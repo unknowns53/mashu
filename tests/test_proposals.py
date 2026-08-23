@@ -111,9 +111,19 @@ def test_a_decided_proposal_cannot_be_decided_again(cur, scope_id):
 # --------------------------------------------------------------------------
 # the auto line
 # --------------------------------------------------------------------------
-def test_preference_is_applied_without_review(cur, scope_id):
+def test_a_preference_the_user_stated_is_applied_without_review(cur, scope_id):
+    """The source is what makes it automatic, not the type (17).
+
+    A preference governs every later session, so the agent guessing at one is
+    an interpretation and waits like any other; the user saying one is the
+    user changing their own setting.
+    """
     result = _propose_create(
-        cur, scope_id, type=str(MemoryType.PREFERENCE), title="commit messages in English"
+        cur,
+        scope_id,
+        type=str(MemoryType.PREFERENCE),
+        title="commit messages in English",
+        source_type=str(SourceType.USER),
     )
     assert result["ruling"].decision is CommitDecision.AUTO
 
@@ -127,8 +137,23 @@ def test_preference_is_applied_without_review(cur, scope_id):
 
 
 def test_auto_committed_work_does_not_enter_the_queue(cur, scope_id):
-    _propose_create(cur, scope_id, type=str(MemoryType.PREFERENCE), title="a preference")
+    _propose_create(
+        cur,
+        scope_id,
+        type=str(MemoryType.PREFERENCE),
+        title="a preference",
+        source_type=str(SourceType.USER),
+    )
     assert proposals.session_queue(cur) == []
+
+
+def test_a_preference_the_agent_inferred_waits_like_anything_else(cur, scope_id):
+    result = _propose_create(
+        cur, scope_id, type=str(MemoryType.PREFERENCE), title="a preference the agent guessed at"
+    )
+    assert result["ruling"].decision is CommitDecision.CANDIDATE
+    assert result["proposal"]["status"] == ProposalStatus.PENDING
+    assert store.get_entity(cur, result["proposal"]["target_memory"])["active_version"] is None
 
 
 # --------------------------------------------------------------------------

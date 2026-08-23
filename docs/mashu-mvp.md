@@ -1,4 +1,4 @@
-# Mashu — Shared Agent Memory Layer / MVP 実装仕様書 v0.9
+# Mashu — Shared Agent Memory Layer / MVP 実装仕様書 v0.10
 
 改訂履歴:
 
@@ -11,6 +11,7 @@
 - v0.7: 27.4a の実測を受けた Review 負荷対策。Review の単位をセッション束へ(18.1節)、candidate を準承認として本文まで渡す(21.1節)、Task の範囲を限定(16.2節)、proposal に由来セッションを追加(15・26節)
 - v0.8: 準承認の導入で開いた二つの穴を塞ぐ。Layer 2 の相対・絶対上限(21.1節)、Review 負荷指標を束単位へ改め未審査比率を追加、行き先を失っていた閾値を差し替え(27.3節)
 - v0.9: 却下された Proposal の後始末を dormant から分離する。version.status に rejected を追加(11・12・26節)、Layer 3 に rejected を追加(21.1節)、重複チェックの対象を却下済みへ拡大(15.1節)
+- v0.10: 実データを移植した直後に出た問題への対応。Preference の Auto Commit を User 明示のものに限定(17節)
 
 ---
 
@@ -435,8 +436,7 @@ type = task として Memory にするのは、**セッションを跨いで持�
 
 ### Auto Commit(System が自動反映)
 
-- Preference
-- User 明示変更
+- User 明示変更(type を問わない)
 - 単純 Task 完了
 
 ### Candidate Commit(candidate として保留、Review 待ち)
@@ -445,6 +445,13 @@ type = task として Memory にするのは、**セッションを跨いで持�
 - Interpretation
 - Hypothesis
 - State(Current State)変更
+- **Preference(User 明示でないもの)**
+
+v0.10 での変更: Preference を type だけで Auto Commit する規則を廃止する。
+
+理由は Preference が何をするものかにある。Preference は以後のすべてのセッションで Agent が従う常設の指示である。type だけで Review を飛ばせるなら、**Agent は自分の指示を自分で書ける**。さらに Agent が外部で読んだ内容(Web ページ、ファイル、ツール出力)も、Preference と名付けるだけで同じ場所へ届く。21.2節が Preference を毎セッション押し込む以上、経路は一度きりでなく恒久的である。
+
+13節は Preference を「ユーザー設定」と定義している。定義どおりのものは source_type = user であり、それは既に「User 明示変更」の行が拾う。残るのは **Agent がユーザーの意図を推測したもの**で、それは Preference の顔をした Interpretation である。
 
 ### Human Review Required(User 承認必須)
 

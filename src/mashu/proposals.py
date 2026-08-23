@@ -236,12 +236,12 @@ def propose(
     Returns the proposal row together with the gate's ruling, so the caller can
     tell an applied change from one that is now waiting.
 
-    hold_for_review overrides an auto commit and holds the change as a
-    candidate instead, recording the given reason. Section 27.1 needs it: the
-    content being imported from the native memory files is summary prose with
-    observation and interpretation fused together, and letting the auto line
-    apply any of it would import the contamination Mashu exists to keep out.
-    It can only ever make the gate stricter.
+    hold_for_review holds the change as a candidate and records the given
+    reason. Section 27.1 needs it: the content being imported from the native
+    memory files is summary prose with observation and interpretation fused
+    together, and letting the auto line apply any of it would import the
+    contamination Mashu exists to keep out. It can only ever make the gate
+    stricter, and it never overrides a human review requirement.
 
     Three checks run before the gate does, and all of them stop by raising
     rather than by writing. The first is a vocabulary check: rejected is the
@@ -306,8 +306,17 @@ def propose(
             payload = dict(payload, entity_status=str(EntityStatus.PROVISIONAL))
 
     ruling = _rule(cur, operation, payload, target_memory)
-    if hold_for_review and ruling.decision is CommitDecision.AUTO:
-        ruling = GateRuling(CommitDecision.CANDIDATE, hold_for_review)
+    if hold_for_review and ruling.decision is not CommitDecision.HUMAN_REVIEW:
+        # The hold is a fact about where the change came from, so it is
+        # recorded whether or not the gate had already stopped it. Dropping it
+        # once the gate agrees would leave the reviewer of an imported item
+        # reading a reason that says nothing about the import.
+        reason = (
+            hold_for_review
+            if ruling.decision is CommitDecision.AUTO
+            else f"{ruling.reason}; {hold_for_review}"
+        )
+        ruling = GateRuling(CommitDecision.CANDIDATE, reason)
     status = (
         ProposalStatus.AUTO_COMMITTED
         if ruling.decision is CommitDecision.AUTO

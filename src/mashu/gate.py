@@ -59,6 +59,13 @@ CANDIDATE_TYPES = frozenset(
         MemoryType.INTERPRETATION,
         MemoryType.HYPOTHESIS,
         MemoryType.STATE,
+        # Section 17 lists preference under auto commit, and section 13 defines
+        # it as a setting of the user's. Both hold together only while the
+        # preference came from the user, and that case is already carried by
+        # the source_type rule above. What is left is an agent's guess at what
+        # the user wants, which is an interpretation wearing the one type that
+        # would have skipped review.
+        MemoryType.PREFERENCE,
     }
 )
 
@@ -88,6 +95,14 @@ def classify(
     memory waits for the user even when the user is the one who said it: the
     cost of a wrong disproval is a piece of knowledge that no longer surfaces
     and whose absence nobody notices.
+
+    Preference is the one line where the type alone used to be enough. It is
+    not, and the reason is what a preference is for: it is the standing
+    instruction an agent follows in every later session. A type that skips
+    review and then governs behaviour is a way for an agent to write its own
+    instructions, and content an agent read somewhere is not an instruction
+    from the user. Only the source makes a preference safe, and the source is
+    tested one line above.
     """
     operation = ProposalOperation(operation)
     type = MemoryType(type) if type is not None else None
@@ -117,8 +132,6 @@ def classify(
         return GateRuling(CommitDecision.AUTO, "task completion")
     if source_type is SourceType.USER:
         return GateRuling(CommitDecision.AUTO, "change stated by the user")
-    if type is MemoryType.PREFERENCE:
-        return GateRuling(CommitDecision.AUTO, "preference")
 
     if type in CANDIDATE_TYPES:
         return GateRuling(CommitDecision.CANDIDATE, f"{type} is reviewed before it is trusted")

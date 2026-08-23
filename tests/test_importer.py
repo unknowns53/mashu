@@ -34,7 +34,13 @@ def test_imported_items_arrive_as_candidates(cur, scope_id):
 
 
 def test_a_preference_is_held_too(cur, scope_id):
-    """27.1 overrides the auto line: nothing arrives already trusted."""
+    """Nothing arrives already trusted, whichever rule does the holding.
+
+    An imported preference is now held twice over: by 27.1, which holds the
+    whole migration, and by the gate, which stopped treating the type alone as
+    a licence. The assertion is on the outcome rather than on which rule got
+    there first, because either one failing should still leave it pending.
+    """
     summary = importer.import_items(
         cur,
         scope_id=scope_id,

@@ -17,7 +17,7 @@ from mashu.models import (
 @pytest.mark.parametrize(
     "type_,expected",
     [
-        (MemoryType.PREFERENCE, CommitDecision.AUTO),
+        (MemoryType.PREFERENCE, CommitDecision.CANDIDATE),
         (MemoryType.FACT, CommitDecision.CANDIDATE),
         (MemoryType.INTERPRETATION, CommitDecision.CANDIDATE),
         (MemoryType.HYPOTHESIS, CommitDecision.CANDIDATE),
@@ -105,3 +105,29 @@ def test_every_ruling_carries_a_reason():
             operation=ProposalOperation.CREATE, type=type_, source_type=SourceType.AGENT
         )
         assert ruling.reason
+
+
+def test_a_preference_is_only_automatic_when_the_user_is_the_one_saying_it():
+    """The type used to be enough. It is not, and the reason is what it governs.
+
+    A preference is a standing instruction the agent follows in every later
+    session. Auto-committing one on the strength of its type alone lets an
+    agent write its own instructions, and lets anything the agent read reach
+    the same place by being labelled a preference.
+    """
+    from mashu.models import SourceType
+
+    stated = classify(
+        operation=ProposalOperation.CREATE,
+        type=MemoryType.PREFERENCE,
+        source_type=SourceType.USER,
+    )
+    assert stated.decision is CommitDecision.AUTO
+
+    for source in (SourceType.AGENT, SourceType.WEB, SourceType.FILE, SourceType.TOOL):
+        guessed = classify(
+            operation=ProposalOperation.CREATE,
+            type=MemoryType.PREFERENCE,
+            source_type=source,
+        )
+        assert guessed.decision is CommitDecision.CANDIDATE, source
