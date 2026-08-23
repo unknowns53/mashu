@@ -37,7 +37,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import bootstrap, db, proposals, resolution, retrieval, store
+from mashu import bootstrap, db, proposals, resolution, retrieval, scratch, store
 from mashu.errors import DuplicateProposalError, MashuError
 from mashu.models import MemoryType, ProposalOperation, SourceType, VersionStatus
 
@@ -146,6 +146,15 @@ def build_server() -> Any:
         session needs, and the index of every scope. Call this once, first,
         before any search.
 
+        temporary carries what holds only until a stated moment: follow it as
+        the conditions you are working under, do not quote it as knowledge, do
+        not save it anywhere, and stop using it past valid_until.
+
+        capture says whether automatic capture is still working. If it is not
+        ok, tell the user in one line — nothing new is reaching the store from
+        the sessions it names, and during a stretch where nobody is checking,
+        you are the only reader that arrives.
+
         Pass scopes once you know which scopes the session is working in, to
         get their current state as well. The index always covers the whole
         ledger, which is what makes everything else reachable by name: a body
@@ -165,6 +174,8 @@ def build_server() -> Any:
                     "scope_index": got.scope_index,
                     "startup": got.startup,
                     "scoped": got.scoped,
+                    "temporary": got.temporary,
+                    "capture": got.health,
                     "trimmed": got.trimmed,
                     "tokens": got.tokens,
                     "over_budget": got.over_budget,
@@ -245,6 +256,32 @@ def build_server() -> Any:
         with db.transaction() as cur:
             found = resolution.find_similar(cur, scope_id=UUID(scope), title=title)
             return _plain({"ok": True, "candidates": found})
+
+    @server.tool()
+    def scratch_put(
+        content: str, kind: str = "note", source_turn: str | None = None
+    ) -> dict[str, Any]:
+        """Put down something this session may be worth keeping, as you go.
+
+        Scratch is not a memory and costs no review. Nothing here is visible to
+        any other session or any other agent, and it is read once at the end,
+        by the extraction that decides what deserves to become a proposal.
+
+        Use it for what would otherwise be lost when the session closes: a
+        result you have not acted on yet, a suspicion worth testing, a step you
+        left unfinished. kind is note, candidate, or work_state.
+        """
+        with db.transaction() as cur:
+            item = scratch.put(
+                cur, session_id=session(cur), content=content, kind=kind, source_turn=source_turn
+            )
+            return _plain({"ok": True, "item": item})
+
+    @server.tool()
+    def scratch_get() -> dict[str, Any]:
+        """Everything this session has put down. This session only."""
+        with db.transaction() as cur:
+            return _plain({"ok": True, "items": scratch.get(cur, session_id=session(cur))})
 
     @server.tool()
     def memory_propose(

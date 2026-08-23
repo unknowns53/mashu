@@ -14,6 +14,7 @@ the user's decision into the store.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -21,7 +22,18 @@ import sys
 import textwrap
 from uuid import UUID
 
-from mashu import bootstrap, db, importer, proposals, resolution, retrieval, server, store
+from mashu import (
+    bootstrap,
+    context,
+    db,
+    importer,
+    proposals,
+    resolution,
+    retrieval,
+    runs,
+    server,
+    store,
+)
 from mashu.db import transaction
 from mashu.embed import get_embedder
 from mashu.errors import DeliveryError
@@ -524,6 +536,16 @@ def cmd_remember(args) -> int:
     if not content:
         raise SystemExit("nothing to remember; pass content or --file")
 
+    if args.until:
+        return _remember_until(args, content)
+
+    missing = [f for f in ("scope", "type", "title") if not getattr(args, f)]
+    if missing:
+        raise SystemExit(
+            f"a memory needs --{', --'.join(missing)}. For something that expires, "
+            f"pass --until instead and it takes none of them (25.2)"
+        )
+
     with transaction(args.dsn) as cur:
         try:
             result = proposals.propose(
@@ -648,6 +670,129 @@ def _resolve_version(cur, prefix: str) -> UUID:
     if len(rows) > 1:
         raise SystemExit(f"{prefix!r} matches {len(rows)} versions; use more characters")
     return rows[0]["version_id"]
+
+
+def _remember_until(args, content: str) -> int:
+    """Record something that stops applying at a stated moment (25.2).
+
+    Not a Memory, so it takes no type, no title and no review. What the user
+    states here they also authorised the end of, at the moment they said it.
+    """
+    when = _when(args.until)
+    with transaction(args.dsn) as cur:
+        row = context.put(
+            cur,
+            content=content,
+            expires_at=when,
+            kind=args.kind,
+            source_type=SourceType.USER,
+            created_by=args.actor,
+            actor=args.actor,
+            scope_id=_scope_by_name(cur, args.scope) if args.scope else None,
+        )
+    where = args.scope or "every scope"
+    print(f"{_short(row['context_id'])}  [{row['kind']}] until {_moment(row['expires_at'])}")
+    print(f"  {where}; it leaves on its own, no review")
+    return 0
+
+
+def _moment(when) -> str:
+    """A moment with its offset, always.
+
+    25.2 refuses an expiry that reads differently to different readers. Printing
+    one without its zone reintroduces on the way out exactly what the input
+    rule keeps out.
+    """
+    return f"{when:%Y-%m-%d %H:%M %z}".replace(" +", " UTC+").replace(" -", " UTC-")
+
+
+def _when(text: str):
+    """A moment, from an ISO timestamp or a plain duration.
+
+    Only what resolves the same way twice. Anything looser — tomorrow morning,
+    the end of the month — is read differently by different readers, and 25.2
+    would rather send it to scratch than guess.
+    """
+    import datetime as _dt
+    import re as _re
+
+    now = _dt.datetime.now().astimezone()
+    match = _re.fullmatch(r"(\d+)\s*(h|hour|hours|d|day|days|w|week|weeks)", text.strip())
+    if match:
+        n = int(match.group(1))
+        unit = match.group(2)[0]
+        return now + _dt.timedelta(hours=n if unit == "h" else n * 24 * (7 if unit == "w" else 1))
+    try:
+        parsed = _dt.datetime.fromisoformat(text)
+    except ValueError:
+        raise SystemExit(
+            f"cannot read {text!r} as a moment. Give an ISO timestamp, or a duration "
+            f"like 24h, 3d, 2w (25.2 takes only what resolves the same way twice)"
+        ) from None
+    return parsed if parsed.tzinfo else parsed.astimezone()
+
+
+def cmd_enqueue(args) -> int:
+    """Claim a transcript for extraction. This is all a session-end hook does.
+
+    The hook runs inside the CLI's exit path, which is measured in seconds, so
+    it must not call a model, open a network connection, or wait on anything.
+    It writes one row and returns. Everything expensive happens later, in a
+    worker that nothing is waiting for.
+
+    Failing here must not fail the hook: a session that cannot be enqueued is a
+    session the sweeper will find by walking transcripts, and a non-zero exit
+    from a hook is a visible error for something the user did not ask for.
+    """
+    path = pathlib.Path(args.transcript)
+    if not path.exists():
+        print(f"no transcript at {path}", file=sys.stderr)
+        return 0
+
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()[:32]
+    try:
+        with transaction(args.dsn) as cur:
+            run = runs.enqueue(
+                cur,
+                source_cli=args.cli,
+                external_session_id=args.session,
+                transcript_digest=digest,
+                extractor_version=args.extractor_version,
+            )
+    except Exception as failure:  # noqa: BLE001 - a hook must not break the CLI it runs in
+        print(f"could not enqueue: {failure}", file=sys.stderr)
+        return 0
+
+    print(f"{_short(run['run_id'])}  {run['state']}")
+    return 0
+
+
+def cmd_runs(args) -> int:
+    """Whether automatic capture is still working (16.3)."""
+    with transaction(args.dsn) as cur:
+        state = runs.health(cur)
+        cur.execute(
+            "SELECT source_cli, external_session_id, state, attempts, last_error, created_at "
+            "FROM extraction_run WHERE state IN ('failed', 'retrying') ORDER BY created_at LIMIT 20"
+        )
+        stuck = cur.fetchall()
+
+    print(
+        f"succeeded {state['succeeded']}  skipped {state['skipped']}  "
+        f"waiting {state['waiting']}  failed {state['failed']}"
+    )
+    if state["oldest_wait_hours"] is not None:
+        print(f"oldest wait  {state['oldest_wait_hours']}h")
+    if state["warning"]:
+        print(f"\n{state['warning']}")
+    for row in stuck:
+        print(
+            f"\n  {row['state']:<9}{row['source_cli']}/{row['external_session_id'][:8]}"
+            f"  attempt {row['attempts']}"
+        )
+        if row["last_error"]:
+            print(f"    {row['last_error'][:140]}")
+    return 0
 
 
 def cmd_evidence(args) -> int:
@@ -864,9 +1009,15 @@ def build_parser() -> argparse.ArgumentParser:
     rm = sub.add_parser("remember", help="record something the user states (16, 17)")
     rm.add_argument("content", nargs="?", help="the body; omit when using --file")
     rm.add_argument("--file", help="read the body from a file instead")
-    rm.add_argument("--scope", required=True, help="name of an existing scope")
-    rm.add_argument("--type", required=True, choices=[str(t) for t in MemoryType])
-    rm.add_argument("--title", required=True)
+    rm.add_argument("--scope", help="name of an existing scope; required unless --until")
+    rm.add_argument("--type", choices=[str(t) for t in MemoryType])
+    rm.add_argument("--title")
+    rm.add_argument(
+        "--until",
+        metavar="WHEN",
+        help="record it as a condition that expires: an ISO timestamp, or 24h / 3d / 2w (25.2)",
+    )
+    rm.add_argument("--kind", default="fact", choices=list(context.KINDS))
     rm.add_argument("--directive", help="the short standing form, if it is pushed later (21.2)")
     rm.add_argument("--actor", default="user")
     rm.add_argument(
@@ -911,6 +1062,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="propose even though an equivalent one is already waiting (15.1)",
     )
     t.set_defaults(func=cmd_state)
+
+    eq = sub.add_parser("enqueue", help="claim a transcript for extraction (16.3)")
+    eq.add_argument("transcript", help="path to the session transcript")
+    eq.add_argument("--cli", required=True, help="which CLI produced it")
+    eq.add_argument("--session", required=True, help="that CLI's session id")
+    eq.add_argument("--extractor-version", default="v1")
+    eq.set_defaults(func=cmd_enqueue)
+
+    ru = sub.add_parser("runs", help="whether automatic capture is still working (16.3)")
+    ru.set_defaults(func=cmd_runs)
 
     ev = sub.add_parser("evidence", help="what a memory rests on, and what rests on it (19)")
     ev.add_argument("memory")

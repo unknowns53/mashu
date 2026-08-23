@@ -13,7 +13,7 @@ import uuid
 
 import pytest
 
-from mashu import cli, proposals, store
+from mashu import cli, context, proposals, runs, store
 from mashu.db import transaction
 from mashu.models import MemoryType, ProposalOperation, SourceType
 
@@ -783,3 +783,103 @@ def test_an_empty_body_is_refused(run, test_dsn, committed_scope):
             "--title",
             "an empty one",
         )
+
+
+def test_a_condition_with_a_window_is_not_a_memory(run, test_dsn, committed_scope):
+    """25.2: it takes no type and no title, and no review stands between it and use."""
+    code, out = run(
+        "remember",
+        "the cluster is in maintenance",
+        "--until",
+        "2d",
+        "--scope",
+        _scope_name(test_dsn, committed_scope),
+    )
+    assert code == 0
+    assert "no review" in out
+
+    with transaction(test_dsn) as cur:
+        live = context.live(cur, scopes=[committed_scope])
+        assert [row["content"] for row in live] == ["the cluster is in maintenance"]
+        assert live[0]["source_type"] == "user"
+
+        cur.execute(
+            "SELECT count(*) AS n FROM memory_entity WHERE scope_id = %s", (committed_scope,)
+        )
+        assert cur.fetchone()["n"] == 0
+
+
+def test_the_expiry_is_printed_with_its_zone(run, test_dsn, committed_scope):
+    """An expiry read differently by different readers is what 25.2 refuses."""
+    _, out = run("remember", "a passing condition", "--until", "6h")
+    assert "UTC+" in out or "UTC-" in out
+
+
+def test_a_moment_that_reads_two_ways_is_refused(run, test_dsn):
+    with pytest.raises(SystemExit, match="resolves the same way twice"):
+        run("remember", "something", "--until", "tomorrow morning")
+
+
+def test_a_memory_still_needs_its_type_and_title(run, test_dsn, committed_scope):
+    with pytest.raises(SystemExit, match="--until instead"):
+        run("remember", "a lasting rule", "--scope", _scope_name(test_dsn, committed_scope))
+
+
+def test_runs_reports_that_capture_stopped(run, test_dsn):
+    with transaction(test_dsn) as cur:
+        r = runs.enqueue(
+            cur,
+            source_cli="claude",
+            external_session_id="cli-1",
+            transcript_digest="cli-d1",
+            extractor_version="v1",
+        )
+        while True:
+            cur.execute("UPDATE extraction_run SET next_retry_at = now() - interval '1 minute'")
+            if not runs.claim(cur):
+                break
+            if runs.failed(cur, run_id=r["run_id"], error="the model timed out")["state"] == (
+                "failed"
+            ):
+                break
+
+    code, out = run("runs")
+    assert code == 0
+    assert "failed 1" in out
+    assert "Nothing new is reaching the store" in out
+
+
+def test_enqueue_claims_a_transcript_once(run, test_dsn, tmp_path):
+    """The hook may fire twice, and the sweeper covers the times it does not."""
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"a": 1}\n', "utf-8")
+
+    code, first = run("enqueue", str(transcript), "--cli", "claude", "--session", "ext-1")
+    assert code == 0
+    assert "queued" in first
+
+    _, second = run("enqueue", str(transcript), "--cli", "claude", "--session", "ext-1")
+    assert first.split()[0] == second.split()[0]
+
+    with transaction(test_dsn) as cur:
+        cur.execute("SELECT count(*) AS n FROM extraction_run WHERE external_session_id = 'ext-1'")
+        assert cur.fetchone()["n"] == 1
+
+
+def test_a_changed_transcript_is_a_new_run(run, test_dsn, tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"a": 1}\n', "utf-8")
+    run("enqueue", str(transcript), "--cli", "claude", "--session", "ext-2")
+
+    transcript.write_text('{"a": 1}\n{"b": 2}\n', "utf-8")
+    run("enqueue", str(transcript), "--cli", "claude", "--session", "ext-2")
+
+    with transaction(test_dsn) as cur:
+        cur.execute("SELECT count(*) AS n FROM extraction_run WHERE external_session_id = 'ext-2'")
+        assert cur.fetchone()["n"] == 2
+
+
+def test_a_missing_transcript_does_not_fail_the_hook(run, tmp_path):
+    """A non-zero exit here is a visible error for something nobody asked for."""
+    code, _ = run("enqueue", str(tmp_path / "gone.jsonl"), "--cli", "claude", "--session", "ext-3")
+    assert code == 0

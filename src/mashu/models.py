@@ -134,6 +134,8 @@ class EventType(StrEnum):
     STATUS_CHANGED = "status_changed"
     ACTIVE_SWITCHED = "active_switched"
     EVIDENCE_RECORDED = "evidence_recorded"
+    CONTEXT_RECORDED = "context_recorded"
+    CONTEXT_REVOKED = "context_revoked"
     PROPOSAL_CREATED = "proposal_created"
     PROPOSAL_COMMITTED = "proposal_committed"
     PROPOSAL_REJECTED = "proposal_rejected"
