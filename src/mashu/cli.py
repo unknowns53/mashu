@@ -471,6 +471,73 @@ def cmd_state(args) -> int:
     return 0
 
 
+def cmd_merge(args) -> int:
+    """Fold one entity into another, keeping the history (20.2).
+
+    Only the user runs this, which is why it is here and not on the agent's
+    side of the wall. Section 20.1 sends a provisional entity either here or to
+    active, and until now only one of those two doors was reachable.
+
+    Which active version survives is asked rather than picked. The two entities
+    hold two readings of one concept, and choosing between them is a judgement
+    about which is true.
+    """
+    with transaction(args.dsn) as cur:
+        source = _resolve_entity(cur, args.source)
+        target = _resolve_entity(cur, args.into)
+        keep = _keep_active(cur, args.keep_active, source, target)
+
+        result = store.merge_entities(
+            cur,
+            source=source["memory_id"],
+            target=target["memory_id"],
+            actor=args.actor,
+            reason=args.reason,
+            keep_active=keep,
+        )
+
+    print(f"{source['title']}\n  merged into {target['title']}")
+    print(f"  {result['versions_moved']} version(s) moved, {result['evidence_moved']} edge(s)")
+    if result["not_chosen"]:
+        print(f"  superseded {', '.join(_short(v) for v in result['not_chosen'])}")
+    return 0
+
+
+def _keep_active(cur, asked: str | None, source: dict, target: dict) -> UUID | None:
+    """Which version stays active, named by version or by which side it is on.
+
+    The words exist because the answer is usually known before the versions
+    are: a merge is planned while the thing being merged is still in review,
+    and a command that cannot be written until then is a command written under
+    pressure.
+    """
+    if asked is None:
+        return None
+    if asked in ("source", "into"):
+        row = source if asked == "source" else target
+        cur.execute(
+            "SELECT active_version FROM memory_entity WHERE memory_id = %s", (row["memory_id"],)
+        )
+        active = cur.fetchone()["active_version"]
+        if active is None:
+            raise SystemExit(f"the {asked} entity has no active version to keep")
+        return active
+    return _resolve_version(cur, asked)
+
+
+def _resolve_version(cur, prefix: str) -> UUID:
+    cur.execute(
+        "SELECT version_id FROM memory_version WHERE version_id::text LIKE %s",
+        (f"{prefix}%",),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        raise SystemExit(f"no version starting {prefix!r}")
+    if len(rows) > 1:
+        raise SystemExit(f"{prefix!r} matches {len(rows)} versions; use more characters")
+    return rows[0]["version_id"]
+
+
 def cmd_evidence(args) -> int:
     """Both directions of one memory's reference edges (19)."""
     with transaction(args.dsn) as cur:
@@ -702,6 +769,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="propose even though an equivalent one is already waiting (15.1)",
     )
     t.set_defaults(func=cmd_state)
+
+    mg = sub.add_parser("merge", help="fold one entity into another (20.2)")
+    mg.add_argument("source", help="the entity that stops being separate")
+    mg.add_argument("--into", required=True, help="the entity it becomes part of")
+    mg.add_argument(
+        "--keep-active",
+        metavar="WHICH",
+        help="which version stays active: 'source', 'into', or a version id",
+    )
+    mg.add_argument("--reason", required=True)
+    mg.add_argument("--actor", default="user")
+    mg.set_defaults(func=cmd_merge)
 
     ev = sub.add_parser("evidence", help="what a memory rests on, and what rests on it (19)")
     ev.add_argument("memory")

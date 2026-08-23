@@ -552,3 +552,93 @@ def test_redrafting_a_state_that_is_still_waiting_is_stopped(
     draft.write_text("the second reading", "utf-8")
     with pytest.raises(DuplicateProposalError, match="already been proposed"):
         run("state", str(draft), "--scope", name)
+
+
+# --------------------------------------------------------------------------
+# merge, the other door out of provisional (20.1, 20.2)
+# --------------------------------------------------------------------------
+def test_merging_folds_one_entity_into_another(run, test_dsn, committed_scope):
+    source = _propose(test_dsn, committed_scope, "SSD failure analysis", "the drive dropped out")
+    target = _propose(test_dsn, committed_scope, "SSD debugging", "the drive dropped out")
+
+    code, out = run(
+        "merge",
+        str(source["target_memory"])[:8],
+        "--into",
+        str(target["target_memory"])[:8],
+        "--reason",
+        "one investigation under two names",
+    )
+    assert code == 0
+    assert "merged into" in out
+    assert "1 version(s) moved" in out
+
+    with transaction(test_dsn) as cur:
+        folded = store.get_entity(cur, source["target_memory"])
+        assert folded["status"] == "merged"
+        assert folded["merged_into"] == target["target_memory"]
+
+
+def test_merging_asks_which_reading_survives_when_both_are_active(run, test_dsn, committed_scope):
+    """Choosing between two readings of one concept is a judgement, not a rule."""
+    source = _propose(test_dsn, committed_scope, "the first name", "one reading")
+    target = _propose(test_dsn, committed_scope, "the second name", "another reading")
+    for proposal in (source, target):
+        with transaction(test_dsn) as cur:
+            proposals.approve(cur, proposal["proposal_id"], reviewer="user", reason="both stand")
+
+    from mashu.errors import MergeError
+
+    with pytest.raises(MergeError, match="name which one survives"):
+        run(
+            "merge",
+            str(source["target_memory"])[:8],
+            "--into",
+            str(target["target_memory"])[:8],
+            "--reason",
+            "the same thing",
+        )
+
+    with transaction(test_dsn) as cur:
+        keep = store.get_entity(cur, source["target_memory"])["active_version"]
+
+    code, out = run(
+        "merge",
+        str(source["target_memory"])[:8],
+        "--into",
+        str(target["target_memory"])[:8],
+        "--keep-active",
+        str(keep)[:8],
+        "--reason",
+        "the same thing",
+    )
+    assert code == 0
+    assert "superseded" in out
+
+    with transaction(test_dsn) as cur:
+        assert store.get_entity(cur, target["target_memory"])["active_version"] == keep
+
+
+def test_which_side_survives_can_be_named_before_the_versions_exist(run, test_dsn, committed_scope):
+    """A merge is planned while the thing being merged is still in review."""
+    source = _propose(test_dsn, committed_scope, "the older name", "one reading")
+    target = _propose(test_dsn, committed_scope, "the newer name", "another reading")
+    for proposal in (source, target):
+        with transaction(test_dsn) as cur:
+            proposals.approve(cur, proposal["proposal_id"], reviewer="user", reason="both stand")
+
+    code, _ = run(
+        "merge",
+        str(source["target_memory"])[:8],
+        "--into",
+        str(target["target_memory"])[:8],
+        "--keep-active",
+        "into",
+        "--reason",
+        "one concept",
+    )
+    assert code == 0
+
+    with transaction(test_dsn) as cur:
+        entity = store.get_entity(cur, target["target_memory"])
+        assert store.get_version(cur, entity["active_version"])["content"] == "another reading"
