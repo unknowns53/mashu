@@ -1,4 +1,4 @@
-# Mashu — Shared Agent Memory Layer / MVP 実装仕様書 v0.11
+# Mashu — Shared Agent Memory Layer / MVP 実装仕様書 v0.12
 
 改訂履歴:
 
@@ -12,6 +12,7 @@
 - v0.8: 準承認の導入で開いた二つの穴を塞ぐ。Layer 2 の相対・絶対上限(21.1節)、Review 負荷指標を束単位へ改め未審査比率を追加、行き先を失っていた閾値を差し替え(27.3節)
 - v0.9: 却下された Proposal の後始末を dormant から分離する。version.status に rejected を追加(11・12・26節)、Layer 3 に rejected を追加(21.1節)、重複チェックの対象を却下済みへ拡大(15.1節)
 - v0.10: 実データを移植した直後に出た問題への対応。Preference の Auto Commit を User 明示のものに限定(17節)、Scope に lifecycle と readiness manifest を追加(7.1節)、Review 用の preview 経路を分離(27.1節)、Bootstrap の対象を type でなく delivery で決める(21.2節)、version に directive を追加(9・26節)
+- v0.12: 誰も面倒を見ない一週間を成立させる。寿命の三分(13.1節)、Temporary Context の新設(25.2節)、Scratch の実体化(25.1節)、捕捉パイプラインの仕様化(16.3節)、Review の随意化(17節)、開発計画を依存の鎖で引き直し(30節)。撤回: Queue の義務性、未審査比率 50% の反証条件(27.3節)、手動 Conflict 記録(23節)、27.4b の全文ラベリング
 - v0.11: 手動運用に入る前に、Review が構造的に必須になっている経路を断つ。Layer 2 の相対上限を撤回し、守っていたものを強制から観測へ移す(21.1・27.3節)。前提が消えた lifecycle と readiness manifest を撤回(7.1節)。Entity の type を訂正する操作を追加(8・15節)
 
 ---
@@ -1059,6 +1060,48 @@ CREATE TABLE proposal (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- v0.12: window-scoped な項目。Memory ではないので Proposal も status も持たず、
+-- 壁時計を過ぎた瞬間に read の filter だけで消える(25.2節)。
+CREATE TABLE temporary_context (
+    context_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    scope_id          UUID REFERENCES scope(scope_id),  -- NULL は全 Scope 共通
+    kind              TEXT NOT NULL CHECK (kind IN ('fact', 'preference')),
+    content           TEXT NOT NULL,
+    valid_from        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at        TIMESTAMPTZ NOT NULL,
+    source_type       TEXT NOT NULL,   -- 境界で強制。自己申告不可
+    source_reference  TEXT,            -- 由来セッションと user turn の span
+    created_by        TEXT NOT NULL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    revoked_at        TIMESTAMPTZ,
+    revocation_reason TEXT,
+    CHECK (expires_at > valid_from)
+);
+CREATE INDEX idx_temporary_live ON temporary_context (scope_id, expires_at)
+    WHERE revoked_at IS NULL;
+
+-- v0.12: 抽出の実行台帳。沈黙する失敗を構造的に禁止するためにあり、
+-- 成功だけでなく skip と失敗も行として残す(16.3節)。
+CREATE TABLE extraction_run (
+    run_id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_cli          TEXT NOT NULL,
+    external_session_id TEXT NOT NULL,
+    transcript_digest   TEXT NOT NULL,
+    extractor_version   TEXT NOT NULL,
+    state               TEXT NOT NULL
+                        CHECK (state IN ('queued', 'running', 'succeeded',
+                                         'skipped', 'retrying', 'failed')),
+    attempts            INT NOT NULL DEFAULT 0,
+    model               TEXT,
+    input_tokens        INT,
+    output_tokens       INT,
+    last_error          TEXT,
+    next_retry_at       TIMESTAMPTZ,
+    completed_at        TIMESTAMPTZ,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (source_cli, external_session_id, transcript_digest, extractor_version)
+);
+
 CREATE TABLE event_log (
     event_id    BIGSERIAL PRIMARY KEY,
     event_type  TEXT NOT NULL,
@@ -1088,7 +1131,13 @@ CREATE TABLE agent_session (
     agent       TEXT NOT NULL,
     started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     ended_at    TIMESTAMPTZ,
-    scratch     JSONB
+    scratch     JSONB,
+    -- v0.12: 外部セッションとの対応。これが無いと同じ transcript を二度
+    -- 処理したかを判定できず、無人での再実行が冪等にならない(16.3節)。
+    source_cli          TEXT,
+    external_session_id TEXT,
+    transcript_digest   TEXT,
+    checkpoint          TEXT
 );
 ```
 
@@ -1184,7 +1233,7 @@ placeholder の 0.94 は、実際には言い換えを 10 件中 1 件しか捕�
 
 Review の単位をセッション束に変えたため(18.1節)、負荷の単位も 1 件あたりではなく**束あたり**とする。文脈スイッチが負荷の正体である以上、件数で測ると実態を外す。
 
-手動運用期間中、以下の五つを記録する。
+運用中、以下の五つを記録する。
 
 1. **束あたりの処理時間**(中央値)
 2. **1日あたりの束数**
@@ -1285,7 +1334,7 @@ v0.8 はこれを「準承認という設計そのものの反証条件」と置
 
 #### 27.4b 退役の洗い出しの検証
 
-**前提条件: 27.1 の移植が完了していること。** したがって Week 3 以降にしか実施できない。
+**前提条件: 27.1 の移植が完了していること。** したがって 30節の段 A より前には実施できない。
 
 入力は二つ。**移植済みの Active 集合**と、その後に発生したセッションログ 1 本。
 
@@ -1318,7 +1367,7 @@ marker は出力より**時間的に先に確定する**ので、アンカリン
 
 - その在庫は未承認の解釈が混入していることが分かっている。汚染された入力で測ると、退役判定が外れたときに抽出プロンプトの欠陥なのか入力の汚染なのかを切り分けられない。較正に汚れた標準試料を使うのと同じである
 - ファイルの更新日時から復元できるのは「その時点で存在したか」であって「その時点で Active だったか」ではない。native な記憶機構には Mashu の状態機械が無く、Active という概念が代用側に存在しない
-- Week 3 まで待てば本物の Active 集合が手に入る。数週間を節約するために汚染された近似を使うのは割に合わない
+- 移植を待てば本物の Active 集合が手に入る。数週間を節約するために汚染された近似を使うのは割に合わない
 
 ### 27.5 切替試験
 
@@ -1352,7 +1401,7 @@ Phase 0 から作成し、各 Phase と並走させる。
 4. 同時更新(based_on_version 不一致の reject)
 5. 承認遅延(Candidate が滞留したときの Retrieval 挙動)
 
-シナリオ 1〜3 は Agent 接続前に 27 節の手動運用で検証する。
+シナリオ 1〜3 は Agent 接続前に、30節の段 A から始まる shadow 運用で検証する。
 
 ## 29. 実装しないもの(MVP 外)
 
@@ -1366,59 +1415,157 @@ Phase 0 から作成し、各 Phase と並走させる。
 - Graph Database
 - Policy Learning
 
-## 30. 開発計画(3ヶ月)
+## 30. 開発計画
 
-v0.3 の週割りは実装時間を軸に組んでいた。較正点の発動(後述)によりこれを破棄し、**暦でしか進まない人間の検証期間**を軸に組み直す。
+v0.3 は実装時間を軸に組み、v0.6 は暦を軸に組み直した。**v0.12 は依存の鎖を軸に組む。**
 
-圧縮不能の芯は二つある。
+週番号を書かない。前の二つの計画はどちらも週に紐づけて書かれ、そのことが「その週に何をするか」を先に決めさせ、**「その項目が無いと次が始まらない」という関係のほうを見えなくした。** 実際に v0.6 の計画は 13 週すべてを人間の出席で埋め、撃発装置を作る行を一つも持たないまま閉じている。番号を外して鎖だけを書けば、抜けた項目は「順番が飛んでいる」として現れる。
 
-- **手動運用 3 週**(27.1〜27.3): Review 負荷と滞留時間は日単位で積み上がるため、まとめて短縮できない
-- **切替試験 2 週**(27.5): 事故は運用日数に比例してしか観測されない
+### 旧計画の何が誤っていたか
 
-この 5 週は並列化も前倒しもできない。実装はこの芯の隙間と並走に入る。
+事実は三つで足りる。
 
-確定している依存の鎖が一本ある。
+1. 仕様が命名する 70 操作のうち 14 が CLI からも MCP からも到達できない。その分布が問題の全体である——**16.1節の捕捉契機は三つとも、27節の検証・計測は八つ、18.1節の Diff View と Edit、そして Conflict 解決。** 知識を保存し取り出す操作はすべて作られ、頼まれずに捕捉する操作と、系が機能しているかを測る操作だけが作られていない
+2. 旧 30節に、人間が出席せずに動くものを作る行が一つも無い。16節は Session End Extraction を二本の書き込み契機の一本と定め、27.4a はそのプロンプトをオフラインで検証済みだが、**それを撃発する装置を作る項目がどこにも無い。** 芯とされた 5 週も、較正点(手動運用の開始日)も、すべて人間の出席を測っている
+3. 帰結として、CLI 組み込みの記憶機構は勝手に(下手に)書くのに対し、本系は誰かが意図的に動かさない限り何も書かない。厳密なほうが退行として体感される
 
-**移植(27.1) → 27.4b の検証 → 退役契機の本実装 → 手動運用**
+**モデルへの含意。** 誤りは「厳密すぎた」ことではない。27.3.1 が「負荷の問題を安全性の予算で払わない」と Auto Commit の拡大を拒んだ判断は今も正しい。誤っていたのは選択肢の張り方で、**厳密 対 緩和の一軸しか盤上になく、手動 対 自動という第三の軸が書き込み側には置かれなかった。**
 
-退役の洗い出しは移植済みの Active 集合が無ければ検証できず(27.4b)、手動運用に入る時点では退役契機が実装済みであってほしい。手動運用は Review 負荷と滞留時間を測る期間であり、そこに退役の Proposal が流れてこないと、測った負荷が本番の負荷にならないためである。
+正確には、第三の軸は一度だけ盤上に載っている。**v0.7 の準承認は、読み側について「負荷を緩和でなく構造変更で外す」操作そのものだった。** 同じ操作が書き側(捕捉の撃発)には適用されず、計画は v0.3 の「人間が唯一のモーターである」という前提のまま、以後のどの改訂でも引き直されなかった。
 
-| 期間 | 内容 | 暦の消費 |
-|---|---|---|
-| 完了 | Phase 0: DB スキーマ、event_log、Status 遷移、Harness シナリオ書き下し | — |
-| Week 1 | Phase 1: Proposal / Commit Gate / Memory Hub API | 実装 |
-| Week 1 | 27.4a 新規抽出の検証(前提条件なし、実装不要) | 実装と並走 |
-| Week 2 | Phase 2a: 埋め込み生成、Retrieval Pipeline、三層出力、Entity Resolution | 実装 |
-| Week 3 | Phase 2b: Review CLI、native な記憶機構からの移植(Scope 単位、27.1 の規則) | 実装 |
-| Week 4–5 | 27.4b 退役の洗い出しの検証 → 退役契機(16.1節)の本実装 | 実装 |
-| **Week 6–8** | **手動運用 3 週**: 27.1 Retrieval 品質 / 27.2 閾値実測 / 27.3 Review 負荷・滞留時間・未審査比率 | **暦・圧縮不能** |
-| Week 6–8 | 並走: Phase 3 実装(MCP Server、session_bootstrap、指示ファイル要件) | 実装 |
-| Week 9 | Claude 接続、Bootstrap 込みの通し確認、Harness シナリオ 1〜4 通過 | 実装 |
-| **Week 10–11** | **切替試験 2 週**: 27.5。native な記憶機構を切り、取得失敗事故を記録 | **暦・圧縮不能** |
-| Week 12 | 事故ログの反映: Bootstrap の内容と token 上限、6.1節の呼び出し要件の見直し | 実装 |
-| Week 13 | 緩衝 | 緩衝 |
+### 最適化する対象
 
-緩衝の使いみち:
+**系は誰も面倒を見ない一週間、機能しつづける。** 知識は溜まり、引け、腐った項目は返らなくなる。その週に人間の操作はゼロである。
 
-手動運用が 3 週で足りなかった場合の延長、切替試験のやり直し。実装の遅れではなく、**芯の期間が伸びたとき**に使う。
+生き残る安全制約はただ一つ。**未審査の解釈が、確立した事実として書かれることはない。**
 
-緩衝は 1 週しかない。芯 5 週に加えて依存の鎖が Week 4–5 を占めるためで、手動運用を 1 週延ばすと使い切る。27 節は手動運用を「2〜3 週間」としているため、緩衝が必要になった場合は手動運用を 2 週へ縮めるのが最初の調整弁になる。
+なお「無人」とは Review と保守をしないことであって、会話が起きないことではない。無人の期間にもセッションは通常どおり発生する。この区別が設計を軽くする——**User の発話は無人の週にも系へ届いており、届いた発話は書き込み契機として使える。**
 
-較正点:
+### 依存の鎖
 
-v0.3 の較正点「Phase 0 を 2 週間で完了できるか」は**発動済み**である。
+```
+A 撃発装置 ──> B 退役の三形 ──> D 突き合わせ ──> E 切替 ──> F 無人期間 ──> G 反映
+     |               |                              ^
+     +──> C 人間面 ──+                              |
+                     (C は E の前提。無人期間の直前に一度は人が触れる形が要る)
+```
 
-実際の所要は 1 セッションで、超過ではなく大幅な下振れだった。しかし較正点の趣旨は所要時間そのものではなく、見積もりの前提が保たれているかにある。「人間が手で書く」という前提が崩れた以上、方向が逆でも計画は引き直す。
+**段 A: 撃発装置**
 
-**新しい較正点は手動運用の開始日とする。** Week 5 の終わりまでに手動運用へ入れない場合、芯 5 週と緩衝 1 週が 3 ヶ月に収まらないため、その時点で再度引き直す。
+これが無いと以後のすべてが始まらない。捕捉されないものは退役もできず、測る対象も生まれない。
 
-実装の所要時間は較正点にしない。前提が崩れた以上、それは拘束条件ではなくなったためである。
+- SessionEnd hook(各 CLI)。enqueue のみ
+- 常駐 worker と `extraction_run` 台帳、retry、dead letter、Bootstrap 経由の health 警告
+- Scratch の読み書き(25.1節)と `agent_session` の外部セッション対応
+- Scratch-first の新規抽出、skip 基準、日次の入力予算
+- Temporary Context(25.2節)の最小形。**User 由来のみ**
+- cwd から Scope への明示 map
+- 15.1節の重複チェックを仕様(title embedding 照合)へ揃える —— **実装済み**
 
-3ヶ月時点の到達目標:
+ここから **shadow 運用**を始める。native な記憶機構は切らない。捕捉品質は実セッションで測れるので、旧計画の 27.4a(過去ログへのオフライン適用)はこれに置き換わる。
 
-**Claude 1 体を MCP 接続して Harness シナリオ 1〜4 が通過し、かつ native な記憶機構を切った状態で切替試験を完了して、取得失敗事故の件数を手元に持っていること。**
+**段 B: 退役の三形**
 
-MVP 後(4ヶ月目以降): Codex / Gemini 接続、Web UI、Conflict 検出、Auto Commit 範囲の調整。
+「腐った項目が返らなくなる」を無人で成立させる機構を、判断の重さで三段に分ける。
+
+1. **時限による退役** —— Temporary Context の read filter。判断ゼロ、worker 不要
+2. **User 発話による退役** —— 完了・棄却の宣言を拾って Auto Commit で落とす。書いた本人の判断を時計と transcript が執行するだけで、新しい判断はない。人が直接叩く `mashu retire <id> completed|disproven|dormant --reason` を足す(16.1節が User Explicit を契機と定めながら、人間用の入口が無かった)
+3. **Agent 推論による退役** —— **無人では落とさない。** candidate として積み、Layer 1 の当該項目に「退役候補あり(理由)」の注記を付けて返す(21.1節)
+
+3 で「N 日誰も異議を挟まなければ自動で dormant へ落とす」を採らない理由: **それは「無反応」を「同意」と読む機構であり、無人の週にはまさに全員が無反応である。** 誤退役は誤追加より発見が遅い——消えたものは検索に現れない。
+
+同じ段で、Agent の Temporary Context 書き込み(`context_put`、window 上限あり、Bootstrap には載せない)を入れる。ここから **retirement marker** が溜まりはじめ、段 D の突き合わせが可能になる。
+
+**段 C: 人間面**
+
+Review は随意になるが、**随意だからこそ一回の着席で完結しなければ二度と開かれない。**
+
+- 日常面を `review` / `remember` / `retire` / `find` / `inspect` に寄せ、保守・移植・評価を `admin` 以下へ分離する
+- `mashu review` は最古の束を開き、一括承認・番号指定の Edit・理由つき却下・**skip の明示化**まで一画面で終える。現在の skip は pending へ黙って戻るので、後で見る / 却下 / 保留の宣言を要求する
+- Diff View(既存 Active との差分)を束表示に含める。**Edit の定義**は「承認時に User が本文を修正し、修正後の Version を User の編集として記録する」とする(18.1節で未定義だった)
+- Scope 作成コマンド(7節が User のみ作成と定めながら入口が無い)
+- `mashu status`: 27.3 改の指標の自動集計と、health の Bootstrap 掲載
+- **時限を自称する Active の棚卸し**と Temporary Context への移行(25.2節)
+
+**段 D: 計測と突き合わせ**
+
+- `admin eval-retire`: marker と抽出出力の突き合わせ(27.4b 改)
+- `admin thresholds`: 実在庫の類似度分布から閾値を決める(27.2) —— **実装済み**
+- **Scope Detection の作り直し。** 27.2 の実測で、名前と一行要約にクエリを当てる方式が成立していないことが判明した(全クエリが 0.72〜0.81 に収まり、順位が 7 問中 4 問で誤る)。閾値ではなく機構の問題であり、Scope は**保持している Memory** から判定する形へ変える。捕捉が自動化されると Scope の割り当てが毎晩効くので、ここは段 E の前に要る
+- `mashu incident`: 事故の記録と三分類
+- semantic dedup の有効化(閾値が実測で決まってから)
+
+**段 E: 切替**
+
+native な記憶機構を無効化する。切替は本系の機能ではなく設定手順として文書化し、試験窓の開始を event_log に記録する。
+
+事故の分類に**三つ目を足す**。旧二分類は Bootstrap の内容不足と pull の動機不足だったが、自動捕捉を入れると **捕捉漏れ——そもそも書かれていなかった** が独立の原因になる。旧計画はこの分類を表現できなかった。
+
+**段 F: 無人期間**
+
+Review・保守・admin 操作をゼロにする。実装もしない。
+
+**段 G: 反映**
+
+Bootstrap の内容と上限、6.1節の第二段への移行判断。
+
+### 暦に縛られる部分
+
+段の順序とは別に、**日数でしか進まないもの**が二つある。
+
+- **shadow 運用**: 段 A から段 D まで並走する。捕捉品質は実セッションの本数でしか測れない
+- **切替試験と無人期間**: 事故は運用日数に比例してしか観測されない。両者を合わせて 2 週間程度
+
+旧計画の芯 5 週(手動運用 3 + 切替 2)から手動運用 3 週が消えるのは、それが測ろうとした Review 負荷と滞留が随意化で降格したためである。捕捉品質はその間 native を切らずに shadow で測れるので、危険を伴わない。
+
+**測定上の注意**: 無人期間を切替試験の中に置くと、「native を切った」と「誰も見ていない」が同時にかかり、事故を三分類のどれかに帰属できない。分けて測るのが厳密だが、**両方が同時にかかっている状態こそ実運用の条件**なので、交絡を承知で同時に測り、事故が出たときだけ切り分けを試みる。
+
+### 到達不能 14 操作の行き先
+
+旧計画の失敗を構造的に繰り返さないため、**全項目に行き先を書く。**
+
+| 操作 | 行き先 |
+|---|---|
+| User 発話からの change_status 契機(16.1) | 段 B: `mashu retire`(人間用)+ worker の発話検出 |
+| Session 終了時の新規抽出(16.1) | 段 A: worker |
+| Session 終了時の退役洗い出し(16.1) | 段 B: worker の退役検出 |
+| Conflict 解決(17) | **撤回**(23節) |
+| Diff View(18.1) | 段 C: `mashu review` |
+| Proposal Edit(18.1) | 段 C: `mashu review`。定義は「承認時の User 修正」 |
+| 類似度分布と閾値決定(27.2) | 段 D: `admin thresholds` —— **実装済み** |
+| 五指標の記録(27.3) | 段 C: `mashu status`。指標自体は 27.3 で改定 |
+| 過去ログへの抽出適用(27.4a) | **置換**: 段 A からの shadow 運用が実セッションで同じ問いに答える |
+| 正解ラベル付け(27.4b) | **置換**: 段 B の retirement marker(27.4b) |
+| 退役洗い出しの実行(27.4b) | 段 B: worker |
+| 出力と正解の突き合わせ(27.4b) | 段 D: `admin eval-retire` |
+| 切替試験の制御(27.5) | 段 E: 設定手順の文書化と試験窓の記録。専用機構は作らない |
+| 事故の記録と分類(27.5) | 段 D で実装、段 E から使用: `mashu incident` |
+
+### 較正点
+
+**段 B の終わり**に置く。実セッション連続 5 本について、
+
+1. `extraction_run` に全 transcript の行があり(sweeper が拾い漏れを検出しない)
+2. 沈黙する失敗がゼロで
+3. 各セッションから少なくとも 1 件の Proposal または Temporary Context 項目が**人手ゼロで**生まれている
+
+満たせない場合、原因が hook の信頼性にあるなら第一段を放棄して sweeper 起点(定期巡回)へ寄せ、原因が抽出品質にあるなら段 C を先行させて引き直す。
+
+**旧計画の較正点が人間の開始日を見張ったのに対し、新しい較正点は装置の自走を見張る。** 引き直しの要点はここに尽きる。
+
+### 反証条件
+
+無人期間の明けに、この計画が誤っていたと分かる観測を、起きうる向きごとに先に書く。
+
+1. **毒** —— worker が書いた candidate への訂正・却下が過半を占める。捕捉の質が負債を生んでいる。抽出の閾値を上げて Scratch 側へ寄せる(取りこぼしは Scratch に残るので観測可能な損失で済む)。改善しなければ、自動捕捉を Scratch 蓄積 + 定期の人間トリアージへ縮退する
+2. **不毛** —— Proposal がほぼゼロ、または Scratch 級ばかり。Scratch-first が絞りすぎている。skip 基準と入力範囲を広げ、予算を実測で引き直す
+3. **腐敗** —— 期限切れ・完了済みの内容が現在値として返った事故が 1 件でもある。機構別に切り分ける。Temporary Context の filter 漏れなら実装の不具合、時限つきの内容が indefinite 側に書かれていたなら棚卸し(段 C)の網の目、User 発話の拾い漏れなら marker の Recall の問題。三つ目が支配的なら、時限つき自動 dormant の再検討へ進む
+4. **注記の無効化** —— Layer 1 の「退役候補あり」注記が付いた項目を、Agent が注記に言及せず現在値として使った事例が繰り返し観測される。21.1節の注記に固有の失敗である。注記を本文より前へ移すか、当該項目を注記つきの Layer 2 相当へ降格する形を設計する
+5. **費用** —— 週次の抽出入力が予算を超過する。scratch-first が効いていない。chunk と skip を締め、それでも超えるなら「全セッション捕捉」から「marker のあるセッションのみ捕捉」へ縮退する
+
+いずれも観測されなければ、この計画の中心仮説——**捕捉と退役の大半は判断ではなく寿命の型であり、型は無人で執行できる**——は当面反証されない。
+
+MVP 後: Codex / Gemini 接続の拡張、Web UI、Conflict の自動検出、worker の User 主張(16.3節の二重の絞りを満たしたうえで)。
 
 ## 31. 成功条件
 
@@ -1431,6 +1578,7 @@ MVP(3ヶ月)の成功条件:
 - Claude が MCP 経由で Retrieval / Proposal を実行できる
 - CLI の native な記憶機構の内容が Mashu へ移植済みである。移植は全件 candidate として入れ Review を通したものであり、各項目が source_reference に由来を持つ(27.1節)
 - 切替試験(27.5節)を実施し、native な記憶機構を切った状態での取得失敗事故の件数を記録している
+- **誰も面倒を見なかった一週間の後で、知識は増えており、期限切れは返らなくなっており、そのどちらにも人間の操作を要していない**(v0.12)
 
 最終成功条件(MVP 後):
 
