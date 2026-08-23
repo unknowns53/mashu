@@ -64,9 +64,7 @@ def _render_user(record: dict) -> str | None:
             # Only the shape of the result matters here, and whether it failed.
             body = block.get("content")
             if isinstance(body, list):
-                body = " ".join(
-                    b.get("text", "") for b in body if isinstance(b, dict)
-                )
+                body = " ".join(b.get("text", "") for b in body if isinstance(b, dict))
             marker = "error" if block.get("is_error") else "result"
             parts.append(f"    ({marker}: {_clip(body or '', RESULT_LIMIT)})")
     text = "\n".join(p for p in parts if p.strip())
