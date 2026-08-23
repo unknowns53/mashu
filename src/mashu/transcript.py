@@ -1,0 +1,262 @@
+"""Reading a CLI's session transcript (16.3).
+
+The transcript format is not a stable interface — it belongs to the CLI, which
+changes it whenever it likes — so the per-CLI knowledge is confined here and
+pinned by fixtures. Everything upstream works on turns.
+
+Two things a raw transcript is bad at, and both are handled here.
+
+It is mostly not conversation. A few megabytes of tool payloads surround a much
+smaller exchange, and the extraction judges what was concluded, not the bytes
+that flowed through, so reasoning blocks and result bodies are dropped or
+clipped.
+
+And it grows. A session that is extracted twice would pay for its first half
+again, every time, so every turn carries the ordinal of the record it came from
+and a checkpoint slices the file at the point the last successful run stopped.
+Records are only ever appended, which is what makes an ordinal stable enough to
+be a checkpoint.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import pathlib
+from dataclasses import dataclass, field
+
+#: Tool arguments worth keeping, in the order they are tried.
+TOOL_SUMMARY_KEYS = ("description", "command", "file_path", "pattern", "query", "prompt", "url")
+
+TOOL_ARG_LIMIT = 160
+RESULT_LIMIT = 200
+
+CLIS = ("claude", "codex")
+
+
+@dataclass
+class Turn:
+    """One thing said, and where in the file it was said."""
+
+    ordinal: int
+    role: str
+    text: str
+
+
+@dataclass
+class Session:
+    path: pathlib.Path
+    source_cli: str
+    external_id: str | None = None
+    cwd: str | None = None
+    title: str | None = None
+    records: int = 0
+    turns: list[Turn] = field(default_factory=list)
+
+    def since(self, checkpoint: int | None) -> list[Turn]:
+        """The turns that arrived after the last successful extraction."""
+        if not checkpoint:
+            return list(self.turns)
+        return [turn for turn in self.turns if turn.ordinal > checkpoint]
+
+    def user_turns(self, turns: list[Turn] | None = None) -> int:
+        return sum(1 for turn in (self.turns if turns is None else turns) if turn.role == "user")
+
+
+def digest(path: pathlib.Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:32]
+
+
+def _clip(text: str, limit: int) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[:limit] + " …"
+
+
+# --------------------------------------------------------------------------
+# claude code
+# --------------------------------------------------------------------------
+def _blocks(message: dict) -> list[dict]:
+    content = message.get("content")
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return [b for b in content or [] if isinstance(b, dict)]
+
+
+def _summarise_tool(block: dict) -> str:
+    name = block.get("name", "tool")
+    args = block.get("input") or {}
+    for key in TOOL_SUMMARY_KEYS:
+        if args.get(key):
+            return f"[{name}] {_clip(args[key], TOOL_ARG_LIMIT)}"
+    return f"[{name}]"
+
+
+def _claude_user(record: dict) -> str | None:
+    if record.get("isMeta"):
+        return None
+    parts: list[str] = []
+    for block in _blocks(record.get("message") or {}):
+        kind = block.get("type")
+        if kind == "text":
+            parts.append(block.get("text", ""))
+        elif kind == "tool_result":
+            body = block.get("content")
+            if isinstance(body, list):
+                body = " ".join(b.get("text", "") for b in body if isinstance(b, dict))
+            marker = "error" if block.get("is_error") else "result"
+            parts.append(f"    ({marker}: {_clip(body or '', RESULT_LIMIT)})")
+    text = "\n".join(p for p in parts if p.strip())
+    return text or None
+
+
+def _claude_assistant(record: dict) -> str | None:
+    parts: list[str] = []
+    for block in _blocks(record.get("message") or {}):
+        kind = block.get("type")
+        if kind == "text":
+            parts.append(block.get("text", ""))
+        elif kind == "tool_use":
+            parts.append("    " + _summarise_tool(block))
+        # thinking is dropped: it is the largest part of a transcript, and the
+        # extraction judges what was concluded rather than how it was reached.
+    text = "\n".join(p for p in parts if p.strip())
+    return text or None
+
+
+def _read_claude(path: pathlib.Path, session: Session) -> Session:
+    for ordinal, record in _records(path):
+        session.records = ordinal
+        if record.get("cwd") and not session.cwd:
+            session.cwd = record["cwd"]
+        if record.get("sessionId") and not session.external_id:
+            session.external_id = record["sessionId"]
+        if not session.title:
+            session.title = record.get("aiTitle") or record.get("customTitle")
+        if record.get("isSidechain"):
+            continue  # subagent transcripts have their own files
+        kind = record.get("type")
+        if kind == "user":
+            text = _claude_user(record)
+        elif kind == "assistant":
+            text = _claude_assistant(record)
+        else:
+            continue
+        if text:
+            session.turns.append(
+                Turn(ordinal, "user" if kind == "user" else "assistant", text.strip())
+            )
+    return session
+
+
+# --------------------------------------------------------------------------
+# codex
+# --------------------------------------------------------------------------
+def _read_codex(path: pathlib.Path, session: Session) -> Session:
+    for ordinal, record in _records(path):
+        session.records = ordinal
+        payload = record.get("payload") or {}
+        kind = record.get("type")
+
+        if kind == "session_meta":
+            session.external_id = (
+                session.external_id or payload.get("session_id") or payload.get("id")
+            )
+            session.cwd = session.cwd or payload.get("cwd")
+            continue
+
+        # The user's own prompt and the agent's own message, before either is
+        # wrapped in the developer preamble that the response_item carries.
+        if kind == "event_msg" and payload.get("type") == "user_message":
+            text = (payload.get("message") or "").strip()
+            if text:
+                session.turns.append(Turn(ordinal, "user", text))
+        elif kind == "event_msg" and payload.get("type") == "agent_message":
+            text = (payload.get("message") or "").strip()
+            if text:
+                session.turns.append(Turn(ordinal, "assistant", text))
+        elif kind == "response_item" and payload.get("type") == "custom_tool_call":
+            name = payload.get("name", "tool")
+            session.turns.append(
+                Turn(
+                    ordinal,
+                    "assistant",
+                    f"    [{name}] {_clip(payload.get('input') or '', TOOL_ARG_LIMIT)}",
+                )
+            )
+    return session
+
+
+# --------------------------------------------------------------------------
+# reading
+# --------------------------------------------------------------------------
+def _records(path: pathlib.Path):
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for ordinal, line in enumerate(handle, start=1):
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                yield ordinal, record
+
+
+def sniff(path: pathlib.Path) -> str:
+    """Which CLI wrote this file, from its first records rather than its path.
+
+    A path can be moved or copied; the shape of the first record cannot.
+    """
+    for ordinal, record in _records(path):
+        if record.get("type") == "session_meta" or "payload" in record:
+            return "codex"
+        if "sessionId" in record or "parentUuid" in record:
+            return "claude"
+        if ordinal > 20:
+            break
+    return "claude"
+
+
+def peek(path: pathlib.Path, *, source_cli: str | None = None, records: int = 200) -> Session:
+    """The session id and working directory, without reading the whole file.
+
+    The session-end hook runs inside a CLI's exit path, which is measured in
+    seconds, so it may not walk a few megabytes to learn two fields that both
+    appear in the opening records.
+    """
+    path = pathlib.Path(path)
+    cli = source_cli or sniff(path)
+    session = Session(path=path, source_cli=cli)
+    for ordinal, record in _records(path):
+        payload = record.get("payload") or {}
+        session.external_id = (
+            session.external_id or record.get("sessionId") or payload.get("session_id")
+        )
+        session.cwd = session.cwd or record.get("cwd") or payload.get("cwd")
+        if session.external_id and session.cwd:
+            break
+        if ordinal >= records:
+            break
+    return session
+
+
+def read(path: pathlib.Path, *, source_cli: str | None = None) -> Session:
+    """Turn one transcript into turns, keeping the ordinals a checkpoint needs."""
+    path = pathlib.Path(path)
+    cli = source_cli or sniff(path)
+    session = Session(path=path, source_cli=cli)
+    if cli == "codex":
+        return _read_codex(path, session)
+    return _read_claude(path, session)
+
+
+def render(session: Session, turns: list[Turn] | None = None) -> str:
+    """The condensed log the extraction reads."""
+    turns = session.turns if turns is None else turns
+    header = [
+        f"# session {session.external_id or session.path.stem}",
+        "",
+        f"- cli: {session.source_cli}",
+        f"- title: {session.title or '(none recorded)'}",
+        f"- turns kept: {len(turns)}",
+    ]
+    body = [f"\n## {turn.role}\n\n{turn.text}" for turn in turns]
+    return "\n".join(header) + "\n" + "\n".join(body) + "\n"

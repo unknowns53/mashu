@@ -156,7 +156,7 @@ def session_queue(cur: psycopg.Cursor) -> list[dict]:
     cur.execute(
         """
         SELECT p.proposal_id, p.session_id, p.actor, p.operation, p.target_memory,
-               p.payload, p.created_at, p.seq,
+               p.payload, p.created_at, p.seq, p.deferred_at, p.review_note,
                EXTRACT(DAY FROM now() - p.created_at)::int AS days_pending,
                COALESCE(e.type, p.payload ->> 'type') AS memory_type,
                COALESCE(e.title, p.payload ->> 'title') AS title,
@@ -196,10 +196,14 @@ def session_queue(cur: psycopg.Cursor) -> list[dict]:
                 "session_id": session_id,
                 "count": len(items),
                 "days_pending": max(i["days_pending"] for i in items),
+                "deferred": sum(1 for i in items if i["deferred_at"]),
                 "proposals": items,
             }
         )
-    out.sort(key=lambda b: -b["days_pending"])
+    # A bundle whose every item a reviewer has already looked at and put off
+    # sorts last. Waiting longest is the right order among things nobody has
+    # seen; it is the wrong order for the one thing somebody chose to leave.
+    out.sort(key=lambda b: (b["deferred"] == b["count"], -b["days_pending"]))
     return out
 
 
@@ -520,6 +524,32 @@ def approve_bundle(
 # --------------------------------------------------------------------------
 # internals
 # --------------------------------------------------------------------------
+def defer(cur: psycopg.Cursor, proposal_id: UUID, *, reviewer: str, note: str) -> dict:
+    """Record that a reviewer looked at this and chose to wait (30 段 C).
+
+    A skip that leaves no trace is indistinguishable from never having been
+    read, so the same item returns to the top of the next sitting and is skipped
+    again. Requiring a note is not bureaucracy: it is what separates "not yet"
+    from "not this", and only one of those is going to change.
+    """
+    proposal = _pending(cur, proposal_id)
+    cur.execute(
+        "UPDATE proposal SET deferred_at = now(), review_note = %s WHERE proposal_id = %s "
+        "RETURNING *",
+        (note, proposal_id),
+    )
+    row = cur.fetchone()
+    events.record(
+        cur,
+        EventType.PROPOSAL_CREATED,
+        reviewer,
+        proposal_id=proposal_id,
+        memory_id=proposal["target_memory"],
+        detail={"deferred": True, "note": note},
+    )
+    return row
+
+
 def _pending(cur: psycopg.Cursor, proposal_id: UUID) -> dict:
     proposal = get(cur, proposal_id)
     if ProposalStatus(proposal["status"]) in _DECIDED:

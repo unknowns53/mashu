@@ -14,11 +14,12 @@ the user's decision into the store.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import pathlib
+import subprocess
 import sys
+import tempfile
 import textwrap
 from uuid import UUID
 
@@ -26,19 +27,30 @@ from mashu import (
     bootstrap,
     context,
     db,
+    extract,
     importer,
     proposals,
     resolution,
     retrieval,
+    routing,
     runs,
     server,
     store,
+    transcript,
+    worker,
 )
 from mashu.db import transaction
 from mashu.embed import get_embedder
 from mashu.errors import DeliveryError
 from mashu.migrate import migrate
-from mashu.models import Delivery, MemoryType, ProposalOperation, SourceType
+from mashu.models import (
+    Delivery,
+    MemoryType,
+    ProposalOperation,
+    ProposalStatus,
+    SourceType,
+    VersionStatus,
+)
 
 WIDTH = 88
 
@@ -740,6 +752,12 @@ def cmd_enqueue(args) -> int:
     It writes one row and returns. Everything expensive happens later, in a
     worker that nothing is waiting for.
 
+    The session id and the working directory are read from the file's opening
+    records when the hook did not supply them, which is a few hundred lines
+    rather than the whole transcript. The directory has to be recorded here
+    because it is what decides the scope later, and by then the process that
+    knew it has exited.
+
     Failing here must not fail the hook: a session that cannot be enqueued is a
     session the sweeper will find by walking transcripts, and a non-zero exit
     from a hook is a visible error for something the user did not ask for.
@@ -749,15 +767,22 @@ def cmd_enqueue(args) -> int:
         print(f"no transcript at {path}", file=sys.stderr)
         return 0
 
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()[:32]
     try:
+        peeked = transcript.peek(path, source_cli=args.cli)
+        digest = transcript.digest(path)
+        session_id = args.session or peeked.external_id
+        if not session_id:
+            print("no session id given and none in the transcript", file=sys.stderr)
+            return 0
         with transaction(args.dsn) as cur:
             run = runs.enqueue(
                 cur,
-                source_cli=args.cli,
-                external_session_id=args.session,
+                source_cli=args.cli or peeked.source_cli,
+                external_session_id=session_id,
                 transcript_digest=digest,
                 extractor_version=args.extractor_version,
+                transcript_path=str(path.resolve()),
+                cwd=args.cwd or peeked.cwd,
             )
     except Exception as failure:  # noqa: BLE001 - a hook must not break the CLI it runs in
         print(f"could not enqueue: {failure}", file=sys.stderr)
@@ -890,6 +915,339 @@ def cmd_migrate(args) -> int:
     applied = migrate(args.dsn)
     print("\n".join(f"applied: {name}" for name in applied) or "already up to date")
     return 0
+
+
+# --------------------------------------------------------------------------
+# capture
+# --------------------------------------------------------------------------
+def cmd_work(args) -> int:
+    """Work through the extraction queue (16.3).
+
+    This is the process that makes the store fill itself. Everything it does is
+    reversible by a reviewer and nothing it does removes knowledge on its own,
+    which is what makes it safe to leave running.
+    """
+    try:
+        extractor = extract.get_extractor(args.extractor)
+    except extract.ExtractionError as failure:
+        print(f"no extractor: {failure}", file=sys.stderr)
+        return 1
+
+    print(f"extractor  {extractor.name} / {extractor.model}")
+    outcomes = worker.run_once(
+        args.dsn, extractor=extractor, limit=args.limit, dry_run=args.dry_run
+    )
+    if not outcomes:
+        print("nothing queued")
+        return 0
+    for outcome in outcomes:
+        print(outcome.line())
+        for refusal in outcome.refused:
+            print(f"    refused: {refusal}")
+    return 0
+
+
+def cmd_sweep(args) -> int:
+    """Enqueue transcripts no hook ever claimed (16.3).
+
+    A hook that did not fire leaves nothing behind saying so, so the only way
+    to find out is to compare what is on disk with what the ledger has seen.
+    """
+    found = worker.sweep(args.dsn, since_days=args.days, limit=args.limit)
+    if not found:
+        print("nothing new on disk")
+        return 0
+    print(f"enqueued {len(found)} transcript(s)")
+    for run in found:
+        print(f"  {_short(run['run_id'])}  {run['source_cli']}  {run['cwd'] or '-'}")
+    return 0
+
+
+def cmd_route(args) -> int:
+    """The map from a working directory to a scope (16.3).
+
+    Stated, never inferred. A memory filed under the wrong scope is not a worse
+    version of a right one; it sits where the sessions that need it will never
+    look, and nothing about it reads as wrong.
+    """
+    with transaction(args.dsn) as cur:
+        if args.add:
+            scope_id = _scope_by_name(cur, args.scope)
+            row = routing.add(
+                cur, path_prefix=args.add, scope_id=scope_id, created_by=args.actor
+            )
+            released = runs.release(cur, cwd_prefix=row["path_prefix"])
+            print(f"{row['path_prefix']}  ->  {args.scope}")
+            if released:
+                print(f"released {released} held transcript(s) back into the queue")
+            return 0
+        if args.remove:
+            print("removed" if routing.remove(cur, path_prefix=args.remove) else "no such route")
+            return 0
+
+        rows = routing.all_routes(cur)
+        if not rows:
+            print("no routes; every transcript will be held until one exists")
+            return 0
+        for row in rows:
+            print(f"{row['path_prefix']}\n    -> {row['scope_name']}")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# retirement
+# --------------------------------------------------------------------------
+def cmd_retire(args) -> int:
+    """Retire what a person says is finished or wrong (16.1, 30 段 B).
+
+    Section 16.1 has always named the user's own statement as a trigger for
+    retirement, and there was no way for a person to make one: retiring
+    anything meant waiting for an agent to propose it. This is that entrance.
+
+    disproven is Human Review Required under section 17 whoever asks for it,
+    and the person typing this command with a reason is that review. It is
+    recorded as a review rather than waved past one, so the log says who
+    decided and on what grounds.
+    """
+    target = VersionStatus(args.status)
+    with transaction(args.dsn) as cur:
+        entity = _resolve_entity(cur, args.memory_id)
+        full = store.get_entity(cur, entity["memory_id"])
+        version_id = full["active_version"]
+        if version_id is None:
+            print(f"{full['title']} has no active version to retire", file=sys.stderr)
+            return 1
+
+        made = proposals.propose(
+            cur,
+            actor=args.actor,
+            operation=ProposalOperation.CHANGE_STATUS,
+            payload={
+                "version_id": str(version_id),
+                "status": str(target),
+                "reason": args.reason,
+                "source_type": str(SourceType.USER),
+            },
+            target_memory=full["memory_id"],
+        )
+        proposal = made["proposal"]
+        if proposal["status"] == str(ProposalStatus.PENDING):
+            proposals.approve(
+                cur,
+                proposal["proposal_id"],
+                reviewer=args.reviewer,
+                reason=f"stated at the terminal: {args.reason}",
+            )
+            print(f"{full['title']}  ->  {target}  (reviewed here: {made['ruling'].reason})")
+        else:
+            print(f"{full['title']}  ->  {target}")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# review, in one sitting
+# --------------------------------------------------------------------------
+def cmd_review(args) -> int:
+    """Open the oldest bundle and finish with it (18.1, 30 段 C).
+
+    Review is optional now, and that is exactly why one sitting has to be
+    enough. A pass that ends with items in the same state they started in is a
+    pass that will not happen twice, so every item leaves here decided:
+    approved, turned down with a reason, edited, or put off with a reason.
+
+    The diff is part of it. Approving a replacement without seeing what it
+    replaces is not review, and section 18.1 asked for the comparison that the
+    bundle display never had.
+    """
+    with transaction(args.dsn) as cur:
+        bundles = [b for b in proposals.session_queue(cur) if b["deferred"] < b["count"]]
+        if not bundles:
+            deferred = proposals.session_queue(cur)
+            if deferred:
+                print(f"nothing new; {len(deferred)} bundle(s) are put off. --all to see them")
+            else:
+                print("nothing waiting for review")
+            return 0
+        bundle = bundles[0]
+        items = [i for i in bundle["proposals"] if args.all or not i["deferred_at"]]
+        _print_review(cur, bundle, items)
+
+    script = args.batch
+    if script is None:
+        if not sys.stdin.isatty():
+            print("\nnot a terminal; pass --batch to decide non-interactively")
+            return 0
+        print(_REVIEW_HELP)
+        script = input("review> ").strip()
+
+    return _apply_review(args, items, script)
+
+
+_REVIEW_HELP = """
+  all                 approve everything still undecided here
+  r N reason          turn item N down, with the reason
+  e N                 edit item N's text, then approve it as your own
+  s N reason          put item N off, saying why
+  q                   leave (anything undecided stays undecided)
+
+  several may be given at once, separated by ';'
+"""
+
+
+def _print_review(cur, bundle, items) -> None:
+    """The bundle as one reading, each proposal against what it would replace."""
+    name = _short(bundle["session_id"]) if bundle["session_id"] else "none"
+    scope = items[0]["scope_name"] if items else "-"
+    print(
+        f"bundle {name}  [{scope or '-'}]  {len(items)} to decide, "
+        f"waiting {bundle['days_pending']} day(s)\n"
+    )
+    for index, item in enumerate(items, 1):
+        print("-" * WIDTH)
+        print(
+            f"{index:>3}  {_short(item['proposal_id'])}  {item['operation']}  "
+            f"{item['memory_type'] or '-'}"
+        )
+        print(f"     {item['title'] or ''}\n")
+        if item["review_note"]:
+            print(_wrap(f"(put off earlier: {item['review_note']})"))
+            print()
+        _print_diff(cur, item)
+    print("-" * WIDTH)
+
+
+def _print_diff(cur, item) -> None:
+    """What this proposal says, beside what it would displace (18.1)."""
+    cur.execute(
+        "SELECT applied_version FROM proposal WHERE proposal_id = %s", (item["proposal_id"],)
+    )
+    version_id = (cur.fetchone() or {}).get("applied_version")
+    if version_id is None:
+        print(_wrap("(nothing written yet; this proposal changes nothing until approved)"))
+        for key, value in (item["payload"] or {}).items():
+            if key in ("reason", "status"):
+                print(_wrap(f"{key}: {value}"))
+        return
+
+    version = store.get_version(cur, version_id)
+    entity = store.get_entity(cur, version["memory_id"])
+    if version["directive"]:
+        print(_wrap(version["directive"], indent="  > "))
+        print()
+    print(_wrap(version["content"]))
+    _print_grounds(cur, version_id)
+
+    current = entity["active_version"]
+    if current and current != version_id:
+        print("\n     replacing what is active now:")
+        print(_wrap(store.get_version(cur, current)["content"], indent="   | "))
+    elif current is None:
+        print("\n     (new; nothing is active on this entity yet)")
+
+
+def _apply_review(args, items, script: str) -> int:
+    """Carry the sitting's decisions into the store, one transaction each."""
+    if not script or script.lower() in ("q", "quit"):
+        print("left undecided")
+        return 0
+
+    decided: dict[int, tuple[str, str]] = {}
+    approve_rest = False
+    for clause in script.split(";"):
+        clause = clause.strip()
+        if not clause:
+            continue
+        if clause.lower() in ("all", "a"):
+            approve_rest = True
+            continue
+        head, _, rest = clause.partition(" ")
+        verb = head.lower()
+        if verb not in ("r", "e", "s"):
+            print(f"do not know what to do with {clause!r}", file=sys.stderr)
+            return 1
+        number, _, reason = rest.strip().partition(" ")
+        if not number.isdigit() or not 1 <= int(number) <= len(items):
+            print(f"{number!r} is not one of 1..{len(items)}", file=sys.stderr)
+            return 1
+        if verb in ("r", "s") and not reason.strip():
+            print(f"'{verb} {number}' needs a reason", file=sys.stderr)
+            return 1
+        decided[int(number)] = (verb, reason.strip())
+
+    for index, item in enumerate(items, 1):
+        verb, reason = decided.get(index, ("a" if approve_rest else "", ""))
+        if not verb:
+            continue
+        with transaction(args.dsn) as cur:
+            _decide(cur, args, item, verb, reason)
+    return 0
+
+
+def _decide(cur, args, item, verb: str, reason: str) -> None:
+    proposal_id = item["proposal_id"]
+    title = item["title"] or _short(proposal_id)
+
+    if verb == "r":
+        proposals.reject(cur, proposal_id, reviewer=args.reviewer, reason=reason)
+        print(f"rejected  {title}")
+        return
+    if verb == "s":
+        proposals.defer(cur, proposal_id, reviewer=args.reviewer, note=reason)
+        print(f"put off   {title}  ({reason})")
+        return
+    if verb == "e":
+        _edit(cur, args, item)
+        return
+    proposals.approve(cur, proposal_id, reviewer=args.reviewer, reason=args.reason)
+    print(f"approved  {title}")
+
+
+def _edit(cur, args, item) -> None:
+    """Approve, then record the reviewer's own wording as a version of theirs (18.1).
+
+    Not an overwrite. Versions are immutable, so what an edit produces is a new
+    version whose source is the user, sitting on top of what the agent proposed.
+    The history then says both things: what was suggested, and what a person
+    made of it.
+    """
+    cur.execute(
+        "SELECT applied_version FROM proposal WHERE proposal_id = %s", (item["proposal_id"],)
+    )
+    version_id = (cur.fetchone() or {}).get("applied_version")
+    if version_id is None:
+        print(f"nothing written yet to edit on {item['title']}", file=sys.stderr)
+        return
+
+    original = store.get_version(cur, version_id)["content"]
+    edited = _open_editor(original)
+    proposals.approve(cur, item["proposal_id"], reviewer=args.reviewer, reason="edited on review")
+    if edited.strip() == original.strip():
+        print(f"approved  {item['title']}  (unchanged)")
+        return
+
+    entity = store.get_entity(cur, store.get_version(cur, version_id)["memory_id"])
+    store.add_version(
+        cur,
+        memory_id=entity["memory_id"],
+        content=edited.strip(),
+        source_type=SourceType.USER,
+        source_reference="edited during review",
+        created_by=args.reviewer,
+        actor=args.reviewer,
+        adopt=True,
+    )
+    print(f"edited    {item['title']}")
+
+
+def _open_editor(text: str) -> str:
+    editor = os.environ.get("MASHU_EDITOR") or os.environ.get("EDITOR") or "vi"
+    with tempfile.NamedTemporaryFile("w+", suffix=".md", delete=False, encoding="utf-8") as handle:
+        handle.write(text)
+        path = handle.name
+    subprocess.run([*editor.split(), path], check=False)
+    body = pathlib.Path(path).read_text(encoding="utf-8")
+    pathlib.Path(path).unlink(missing_ok=True)
+    return body
 
 
 # --------------------------------------------------------------------------
@@ -1065,9 +1423,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     eq = sub.add_parser("enqueue", help="claim a transcript for extraction (16.3)")
     eq.add_argument("transcript", help="path to the session transcript")
-    eq.add_argument("--cli", required=True, help="which CLI produced it")
-    eq.add_argument("--session", required=True, help="that CLI's session id")
-    eq.add_argument("--extractor-version", default="v1")
+    eq.add_argument("--cli", choices=transcript.CLIS, help="which CLI produced it")
+    eq.add_argument("--session", help="that CLI's session id; read from the file if omitted")
+    eq.add_argument("--cwd", help="the directory it ran in; read from the file if omitted")
+    eq.add_argument("--extractor-version", default=extract.EXTRACTOR_VERSION)
     eq.set_defaults(func=cmd_enqueue)
 
     ru = sub.add_parser("runs", help="whether automatic capture is still working (16.3)")
@@ -1088,6 +1447,41 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("delivery", choices=[str(x) for x in Delivery])
     d.add_argument("--actor", default="user")
     d.set_defaults(func=cmd_deliver)
+
+    wk = sub.add_parser("work", help="run the extraction worker over the queue (16.3)")
+    wk.add_argument("--limit", type=int, default=1, help="how many runs to take this time")
+    wk.add_argument("--extractor", help="api, cli:claude, cli:codex, stub, or auto")
+    wk.add_argument(
+        "--dry-run", action="store_true", help="size the input without calling a model"
+    )
+    wk.set_defaults(func=cmd_work)
+
+    sw = sub.add_parser("sweep", help="enqueue transcripts no hook claimed (16.3)")
+    sw.add_argument("--days", type=int, default=7, help="how far back to look")
+    sw.add_argument("--limit", type=int, default=200, help="files per CLI to consider")
+    sw.set_defaults(func=cmd_sweep)
+
+    ro = sub.add_parser("route", help="map a working directory onto a scope (16.3)")
+    ro.add_argument("--add", metavar="PATH", help="map this directory tree")
+    ro.add_argument("--scope", help="the scope name it maps to")
+    ro.add_argument("--remove", metavar="PATH", help="drop the mapping for this directory")
+    ro.add_argument("--actor", default="user")
+    ro.set_defaults(func=cmd_route)
+
+    re_ = sub.add_parser("retire", help="record that something is finished or wrong (16.1)")
+    re_.add_argument("memory_id")
+    re_.add_argument("status", choices=["completed", "disproven", "dormant"])
+    re_.add_argument("--reason", required=True, help="what makes this true")
+    re_.add_argument("--actor", default="user")
+    re_.add_argument("--reviewer", default="user")
+    re_.set_defaults(func=cmd_retire)
+
+    rv = sub.add_parser("review", help="decide a whole bundle in one sitting (18.1)")
+    rv.add_argument("--batch", help="the decisions, instead of being asked for them")
+    rv.add_argument("--all", action="store_true", help="include items already put off")
+    rv.add_argument("--reviewer", default="user")
+    rv.add_argument("--reason", default=None, help="a note recorded on every approval")
+    rv.set_defaults(func=cmd_review)
 
     v = sub.add_parser("serve", help="run the MCP server over stdio")
     v.add_argument("--agent", default=None, help="the identity proposals are recorded under")

@@ -27,6 +27,12 @@ MAX_ATTEMPTS = 3
 FAILED_WARNING_THRESHOLD = 1
 STALE_QUEUE_HOURS = 24
 
+#: Input tokens capture may spend in one day (16.3). Over it, work is deferred
+#: rather than dropped: a transcript nobody read is knowledge that never
+#: arrives, and the ledger cannot tell that apart from a night with nothing to
+#: say unless the deferral is written down.
+DAILY_INPUT_BUDGET = 400_000
+
 
 class RunError(MashuError):
     """A run cannot be moved the way the caller asked."""
@@ -39,6 +45,8 @@ def enqueue(
     external_session_id: str,
     transcript_digest: str,
     extractor_version: str,
+    transcript_path: str | None = None,
+    cwd: str | None = None,
 ) -> dict[str, Any]:
     """Claim a transcript for extraction, once.
 
@@ -49,13 +57,21 @@ def enqueue(
     cur.execute(
         """
         INSERT INTO extraction_run
-            (source_cli, external_session_id, transcript_digest, extractor_version)
-        VALUES (%s, %s, %s, %s)
+            (source_cli, external_session_id, transcript_digest, extractor_version,
+             transcript_path, cwd)
+        VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (source_cli, external_session_id, transcript_digest, extractor_version)
         DO NOTHING
         RETURNING *
         """,
-        (source_cli, external_session_id, transcript_digest, extractor_version),
+        (
+            source_cli,
+            external_session_id,
+            transcript_digest,
+            extractor_version,
+            transcript_path,
+            cwd,
+        ),
     )
     row = cur.fetchone()
     if row is not None:
@@ -81,7 +97,7 @@ def claim(cur: psycopg.Cursor, *, limit: int = 1) -> list[dict[str, Any]]:
             SELECT run_id FROM extraction_run
             WHERE (state = 'queued')
                OR (state = 'retrying' AND (next_retry_at IS NULL OR next_retry_at <= now()))
-            ORDER BY created_at
+            ORDER BY seq
             LIMIT %s
             FOR UPDATE SKIP LOCKED
         )
@@ -100,13 +116,97 @@ def succeeded(
     input_tokens: int | None = None,
     output_tokens: int | None = None,
     note: str | None = None,
+    checkpoint: int | None = None,
 ) -> dict[str, Any]:
-    return _finish(cur, run_id, "succeeded", model, input_tokens, output_tokens, note, None)
+    """Finish a run and mark how far into the transcript it read.
+
+    The checkpoint is what stops a long session being paid for again every
+    night: the next run over the same session starts from here.
+    """
+    row = _finish(cur, run_id, "succeeded", model, input_tokens, output_tokens, note, None)
+    if checkpoint is not None:
+        cur.execute(
+            "UPDATE extraction_run SET checkpoint = %s WHERE run_id = %s RETURNING *",
+            (checkpoint, run_id),
+        )
+        row = cur.fetchone()
+    return row
 
 
 def skipped(cur: psycopg.Cursor, *, run_id: UUID, note: str) -> dict[str, Any]:
     """Recorded, not dropped. A skip nobody can see is the same as a silent failure."""
     return _finish(cur, run_id, "skipped", None, None, None, note, None)
+
+
+def held(cur: psycopg.Cursor, *, run_id: UUID, note: str) -> dict[str, Any]:
+    """Stop before spending anything, and stay releasable (16.3).
+
+    What this is for is an unmapped working directory. The alternative is
+    guessing a scope, and a wrongly filed memory is not a worse version of a
+    right one: it sits where the sessions that need it never look, and nothing
+    about it reads as wrong.
+    """
+    return _finish(cur, run_id, "held", None, None, None, note, None)
+
+
+def release(cur: psycopg.Cursor, *, cwd_prefix: str | None = None) -> int:
+    """Put held runs back in the queue, once whatever held them is resolved."""
+    cur.execute(
+        """
+        UPDATE extraction_run
+        SET state = 'queued', note = NULL, completed_at = NULL
+        WHERE state = 'held'
+          AND (%(prefix)s::text IS NULL OR cwd LIKE %(prefix)s || '%%')
+        """,
+        {"prefix": cwd_prefix},
+    )
+    return cur.rowcount
+
+
+def defer(cur: psycopg.Cursor, *, run_id: UUID, until_hours: int, note: str) -> dict[str, Any]:
+    """Put a run back without spending one of its attempts.
+
+    Deferral is not failure. The attempt counter exists to stop a broken
+    transcript costing forever, and a run that never reached the model has not
+    told us anything about whether it is broken.
+    """
+    cur.execute(
+        """
+        UPDATE extraction_run
+        SET state = 'retrying', attempts = greatest(attempts - 1, 0), note = %s,
+            next_retry_at = now() + make_interval(hours => %s)
+        WHERE run_id = %s
+        RETURNING *
+        """,
+        (note, until_hours, run_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise RunError(f"no run {run_id}")
+    return row
+
+
+def checkpoint_for(cur: psycopg.Cursor, *, source_cli: str, external_session_id: str) -> int | None:
+    """How far a previous successful run read this session."""
+    cur.execute(
+        """
+        SELECT max(checkpoint) AS mark FROM extraction_run
+        WHERE source_cli = %s AND external_session_id = %s AND state = 'succeeded'
+        """,
+        (source_cli, external_session_id),
+    )
+    return (cur.fetchone() or {}).get("mark")
+
+
+def spent_today(cur: psycopg.Cursor) -> int:
+    """Input tokens capture has already spent since midnight (16.3)."""
+    cur.execute(
+        """
+        SELECT coalesce(sum(input_tokens), 0) AS spent FROM extraction_run
+        WHERE completed_at >= date_trunc('day', now())
+        """
+    )
+    return int(cur.fetchone()["spent"])
 
 
 def failed(cur: psycopg.Cursor, *, run_id: UUID, error: str) -> dict[str, Any]:
@@ -147,6 +247,7 @@ def health(cur: psycopg.Cursor) -> dict[str, Any]:
           count(*) FILTER (WHERE state IN ('queued', 'retrying')) AS waiting,
           count(*) FILTER (WHERE state = 'succeeded') AS succeeded,
           count(*) FILTER (WHERE state = 'skipped') AS skipped,
+          count(*) FILTER (WHERE state = 'held') AS held,
           EXTRACT(EPOCH FROM now() - min(created_at)
                   FILTER (WHERE state IN ('queued', 'retrying'))) / 3600 AS oldest_wait_hours
         FROM extraction_run
@@ -155,8 +256,10 @@ def health(cur: psycopg.Cursor) -> dict[str, Any]:
     row = dict(cur.fetchone())
     oldest = row["oldest_wait_hours"]
     row["oldest_wait_hours"] = round(float(oldest), 1) if oldest is not None else None
-    row["ok"] = row["failed"] < FAILED_WARNING_THRESHOLD and (
-        oldest is None or float(oldest) < STALE_QUEUE_HOURS
+    row["ok"] = (
+        row["failed"] < FAILED_WARNING_THRESHOLD
+        and not row["held"]
+        and (oldest is None or float(oldest) < STALE_QUEUE_HOURS)
     )
     row["warning"] = None if row["ok"] else _warning(row)
     return row
@@ -168,6 +271,10 @@ def _warning(row: dict[str, Any]) -> str:
         parts.append(f"{row['failed']} transcript(s) gave up after {MAX_ATTEMPTS} attempts")
     if row["oldest_wait_hours"] and row["oldest_wait_hours"] >= STALE_QUEUE_HOURS:
         parts.append(f"the oldest queued transcript has waited {row['oldest_wait_hours']}h")
+    if row.get("held"):
+        parts.append(
+            f"{row['held']} transcript(s) are held because their working directory maps to no scope"
+        )
     return (
         "capture is not keeping up: "
         + "; ".join(parts)
