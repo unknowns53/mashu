@@ -617,3 +617,28 @@ def test_merging_asks_which_reading_survives_when_both_are_active(run, test_dsn,
 
     with transaction(test_dsn) as cur:
         assert store.get_entity(cur, target["target_memory"])["active_version"] == keep
+
+
+def test_which_side_survives_can_be_named_before_the_versions_exist(run, test_dsn, committed_scope):
+    """A merge is planned while the thing being merged is still in review."""
+    source = _propose(test_dsn, committed_scope, "the older name", "one reading")
+    target = _propose(test_dsn, committed_scope, "the newer name", "another reading")
+    for proposal in (source, target):
+        with transaction(test_dsn) as cur:
+            proposals.approve(cur, proposal["proposal_id"], reviewer="user", reason="both stand")
+
+    code, _ = run(
+        "merge",
+        str(source["target_memory"])[:8],
+        "--into",
+        str(target["target_memory"])[:8],
+        "--keep-active",
+        "into",
+        "--reason",
+        "one concept",
+    )
+    assert code == 0
+
+    with transaction(test_dsn) as cur:
+        entity = store.get_entity(cur, target["target_memory"])
+        assert store.get_version(cur, entity["active_version"])["content"] == "another reading"

@@ -485,7 +485,7 @@ def cmd_merge(args) -> int:
     with transaction(args.dsn) as cur:
         source = _resolve_entity(cur, args.source)
         target = _resolve_entity(cur, args.into)
-        keep = _resolve_version(cur, args.keep_active) if args.keep_active else None
+        keep = _keep_active(cur, args.keep_active, source, target)
 
         result = store.merge_entities(
             cur,
@@ -501,6 +501,28 @@ def cmd_merge(args) -> int:
     if result["not_chosen"]:
         print(f"  superseded {', '.join(_short(v) for v in result['not_chosen'])}")
     return 0
+
+
+def _keep_active(cur, asked: str | None, source: dict, target: dict) -> UUID | None:
+    """Which version stays active, named by version or by which side it is on.
+
+    The words exist because the answer is usually known before the versions
+    are: a merge is planned while the thing being merged is still in review,
+    and a command that cannot be written until then is a command written under
+    pressure.
+    """
+    if asked is None:
+        return None
+    if asked in ("source", "into"):
+        row = source if asked == "source" else target
+        cur.execute(
+            "SELECT active_version FROM memory_entity WHERE memory_id = %s", (row["memory_id"],)
+        )
+        active = cur.fetchone()["active_version"]
+        if active is None:
+            raise SystemExit(f"the {asked} entity has no active version to keep")
+        return active
+    return _resolve_version(cur, asked)
 
 
 def _resolve_version(cur, prefix: str) -> UUID:
@@ -753,7 +775,8 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("--into", required=True, help="the entity it becomes part of")
     mg.add_argument(
         "--keep-active",
-        help="version that stays active when both entities have one",
+        metavar="WHICH",
+        help="which version stays active: 'source', 'into', or a version id",
     )
     mg.add_argument("--reason", required=True)
     mg.add_argument("--actor", default="user")
