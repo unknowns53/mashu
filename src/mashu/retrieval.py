@@ -94,40 +94,31 @@ class Retrieved:
 # --------------------------------------------------------------------------
 # scope detection
 # --------------------------------------------------------------------------
-def detect_scopes(cur: psycopg.Cursor, query: str) -> list[UUID]:
+def detect_scopes(cur: psycopg.Cursor, query_vector: str) -> list[UUID]:
     """Which scopes in the ledger the query is about (21).
 
-    The ledger is small and read at query time rather than kept embedded: a
-    scope's name and description change rarely enough that caching them would
-    buy little and go stale silently.
+    The ledger carries its own embeddings (migration 0006) rather than being
+    re-encoded per query. It changes about as often as the user adds a scope,
+    so encoding it on every search was the same work repeated indefinitely.
 
     Returning an empty list means no scope stood out, and the caller searches
     everything. Guessing one scope and being wrong hides the answer completely,
     which is worse than a wider search.
     """
-    cur.execute(
-        "SELECT scope_id, name, description FROM scope WHERE status = 'active' ORDER BY name"
-    )
-    scopes = cur.fetchall()
-    if not scopes:
-        return []
-
     floor = float(
         os.environ.get(SCOPE_THRESHOLD_ENV_VAR)
         or SCOPE_MATCH_THRESHOLDS.get(get_embedder().name, SCOPE_MATCH_FALLBACK)
     )
-    embedder = get_embedder()
-    described = [
-        f"{s['name']}. {s['description']}" if s["description"] else s["name"] for s in scopes
-    ]
-    vectors = embedder.embed_documents(described)
-    q = embedder.embed_query(query)
-
-    scored = [
-        (sum(a * b for a, b in zip(q, v, strict=True)), s["scope_id"])
-        for s, v in zip(scopes, vectors, strict=True)
-    ]
-    return [scope_id for score, scope_id in scored if score >= floor]
+    cur.execute(
+        """
+        SELECT scope_id, 1 - (name_embedding <=> %(q)s::vector) AS similarity
+        FROM scope
+        WHERE status = 'active' AND name_embedding IS NOT NULL
+        ORDER BY name_embedding <=> %(q)s::vector
+        """,
+        {"q": query_vector},
+    )
+    return [row["scope_id"] for row in cur.fetchall() if row["similarity"] >= floor]
 
 
 # --------------------------------------------------------------------------
@@ -196,7 +187,7 @@ def retrieve(
     q = _as_vector(embedder.embed_query(query))
     type_filter = [str(MemoryType(t)) for t in types] if types else None
 
-    scopes = [scope_id] if scope_id is not None else detect_scopes(cur, query)
+    scopes = [scope_id] if scope_id is not None else detect_scopes(cur, q)
     params = {
         "q": q,
         "scopes": scopes or None,

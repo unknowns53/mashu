@@ -262,3 +262,53 @@ def test_an_undetectable_query_searches_everything_rather_than_guessing(cur, sco
     got = retrieval.retrieve(cur, "zzzz unrelated", actor="claude")
     assert got.scopes == []
     assert _titles(got.active) == ["ramp rate"]
+
+
+def test_a_scope_with_no_vector_is_skipped_rather_than_breaking_detection(cur, author):
+    """Scopes predate migration 0006; backfill is what fills them in."""
+    from mashu import store as _store
+
+    detectable = _store.create_scope(
+        cur, name="cloud point measurement", actor="user", description="ramp rates"
+    )
+    stale = _store.create_scope(cur, name="an older scope", actor="user")
+    cur.execute("UPDATE scope SET name_embedding = NULL WHERE scope_id = %s", (stale,))
+
+    _store.create_entity(
+        cur,
+        scope_id=detectable,
+        type=MemoryType.FACT,
+        title="ramp rate",
+        content="the ramp is half a degree per minute",
+        source_type=SourceType.AGENT,
+        created_by="claude",
+        actor="claude",
+        adopt=True,
+    )
+
+    got = retrieval.retrieve(cur, "cloud point measurement", actor="claude")
+    assert got.scopes == [detectable]
+
+
+def test_the_ledger_is_not_re_encoded_on_every_query(cur, scope_id, author, monkeypatch):
+    """Scope names change when the user adds a scope, not once per search."""
+    from mashu import embed
+
+    author("ramp rate", "the ramp is half a degree per minute")
+    calls: list[list[str]] = []
+    inner = embed.get_embedder()
+
+    class Watched:
+        name = inner.name
+        dimensions = inner.dimensions
+
+        def embed_query(self, text):
+            return inner.embed_query(text)
+
+        def embed_documents(self, texts):
+            calls.append(list(texts))
+            return inner.embed_documents(texts)
+
+    embed.set_embedder(Watched())
+    retrieval.retrieve(cur, "ramp rate", actor="claude")
+    assert calls == []

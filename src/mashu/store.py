@@ -62,10 +62,18 @@ def create_scope(
     actor: str,
     description: str | None = None,
 ) -> UUID:
-    """Add a scope to the ledger. Only the user does this (specification 7)."""
+    """Add a scope to the ledger. Only the user does this (specification 7).
+
+    The name and description are embedded here rather than at query time.
+    Scope detection compares every query against all of them, and a ledger
+    that rarely changes should not be re-encoded on every search.
+    """
     cur.execute(
-        "INSERT INTO scope (name, description) VALUES (%s, %s) RETURNING scope_id",
-        (name, description),
+        """
+        INSERT INTO scope (name, description, name_embedding)
+        VALUES (%s, %s, %s) RETURNING scope_id
+        """,
+        (name, description, embed_text(scope_description(name, description))),
     )
     scope_id = cur.fetchone()["scope_id"]
     events.record(cur, EventType.SCOPE_CREATED, actor, detail={"name": name})
@@ -439,6 +447,11 @@ def _choose_surviving_active(
 # internals
 # --------------------------------------------------------------------------
 _ACTIVE_OK = frozenset({VersionStatus.CANDIDATE, VersionStatus.COMPLETED})
+
+
+def scope_description(name: str, description: str | None) -> str:
+    """The text scope detection matches a query against."""
+    return f"{name}. {description}" if description else name
 
 
 def embed_text(text: str) -> str:

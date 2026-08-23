@@ -24,12 +24,17 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import pathlib
 import re
+import sqlite3
+from array import array
 from typing import Protocol, runtime_checkable
 
 DIMENSIONS = 1024
 MODEL_ENV_VAR = "MASHU_EMBEDDING_MODEL"
 DEFAULT_MODEL = "intfloat/multilingual-e5-large"
+CACHE_ENV_VAR = "MASHU_EMBEDDING_CACHE"
+DEFAULT_CACHE_DIR = "~/.cache/mashu"
 
 
 @runtime_checkable
@@ -52,9 +57,15 @@ class Embedder(Protocol):
 class E5Embedder:
     """multilingual-e5-large, loaded on first use.
 
-    Loading costs seconds and hundreds of megabytes of memory, so it is
-    deferred until something actually asks for a vector. A process that only
-    reads existing embeddings never pays for it.
+    Loading costs seconds and a gigabyte of memory, so it is deferred until
+    something actually asks for a vector. A process that only reads existing
+    embeddings never pays for it.
+
+    Loading is attempted from the local cache first. Left to itself the library
+    contacts the model hub on every construction to check for a newer revision,
+    which measured at 5.7 of the 7.2 seconds a load took, for a model already
+    sitting on disk. The network path is kept as the fallback, because the very
+    first run has nothing cached to load from.
     """
 
     dimensions = DIMENSIONS
@@ -67,7 +78,11 @@ class E5Embedder:
         if self._model is None:
             from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(self.name)
+            try:
+                self._model = SentenceTransformer(self.name, local_files_only=True)
+            except Exception:
+                # Nothing cached yet, or the cache is incomplete. Fetch it.
+                self._model = SentenceTransformer(self.name)
             getter = (
                 getattr(self._model, "get_embedding_dimension", None)
                 or self._model.get_sentence_embedding_dimension
@@ -133,6 +148,125 @@ class HashingEmbedder:
 
 
 # --------------------------------------------------------------------------
+# not loading the model at all
+# --------------------------------------------------------------------------
+class CachedEmbedder:
+    """Remembers vectors across processes so a repeat never loads the model.
+
+    Embedding is deterministic for a given model and text, so the same query
+    asked twice does not need the weights a second time. That matters more than
+    the arithmetic it saves: the lookup happens before the inner embedder is
+    touched, and the inner embedder is what imports torch and reads a gigabyte
+    off disk. A run that hits the cache for everything it needs never pays any
+    of that.
+
+    The model name is part of the key. Vectors from two models are not
+    comparable, and silently mixing them would degrade similarity in a way that
+    shows up as slightly worse answers rather than as an error.
+    """
+
+    def __init__(self, inner: Embedder, path: str | None = None) -> None:
+        self._inner = inner
+        self._path = (
+            pathlib.Path(path or os.environ.get(CACHE_ENV_VAR) or DEFAULT_CACHE_DIR).expanduser()
+            / "embeddings.sqlite3"
+        )
+        self._db: sqlite3.Connection | None = None
+
+    @property
+    def name(self) -> str:
+        return self._inner.name
+
+    @property
+    def dimensions(self) -> int:
+        return self._inner.dimensions
+
+    def _connect(self) -> sqlite3.Connection | None:
+        """Open the cache, or give up on it.
+
+        A cache that cannot be opened is not an error worth stopping for: the
+        inner embedder still answers, only slower. Failing hard here would turn
+        a read-only home directory into an outage.
+        """
+        if self._db is None:
+            try:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                self._db = sqlite3.connect(self._path)
+                self._db.execute(
+                    "CREATE TABLE IF NOT EXISTS vector ("
+                    "  key TEXT PRIMARY KEY, value BLOB NOT NULL)"
+                )
+                self._db.commit()
+            except (OSError, sqlite3.Error):
+                self._db = False  # type: ignore[assignment]
+        return self._db or None
+
+    @staticmethod
+    def _narrow(vector: list[float]) -> list[float]:
+        """Put a fresh vector through the precision the cache stores.
+
+        pgvector's own type is single precision, so the extra digits are
+        discarded on the way into the database regardless. Narrowing here as
+        well is what keeps a cache hit and a cache miss from returning
+        different numbers for the same text.
+        """
+        return list(array("f", vector))
+
+    def _key(self, role: str, text: str) -> str:
+        digest = hashlib.blake2b(text.encode("utf-8"), digest_size=16).hexdigest()
+        return f"{self.name}\x00{role}\x00{digest}"
+
+    def _get(self, role: str, text: str) -> list[float] | None:
+        db = self._connect()
+        if db is None:
+            return None
+        row = db.execute(
+            "SELECT value FROM vector WHERE key = ?", (self._key(role, text),)
+        ).fetchone()
+        if row is None:
+            return None
+        return list(array("f", row[0]))
+
+    def _put(self, role: str, text: str, vector: list[float]) -> None:
+        db = self._connect()
+        if db is None:
+            return
+        try:
+            db.execute(
+                "INSERT OR REPLACE INTO vector (key, value) VALUES (?, ?)",
+                (self._key(role, text), array("f", vector).tobytes()),
+            )
+            db.commit()
+        except sqlite3.Error:
+            pass
+
+    def embed_query(self, text: str) -> list[float]:
+        cached = self._get("query", text)
+        if cached is not None:
+            return cached
+        vector = self._narrow(self._inner.embed_query(text))
+        self._put("query", text, vector)
+        return vector
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        found: dict[int, list[float]] = {}
+        missing: list[int] = []
+        for i, text in enumerate(texts):
+            cached = self._get("passage", text)
+            if cached is None:
+                missing.append(i)
+            else:
+                found[i] = cached
+
+        if missing:
+            fresh = self._inner.embed_documents([texts[i] for i in missing])
+            for i, vector in zip(missing, fresh, strict=True):
+                found[i] = self._narrow(vector)
+                self._put("passage", texts[i], found[i])
+        return [found[i] for i in range(len(texts))]
+
+
+# --------------------------------------------------------------------------
 # choosing one
 # --------------------------------------------------------------------------
 _current: Embedder | None = None
@@ -147,7 +281,11 @@ def get_embedder() -> Embedder:
     global _current
     if _current is None:
         configured = os.environ.get(MODEL_ENV_VAR, DEFAULT_MODEL)
-        _current = HashingEmbedder() if configured == "hashing" else E5Embedder(configured)
+        # The hashing embedder is cheaper than a cache lookup, so it is not
+        # wrapped: caching it would only add a file to keep coherent.
+        _current = (
+            HashingEmbedder() if configured == "hashing" else CachedEmbedder(E5Embedder(configured))
+        )
     return _current
 
 

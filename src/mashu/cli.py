@@ -180,6 +180,17 @@ def cmd_backfill(args) -> int:
     embedder = get_embedder()
     print(f"embedding with {embedder.name}")
     with transaction(args.dsn) as cur:
+        cur.execute("SELECT scope_id, name, description FROM scope WHERE name_embedding IS NULL")
+        scopes = cur.fetchall()
+        for row in scopes:
+            cur.execute(
+                "UPDATE scope SET name_embedding = %s WHERE scope_id = %s",
+                (
+                    store.embed_text(store.scope_description(row["name"], row["description"])),
+                    row["scope_id"],
+                ),
+            )
+
         cur.execute("SELECT memory_id, title FROM memory_entity WHERE title_embedding IS NULL")
         entities = cur.fetchall()
         for row in entities:
@@ -197,7 +208,9 @@ def cmd_backfill(args) -> int:
                 "UPDATE memory_version SET content_embedding = %s WHERE version_id = %s",
                 (store.embed_text(row["content"]), row["version_id"]),
             )
-    print(f"embedded {len(entities)} title(s) and {len(versions)} version(s)")
+    print(
+        f"embedded {len(scopes)} scope(s), {len(entities)} title(s) and {len(versions)} version(s)"
+    )
     return 0
 
 
