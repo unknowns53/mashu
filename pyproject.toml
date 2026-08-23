@@ -1,0 +1,40 @@
+[project]
+name = "mashu"
+version = "0.0.1"
+description = "Shared agent memory layer: a version-managed external knowledge state for AI agents"
+requires-python = ">=3.11"
+dependencies = [
+    "psycopg[binary]>=3.2",
+    "pydantic>=2.9",
+]
+
+[project.scripts]
+mashu = "mashu.cli:main"
+
+[project.optional-dependencies]
+embed = [
+    "sentence-transformers>=3.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mashu"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
