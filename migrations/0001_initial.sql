@@ -1,4 +1,4 @@
--- Mashu initial schema. Follows docs/mashu-mvp-v0.3.md section 26.
+-- Mashu initial schema. Follows docs/mashu-mvp.md section 26.
 --
 -- Embedding dimension: 1024, matching intfloat/multilingual-e5-large.
 -- Changing the model means changing this dimension, which requires a new

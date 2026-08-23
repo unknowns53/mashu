@@ -1,10 +1,11 @@
-# Mashu — Shared Agent Memory Layer / MVP 実装仕様書 v0.3
+# Mashu — Shared Agent Memory Layer / MVP 実装仕様書 v0.4
 
 改訂履歴:
 
 - v0.1: MVP 初版
 - v0.2: Actor モデル、Commit Gate、Write Policy、Entity Resolution、Review UI を追加
 - v0.3: スキーマ確定、接続方式を MCP に確定、MVP スコープ縮小、開発計画を実測ベースに改訂、プロジェクト名を Mashu に確定
+- v0.4: Harness シナリオの書き下しで判明した欠落を補う。Retrieval の三層出力(21節)、Entity Status と Merge 手順(20節)、Proposal の重複チェック(15節)、Commit Gate への Entity 作成の追加(17節)、entity.status 列と disproven の reason 必須制約(26節)、滞留時間指標(27.3)
 
 ---
 
@@ -319,6 +320,26 @@ v0.2 からの変更:
 reviewer / decided_at / decision_reason を追加。
 成功条件「過去判断の理由が追跡できる」は、却下理由の記録まで含めて成立する。
 
+### 15.1 重複チェック
+
+Proposal 作成時、同じ対象に対する pending な Proposal が既に存在するかを確認する。
+
+target_memory が指定されている場合:
+
+同一 target_memory の pending Proposal を検索する。
+
+target_memory が NULL(operation = create)の場合:
+
+同一 Scope 内の pending な create Proposal のうち、payload の title の title_embedding 類似度が Entity Resolution と同じ閾値(20節)以上のものを検索する。
+
+該当がある場合、新規 Proposal を作成せず、既存 Proposal の proposal_id・payload・created_at・滞留日数を提案者へ返す。
+
+理由:
+
+未承認の候補は Retrieval の Layer 1 に現れない(21節)。Agent は自分が既に提案済みであることを Context の本文からは知りえないため、重複チェックがなければ Review が遅れるほど同一内容の Proposal が Queue に積み上がる。これは User の Review 負荷を、知識状態の改善を伴わずに増やす。
+
+重複チェックは作成の機械的な禁止ではない。目的は既存 Proposal の存在を提案者に見せることであり、提案者が確認したうえで「別物である」と明示した場合は新規作成を許す。その場合は両方が Review Queue に並び、User が Merge するか一方を却下する。
+
 ## 16. Write Policy
 
 Proposal 作成タイミングは二本立てとする。
@@ -350,8 +371,11 @@ Session End Extraction の抽出品質は実装前にオフラインで検証す
 - Active Version の切替
 - Disproven 化
 - Restore
+- Entity 作成(類似度が閾値超過)
 - Entity Merge
 - Conflict 解決
+
+Entity 作成が Review 対象になるのは、類似度が閾値を超えているにもかかわらず Agent が新規作成を選んだ場合に限る(20節)。閾値未満の新規作成は Review を経ない。
 
 Auto Commit の対象範囲は、Review 負荷の実測(27節)に基づいて調整する。
 
@@ -404,6 +428,40 @@ Agent が選択(既存 Entity への Version 追加 or 新規作成)
 閾値は仕様では定めない。
 紛らわしい Entity 名を意図的に登録した実測(27節)によって決定する。
 
+### 20.1 Entity Status
+
+Entity は Version の status とは別に、Entity 自身の status を持つ。
+
+- **active**: 通常。Retrieval の Layer 1 の対象
+- **provisional**: 類似度が閾値以上であるにもかかわらず新規作成されたもの。Human Review 待ち
+- **merged**: 他 Entity へ統合済み。merged_into に統合先を持つ
+- **archived**: 利用しないが履歴として残す
+
+provisional の扱い:
+
+Entity は実際に作成され、Agent は Version をぶら下げられる。ただし Retrieval の Layer 1 からは除外し、Layer 2 に「未確定の Entity」として現れる(21.1節)。
+
+これにより、Review 待ちのあいだ Agent の作業が止まらず、かつ同一概念に対して2つの Entity が Active として並ぶ状態も発生しない。
+
+Review の結果、既存 Entity と同一と判断された場合は Merge(20.2節)、独立と判断された場合は active へ移す。
+
+### 20.2 Merge 手順
+
+Merge は User のみが実行する(17節)。Entity B を Entity A へ統合する場合、以下を同一トランザクションで行う。
+
+1. B の active_version と latest_version を NULL にする
+2. B の全 Version の memory_id を A へ付け替える。version_id・content・status は変更しない
+3. A の active_version を決める。B が Active を持っていた場合、A の既存 Active との二者択一を User が選ぶ。選ばれなかった側は superseded へ移す
+4. A の latest_version を、付け替え後の全 Version のうち created_at が最新のものへ更新する
+5. memory_evidence の to_memory が B を指す行を A へ付け替える。付け替えた結果 (from_version, A) が重複する場合は片方を削除する
+6. B の status を merged とし、merged_into に A を設定する
+
+手順1を先に行うのは、Entity のポインタが自 Entity の Version のみを指せるよう複合外部キーで拘束されているためである(26節)。ポインタを外す前に Version を付け替えると制約に触れる。
+
+B の行自体は削除しない。過去の Context Assembly の event_log に B の Memory ID が記録されており、削除すると当時の判断ログから参照が解決できなくなる。
+
+Merge は event_log に entity_merged として記録し、detail に付け替えた Version 数・Evidence 数と、手順3で選ばれなかった Version の version_id を残す。
+
 ## 21. Retrieval Pipeline
 
 ```
@@ -432,6 +490,38 @@ Ranking 優先順位:
 Recency は補助にとどめる。Superseded / Disproven の除外は Active Version Filter で構造的に行われるため、Recency に古い情報の排除を期待しない。
 
 Agent へ渡す Context には Memory ID を必ず付与する。判断ログと Memory の紐付け(Test Harness の前提)に必要である。
+
+### 21.1 三層出力
+
+Context Assembly は単一の本文列ではなく、三層に分けて返す。
+
+理由:
+
+Active Version Filter は古い情報と棄却済み情報を Context から除く。しかし除くことと再利用を防ぐことは別である。
+
+棄却された仮説が見えないだけなら、Agent は同じ仮説を最初から導き直せる。未承認の候補が見えないだけなら、Agent は同じ提案を繰り返す。どちらも1節が解決対象に挙げた状態そのものであり、フィルタだけでは達成されない。
+
+| 層 | 対象 | 渡すもの | Agent への指示 |
+|---|---|---|---|
+| Layer 1 Active | status = active な Entity の active_version | Memory ID / type / title / content | 現在の知識として利用してよい |
+| Layer 2 Pending | active_version が指していない candidate、および status = provisional な Entity | Memory ID / title / 提案者 / created_at / 滞留日数 | 同一内容を再提案しない。未承認であり、推論の前提に使わない |
+| Layer 3 Retired | status = disproven / dormant の Version | Memory ID / title / status / reason | 再導出しない。reason に反する主張をする場合は新たな根拠を示す |
+
+Layer 2 と Layer 3 で content を渡さないのは、いずれも「現在の知識ではないもの」だからである。本文を渡せば Agent がそれを現在値として扱う危険があり、Active Version Filter を設けた意味がなくなる。
+
+Layer 2 が渡すのは「その対象について未承認の提案が既に存在する」という事実のみ、Layer 3 が渡すのは「何が、なぜ否定されたか」のみとする。Layer 3 で content ではなく reason を渡すのは、否定された主張そのものより、否定した根拠のほうが Agent の再導出を止めるからである。
+
+superseded は三層のいずれにも含めない。置換済みの内容に対応する現在値は Layer 1 が持っており、追加の情報を持たない。
+
+取得経路:
+
+Layer 1 は 21節のパイプラインをそのまま通す。Layer 2 と Layer 3 は、Scope Detection で確定した Scope の範囲内で title_embedding により引く。content_embedding を使わないのは、content を渡さない層に対して本文の類似度で順位をつける意味がないためである。
+
+Layer 2 と Layer 3 に含めた Memory ID も、Layer 1 と同様に event_log の context_assembled へ記録する(22節)。
+
+MVP の既定:
+
+Layer 1 は常に返す。Layer 2 と Layer 3 は、Layer 1 で当たった Entity と同一 Scope のものに限る。Scope 全体を返す形は、Layer 3 が肥大したときに Context を圧迫するため MVP では採らない。
 
 ## 22. Context Artifact(簡略化)
 
@@ -491,11 +581,17 @@ v0.2 からの変更点:
 - memory_evidence 中間テーブル新設
 - 埋め込み列を明記
 
+v0.3 からの変更点:
+
+- memory_entity に status 列と merged_into 列を追加(20.1節)
+- memory_version に disproven の reason 必須制約を追加
+- 埋め込み次元を 1024 に確定(採用モデル: intfloat/multilingual-e5-large)
+
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- 埋め込み次元は採用モデルに依存するため、決定後に置換する
--- 以下では仮に 1024 とする
+-- 埋め込み次元は採用モデル intfloat/multilingual-e5-large に合わせて 1024 とする
+-- モデルを変更する場合は埋め込み列を作り直すマイグレーションが必要になる
 
 CREATE TABLE scope (
     scope_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -512,6 +608,10 @@ CREATE TABLE memory_entity (
         -- observation / fact / interpretation / hypothesis /
         -- decision / task / preference / state
     title           TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'active',
+        -- active / provisional / merged / archived(20.1節)
+    merged_into     UUID REFERENCES memory_entity(memory_id),
+        -- status = merged のときの統合先。それ以外では NULL
     active_version  UUID,   -- FK は後付け(相互参照のため)
     latest_version  UUID,   -- FK は後付け
     title_embedding vector(1024),
@@ -532,7 +632,12 @@ CREATE TABLE memory_version (
     source_reference  TEXT,
     created_by        TEXT NOT NULL,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    content_embedding vector(1024)
+    content_embedding vector(1024),
+
+    -- disproven は理由が無ければ Layer 3 で渡すものが無く(21.1節)、
+    -- 31節の「判断理由を追跡できる」も満たさない
+    CONSTRAINT disproven_needs_reason
+        CHECK (status <> 'disproven' OR reason IS NOT NULL)
 );
 
 ALTER TABLE memory_entity
@@ -601,6 +706,7 @@ CREATE TABLE agent_session (
 
 - 埋め込みは Version 作成時に同期生成する(非同期化は量が増えてから)
 - active_version / latest_version の更新と Status 遷移は同一トランザクションで行う
+- reason は「その Version が現在の状態にある理由」を表す。Status 遷移のたびに更新され、履歴は event_log 側が保持する
 
 ## 27. Agent 接続前検証
 
@@ -625,6 +731,20 @@ Harness シナリオ 1・2 はこの段階で Agent なしで検証できる。
 
 手動運用期間中、週あたりの Candidate 件数と処理時間を記録する。
 1日10分を超える場合、Agent 接続前に Auto Commit の対象範囲を拡大する。
+
+滞留時間:
+
+件数と処理時間に加えて、Proposal ごとの滞留時間(created_at から decided_at まで)を記録する。
+
+理由:
+
+処理時間は User の負担を表すが、滞留時間は知識状態の欠落を表す。未承認の候補は Retrieval の Layer 1 に現れない(21.1節)ため、滞留時間はそのまま「その知識が利用できなかった期間」である。両者は別の指標であり、片方だけでは Auto Commit の範囲を決められない。
+
+統計は中央値と 90 パーセンタイルを取る。平均は少数の長期滞留に引きずられ、Queue の底に沈んだ Proposal を見えなくする。
+
+判定:
+
+滞留時間の 90 パーセンタイルが 1 週間を超える場合、Agent 接続前に Auto Commit の対象範囲を拡大するか、Write Policy(16節)の抽出量を絞る。
 
 ### 27.4 Session End Extraction のオフライン検証
 
