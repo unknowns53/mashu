@@ -7,21 +7,21 @@ Specification 21 assembles context from active version content only, so a
 pending candidate contributes nothing. The scenario pins that down because the
 consequence is easy to miss.
 
-What the scenario exposed
--------------------------
-Two behaviours follow that the specification never states outright.
+What the scenario exposed, and how v0.4 answered it
+---------------------------------------------------
+Two behaviours followed that the specification never stated outright.
 
-First, an entity whose very first version is still pending is invisible in its
-entirety. There is no active version to filter down to, so neither the content
-nor the fact that a proposal exists reaches retrieval. The agent can therefore
-propose the same thing again on Friday, and the review queue grows duplicates
-of a single unreviewed idea.
+First, an entity whose first version is still pending was invisible in its
+entirety. Neither the content nor the fact that a proposal existed reached
+retrieval, so the agent could propose the same thing again on Friday and the
+queue grew duplicates of one unreviewed idea. Section 21.1 now returns a
+second layer carrying the bare fact that a pending proposal exists, without its
+content, and section 15.1 checks for a duplicate when the proposal is created.
 
-Second, this makes review latency a correctness matter rather than a matter of
-tidiness. Section 27.3 measures the review load in minutes per day; the number
-that actually matters here is how long a candidate waits, because that is how
-long the knowledge is unavailable. Worth deciding before the Review CLI is
-built whether a pending candidate should be visible to its own proposer.
+Second, review latency turned out to be a correctness matter rather than a
+matter of tidiness. Section 27.3 measured minutes spent per day; it now also
+records how long each proposal waits, because with a candidate held out of
+layer 1 the waiting time is exactly how long that knowledge was unavailable.
 """
 
 import pytest

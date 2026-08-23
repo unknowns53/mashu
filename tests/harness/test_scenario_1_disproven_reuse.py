@@ -10,14 +10,18 @@
 This is the first problem named in specification 1 and the second success
 criterion in specification 31.
 
-What the scenario exposed
--------------------------
+What the scenario exposed, and how v0.4 answered it
+---------------------------------------------------
 Filtering the hypothesis out is not the same as preventing its reuse. Once the
-entity has no active version it becomes invisible, so on day 10 the agent is
-free to derive the very same hypothesis from scratch, propose it again, and
-learn nothing from the earlier refutation. Specification 21 filters; it does not
-warn. Whether retrieval should surface "this was tried and disproven, here is
-why" is open, and the answer changes what Context Assembly returns.
+entity has no active version it became invisible, so on day 10 the agent was
+free to derive the very same hypothesis from scratch and learn nothing from the
+earlier refutation.
+
+Section 21.1 now returns a third layer. A disproven version reaches the agent
+as its title, its status and the reason it was refuted, with the content held
+back so that nothing retired can be read as current. The schema backs this up:
+a disproven version without a reason is refused, because layer 3 would have
+nothing to hand over.
 """
 
 import pytest

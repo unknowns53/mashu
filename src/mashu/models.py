@@ -45,6 +45,21 @@ class SourceType(StrEnum):
     WEB = "web"
 
 
+class EntityStatus(StrEnum):
+    """Specification 20.1. Separate from the status a version carries.
+
+    provisional is what an entity holds when it was created despite a title
+    similarity above the threshold: it exists and can hold versions, so the
+    agent is not blocked, but it stays out of layer 1 of retrieval so that one
+    concept never has two entities answering as current.
+    """
+
+    ACTIVE = "active"
+    PROVISIONAL = "provisional"
+    MERGED = "merged"
+    ARCHIVED = "archived"
+
+
 class ScopeStatus(StrEnum):
     ACTIVE = "active"
     ARCHIVED = "archived"
@@ -86,6 +101,7 @@ class EventType(StrEnum):
 
     SCOPE_CREATED = "scope_created"
     ENTITY_CREATED = "entity_created"
+    ENTITY_MERGED = "entity_merged"
     VERSION_CREATED = "version_created"
     STATUS_CHANGED = "status_changed"
     ACTIVE_SWITCHED = "active_switched"

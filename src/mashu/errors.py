@@ -28,3 +28,7 @@ class ConcurrentUpdateError(MashuError):
     The caller has to re-read the entity and propose again; the layer never
     merges on the caller's behalf.
     """
+
+
+class MergeError(MashuError):
+    """A merge that cannot be carried out as asked (specification 20.2)."""
