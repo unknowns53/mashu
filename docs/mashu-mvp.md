@@ -1,4 +1,4 @@
-# Mashu — Shared Agent Memory Layer / MVP 実装仕様書 v0.6
+# Mashu — Shared Agent Memory Layer / MVP 実装仕様書 v0.7
 
 改訂履歴:
 
@@ -8,6 +8,7 @@
 - v0.4: Harness シナリオの書き下しで判明した欠落を補う。Retrieval の三層出力(21節)、Entity Status と Merge 手順(20節)、Proposal の重複チェック(15節)、Commit Gate への Entity 作成の追加(17節)、entity.status 列と disproven の reason 必須制約(26節)、滞留時間指標(27.3)
 - v0.5: Session Bootstrap を復活させる。v4 の Always Inject Context が MVP 化で落ちていたことによる退行の修復。session_bootstrap Tool と呼び出し要件(6節)、Bootstrap の内容と token 上限(21.2節)、native memory からの移植規則と棚卸し単位(27.1節)、切替試験(27.5節)、成功条件2件の追加(31節)
 - v0.6: Write Policy に退役の契機を追加(16.1節)。27.4 を前提条件の異なる 27.4a / 27.4b に分割。開発計画を較正点の発動により引き直す(30節)
+- v0.7: 27.4a の実測を受けた Review 負荷対策。Review の単位をセッション束へ(18.1節)、candidate を準承認として本文まで渡す(21.1節)、Task の範囲を限定(16.2節)、proposal に由来セッションを追加(15・26節)
 
 ---
 
@@ -289,7 +290,7 @@ candidate ──(承認 + active_version 切替)──> 採用
 - **Interpretation**: 観測から導いた解釈。例: SSD 内部状態遷移の可能性
 - **Hypothesis**: 未検証仮説
 - **Decision**: 判断
-- **Task**: 作業
+- **Task**: 作業。ただし Memory にするのはセッションを跨ぐものに限る(16.2節)
 - **Preference**: ユーザー設定
 - **State**: Scope の現在状態(14節)
 
@@ -327,6 +328,7 @@ Open Question は references で表現できないため、summary 内の自由�
 - operation(create / update_version / change_status / restore / merge)
 - target_memory
 - based_on_version(楽観ロック用。24節)
+- session_id(由来セッション。Review の束ね単位。18.1節)
 - payload
 - status(pending / approved / rejected / auto_committed)
 - reviewer
@@ -355,7 +357,7 @@ target_memory が NULL(operation = create)の場合:
 
 理由:
 
-未承認の候補は Retrieval の Layer 1 に現れない(21節)。Agent は自分が既に提案済みであることを Context の本文からは知りえないため、重複チェックがなければ Review が遅れるほど同一内容の Proposal が Queue に積み上がる。これは User の Review 負荷を、知識状態の改善を伴わずに増やす。
+未承認の候補は Retrieval の Layer 1 に現れない(21.1節)。v0.7 で Layer 2 が本文を渡すようになったため、その Scope を実際に引いた Agent であれば自分の提案に気づけるが、Retrieval は Query 起点であり、引かなかった Agent は気づけない。重複チェックがなければ、Review が遅れるほど同一内容の Proposal が Queue に積み上がる。これは User の Review 負荷を、知識状態の改善を伴わずに増やす。
 
 重複チェックは作成の機械的な禁止ではない。目的は既存 Proposal の存在を提案者に見せることであり、提案者が確認したうえで「別物である」と明示した場合は新規作成を許す。その場合は両方が Review Queue に並び、User が Merge するか一方を却下する。
 
@@ -398,6 +400,20 @@ Session End Extraction の抽出品質は実装前にオフラインで検証す
 
 洗い出しの品質も、新規抽出と同じく 27.4 でオフラインに検証する。
 
+### 16.2 Task の範囲
+
+type = task として Memory にするのは、**セッションを跨いで持ち越され、完了したかどうかが後続の判断を変える作業**に限る。
+
+セッション内で閉じる作業状態(いまどこを編集しているか、どの検査が走っているか)は Scratch に残す(25節)。
+
+理由:
+
+1 節の解決対象は「終了済み Task が未完了として扱われる」であり、これはセッションを跨いだときにだけ起こる。跨がない作業状態を Memory に入れても、Review 負荷が増えるだけで解決対象には寄与しない。
+
+日々の作業リストの役割を Mashu が引き受けるものではない。
+
+該当する例は、次のセッションが知らないまま進むと誤った前提で作業することになるもの。たとえば「検証を経ずに統合した」「この検査は待ち時間不足で対象に到達していない」など。
+
 ## 17. Commit Gate
 
 目的は正しさの判断ではない。危険な更新を止めることである。
@@ -436,11 +452,24 @@ MVP では CLI として実装する。Web UI は MVP 後。
 
 UI の使い勝手要求は運用してみるまで見えず、先に Web 化すると手戻りが大きい。
 
+### 18.1 Review の単位はセッション束
+
+Review の単位は Proposal 1 件ではなく、**1 セッションから上がった Proposal の束**とする。
+
+理由:
+
+Review 負荷の正体は件数ではなく**文脈スイッチ**である。27.4a の実測では 1 セッションあたり平均 5.8 件の Candidate が上がった。これを 1 件ずつ捌くと、件数と同じ回数だけ文脈を組み立て直すことになる。同一セッション由来の Proposal は文脈を共有しているため、束で読めば文脈の構築は 1 回で済む。
+
 必要機能:
 
-- **Candidate Queue**: 未承認 Proposal の一覧
+- **Session Queue**: 未 Review の Proposal を由来セッションごとに束ねた一覧。束ごとに件数と滞留日数を表示する
+- **束の内部の並び**: 束の中は **observation → interpretation → decision** の依存順に並べる。根拠から結論へ読める順序でなければ、文脈を 1 回で組めるという利点が出ない
 - **Diff View**: 変更前後の比較(active_version の content との差分)
-- **Action**: Approve / Reject(理由必須)/ Edit / Merge
+- **Action**: 束の一括 Approve と、Proposal ごとの Reject(理由必須)/ Edit / Merge
+
+操作は「束で通し、外すものだけ個別に外す」形にする。Reject には理由が必須で手間がかかる一方、通すべきものが多数派になるためである。
+
+由来セッションは proposal.session_id が持つ(15節)。
 
 ## 19. Evidence Reference
 
@@ -553,18 +582,36 @@ Active Version Filter は古い情報と棄却済み情報を Context から除�
 | 層 | 対象 | 渡すもの | Agent への指示 |
 |---|---|---|---|
 | Layer 1 Active | status = active な Entity の active_version | Memory ID / type / title / content | 現在の知識として利用してよい |
-| Layer 2 Pending | active_version が指していない candidate、および status = provisional な Entity | Memory ID / title / 提案者 / created_at / 滞留日数 | 同一内容を再提案しない。未承認であり、推論の前提に使わない |
+| Layer 2 Unreviewed | active_version が指していない candidate、および status = provisional な Entity | Memory ID / title / content / 提案者 / created_at / 滞留日数 / `unreviewed` タグ | 未審査の情報として利用してよい。ただしこれを根拠に確定的な主張をしない。同一内容を再提案しない |
 | Layer 3 Retired | status = disproven / dormant の Version | Memory ID / title / status / reason | 再導出しない。reason に反する主張をする場合は新たな根拠を示す |
 
-Layer 2 と Layer 3 で content を渡さないのは、いずれも「現在の知識ではないもの」だからである。本文を渡せば Agent がそれを現在値として扱う危険があり、Active Version Filter を設けた意味がなくなる。
+Layer 3 で content を渡さないのは、退役した知識だからである。本文を渡せば Agent がそれを現在値として扱う危険があり、Active Version Filter を設けた意味がなくなる。渡すのは「何が、なぜ否定されたか」のみとする。否定された主張そのものより、否定した根拠のほうが Agent の再導出を止めるからである。
 
-Layer 2 が渡すのは「その対象について未承認の提案が既に存在する」という事実のみ、Layer 3 が渡すのは「何が、なぜ否定されたか」のみとする。Layer 3 で content ではなく reason を渡すのは、否定された主張そのものより、否定した根拠のほうが Agent の再導出を止めるからである。
+#### 準承認としての Layer 2
+
+Layer 2 は「人間の目は通っていないが、本文は渡す」層である。
+
+v0.4 では Layer 2 も本文を渡さない設計にしていた。これを改める。
+
+理由:
+
+本文を渡さないと、Review が終わるまでその知識は使えない。Review が三日遅れれば三日ぶん知識が欠ける。27.3 が測る滞留時間は「知識が利用できなかった期間」を表すはずだが、本文を渡さない設計ではそれがそのまま実損になり、Review 負荷が溜まった時点で運用が止まる。
+
+本文に `unreviewed` タグを付けて渡せば、Review が遅れても知識は使える状態になる。Agent はタグを見て未審査だと分かるため、認識論的な正直さは保たれる。
+
+これにより Review の役割が変わる。**Review は「使えるようにする門」ではなく「品質を確定する門」になる。**
+
+17 節の Commit Gate の三区分は変えない。変えるのは candidate の可視性だけである。未審査の内容が Active を名乗ることは引き続き無く、Layer 1 と Layer 2 はタグで区別される。
+
+Layer 2 と Layer 3 の非対称:
+
+**保留中の知識は使ってよいが、退役した知識は使ってはならない。** この非対称が、両者を別の層に分ける意味である。
 
 superseded は三層のいずれにも含めない。置換済みの内容に対応する現在値は Layer 1 が持っており、追加の情報を持たない。
 
 取得経路:
 
-Layer 1 は 21節のパイプラインをそのまま通す。Layer 2 と Layer 3 は、Scope Detection で確定した Scope の範囲内で title_embedding により引く。content_embedding を使わないのは、content を渡さない層に対して本文の類似度で順位をつける意味がないためである。
+Layer 1 は 21節のパイプラインをそのまま通す。Layer 2 は本文を渡すため、Layer 1 と同じく content_embedding で引く。Layer 3 は、Scope Detection で確定した Scope の範囲内で title_embedding により引く。content を渡さない層に対して本文の類似度で順位をつける意味がないためである。
 
 Layer 2 と Layer 3 に含めた Memory ID も、Layer 1 と同様に event_log の context_assembled へ記録する(22節)。
 
@@ -668,6 +715,10 @@ v0.3 からの変更点:
 - memory_version に disproven の reason 必須制約を追加
 - 埋め込み次元を 1024 に確定(採用モデル: intfloat/multilingual-e5-large)
 
+v0.6 からの変更点:
+
+- proposal に session_id 列を追加(18.1節の束ね単位)
+
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -741,6 +792,8 @@ CREATE TABLE proposal (
         -- create / update_version / change_status / restore / merge
     target_memory    UUID REFERENCES memory_entity(memory_id),
     based_on_version UUID REFERENCES memory_version(version_id),
+    session_id       UUID REFERENCES agent_session(session_id),
+        -- 由来セッション。Review はこの単位で束ねる(18.1節)
     payload          JSONB NOT NULL,
     status           TEXT NOT NULL DEFAULT 'pending',
         -- pending / approved / rejected / auto_committed
@@ -834,13 +887,23 @@ Harness シナリオ 1・2 はこの段階で Agent なしで検証できる。
 
 理由:
 
-処理時間は User の負担を表すが、滞留時間は知識状態の欠落を表す。未承認の候補は Retrieval の Layer 1 に現れない(21.1節)ため、滞留時間はそのまま「その知識が利用できなかった期間」である。両者は別の指標であり、片方だけでは Auto Commit の範囲を決められない。
+処理時間は User の負担を表すが、滞留時間は**その知識が未審査のまま使われた期間**を表す。両者は別の指標であり、片方だけでは対策を決められない。
+
+v0.7 で Layer 2 が本文を渡すようになったため(21.1節)、滞留は知識の断絶ではなく品質確定の遅れになった。それでも測る価値は残る。未審査のまま参照される期間が長いほど、誤りが訂正されないまま使われる機会が増えるためである。
 
 統計は中央値と 90 パーセンタイルを取る。平均は少数の長期滞留に引きずられ、Queue の底に沈んだ Proposal を見えなくする。
 
-判定:
+### 27.3.1 Review 負荷への対策と、採らない対策
 
-滞留時間の 90 パーセンタイルが 1 週間を超える場合、Agent 接続前に Auto Commit の対象範囲を拡大するか、Write Policy(16節)の抽出量を絞る。
+27.4a の実測で、1 セッションあたり平均 5.8 件の Candidate が上がった。1 件 1 分で捌いても、1 日 2 セッションで 12 分となり、着手前から上の閾値を超える見込みである。
+
+**採る対策**は二つ。Review の単位をセッション束にすること(18.1節)と、candidate を準承認として本文まで渡すこと(21.1節)。前者は文脈スイッチの回数を減らし、後者は滞留が実損に直結する構造を外す。
+
+**採らない対策**を、理由とともに記録する。
+
+**Auto Commit の対象範囲を先に広げること。** 17 節の三区分は負荷調整の弁ではなく、危険度の分類である。observation や interpretation を Auto Commit に落とすことは、未審査の解釈が Active になる経路を開くことであり、既存の記憶置き場の監査で見つかった汚染を Mashu の中に作り直すことになる。負荷の問題を安全性の予算で払うのは筋が違う。
+
+**抽出の閾値を上げて件数を絞ること(主対策としては採らない)。** 31 件中 29 件が Candidate になったことは、抽出が過剰である証拠ではない。分布として妥当である可能性が高く、既存の記憶置き場との重複 6 件は判定基準3(v0.5)によって既に別枠へ割れている。残りは実在する知識候補であり、閾値で削ることは知識の取りこぼしと引き換えになる。取りこぼしは Review 疲れと違って観測できない損失であり、後から気づけない。
 
 ### 27.4 Session End Extraction のオフライン検証
 
@@ -855,6 +918,12 @@ Harness シナリオ 1・2 はこの段階で Agent なしで検証できる。
 過去の Agent セッションログ 5 本程度に対し、抽出プロンプトを適用して Proposal 案を生成させる。抽出結果が Scratch 級の内容ばかりであれば、Write Policy 自体を再設計する。
 
 見るもの: Scratch 級を拾っていないか、粒度は適切か、Observation と Interpretation を分けられているか。
+
+注記(実測から):
+
+新規抽出からは type = hypothesis がほとんど出ない。未検証のまま複数セッションを跨ぐ仮説は稀で、棄却された筋は「何を追っても無駄だったか」という observation として現れるためである。
+
+したがって、**21.1節の Layer 3 の材料になる「disproven な既存 Memory」は、新規抽出からは原理的に生まれない。** Layer 3 を空でなくするのは 27.4b の退役の洗い出しだけである。両者を別の検証として分けた理由のひとつがここにある。
 
 #### 27.4b 退役の洗い出しの検証
 
