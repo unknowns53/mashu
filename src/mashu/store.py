@@ -480,6 +480,49 @@ def set_entity_status(
     )
 
 
+def set_type(
+    cur: psycopg.Cursor,
+    *,
+    memory_id: UUID,
+    target: MemoryType,
+    actor: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Correct what kind of thing an entity is (specification 8).
+
+    Nothing about the content moves. The type is a reading of what the entity
+    already says, so a correction to it is not a new version: adding one would
+    put an identical body in the history and make the change look like a change
+    of mind about the content.
+
+    It is not a light operation even so. The type decides which commit line the
+    entity's later changes take (17), which is why a proposal to do this waits
+    for a person.
+
+    delivery is deliberately left alone. An entity retyped to state does not
+    join the session-start pack, because joining it is the operation that has
+    to pass admission control (21.2).
+    """
+    target = MemoryType(target)
+    entity = get_entity(cur, memory_id, lock=True)
+    previous = MemoryType(entity["type"])
+
+    if EntityStatus(entity["status"]) is EntityStatus.MERGED:
+        raise MergeError(f"entity {memory_id} was merged into {entity['merged_into']}")
+    if previous is target:
+        raise MashuError(f"entity {memory_id} is already {target}")
+
+    cur.execute("UPDATE memory_entity SET type = %s WHERE memory_id = %s", (str(target), memory_id))
+    events.record(
+        cur,
+        EventType.TYPE_CORRECTED,
+        actor,
+        memory_id=memory_id,
+        detail={"from": str(previous), "to": str(target), "reason": reason},
+    )
+    return {"memory_id": memory_id, "title": entity["title"], "from": previous, "to": target}
+
+
 def merge_entities(
     cur: psycopg.Cursor,
     *,

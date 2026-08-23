@@ -261,10 +261,9 @@ def retrieve(
     hit_scopes = scopes or sorted({row["scope_id"] for row in active})
     narrowed = dict(params, scopes=hit_scopes or None)
 
-    window = max(limit, 1) * 4
-    cur.execute(_LAYER2_SQL, dict(narrowed, limit=window))
+    cur.execute(_LAYER2_SQL, dict(narrowed, limit=LAYER2_ROW_WINDOW))
     rows = cur.fetchall()
-    unreviewed, _ = _cap_layer2(rows, len(active))
+    unreviewed, _ = _cap_layer2(rows)
     for row in unreviewed:
         row["tag"] = UNREVIEWED_TAG
 
@@ -335,18 +334,36 @@ def preview(
     return cur.fetchall()
 
 
-def _cap_layer2(rows: list[dict], active_count: int) -> tuple[list[dict], int]:
-    """Apply both caps of 21.1, keeping the closest matches.
+#: How many candidate rows are fetched before the token cap is applied. It used
+#: to be four times the caller's limit, which was sized for the relative cap
+#: withdrawn in v0.11. It is a fetch bound, not a rule: at 1500 token the cap
+#: binds first unless every row is shorter than about twenty token, and the
+#: dropped count is taken from the whole matching set either way, so a backlog
+#: larger than this is still reported at its real size.
+LAYER2_ROW_WINDOW = 64
 
-    The relative cap is applied first because it is the one with a reason
-    beyond budget. When nothing at all is active the layer is emptied: there is
-    then no untagged material for the tag to contrast against, and a context
-    built entirely of unreviewed content is exactly what the cap exists to
-    prevent.
+
+def _cap_layer2(rows: list[dict]) -> tuple[list[dict], int]:
+    """Apply the token cap of 21.1, keeping the closest matches.
+
+    The relative cap that used to run first — layer 2 holding no more rows than
+    layer 1 — was withdrawn in v0.11. It emptied the layer whenever nothing was
+    active, which meant a scope with nothing reviewed answered nothing, and
+    that is the rule v0.7 said it was removing: review confirms quality, it does
+    not grant use. Keeping it here put the same rule back one floor down.
+
+    What it protected has not been abandoned. The tag needs untagged material
+    to contrast against, and that is now measured rather than enforced (27.3).
+    The trade was taken knowingly: an invariant became an observation, so the
+    failure is noticed afterwards instead of prevented.
+
+    A first row over the whole budget is still admitted. Returning nothing at
+    all to a query that matched something is worse than returning one long
+    answer, and the caller can see the cost.
     """
     kept: list[dict] = []
     spent = 0
-    for row in rows[:active_count]:
+    for row in rows:
         cost = estimate_tokens(row["content"])
         if spent + cost > LAYER2_TOKEN_BUDGET and kept:
             break

@@ -41,18 +41,6 @@ class VersionStatus(StrEnum):
     COMPLETED = "completed"
 
 
-class Lifecycle(StrEnum):
-    """Whether a scope is ready to answer (specification 7.1).
-
-    A scope with nothing adopted is not a scope that knows nothing. Retrieval
-    cannot tell those apart, and after a migration the difference is the whole
-    story, so the scope says which it is instead of leaving it to be inferred.
-    """
-
-    SEEDING = "seeding"
-    OPERATIONAL = "operational"
-
-
 class Delivery(StrEnum):
     """Where a memory goes, as opposed to what it is (specification 21.2).
 
@@ -108,6 +96,7 @@ class ProposalOperation(StrEnum):
     CHANGE_STATUS = "change_status"
     RESTORE = "restore"
     MERGE = "merge"
+    RETYPE = "retype"
 
 
 class ProposalStatus(StrEnum):
@@ -140,6 +129,7 @@ class EventType(StrEnum):
     DELIVERY_SET = "delivery_set"
     ENTITY_CREATED = "entity_created"
     ENTITY_MERGED = "entity_merged"
+    TYPE_CORRECTED = "type_corrected"
     VERSION_CREATED = "version_created"
     STATUS_CHANGED = "status_changed"
     ACTIVE_SWITCHED = "active_switched"

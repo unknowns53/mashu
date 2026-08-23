@@ -21,7 +21,7 @@ import sys
 import textwrap
 from uuid import UUID
 
-from mashu import bootstrap, db, importer, proposals, retrieval, scopes, server, store
+from mashu import bootstrap, db, importer, proposals, retrieval, server, store
 from mashu.db import transaction
 from mashu.embed import get_embedder
 from mashu.errors import DeliveryError
@@ -347,36 +347,29 @@ def cmd_import(args) -> int:
 
 
 def cmd_scope(args) -> int:
-    """Show what each scope declared it needs, and how far it has got (7.1)."""
-    with transaction(args.dsn) as cur:
-        if args.require:
-            type_, requirement = args.require
-            scopes.set_requirement(
-                cur,
-                scope_id=_scope_by_name(cur, args.name),
-                type=MemoryType(type_),
-                requirement=requirement,
-                actor=args.actor,
-            )
-        if args.promote:
-            try:
-                opened = scopes.promote(
-                    cur, scope_id=_scope_by_name(cur, args.name), actor=args.actor
-                )
-            except scopes.NotReadyError as refusal:
-                print(f"not promoted: {refusal}")
-                return 1
-            print(f"{opened['name']} is now {opened['lifecycle']}\n")
+    """What scopes there are, and how much of each has been through review.
 
-        for row in scopes.readiness(cur):
-            mark = "" if row["ready"] else f"  needs {', '.join(row['missing'])}"
-            print(
-                f"{row['name']:<16}{row['lifecycle']:<13}"
-                f"adopted {row['adopted']:<4}unreviewed {row['pending']:<5}{mark}"
-            )
-            declared = [t for t, r in row["manifest"].items() if r == scopes.NOT_NEEDED]
-            if declared:
-                print(f"{'':<16}declared unnecessary: {', '.join(declared)}")
+    Nothing here gates anything. The lifecycle and readiness manifest that used
+    to live here were withdrawn in v0.11: with the relative cap gone, a scope
+    with nothing adopted answers like any other, so declaring it open stopped
+    meaning anything and the declaring was work without a judgement in it.
+    """
+    with transaction(args.dsn) as cur:
+        cur.execute(
+            """
+            SELECT s.name,
+                   count(e.memory_id) AS entities,
+                   count(e.active_version) AS adopted
+            FROM scope s
+            LEFT JOIN memory_entity e ON e.scope_id = s.scope_id AND e.status <> 'merged'
+            WHERE s.status = 'active'
+            GROUP BY s.name
+            ORDER BY s.name
+            """
+        )
+        for row in cur.fetchall():
+            waiting = row["entities"] - row["adopted"]
+            print(f"{row['name']:<16}adopted {row['adopted']:<5}unreviewed {waiting}")
     return 0
 
 
@@ -511,6 +504,30 @@ def cmd_active(args) -> int:
         if args.full:
             print(_wrap(row["content"]))
             print()
+    return 0
+
+
+def cmd_retype(args) -> int:
+    """Correct what kind of thing an entity is (8).
+
+    The user runs it directly, the way a merge is run directly: the judgement
+    it needs — is this a decision or an observation — is the user's, and a
+    proposal from an agent asking for it waits for them anyway (17).
+
+    No version is created. The content does not change, and putting an
+    identical body in the history would make a correction look like a change of
+    mind.
+    """
+    with transaction(args.dsn) as cur:
+        entity = _resolve_entity(cur, args.memory)
+        moved = store.set_type(
+            cur,
+            memory_id=entity["memory_id"],
+            target=MemoryType(args.to),
+            actor=args.actor,
+            reason=args.reason,
+        )
+    print(f"{moved['title']}\n  {moved['from']} -> {moved['to']}")
     return 0
 
 
@@ -783,18 +800,33 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--actor", default="user")
     n.set_defaults(func=cmd_bootstrap)
 
-    c = sub.add_parser("scope", help="scope readiness and lifecycle")
-    c.add_argument("name", nargs="?", default=None)
-    c.add_argument("--promote", action="store_true", help="open the scope for use")
-    c.add_argument(
-        "--require",
-        nargs=2,
-        metavar=("TYPE", "REQUIREMENT"),
-        default=None,
-        help="declare a type required or not_needed for this scope",
-    )
-    c.add_argument("--actor", default="user")
+    c = sub.add_parser("scope", help="what scopes there are, and how much is adopted")
     c.set_defaults(func=cmd_scope)
+
+    ac = sub.add_parser("active", help="everything a scope holds as true (16.1, 27.4b)")
+    ac.add_argument("--scope", help="name of an existing scope; omit for every scope")
+    ac.add_argument("--json", action="store_true", help="the form the extraction prompt takes")
+    ac.add_argument("--full", action="store_true", help="print each body as well as its title")
+    ac.set_defaults(func=cmd_active)
+
+    rt = sub.add_parser("retype", help="correct what kind of thing an entity is (8)")
+    rt.add_argument("memory")
+    rt.add_argument("--to", required=True, choices=[str(t) for t in MemoryType])
+    rt.add_argument("--reason", required=True)
+    rt.add_argument("--actor", default="user")
+    rt.set_defaults(func=cmd_retype)
+
+    mg = sub.add_parser("merge", help="fold one entity into another (20.2)")
+    mg.add_argument("source", help="the entity that stops being separate")
+    mg.add_argument("--into", required=True, help="the entity it becomes part of")
+    mg.add_argument(
+        "--keep-active",
+        metavar="WHICH",
+        help="which version stays active: 'source', 'into', or a version id",
+    )
+    mg.add_argument("--reason", required=True)
+    mg.add_argument("--actor", default="user")
+    mg.set_defaults(func=cmd_merge)
 
     t = sub.add_parser("state", help="propose a scope's current state (14)")
     t.add_argument("file", help="file holding the summary")
@@ -812,24 +844,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="propose even though an equivalent one is already waiting (15.1)",
     )
     t.set_defaults(func=cmd_state)
-
-    ac = sub.add_parser("active", help="everything a scope holds as true (16.1, 27.4b)")
-    ac.add_argument("--scope", help="name of an existing scope; omit for every scope")
-    ac.add_argument("--json", action="store_true", help="the form the extraction prompt takes")
-    ac.add_argument("--full", action="store_true", help="print each body as well as its title")
-    ac.set_defaults(func=cmd_active)
-
-    mg = sub.add_parser("merge", help="fold one entity into another (20.2)")
-    mg.add_argument("source", help="the entity that stops being separate")
-    mg.add_argument("--into", required=True, help="the entity it becomes part of")
-    mg.add_argument(
-        "--keep-active",
-        metavar="WHICH",
-        help="which version stays active: 'source', 'into', or a version id",
-    )
-    mg.add_argument("--reason", required=True)
-    mg.add_argument("--actor", default="user")
-    mg.set_defaults(func=cmd_merge)
 
     ev = sub.add_parser("evidence", help="what a memory rests on, and what rests on it (19)")
     ev.add_argument("memory")
