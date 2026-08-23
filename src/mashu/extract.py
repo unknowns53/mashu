@@ -386,7 +386,7 @@ class CLIExtractor:
         self.model = model or os.environ.get(MODEL_ENV_VAR) or DEFAULT_MODEL
         self.timeout = timeout
 
-    def command(self) -> list[str]:
+    def command(self, out: pathlib.Path | None = None) -> list[str]:
         if self.cli == "claude":
             return [
                 "claude",
@@ -401,6 +401,10 @@ class CLIExtractor:
                 "",
             ]
         if self.cli == "codex":
+            # --ephemeral so the run leaves no session file: without it every
+            # extraction writes a transcript that the next sweep extracts.
+            # The answer is taken from a file rather than from stdout, which
+            # carries hook lines, a banner and a token count around it.
             return [
                 "codex",
                 "exec",
@@ -412,6 +416,7 @@ class CLIExtractor:
                 "read-only",
                 "--color",
                 "never",
+                *(["--output-last-message", str(out)] if out else []),
                 "-",
             ]
         raise ExtractionError(f"no command known for CLI '{self.cli}'")
@@ -422,9 +427,11 @@ class CLIExtractor:
     def run(self, prompt: str) -> str:
         if not self.available():
             raise ExtractionError(f"{self.cli} is not on PATH")
+
+        out = workdir() / f"answer-{os.getpid()}.txt" if self.cli == "codex" else None
         try:
             done = subprocess.run(
-                self.command(),
+                self.command(out),
                 input=prompt,
                 capture_output=True,
                 text=True,
@@ -433,13 +440,19 @@ class CLIExtractor:
             )
         except subprocess.TimeoutExpired as failure:
             raise ExtractionError(f"{self.cli} did not answer in {self.timeout}s") from failure
+        finally:
+            answer = out.read_text(encoding="utf-8") if out and out.exists() else ""
+            if out is not None:
+                out.unlink(missing_ok=True)
+
         if done.returncode != 0:
             raise ExtractionError(
                 f"{self.cli} exited {done.returncode}: {(done.stderr or '').strip()[:400]}"
             )
-        if not (done.stdout or "").strip():
+        answer = answer or done.stdout or ""
+        if not answer.strip():
             raise ExtractionError(f"{self.cli} answered with nothing")
-        return done.stdout
+        return answer
 
 
 class APIExtractor:

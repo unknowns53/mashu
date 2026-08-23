@@ -124,6 +124,7 @@ fresh clone では git hook を入れる。
 | `mashu work` | 抽出 worker を queue に対して走らせる |
 | `mashu sweep` | hook が取り落とした transcript を台帳へ積む |
 | `mashu route --add <path> --scope <name>` | 作業ディレクトリを Scope に対応づける |
+| `mashu route --ignore <path>` | そのディレクトリは捕捉しないと決める |
 | `mashu bootstrap` | セッション開始時に渡る固定の塊とその token |
 | `mashu scope` | Scope ごとの採用済み・未審査の件数 |
 | `mashu preview <query> --scope` | 上限をかけずに順位だけ見る（移植の検証用） |
@@ -167,6 +168,18 @@ uv run mashu work --limit 4
 
 Model を呼ぶ部分は差し替えできる。`MASHU_EXTRACTOR` に `api`（`ANTHROPIC_API_KEY` が要る）、`cli:claude`、`cli:codex`、`auto`（既定）を渡す。仕様の第一選択は専用予算の小型モデルだが、鍵が無ければ対話 CLI の subprocess へ落ちる。
 
+### 動かしつづける
+
+`mashu work` は一回走って終わる。**それを呼ぶものが要る。** 無ければ結局「人が打ったときだけ書き込まれる」ままで、この層を作った理由が消える。
+
+```bash
+./tools/launchd/install.sh
+```
+
+これは `~/Library/LaunchAgents/` に置くだけで**読み込まない**。読み込むと、毎晩誰も見ていないところでモデルの枠を使いはじめる。その判断は枠の持ち主のものなので、コマンドは表示するが実行はしない。
+
+セッション終了 hook（`tools/session_end_hook.sh`）を各 CLI の設定に登録すると、transcript が終わった時点で台帳に載る。登録しなくても `sweep` がディスクから拾うので、遅れるだけで落ちはしない。
+
 ## 配置
 
 ```
@@ -176,6 +189,7 @@ migrations/                    連番の SQL。mashu migrate が順に流す
 src/mashu/                     実装
 tests/                         実 PostgreSQL に対して走る。harness/ は仕様 28 節のシナリオ
 tools/session_end_hook.sh      SessionEnd hook。台帳へ積むだけで返る
+tools/launchd/                 常駐ユニット。install.sh は置くだけで読み込まない
 tools/condense_session.py      セッションログの圧縮
 tools/measure_thresholds.py    閾値を実在庫の分布から決める（仕様 27.2）
 hooks/                         pre-commit / commit-msg
