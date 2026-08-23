@@ -26,7 +26,7 @@ from mashu.db import transaction
 from mashu.embed import get_embedder
 from mashu.errors import DeliveryError
 from mashu.migrate import migrate
-from mashu.models import Delivery, MemoryType
+from mashu.models import Delivery, MemoryType, ProposalOperation, SourceType
 
 WIDTH = 88
 
@@ -381,6 +381,108 @@ def cmd_preview(args) -> int:
     return 0
 
 
+def cmd_state(args) -> int:
+    """Propose a scope's current state, with the memories it rests on (14, 19).
+
+    A scope has one current state, so this adds a version to the one already
+    there rather than putting a rival beside it. It is a proposal like any
+    other: state is a candidate commit type (17), so what this writes is
+    waiting for review, not in force.
+
+    The references are the point. Section 14 lets the summary say only what its
+    references already say, and without the edges that condition cannot be
+    checked by anyone — which is how a current state turns back into the kind
+    of summary prose this whole layer exists to stop importing.
+    """
+    content = pathlib.Path(args.file).read_text(encoding="utf-8").strip()
+    if not content:
+        raise SystemExit(f"{args.file} is empty")
+
+    with transaction(args.dsn) as cur:
+        scope_id = _scope_by_name(cur, args.scope)
+        grounds = [_resolve_entity(cur, prefix)["memory_id"] for prefix in args.evidence]
+
+        cur.execute(
+            "SELECT memory_id, title, latest_version FROM memory_entity "
+            "WHERE scope_id = %s AND type = 'state' AND status <> 'merged'",
+            (scope_id,),
+        )
+        existing = cur.fetchall()
+        if len(existing) > 1:
+            listed = "\n".join(f"  {_short(r['memory_id'])}  {r['title']}" for r in existing)
+            raise SystemExit(f"{args.scope} already has {len(existing)} states:\n{listed}")
+
+        payload = {
+            "content": content,
+            "source_type": str(SourceType(args.source_type)),
+            "source_reference": args.source_reference,
+            "evidence": [str(g) for g in grounds],
+        }
+        if existing:
+            target = existing[0]
+            result = proposals.propose(
+                cur,
+                actor=args.actor,
+                operation=ProposalOperation.UPDATE_VERSION,
+                payload=payload,
+                target_memory=target["memory_id"],
+                based_on_version=target["latest_version"],
+                allow_duplicate=args.anyway,
+            )
+            print(f"new version of {_short(target['memory_id'])}  {target['title']}")
+        else:
+            if not args.title:
+                raise SystemExit(f"{args.scope} has no current state yet; pass --title")
+            payload |= {
+                "scope_id": str(scope_id),
+                "type": str(MemoryType.STATE),
+                "title": args.title,
+            }
+            result = proposals.propose(
+                cur,
+                actor=args.actor,
+                operation=ProposalOperation.CREATE,
+                payload=payload,
+                allow_duplicate=args.anyway,
+                allow_similar=args.anyway,
+            )
+            print(f"new current state for {args.scope}")
+
+        proposal = result["proposal"]
+        print(f"proposal {_short(proposal['proposal_id'])}  {proposal['status']}")
+        print(f"  {result['ruling'].reason}")
+        print(f"  resting on {len(grounds)} memory(ies)")
+    return 0
+
+
+def cmd_evidence(args) -> int:
+    """Both directions of one memory's reference edges (19)."""
+    with transaction(args.dsn) as cur:
+        entity = _resolve_entity(cur, args.memory)
+        cur.execute(
+            "SELECT active_version FROM memory_entity WHERE memory_id = %s",
+            (entity["memory_id"],),
+        )
+        active = cur.fetchone()["active_version"]
+
+        print(f"{_short(entity['memory_id'])}  {entity['title']}\n")
+
+        grounds = store.evidence_for(cur, active) if active else []
+        print(f"rests on ({len(grounds)})")
+        for row in grounds:
+            standing = row["version_status"] or "no active version"
+            print(f"  {_short(row['memory_id'])}  [{row['type']}] {row['title']}  ({standing})")
+        if active is None:
+            print("  (nothing active to read grounds from)")
+
+        dependants = store.resting_on(cur, entity["memory_id"])
+        print(f"\nsupports ({len(dependants)})")
+        for row in dependants:
+            live = "active" if row["is_active"] else row["status"]
+            print(f"  {_short(row['memory_id'])}  [{row['type']}] {row['title']}  ({live})")
+    return 0
+
+
 def cmd_bootstrap(args) -> int:
     """Show what a session start is handed, and what it costs (21.2)."""
     with transaction(args.dsn) as cur:
@@ -561,6 +663,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     c.add_argument("--actor", default="user")
     c.set_defaults(func=cmd_scope)
+
+    t = sub.add_parser("state", help="propose a scope's current state (14)")
+    t.add_argument("file", help="file holding the summary")
+    t.add_argument("--scope", required=True, help="name of an existing scope")
+    t.add_argument("--title", help="required when the scope has no current state yet")
+    t.add_argument(
+        "--evidence", nargs="*", default=[], metavar="ID", help="memories the summary rests on"
+    )
+    t.add_argument("--source-type", default="agent", choices=[str(s) for s in SourceType])
+    t.add_argument("--source-reference", default=None)
+    t.add_argument("--actor", default="claude")
+    t.add_argument(
+        "--anyway",
+        action="store_true",
+        help="propose even though an equivalent one is already waiting (15.1)",
+    )
+    t.set_defaults(func=cmd_state)
+
+    ev = sub.add_parser("evidence", help="what a memory rests on, and what rests on it (19)")
+    ev.add_argument("memory")
+    ev.set_defaults(func=cmd_evidence)
 
     w = sub.add_parser("preview", help="rank a scope's candidates, caps off (27.1)")
     w.add_argument("query")

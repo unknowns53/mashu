@@ -394,3 +394,123 @@ def test_a_scope_will_not_be_promoted_before_it_is_ready(run, committed_scope, t
     assert code == 1
     assert "not promoted" in out
     assert "state" in out
+
+
+# --------------------------------------------------------------------------
+# current state and its references (14, 19)
+# --------------------------------------------------------------------------
+def _scope_name(test_dsn, scope_id):
+    with transaction(test_dsn) as cur:
+        cur.execute("SELECT name FROM scope WHERE scope_id = %s", (scope_id,))
+        return cur.fetchone()["name"]
+
+
+def test_a_current_state_is_proposed_with_the_memories_it_rests_on(
+    run, test_dsn, committed_scope, tmp_path
+):
+    ground = _propose(test_dsn, committed_scope, "the measurement", "eight seeds, byte identical")
+    ground_id = str(ground["target_memory"])
+
+    draft = tmp_path / "state.md"
+    draft.write_text("where the scope stands, saying only what its references say", "utf-8")
+
+    code, out = run(
+        "state",
+        str(draft),
+        "--scope",
+        _scope_name(test_dsn, committed_scope),
+        "--title",
+        "current state",
+        "--evidence",
+        ground_id[:8],
+    )
+    assert code == 0
+    assert "new current state" in out
+    assert "resting on 1 memory" in out
+
+    with transaction(test_dsn) as cur:
+        cur.execute(
+            "SELECT memory_id, latest_version FROM memory_entity "
+            "WHERE scope_id = %s AND type = 'state'",
+            (committed_scope,),
+        )
+        state = cur.fetchone()
+        grounds = store.evidence_for(cur, state["latest_version"])
+        assert [str(g["memory_id"]) for g in grounds] == [ground_id]
+
+
+def test_a_second_state_becomes_a_version_of_the_first_not_a_rival(
+    run, test_dsn, committed_scope, tmp_path
+):
+    """Section 14 gives a scope one current state."""
+    name = _scope_name(test_dsn, committed_scope)
+    draft = tmp_path / "state.md"
+
+    draft.write_text("the first reading", "utf-8")
+    run("state", str(draft), "--scope", name, "--title", "current state")
+
+    draft.write_text("the second reading", "utf-8")
+    code, out = run("state", str(draft), "--scope", name, "--anyway")
+    assert code == 0
+    assert "new version of" in out
+
+    with transaction(test_dsn) as cur:
+        cur.execute(
+            "SELECT count(*) AS n FROM memory_entity WHERE scope_id = %s AND type = 'state'",
+            (committed_scope,),
+        )
+        assert cur.fetchone()["n"] == 1
+
+
+def test_a_first_state_without_a_title_says_so(run, test_dsn, committed_scope, tmp_path):
+    draft = tmp_path / "state.md"
+    draft.write_text("a reading", "utf-8")
+    with pytest.raises(SystemExit, match="pass --title"):
+        run("state", str(draft), "--scope", _scope_name(test_dsn, committed_scope))
+
+
+def test_an_empty_draft_is_refused(run, test_dsn, committed_scope, tmp_path):
+    draft = tmp_path / "state.md"
+    draft.write_text("   \n", "utf-8")
+    with pytest.raises(SystemExit, match="is empty"):
+        run("state", str(draft), "--scope", _scope_name(test_dsn, committed_scope), "--title", "s")
+
+
+def test_evidence_shows_both_directions(run, test_dsn, committed_scope, tmp_path):
+    ground = _propose(test_dsn, committed_scope, "the measurement", "eight seeds")
+    ground_id = str(ground["target_memory"])
+
+    draft = tmp_path / "state.md"
+    draft.write_text("what the measurement means", "utf-8")
+    run(
+        "state",
+        str(draft),
+        "--scope",
+        _scope_name(test_dsn, committed_scope),
+        "--title",
+        "current state",
+        "--evidence",
+        ground_id[:8],
+    )
+
+    code, out = run("evidence", ground_id[:8])
+    assert code == 0
+    assert "rests on (0)" in out
+    assert "supports (1)" in out
+    assert "current state" in out
+
+
+def test_redrafting_a_state_that_is_still_waiting_is_stopped(
+    run, test_dsn, committed_scope, tmp_path
+):
+    """Specification 15.1: the second draft is the same change proposed twice."""
+    from mashu.errors import DuplicateProposalError
+
+    name = _scope_name(test_dsn, committed_scope)
+    draft = tmp_path / "state.md"
+    draft.write_text("the first reading", "utf-8")
+    run("state", str(draft), "--scope", name, "--title", "current state")
+
+    draft.write_text("the second reading", "utf-8")
+    with pytest.raises(DuplicateProposalError, match="already been proposed"):
+        run("state", str(draft), "--scope", name)

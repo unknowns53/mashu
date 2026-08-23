@@ -534,6 +534,14 @@ def _rule(
     )
 
 
+def _evidence(payload: dict[str, Any]) -> list[UUID] | None:
+    """Read the grounds a proposal names, which arrive as strings through JSONB."""
+    raw = payload.get("evidence")
+    if not raw:
+        return None
+    return [item if isinstance(item, UUID) else UUID(str(item)) for item in raw]
+
+
 def _write_now(
     cur: psycopg.Cursor,
     *,
@@ -558,6 +566,7 @@ def _write_now(
             title=payload["title"],
             content=payload["content"],
             directive=payload.get("directive"),
+            evidence=_evidence(payload),
             source_type=SourceType(payload["source_type"]),
             source_reference=payload.get("source_reference"),
             created_by=proposal["actor"],
@@ -579,6 +588,7 @@ def _write_now(
             memory_id=proposal["target_memory"],
             content=payload["content"],
             directive=payload.get("directive"),
+            evidence=_evidence(payload),
             source_type=SourceType(payload["source_type"]),
             source_reference=payload.get("source_reference"),
             created_by=proposal["actor"],
@@ -602,6 +612,8 @@ def _apply_on_approval(cur: psycopg.Cursor, proposal: dict, *, actor: str) -> No
                 cur,
                 memory_id=proposal["target_memory"],
                 content=payload["content"],
+                directive=payload.get("directive"),
+                evidence=_evidence(payload),
                 source_type=SourceType(payload["source_type"]),
                 source_reference=payload.get("source_reference"),
                 created_by=proposal["actor"],
