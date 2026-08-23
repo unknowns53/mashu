@@ -14,6 +14,7 @@ the user's decision into the store.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -731,6 +732,41 @@ def _when(text: str):
     return parsed if parsed.tzinfo else parsed.astimezone()
 
 
+def cmd_enqueue(args) -> int:
+    """Claim a transcript for extraction. This is all a session-end hook does.
+
+    The hook runs inside the CLI's exit path, which is measured in seconds, so
+    it must not call a model, open a network connection, or wait on anything.
+    It writes one row and returns. Everything expensive happens later, in a
+    worker that nothing is waiting for.
+
+    Failing here must not fail the hook: a session that cannot be enqueued is a
+    session the sweeper will find by walking transcripts, and a non-zero exit
+    from a hook is a visible error for something the user did not ask for.
+    """
+    path = pathlib.Path(args.transcript)
+    if not path.exists():
+        print(f"no transcript at {path}", file=sys.stderr)
+        return 0
+
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()[:32]
+    try:
+        with transaction(args.dsn) as cur:
+            run = runs.enqueue(
+                cur,
+                source_cli=args.cli,
+                external_session_id=args.session,
+                transcript_digest=digest,
+                extractor_version=args.extractor_version,
+            )
+    except Exception as failure:  # noqa: BLE001 - a hook must not break the CLI it runs in
+        print(f"could not enqueue: {failure}", file=sys.stderr)
+        return 0
+
+    print(f"{_short(run['run_id'])}  {run['state']}")
+    return 0
+
+
 def cmd_runs(args) -> int:
     """Whether automatic capture is still working (16.3)."""
     with transaction(args.dsn) as cur:
@@ -1026,6 +1062,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="propose even though an equivalent one is already waiting (15.1)",
     )
     t.set_defaults(func=cmd_state)
+
+    eq = sub.add_parser("enqueue", help="claim a transcript for extraction (16.3)")
+    eq.add_argument("transcript", help="path to the session transcript")
+    eq.add_argument("--cli", required=True, help="which CLI produced it")
+    eq.add_argument("--session", required=True, help="that CLI's session id")
+    eq.add_argument("--extractor-version", default="v1")
+    eq.set_defaults(func=cmd_enqueue)
 
     ru = sub.add_parser("runs", help="whether automatic capture is still working (16.3)")
     ru.set_defaults(func=cmd_runs)

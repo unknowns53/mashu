@@ -847,3 +847,39 @@ def test_runs_reports_that_capture_stopped(run, test_dsn):
     assert code == 0
     assert "failed 1" in out
     assert "Nothing new is reaching the store" in out
+
+
+def test_enqueue_claims_a_transcript_once(run, test_dsn, tmp_path):
+    """The hook may fire twice, and the sweeper covers the times it does not."""
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"a": 1}\n', "utf-8")
+
+    code, first = run("enqueue", str(transcript), "--cli", "claude", "--session", "ext-1")
+    assert code == 0
+    assert "queued" in first
+
+    _, second = run("enqueue", str(transcript), "--cli", "claude", "--session", "ext-1")
+    assert first.split()[0] == second.split()[0]
+
+    with transaction(test_dsn) as cur:
+        cur.execute("SELECT count(*) AS n FROM extraction_run WHERE external_session_id = 'ext-1'")
+        assert cur.fetchone()["n"] == 1
+
+
+def test_a_changed_transcript_is_a_new_run(run, test_dsn, tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"a": 1}\n', "utf-8")
+    run("enqueue", str(transcript), "--cli", "claude", "--session", "ext-2")
+
+    transcript.write_text('{"a": 1}\n{"b": 2}\n', "utf-8")
+    run("enqueue", str(transcript), "--cli", "claude", "--session", "ext-2")
+
+    with transaction(test_dsn) as cur:
+        cur.execute("SELECT count(*) AS n FROM extraction_run WHERE external_session_id = 'ext-2'")
+        assert cur.fetchone()["n"] == 2
+
+
+def test_a_missing_transcript_does_not_fail_the_hook(run, tmp_path):
+    """A non-zero exit here is a visible error for something nobody asked for."""
+    code, _ = run("enqueue", str(tmp_path / "gone.jsonl"), "--cli", "claude", "--session", "ext-3")
+    assert code == 0
