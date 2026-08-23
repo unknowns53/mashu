@@ -118,11 +118,14 @@ def test_friday_gets_the_pending_content_tagged_rather_than_nothing(cur, scope_i
     assert got.unreviewed[0]["days_pending"] == 0
 
 
-def test_the_unreviewed_layer_cannot_outgrow_the_reviewed_one(cur, scope_id, author):
-    """The backlog is bounded in the context even when it is not bounded in the queue.
+def test_the_backlog_is_bounded_by_tokens_rather_than_by_the_reviewed_count(cur, scope_id, author):
+    """What bounds the backlog in the context, since v0.11.
 
-    A queue nobody works through would otherwise fill the context with tagged
-    material, and a tag that is on everything tells the agent nothing.
+    The count bound — layer 2 no larger than layer 1 — is gone: it made a scope
+    with nothing reviewed answer nothing, which is review granting use. The
+    token bound stays, and the concern the count bound carried (a tag on
+    everything tells the agent nothing) is now measured instead, as the tag
+    ratio of 27.3.
     """
     memory_id, first = author("DES water content", "the mixture is hygroscopic")
     based_on = first
@@ -139,5 +142,8 @@ def test_the_unreviewed_layer_cannot_outgrow_the_reviewed_one(cur, scope_id, aut
         )
 
     got = retrieval.retrieve(cur, "DES water content", actor="claude", scope_id=scope_id)
-    assert len(got.unreviewed) <= len(got.active)
+    assert len(got.unreviewed) > len(got.active)
     assert got.dropped_unreviewed == 4 - len(got.unreviewed)
+
+    spent = sum(retrieval.estimate_tokens(row["content"]) for row in got.unreviewed)
+    assert spent <= retrieval.LAYER2_TOKEN_BUDGET

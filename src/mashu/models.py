@@ -41,18 +41,6 @@ class VersionStatus(StrEnum):
     COMPLETED = "completed"
 
 
-class Lifecycle(StrEnum):
-    """Whether a scope is ready to answer (specification 7.1).
-
-    A scope with nothing adopted is not a scope that knows nothing. Retrieval
-    cannot tell those apart, and after a migration the difference is the whole
-    story, so the scope says which it is instead of leaving it to be inferred.
-    """
-
-    SEEDING = "seeding"
-    OPERATIONAL = "operational"
-
-
 class Delivery(StrEnum):
     """Where a memory goes, as opposed to what it is (specification 21.2).
 

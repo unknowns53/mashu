@@ -146,19 +146,18 @@ def test_an_unrelated_subject_gets_its_own_entity(cur, scope_id):
     assert entity["status"] == EntityStatus.ACTIVE
 
 
-def test_imported_content_is_not_readable_until_something_is_reviewed(cur, scope_id):
-    """Semi-approval does not reach a scope whose every memory is imported.
+def test_imported_content_is_readable_before_anything_is_reviewed(cur, scope_id):
+    """Semi-approval reaches a scope whose every memory is imported.
 
-    The name of this test used to say the opposite, which is where the drift
-    shows. v0.7 made layer 2 hand over content so that waiting for review was
-    no longer an outage; v0.8 then capped layer 2 at the size of layer 1, and
-    a freshly imported scope has no layer 1 at all. So the migration lands in
-    the one state semi-approval does not cover, and the whole import is
-    invisible until a first review gives the scope something active.
+    This test held the opposite for two versions, and the collision was left
+    pinned on purpose: v0.7 made layer 2 hand over content so that waiting for
+    review was not an outage, v0.8 then capped layer 2 at the size of layer 1,
+    and a freshly imported scope has no layer 1 at all. Which rule yielded was
+    a decision about 21.1 rather than something to settle by editing an
+    assertion here.
 
-    Pinned as it stands rather than as it ought to be. Which of the two rules
-    yields is a decision about 21.1, not something to settle by editing an
-    assertion.
+    v0.11 settled it. The cap was withdrawn and v0.7 stands: an import is
+    readable, tagged, from the moment it lands.
     """
     importer.import_items(
         cur,
@@ -168,7 +167,9 @@ def test_imported_content_is_not_readable_until_something_is_reviewed(cur, scope
     )
     got = retrieval.retrieve(cur, "SSD failure analysis", actor="claude", scope_id=scope_id)
     assert got.active == []
-    assert got.unreviewed == []  # nothing active to contrast the tag against
+    assert [row["title"] for row in got.unreviewed] == ["SSD failure analysis"]
+    assert "bridge chip" in got.unreviewed[0]["content"]
+    assert got.unreviewed[0]["tag"] == retrieval.UNREVIEWED_TAG
 
 
 def test_the_short_standing_form_comes_across_when_the_file_marked_one(cur, scope_id):

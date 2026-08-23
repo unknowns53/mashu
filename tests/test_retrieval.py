@@ -117,26 +117,32 @@ def test_an_adopted_version_is_not_also_unreviewed(cur, scope_id, author):
     assert got.unreviewed == []
 
 
-def test_layer_two_never_outnumbers_layer_one(cur, scope_id, author):
-    """The relative cap of 21.1: the tag needs untagged material beside it."""
+def test_the_unreviewed_layer_may_outnumber_the_reviewed_one(cur, scope_id, author):
+    """v0.11 withdrew the relative cap of 21.1.
+
+    It emptied layer 2 in proportion to layer 1, so a scope with little adopted
+    answered with little, and one with nothing adopted answered with nothing.
+    That is review granting use, which v0.7 said it had stopped doing.
+    """
     author("ramp one", "the ramp is half a degree per minute")
     for i in range(5):
         author(f"ramp candidate {i}", f"the ramp wandered on run {i}", adopt=False)
 
     got = retrieval.retrieve(cur, "ramp", actor="claude", scope_id=scope_id)
     assert len(got.active) == 1
-    assert len(got.unreviewed) == 1
-    assert got.dropped_unreviewed == 4
+    assert len(got.unreviewed) == 5
+    assert got.dropped_unreviewed == 0
 
 
-def test_with_nothing_active_the_unreviewed_layer_is_empty(cur, scope_id, author):
-    """A context built entirely of unreviewed content is what the cap prevents."""
+def test_a_scope_with_nothing_adopted_still_answers(cur, scope_id, author):
+    """The case the withdrawal was for: everything imported, nothing reviewed yet."""
     author("ramp candidate", "the ramp wandered on the second run", adopt=False)
 
     got = retrieval.retrieve(cur, "ramp", actor="claude", scope_id=scope_id)
     assert got.active == []
-    assert got.unreviewed == []
-    assert got.dropped_unreviewed == 1
+    assert [row["title"] for row in got.unreviewed] == ["ramp candidate"]
+    assert got.unreviewed[0]["tag"] == retrieval.UNREVIEWED_TAG
+    assert got.dropped_unreviewed == 0
 
 
 def test_the_token_budget_stops_a_long_candidate(cur, scope_id, author, monkeypatch):
@@ -246,19 +252,21 @@ def test_a_scope_with_nothing_left_active_still_answers_from_layer_three(cur, sc
     assert "direct SATA connection" in got.retired[0]["reason"]
 
 
-def test_preview_shows_the_ranking_the_caps_hide(cur, scope_id, author):
+def test_preview_shows_the_ranking_the_caps_hide(cur, scope_id, author, monkeypatch):
     """27.1 asks whether the query finds the right memory. Retrieval cannot say.
 
-    With nothing adopted, layer 2 is emptied on purpose, so the one question a
-    freshly migrated scope has to answer is the one retrieval refuses. Preview
-    answers it, and stays out of context to do so.
+    Since v0.11 a freshly migrated scope does answer, but the token cap still
+    decides how far down the list the answer reaches, and the ranking below
+    that line is exactly what the migration has to check. Preview reads it, and
+    stays out of context to do so.
     """
+    monkeypatch.setattr(retrieval, "LAYER2_TOKEN_BUDGET", 20)
     for i in range(4):
         author("SSD timeout cause", f"reading {i} of the enclosure timing out", adopt=False)
 
     served = retrieval.retrieve(cur, "why does the SSD time out", actor="claude", scope_id=scope_id)
     assert served.active == []
-    assert served.unreviewed == []
+    assert len(served.unreviewed) < 4
 
     ranked = retrieval.preview(cur, "why does the SSD time out", scope_id=scope_id)
     assert len(ranked) == 4

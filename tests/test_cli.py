@@ -375,31 +375,6 @@ def test_import_refuses_a_scope_that_does_not_exist(run, tmp_path):
         run("import", str(path), "--scope", "no such scope")
 
 
-def test_the_scope_command_reports_readiness(run, test_dsn, committed_scope):
-    with transaction(test_dsn) as cur:
-        cur.execute("SELECT name FROM scope WHERE scope_id = %s", (committed_scope,))
-        scope_name = cur.fetchone()["name"]
-
-    code, out = run("scope")
-    assert code == 0
-    assert scope_name[:16] in out
-    assert "seeding" in out
-
-
-def test_a_scope_will_not_be_promoted_before_it_is_ready(run, committed_scope, test_dsn):
-    with transaction(test_dsn) as cur:
-        cur.execute("SELECT name FROM scope WHERE scope_id = %s", (committed_scope,))
-        scope_name = cur.fetchone()["name"]
-
-    code, out = run("scope", scope_name, "--promote")
-    assert code == 1
-    assert "not promoted" in out
-    assert "state" in out
-
-
-# --------------------------------------------------------------------------
-# current state and its references (14, 19)
-# --------------------------------------------------------------------------
 def _scope_name(test_dsn, scope_id):
     with transaction(test_dsn) as cur:
         cur.execute("SELECT name FROM scope WHERE scope_id = %s", (scope_id,))
@@ -669,3 +644,23 @@ def test_the_active_set_counts_what_it_is_about_to_hand_over(run, test_dsn, comm
     assert code == 0
     assert "1 active memory(ies)" in out
     assert "the body of it" in out
+
+
+def test_the_scope_command_counts_without_gating_anything(run, test_dsn, committed_scope):
+    """v0.11 took the readiness manifest and the promotion out of this command.
+
+    They were the shape of work with no judgement in it: declaring which types
+    a scope needed, then declaring it open. With the relative cap withdrawn a
+    scope answers whether or not anything in it has been adopted, so there is
+    nothing left for the declaration to unlock.
+    """
+    _propose(test_dsn, committed_scope, "still waiting", "not reviewed yet")
+    adopted = _propose(test_dsn, committed_scope, "already standing", "reviewed")
+    with transaction(test_dsn) as cur:
+        proposals.approve(cur, adopted["proposal_id"], reviewer="user", reason="it stands")
+
+    code, out = run("scope")
+    assert code == 0
+    line = next(row for row in out.splitlines() if _scope_name(test_dsn, committed_scope) in row)
+    assert "adopted 1" in line
+    assert "unreviewed 1" in line

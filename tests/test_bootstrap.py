@@ -6,7 +6,7 @@ import pytest
 
 from mashu import bootstrap, store
 from mashu.errors import DeliveryError
-from mashu.models import Delivery, EventType, Lifecycle, MemoryType, SourceType
+from mashu.models import Delivery, EventType, MemoryType, SourceType
 
 
 @pytest.fixture
@@ -55,11 +55,17 @@ def test_the_scope_index_lists_every_active_scope_with_its_summary(cur, scope_id
     assert index["DES thermal response"] == "cloud point behaviour of the mixtures"
 
 
-def test_the_map_says_which_scopes_are_not_open_yet(cur, scope_id):
-    """An empty answer from a seeding scope must not read as "nothing is known"."""
+def test_the_map_carries_only_what_names_a_scope(cur, scope_id):
+    """v0.11 took the lifecycle off the map.
+
+    It was there so an empty answer from an unreviewed scope would not read as
+    "nothing is known about this". Such a scope now answers with tagged
+    candidates, so the label had nothing left to disambiguate, and a label
+    nothing maintains is read as current long after it stops being true.
+    """
     got = bootstrap.session_bootstrap(cur, actor="claude")
     entry = next(row for row in got.scope_index if row["scope_id"] == scope_id)
-    assert entry["lifecycle"] == str(Lifecycle.SEEDING)
+    assert set(entry) == {"scope_id", "name", "summary"}
 
 
 def test_an_archived_scope_is_not_on_the_map(cur, scope_id):

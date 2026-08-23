@@ -39,11 +39,12 @@ from mashu.retrieval import estimate_tokens
 #: (27.5), which is the first time the real per-session cost is observable.
 BOOTSTRAP_TOKEN_BUDGET = 2000
 
-# The index carries each scope's lifecycle because an empty answer from a
-# seeding scope otherwise reads as "nothing is known about this", which is the
-# reading that sends an agent off to derive what a review is about to adopt.
+# The index is the map: what it costs is bounded by the number of scopes, and
+# it is what makes everything else reachable by name. An agent missing a body
+# can fetch it; an agent missing the index does not know there is anything to
+# fetch (21.2).
 _SCOPE_INDEX_SQL = """
-SELECT scope_id, name, description, lifecycle
+SELECT scope_id, name, description
 FROM scope
 WHERE status = 'active'
 ORDER BY name
@@ -116,7 +117,6 @@ def session_bootstrap(
             "scope_id": row["scope_id"],
             "name": row["name"],
             "summary": _one_line(row["description"]),
-            "lifecycle": str(row["lifecycle"]),
         }
         for row in cur.fetchall()
     ]
