@@ -4,8 +4,6 @@
 -- Changing the model means changing this dimension, which requires a new
 -- migration that rebuilds the embedding columns.
 
-BEGIN;
-
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ---------------------------------------------------------------------------
@@ -183,5 +181,3 @@ CREATE TABLE agent_session (
     ended_at   TIMESTAMPTZ,
     scratch    JSONB
 );
-
-COMMIT;
