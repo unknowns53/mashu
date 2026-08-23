@@ -53,6 +53,23 @@ class Lifecycle(StrEnum):
     OPERATIONAL = "operational"
 
 
+class Delivery(StrEnum):
+    """Where a memory goes, as opposed to what it is (specification 21.2).
+
+    Bootstrap used to push every active preference and every current state, so
+    a fixed per-session cost grew with the store. Delivery is the axis that was
+    missing: being a preference says what the knowledge is, not that every
+    session needs it in front of it.
+    """
+
+    #: Pushed at session start, before anything is known about the session.
+    STARTUP_REQUIRED = "startup_required"
+    #: Pushed once the session knows which scopes it is working in.
+    SCOPE_REQUIRED = "scope_required"
+    #: Never pushed. Reachable by search and by memory_get.
+    PULL_ONLY = "pull_only"
+
+
 class SourceType(StrEnum):
     """Where the content came from. Folded into the version row (specification 9)."""
 
@@ -120,6 +137,7 @@ class EventType(StrEnum):
     SCOPE_CREATED = "scope_created"
     SCOPE_READINESS_SET = "scope_readiness_set"
     SCOPE_PROMOTED = "scope_promoted"
+    DELIVERY_SET = "delivery_set"
     ENTITY_CREATED = "entity_created"
     ENTITY_MERGED = "entity_merged"
     VERSION_CREATED = "version_created"

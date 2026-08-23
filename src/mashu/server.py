@@ -117,11 +117,15 @@ def build_server() -> Any:
 
     @server.tool()
     def session_bootstrap(scopes: list[str] | None = None) -> dict[str, Any]:
-        """The fixed context for a session start: preferences, current state, and
-        the index of every scope. Call this once, first, before any search.
+        """The fixed context for a session start: the standing rules every
+        session needs, and the index of every scope. Call this once, first,
+        before any search.
 
-        scopes optionally narrows the current state to scopes already known to
-        be in play; the index always covers the whole ledger.
+        Pass scopes once you know which scopes the session is working in, to
+        get their current state as well. The index always covers the whole
+        ledger, and says which scopes are still seeding — a seeding scope
+        holds material nobody has confirmed yet, so an empty answer from one
+        means wait or ask, not that nothing is known.
         """
         with db.transaction() as cur:
             session(cur)
@@ -134,8 +138,8 @@ def build_server() -> Any:
                 {
                     "ok": True,
                     "scope_index": got.scope_index,
-                    "preferences": got.preferences,
-                    "current_state": got.current_state,
+                    "startup": got.startup,
+                    "scoped": got.scoped,
                     "trimmed": got.trimmed,
                     "tokens": got.tokens,
                     "over_budget": got.over_budget,

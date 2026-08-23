@@ -19,8 +19,15 @@ import psycopg
 
 from mashu import events
 from mashu.embed import get_embedder
-from mashu.errors import ConcurrentUpdateError, MergeError, NotFoundError
-from mashu.models import EntityStatus, EventType, MemoryType, SourceType, VersionStatus
+from mashu.errors import ConcurrentUpdateError, DeliveryError, MergeError, NotFoundError
+from mashu.models import (
+    Delivery,
+    EntityStatus,
+    EventType,
+    MemoryType,
+    SourceType,
+    VersionStatus,
+)
 from mashu.transitions import check_can_be_active, check_transition
 
 
@@ -95,6 +102,7 @@ def create_entity(
     status: VersionStatus = VersionStatus.CANDIDATE,
     entity_status: EntityStatus = EntityStatus.ACTIVE,
     reason: str | None = None,
+    directive: str | None = None,
 ) -> tuple[UUID, UUID]:
     """Create an entity together with its first version.
 
@@ -107,16 +115,25 @@ def create_entity(
     retrieval keeps it out of layer 1 until the review settles it
     (specification 20.1).
     """
+    # Section 14 gives a scope one current state, so scope_required keeps the
+    # count bounded by the number of scopes rather than by the size of the
+    # store. Everything else starts pull_only and has to be promoted on
+    # purpose: that is what stops the session opening from growing with the
+    # inventory (21.2).
+    delivery = (
+        Delivery.SCOPE_REQUIRED if MemoryType(type) is MemoryType.STATE else Delivery.PULL_ONLY
+    )
     cur.execute(
         """
-        INSERT INTO memory_entity (scope_id, type, title, status, title_embedding)
-        VALUES (%s, %s, %s, %s, %s) RETURNING memory_id
+        INSERT INTO memory_entity (scope_id, type, title, status, delivery, title_embedding)
+        VALUES (%s, %s, %s, %s, %s, %s) RETURNING memory_id
         """,
         (
             scope_id,
             str(MemoryType(type)),
             title,
             str(EntityStatus(entity_status)),
+            str(delivery),
             embed_text(title),
         ),
     )
@@ -144,6 +161,7 @@ def create_entity(
         source_reference=source_reference,
         created_by=created_by,
         actor=actor,
+        directive=directive,
     )
     _set_latest(cur, memory_id, version_id)
     if adopt:
@@ -164,6 +182,7 @@ def add_version(
     source_reference: str | None = None,
     status: VersionStatus = VersionStatus.CANDIDATE,
     reason: str | None = None,
+    directive: str | None = None,
 ) -> UUID:
     """Add a version to an existing entity.
 
@@ -192,6 +211,7 @@ def add_version(
         source_reference=source_reference,
         created_by=created_by,
         actor=actor,
+        directive=directive,
     )
     _set_latest(cur, memory_id, version_id)
     if adopt:
@@ -269,6 +289,58 @@ def set_active(
         )
     check_can_be_active(VersionStatus(version["status"]))
     _point_active_at(cur, memory_id=memory_id, version_id=version_id, actor=actor, reason=reason)
+
+
+def set_delivery(
+    cur: psycopg.Cursor,
+    *,
+    memory_id: UUID,
+    delivery: Delivery,
+    actor: str,
+) -> dict[str, Any]:
+    """Move a memory between push and pull (specification 21.2).
+
+    Only the user does this. A delivery an agent could set for itself would be
+    the same hole the commit gate closed on preferences by another route: mark
+    a memory startup_required and it is in front of every later session,
+    whatever the type says.
+
+    Promoting into the startup pack is refused when the pack would no longer
+    fit. Trimming it to titles instead would silently drop the standing rules
+    the session was supposed to be told, and a fixed cost that quietly stops
+    delivering is worse than one that says it is full.
+    """
+    from mashu import bootstrap
+
+    delivery = Delivery(delivery)
+    entity = get_entity(cur, memory_id, lock=True)
+
+    if delivery is Delivery.STARTUP_REQUIRED and entity["active_version"] is not None:
+        version = get_version(cur, entity["active_version"])
+        fits, cost = bootstrap.would_fit(
+            cur,
+            memory_id=memory_id,
+            content=version["directive"] or version["content"],
+        )
+        if not fits:
+            raise DeliveryError(
+                f"the startup pack would come to {cost} token, over the ceiling of "
+                f"{bootstrap.BOOTSTRAP_TOKEN_BUDGET}. Shorten a directive, or take "
+                f"something else out of the pack first"
+            )
+
+    cur.execute(
+        "UPDATE memory_entity SET delivery = %s WHERE memory_id = %s",
+        (str(delivery), memory_id),
+    )
+    events.record(
+        cur,
+        EventType.DELIVERY_SET,
+        actor,
+        memory_id=memory_id,
+        detail={"from": entity["delivery"], "to": str(delivery)},
+    )
+    return get_entity(cur, memory_id)
 
 
 def set_entity_status(
@@ -478,18 +550,20 @@ def _insert_version(
     source_reference: str | None,
     created_by: str,
     actor: str,
+    directive: str | None = None,
 ) -> UUID:
     cur.execute(
         """
         INSERT INTO memory_version
-            (memory_id, content, status, supersedes, reason,
+            (memory_id, content, directive, status, supersedes, reason,
              source_type, source_reference, created_by, content_embedding)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING version_id
         """,
         (
             memory_id,
             content,
+            directive,
             str(VersionStatus(status)),
             supersedes,
             reason,

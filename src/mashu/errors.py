@@ -34,6 +34,15 @@ class MergeError(MashuError):
     """A merge that cannot be carried out as asked (specification 20.2)."""
 
 
+class DeliveryError(MashuError):
+    """A memory cannot be delivered the way the caller asked (specification 21.2).
+
+    Raised when the session-start pack would no longer fit inside its ceiling.
+    The pack is a fixed cost every session pays, so it is kept fixed by
+    refusing the change rather than by quietly dropping what it carries.
+    """
+
+
 class ProposalError(MashuError):
     """A proposal cannot be decided the way the caller asked."""
 

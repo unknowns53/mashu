@@ -169,3 +169,33 @@ def test_imported_content_is_not_readable_until_something_is_reviewed(cur, scope
     got = retrieval.retrieve(cur, "SSD failure analysis", actor="claude", scope_id=scope_id)
     assert got.active == []
     assert got.unreviewed == []  # nothing active to contrast the tag against
+
+
+def test_the_short_standing_form_comes_across_when_the_file_marked_one(cur, scope_id):
+    """21.2 pushes the directive; the migration is where the store gets one.
+
+    Taken as written from the source rather than summarised here. A summary
+    made during the import is an interpretation entering the store by the one
+    route that does not pass a review.
+    """
+    item = _item("measurement discipline", "the whole rule with its reasons attached")
+    item["directive"] = "say what each branch will lead to before starting"
+    summary = importer.import_items(
+        cur, scope_id=scope_id, items=[item], actor="import"
+    )
+
+    proposal = proposals.get(cur, summary["created"][0]["proposal_id"])
+    version = store.get_version(cur, proposal["applied_version"])
+    assert version["directive"] == "say what each branch will lead to before starting"
+    assert version["content"] == "the whole rule with its reasons attached"
+
+
+def test_an_item_without_one_keeps_a_null_directive(cur, scope_id):
+    summary = importer.import_items(
+        cur,
+        scope_id=scope_id,
+        items=[_item("measurement discipline", "the whole rule")],
+        actor="import",
+    )
+    proposal = proposals.get(cur, summary["created"][0]["proposal_id"])
+    assert store.get_version(cur, proposal["applied_version"])["directive"] is None

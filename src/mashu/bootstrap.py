@@ -5,9 +5,16 @@ that does not know what the store holds has no reason to ask, which is why
 section 6.1 calls the pull path dead without this. Bootstrap is the push half:
 a fixed payload delivered at session start whether the agent asks or not.
 
-Three parts, and the third is the one that matters most. Preferences and the
-current state are knowledge; the scope index is a *map* of the knowledge, and
-it is the map that gives every later memory_search a motive.
+Three parts, and the third is the one that matters most. The pushed memories
+are knowledge; the scope index is a *map* of the knowledge, and it is the map
+that gives every later memory_search a motive.
+
+What gets pushed is decided by delivery and not by type. The first version of
+this pushed every active preference and every current state, which made a
+fixed per-session cost a function of how much the store held: measured against
+the real migration it wanted 45,840 token against a 2,000 ceiling. Being a
+preference says what a memory is, not that every session needs it in front of
+it, and only the second is a reason to spend the session's opening budget.
 
 Nothing here embeds anything. Bootstrap has no query to encode, so it reads
 rows and counts characters and never touches the model. Session start is the
@@ -24,7 +31,7 @@ from uuid import UUID
 import psycopg
 
 from mashu.events import record
-from mashu.models import EventType, MemoryType
+from mashu.models import Delivery, EventType
 from mashu.retrieval import estimate_tokens
 
 #: Section 21.2. Bootstrap is a fixed cost paid by every session, so without a
@@ -42,14 +49,21 @@ WHERE status = 'active'
 ORDER BY name
 """
 
-# Both payload queries read the pointer, never the version status: active is
+# The payload query reads the pointer, never the version status: active is
 # what active_version points at and nowhere else (specification 10).
-_ACTIVE_BY_TYPE_SQL = """
-SELECT e.memory_id, e.scope_id, e.type, e.title, v.version_id, v.content
+#
+# coalesce is where the short form earns its keep. directive is the standing
+# rule as a person reviewed it; content is the whole of it with the reasons.
+# The push takes the first, the pull takes the second, so keeping the session
+# opening small no longer costs the reasons.
+_PUSHED_SQL = """
+SELECT e.memory_id, e.scope_id, e.type, e.title, e.delivery,
+       v.version_id, coalesce(v.directive, v.content) AS content,
+       v.directive IS NOT NULL AS shortened
 FROM memory_entity e
 JOIN memory_version v ON v.version_id = e.active_version AND v.memory_id = e.memory_id
 WHERE e.status = 'active'
-  AND e.type = %(type)s
+  AND e.delivery = %(delivery)s
   AND (%(scopes)s::uuid[] IS NULL OR e.scope_id = ANY(%(scopes)s::uuid[]))
 ORDER BY e.title
 """
@@ -60,8 +74,10 @@ class Bootstrapped:
     """What a session is handed before it asks anything."""
 
     scope_index: list[dict[str, Any]] = field(default_factory=list)
-    preferences: list[dict[str, Any]] = field(default_factory=list)
-    current_state: list[dict[str, Any]] = field(default_factory=list)
+    #: Pushed before the session knows anything about itself.
+    startup: list[dict[str, Any]] = field(default_factory=list)
+    #: Pushed only for the scopes the session named.
+    scoped: list[dict[str, Any]] = field(default_factory=list)
     #: Memory IDs whose content was dropped to stay inside the budget. They are
     #: still listed, by title, so memory_get can fetch what was cut.
     trimmed: list[UUID] = field(default_factory=list)
@@ -77,7 +93,7 @@ class Bootstrapped:
 
     def memory_ids(self) -> list[UUID]:
         """Everything named in the payload, trimmed or whole."""
-        return [row["memory_id"] for row in (*self.preferences, *self.current_state)]
+        return [row["memory_id"] for row in (*self.startup, *self.scoped)]
 
 
 def session_bootstrap(
@@ -105,19 +121,25 @@ def session_bootstrap(
         for row in cur.fetchall()
     ]
 
-    params = {"scopes": scopes or None}
-    cur.execute(_ACTIVE_BY_TYPE_SQL, dict(params, type=str(MemoryType.PREFERENCE)))
-    preferences = cur.fetchall()
-    cur.execute(_ACTIVE_BY_TYPE_SQL, dict(params, type=str(MemoryType.STATE)))
-    current_state = cur.fetchall()
+    # startup_required ignores the scope filter: it is what a session needs
+    # before it knows which scope it is in, so confining it to a scope the
+    # session has not identified yet would push nothing at all.
+    cur.execute(_PUSHED_SQL, {"scopes": None, "delivery": str(Delivery.STARTUP_REQUIRED)})
+    startup = cur.fetchall()
+    scoped: list[dict[str, Any]] = []
+    if scopes:
+        cur.execute(
+            _PUSHED_SQL, {"scopes": scopes, "delivery": str(Delivery.SCOPE_REQUIRED)}
+        )
+        scoped = cur.fetchall()
 
-    trimmed = _fit(scope_index, preferences, current_state, budget=budget)
+    trimmed = _fit(scope_index, scoped, startup, budget=budget)
     result = Bootstrapped(
         scope_index=scope_index,
-        preferences=preferences,
-        current_state=current_state,
+        startup=startup,
+        scoped=scoped,
         trimmed=trimmed,
-        tokens=_total_tokens(scope_index, preferences, current_state),
+        tokens=_total_tokens(scope_index, startup, scoped),
     )
     result.over_budget = result.tokens > budget
 
@@ -147,8 +169,8 @@ def _one_line(description: str | None) -> str:
 
 def _fit(
     scope_index: list[dict[str, Any]],
-    preferences: list[dict[str, Any]],
-    current_state: list[dict[str, Any]],
+    first_to_give: list[dict[str, Any]],
+    last_to_give: list[dict[str, Any]],
     *,
     budget: int,
 ) -> list[UUID]:
@@ -161,21 +183,27 @@ def _fit(
 
     Two orderings are chosen here that the section leaves open.
 
-    Current state gives up its content before preferences do. A preference the
-    agent cannot read is misbehaviour on every turn afterwards and nobody
-    notices; a current state it cannot read costs one lookup at the start of
-    work in that scope, and the work itself makes the gap obvious.
+    Scope-required material gives up its content before startup-required
+    material does. Something the session was going to be told before it knew
+    anything about itself was judged to be needed by every session; something
+    tied to one scope is needed by the work in that scope, and that work makes
+    the gap obvious in a way a missing standing rule never does.
+
+    That trimming should be rare now. Admission control (would_fit) refuses the
+    change that would put the startup pack over the ceiling, so the trimming
+    here is the backstop for the paths admission control does not sit on, not
+    the ordinary way the budget is kept.
 
     Within a group the largest goes first, because cutting the biggest item
     buys the most budget per item lost, and the count of items still readable
     whole is what the trimming is trying to protect.
     """
     trimmed: list[UUID] = []
-    total = _total_tokens(scope_index, preferences, current_state)
+    total = _total_tokens(scope_index, first_to_give, last_to_give)
     if total <= budget:
         return trimmed
 
-    for group in (current_state, preferences):
+    for group in (first_to_give, last_to_give):
         for row in sorted(group, key=lambda r: -estimate_tokens(r["content"] or "")):
             if total <= budget:
                 return trimmed
@@ -187,11 +215,46 @@ def _fit(
 
 def _total_tokens(
     scope_index: list[dict[str, Any]],
-    preferences: list[dict[str, Any]],
-    current_state: list[dict[str, Any]],
+    *groups: list[dict[str, Any]],
 ) -> int:
     """What the payload costs as it currently stands."""
     cost = sum(estimate_tokens(f"{row['name']} {row['summary']}") for row in scope_index)
-    for row in (*preferences, *current_state):
-        cost += estimate_tokens(row["title"]) + estimate_tokens(row["content"] or "")
+    for group in groups:
+        for row in group:
+            cost += estimate_tokens(row["title"]) + estimate_tokens(row["content"] or "")
     return cost
+
+
+def would_fit(
+    cur: psycopg.Cursor,
+    *,
+    memory_id: UUID | None = None,
+    content: str | None = None,
+    budget: int = BOOTSTRAP_TOKEN_BUDGET,
+) -> tuple[bool, int]:
+    """Whether the startup pack still fits, optionally with one memory changed.
+
+    Trimming an over-budget pack down to titles is not the same as keeping it
+    inside the budget, because what gets trimmed is exactly the standing rules
+    the session was going to be told. A pack that has to be trimmed has already
+    failed; the place to catch that is where the change that would cause it is
+    being approved, while there is still someone to hand it back to.
+    """
+    cur.execute(_SCOPE_INDEX_SQL)
+    index = [
+        {"name": row["name"], "summary": _one_line(row["description"])}
+        for row in cur.fetchall()
+    ]
+    cur.execute(_PUSHED_SQL, {"scopes": None, "delivery": str(Delivery.STARTUP_REQUIRED)})
+    pack = [dict(row) for row in cur.fetchall()]
+
+    if memory_id is not None:
+        for row in pack:
+            if row["memory_id"] == memory_id:
+                row["content"] = content
+                break
+        else:
+            pack.append({"title": "", "content": content})
+
+    cost = _total_tokens(index, pack)
+    return cost <= budget, cost

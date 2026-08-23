@@ -24,8 +24,9 @@ from uuid import UUID
 from mashu import bootstrap, db, importer, proposals, retrieval, scopes, server, store
 from mashu.db import transaction
 from mashu.embed import get_embedder
+from mashu.errors import DeliveryError
 from mashu.migrate import migrate
-from mashu.models import MemoryType
+from mashu.models import Delivery, MemoryType
 
 WIDTH = 88
 
@@ -325,17 +326,35 @@ def cmd_bootstrap(args) -> int:
         summary = f"  {row['summary']}" if row["summary"] else ""
         print(f"  {str(row['scope_id'])[:8]}  {row['name']}{summary}")
 
-    for label, rows in (("preferences", got.preferences), ("current state", got.current_state)):
+    for label, rows in (("pushed at session start", got.startup), ("for this scope", got.scoped)):
         print(f"\n{label} ({len(rows)})")
         for row in rows:
             body = row["content"] if row["content"] is not None else "(trimmed; use memory_get)"
             print(f"  {str(row['memory_id'])[:8]}  {row['title']}")
             print(f"      {body}")
 
-    over = " over the ceiling" if got.tokens > bootstrap.BOOTSTRAP_TOKEN_BUDGET else ""
+    over = " over the ceiling" if got.over_budget else ""
     print(f"\n{got.tokens} token of {bootstrap.BOOTSTRAP_TOKEN_BUDGET}{over}")
     if got.trimmed:
         print(f"{len(got.trimmed)} item(s) had their content dropped to fit")
+    return 0
+
+
+def cmd_deliver(args) -> int:
+    """Move one memory between push and pull (21.2). The user's call only."""
+    with transaction(args.dsn) as cur:
+        entity = _resolve_entity(cur, args.memory)
+        try:
+            changed = store.set_delivery(
+                cur,
+                memory_id=entity["memory_id"],
+                delivery=Delivery(args.delivery),
+                actor=args.actor,
+            )
+        except DeliveryError as refusal:
+            print(f"not changed: {refusal}")
+            return 1
+    print(f"{changed['title']}  ->  {changed['delivery']}")
     return 0
 
 
@@ -358,6 +377,21 @@ def cmd_migrate(args) -> int:
 # --------------------------------------------------------------------------
 # resolving abbreviated ids
 # --------------------------------------------------------------------------
+def _resolve_entity(cur, prefix: str) -> dict:
+    """One entity by the start of its id, refusing to guess between two."""
+    cur.execute(
+        "SELECT memory_id, title, delivery FROM memory_entity WHERE memory_id::text LIKE %s",
+        (f"{prefix}%",),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        raise SystemExit(f"no memory starting {prefix!r}")
+    if len(rows) > 1:
+        listed = "\n".join(f"  {_short(r['memory_id'])}  {r['title']}" for r in rows)
+        raise SystemExit(f"{prefix!r} matches {len(rows)} memories:\n{listed}")
+    return rows[0]
+
+
 def _scope_by_name(cur, name: str) -> UUID:
     """A scope by its name. Scopes are the user's to create, so a miss is fatal."""
     cur.execute("SELECT scope_id FROM scope WHERE name = %s", (name,))
@@ -462,6 +496,12 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--scope", required=True)
     w.add_argument("--limit", type=int, default=retrieval.DEFAULT_LIMIT)
     w.set_defaults(func=cmd_preview)
+
+    d = sub.add_parser("deliver", help="move a memory between push and pull (21.2)")
+    d.add_argument("memory", help="memory id, or enough of its start to be unambiguous")
+    d.add_argument("delivery", choices=[str(x) for x in Delivery])
+    d.add_argument("--actor", default="user")
+    d.set_defaults(func=cmd_deliver)
 
     v = sub.add_parser("serve", help="run the MCP server over stdio")
     v.add_argument("--agent", default=None, help="the identity proposals are recorded under")

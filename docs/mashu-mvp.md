@@ -11,7 +11,7 @@
 - v0.7: 27.4a の実測を受けた Review 負荷対策。Review の単位をセッション束へ(18.1節)、candidate を準承認として本文まで渡す(21.1節)、Task の範囲を限定(16.2節)、proposal に由来セッションを追加(15・26節)
 - v0.8: 準承認の導入で開いた二つの穴を塞ぐ。Layer 2 の相対・絶対上限(21.1節)、Review 負荷指標を束単位へ改め未審査比率を追加、行き先を失っていた閾値を差し替え(27.3節)
 - v0.9: 却下された Proposal の後始末を dormant から分離する。version.status に rejected を追加(11・12・26節)、Layer 3 に rejected を追加(21.1節)、重複チェックの対象を却下済みへ拡大(15.1節)
-- v0.10: 実データを移植した直後に出た問題への対応。Preference の Auto Commit を User 明示のものに限定(17節)、Scope に lifecycle と readiness manifest を追加(7.1節)、Review 用の preview 経路を分離(27.1節)
+- v0.10: 実データを移植した直後に出た問題への対応。Preference の Auto Commit を User 明示のものに限定(17節)、Scope に lifecycle と readiness manifest を追加(7.1節)、Review 用の preview 経路を分離(27.1節)、Bootstrap の対象を type でなく delivery で決める(21.2節)、version に directive を追加(9・26節)
 
 ---
 
@@ -250,6 +250,7 @@ Memory Version は不変履歴。
 - version_id
 - memory_id
 - content
+- directive(常設の規則としての短い形。無い場合は NULL。21.2節)
 - status
 - supersedes
 - reason
@@ -695,25 +696,57 @@ Layer 2 は本文を渡す層であり、件数が増えれば Layer 1 と Token
 
 内容は三つ。
 
-1. **Active な Preference の全件**: type = preference の Active Version
-2. **対象 Scope の Current State**: type = state の Active Version(14節)
-3. **Scope 索引**: scope 台帳の全件と、各 Scope の一行要約
+1. **startup_required な Memory の全件**: セッション開始時、まだ何も分かっていない段階で渡すもの
+2. **scope_required な Memory**: セッションが対象 Scope を特定した時点で渡すもの
+3. **Scope 索引**: scope 台帳の全件と、各 Scope の一行要約・lifecycle(7.1節)
 
 三つ目が最も重要である。
 
 セッション中の pull が機能しない根本の理由は、Agent が「知らないことを知らない」ために検索の動機を持てないことにある。三つ目は知識の中身ではなく**知識の地図**であり、Mashu が何を知っているかの索引が最初に入って初めて、以後の `memory_search` が動機を持つ。地図があれば pull は生きる、地図が無ければ pull は死ぬ。
 
-実装:
+#### delivery — 何であるかと、どこへ渡すかを分ける
 
-type が preference と state の Active Version を返し、scope 台帳を一行要約付きで並べるだけである。スキーマの追加を必要とせず、既存の Retrieval 部品の組み合わせで足りる。14節で Current State を専用テーブルから type = State の Entity へ統合した決定が、ここで効いている。
+v0.10 での変更: 押し込む対象を type で決める規則を廃止する。
+
+v0.9 までは「type = preference の Active Version 全件」を押し込んでいた。これを実データで測ったところ、**固定費が在庫量の関数になっていた**。
+
+```
+移植後の preference / state       : 55 件
+全件承認された場合の Bootstrap    : 45,840 token
+上限                              : 2,000 token(22.9 倍)
+一件あたり中央値                  : 663 token
+2,000 token に収まる件数          : 55 件中 5 件
+```
+
+上限どおり削ると 55 件中 50 件が title だけになり、「Preference を毎セッション押し込む」機構が実質「Preference の目次を押し込む」になる。上限を上げても構造は変わらない。**Preference であることは「何であるか」であって、「毎セッション目の前に要る」ではない。**
+
+そこで Entity に **delivery** を持たせる。
+
+| delivery | 渡す時点 |
+|---|---|
+| `startup_required` | セッション開始時。Scope が分かる前 |
+| `scope_required` | セッションが対象 Scope を特定した後 |
+| `pull_only` | 押し込まない。検索と `memory_get` で届く |
+
+既定は `pull_only`。ただし **type = state だけは `scope_required` を既定とする**。14節が Scope ごとに Current State を原則1つとしているため、件数が在庫量でなく Scope 数で抑えられるからである。それ以外は意図的に昇格させない限り押し込まれない。
+
+delivery を設定できるのは **User だけ**である。Agent が設定できるなら、17節が Preference について塞いだ穴を別経路で開けることになる——type が何であれ、delivery を startup_required にすれば以後のすべてのセッションの目の前に置ける。
+
+#### directive — 短い形と、理由の付いた形
+
+version に **directive** を追加する(9節)。directive はその知識の常設の規則としての短い形で、content は理由と適用法を含む全文である。push は directive を、pull は content を渡す。
+
+directive を実行時の要約にしないのは、実行時の要約が**誰も Review していない解釈**だからである。この系は Agent の解釈を無審査で保存しない。directive は Version の一部として Review を通り、履歴を持つ。
 
 Token 上限:
 
-Bootstrap は毎セッション必ず消費する固定費であり、上限を設けないと予算が Memory 件数に比例して膨らむ。上限は 2000 token とする。
+Bootstrap は毎セッション必ず消費する固定費であり、上限は 2000 token とする。
 
-超える場合は Scope 索引を全件残し、Preference と Current State の側を削る。削った項目は Memory ID と title のみを示し、本文を落とす。地図さえ残れば Agent は `memory_get` で取りに行けるが、地図を削ると取りに行く先が分からなくなるためである。
+**上限は削って守るのではなく、超える変更を拒んで守る。** startup_required への昇格時に pack の合計を計算し、超えるなら昇格を拒否する。削って守ると、落ちるのはまさにそのセッションに伝えるはずだった常設の規則であり、固定費が黙って配達をやめたことに誰も気づかない。拒否であれば、その時点でまだ差し戻す相手がいる。
 
-上限値は 27.5 の切替試験で実測して見直す。
+削る処理は残すが、これは admission control が乗っていない経路(User 明示変更など)の受け皿である。削る場合は Scope 索引を全件残し、scope_required、次いで startup_required の順に本文を落とす。地図さえ残れば Agent は `memory_get` で取りに行けるが、地図を削ると取りに行く先が分からなくなるためである。
+
+Scope 索引だけで上限を超える場合、削る先が無い。その場合は超過したまま返し、**超過したことを明示する**(`over_budget`)。上限値は 27.5 の切替試験で実測して見直す。
 
 記録:
 
@@ -827,6 +860,7 @@ CREATE TABLE memory_version (
         -- active は状態ではなく entity.active_version で表現(10節)
     supersedes        UUID REFERENCES memory_version(version_id),
     reason            TEXT,
+    directive         TEXT,   -- 常設の規則としての短い形。push はこちら(21.2節)
     -- provenance(統合)
     source_type       TEXT NOT NULL,  -- user / agent / tool / file / web
     source_reference  TEXT,

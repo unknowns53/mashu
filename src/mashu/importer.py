@@ -115,6 +115,11 @@ def _payload(item: dict[str, Any], scope_id: UUID) -> dict[str, Any]:
         "content": item["content"],
         "source_type": str(SourceType(item.get("source_type", SourceType.FILE))),
         "source_reference": item["source_reference"],
+        # The short standing form, when the source file marked one off. It is
+        # the file's own opening claim, taken as written, not a summary made
+        # here: a summary would be an interpretation entering the store with
+        # the migration rather than through review (21.2).
+        "directive": item.get("directive"),
     }
 
 
