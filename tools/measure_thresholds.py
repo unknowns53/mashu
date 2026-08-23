@@ -155,6 +155,14 @@ def main() -> None:
     print("\nscope detection, new (query against what each scope holds)")
     with psycopg.connect(os.environ["MASHU_DATABASE_URL"], row_factory=dict_row) as conn:
         cur = conn.cursor()
+        cur.execute(
+            "SELECT s.name AS scope, count(*) AS held FROM memory_entity e "
+            "JOIN scope s ON s.scope_id = e.scope_id "
+            "WHERE e.status = 'active' AND e.active_version IS NOT NULL GROUP BY s.name"
+        )
+        sizes = {r["scope"]: r["held"] for r in cur.fetchall()}
+        total = sum(sizes.values())
+        print("  在庫: " + "  ".join(f"{k}={v}" for k, v in sizes.items()) + f"  合計 {total}\n")
         for want, query in QUERIES:
             vector = "[" + ",".join(f"{v:.6f}" for v in embedder.embed_query(query)) + "]"
             cur.execute(
@@ -176,15 +184,21 @@ def main() -> None:
                 counts: dict[str, int] = {}
                 for h in kept:
                     counts[h["scope"]] = counts.get(h["scope"], 0) + 1
-                needed = max(MIN_HITS, -(-len(kept) * SHARE_NUM // SHARE_DEN))
-                got = sorted(
-                    [s for s, c in counts.items() if c >= needed],
-                    key=lambda s: -max(h["sim"] for h in kept if h["scope"] == s),
+                got = []
+                lifts = {}
+                for s, c in counts.items():
+                    expected = sizes[s] / total
+                    lifts[s] = (c / len(kept)) / expected if expected and kept else 0.0
+                    if c >= MIN_HITS and lifts[s] >= LIFT:
+                        got.append(s)
+                got.sort(key=lambda s: -max(h["sim"] for h in kept if h["scope"] == s))
+                shape = "  ".join(
+                    f"{s}={c}(x{lifts[s]:.2f})"
+                    for s, c in sorted(counts.items(), key=lambda kv: -kv[1])
                 )
-                shape = "  ".join(f"{s}={c}" for s, c in sorted(counts.items(), key=lambda kv: -kv[1]))
                 verdict = "detect nothing" if not got else ",".join(got)
                 print(
-                    f"  floor {floor:.2f}  n={len(kept):>2}  need {needed}  "
+                    f"  floor {floor:.2f}  n={len(kept):>2}  "
                     f"[{shape or 'none'}]  ->  {verdict:<16} want={want:<12} << {query[:24]}…"
                 )
             print()
@@ -192,7 +206,7 @@ def main() -> None:
 
 PROBE = 25
 MIN_HITS = 2
-SHARE_NUM, SHARE_DEN = 34, 100
+LIFT = 1.2
 FLOORS = (0.78, 0.80, 0.82, 0.84)
 
 

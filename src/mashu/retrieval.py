@@ -68,21 +68,35 @@ LAYER2_TOKEN_BUDGET = 1500
 #: scope and gets confidently narrowed to it.
 #:
 #: Measured over the same seven queries and the same ledger 27.2 used, at the
-#: floor below: four narrowed to the right scope alone, two detected nothing
-#: and so searched everything, one came back with two scopes of three. **No
-#: query was narrowed to a single wrong scope**, which is the failure that
-#: hides an answer outright and the one the old mechanism made four times out
-#: of seven. A tighter floor (0.84) detects nothing on six of seven; a looser
-#: one (0.78) starts narrowing questions that match nothing.
+#: floor and lift below: four narrowed to the right scope alone, three detected
+#: nothing and so searched everything. **No query was narrowed to a wrong
+#: scope**, which is the failure that hides an answer outright and the one the
+#: old mechanism made four times out of seven. A tighter floor (0.84) detects
+#: nothing on six of seven; a looser one (0.78) starts narrowing questions that
+#: match nothing — the weather question concentrates 8 of its 10 hits in one
+#: scope at x1.49.
 #:
-#: One of the two that detect nothing is a query about the scope holding two
-#: memories: concentration cannot be shown by a scope with almost nothing in
-#: it. That is the mechanism declining rather than failing — the caller reads
-#: an empty answer as "search everything", which is where that query needed to
-#: go anyway.
+#: Two of the three that decline are right to. One asks about the scope holding
+#: two memories, which cannot show concentration however well it matches. The
+#: other is about a subject the ledger has nothing on: its hits split x0.99 /
+#: x1.08, which is what "no scope answers this better than its size predicts"
+#: looks like. The share-based version this replaced narrowed that one to two
+#: scopes.
+#: Concentration is measured as lift, not as a raw share: what fraction of the
+#: best matches a scope holds, divided by what fraction of the store it holds.
+#:
+#: A raw share has no size invariance, and capture makes that fatal rather than
+#: theoretical — routes point at the directories actually worked in, so one
+#: scope grows to hold most of the ledger and then wins every query by mass. A
+#: ratio asks the only question worth asking: does this scope answer better
+#: than its size would predict?
+#:
+#: It degrades the right way at the extreme. A scope holding almost everything
+#: can hardly ever clear the ratio, so it is never "detected" — and narrowing
+#: to a scope that is nearly the whole store buys nothing anyway.
 SCOPE_PROBE = 25
 SCOPE_MIN_HITS = 2
-SCOPE_SHARE = 0.34
+SCOPE_LIFT = 1.2
 SCOPE_MATCH_THRESHOLDS = {
     "intfloat/multilingual-e5-large": 0.82,
     "hashing": 0.50,
@@ -142,6 +156,13 @@ class Retrieved:
 # --------------------------------------------------------------------------
 # scope detection
 # --------------------------------------------------------------------------
+_SCOPE_SIZE_SQL = """
+SELECT e.scope_id, count(*) AS held
+FROM memory_entity e
+WHERE e.status = 'active' AND e.active_version IS NOT NULL
+GROUP BY e.scope_id
+"""
+
 _SCOPE_PROBE_SQL = """
 SELECT e.scope_id, 1 - (v.content_embedding <=> %(q)s::vector) AS similarity
 FROM memory_entity e
@@ -176,14 +197,26 @@ def detect_scopes(cur: psycopg.Cursor, query_vector: str) -> list[UUID]:
     if len(hits) < SCOPE_MIN_HITS:
         return []
 
+    cur.execute(_SCOPE_SIZE_SQL)
+    held = {row["scope_id"]: row["held"] for row in cur.fetchall()}
+    total = sum(held.values())
+    if not total:
+        return []
+
     counts: dict[UUID, int] = {}
     best: dict[UUID, float] = {}
     for row in hits:
         counts[row["scope_id"]] = counts.get(row["scope_id"], 0) + 1
         best[row["scope_id"]] = max(best.get(row["scope_id"], 0.0), row["similarity"])
 
-    needed = max(SCOPE_MIN_HITS, math.ceil(len(hits) * SCOPE_SHARE))
-    detected = [scope for scope, count in counts.items() if count >= needed]
+    detected = []
+    for scope, count in counts.items():
+        if count < SCOPE_MIN_HITS:
+            continue
+        expected = held.get(scope, 0) / total
+        if expected and (count / len(hits)) / expected >= SCOPE_LIFT:
+            detected.append(scope)
+
     # Ordered by how well the scope's own best memory answered, so a caller
     # that takes only the first takes the strongest rather than an arbitrary one.
     return sorted(detected, key=lambda s: -best[s])
