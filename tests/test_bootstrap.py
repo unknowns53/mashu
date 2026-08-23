@@ -250,3 +250,57 @@ def test_bootstrap_never_reaches_for_the_model(cur, push, monkeypatch):
 
     monkeypatch.setattr(mashu.embed, "get_embedder", refuse)
     assert bootstrap.session_bootstrap(cur, actor="claude").startup
+
+
+# --------------------------------------------------------------------------
+# the ceiling holds wherever a version is adopted, not only where it is pushed
+# --------------------------------------------------------------------------
+def test_a_current_state_that_would_burst_its_scope_pack_cannot_be_adopted(cur, scope_id, write):
+    """A pushed memory bursts the pack by growing, not only by being promoted."""
+    memory_id, first = write(MemoryType.STATE, "where things stand", "short enough")
+    assert store.get_entity(cur, memory_id)["delivery"] == str(Delivery.SCOPE_REQUIRED)
+
+    with pytest.raises(DeliveryError, match="over 2000"):
+        store.add_version(
+            cur,
+            memory_id=memory_id,
+            content="word " * 3000,
+            source_type=SourceType.USER,
+            created_by="user",
+            actor="user",
+            based_on_version=first,
+            adopt=True,
+        )
+
+    assert store.get_entity(cur, memory_id)["active_version"] == first
+
+
+def test_the_same_length_is_fine_when_nothing_pushes_it(cur, scope_id, write):
+    """Only what a session is handed unasked is bounded; the rest is pulled."""
+    memory_id, first = write(MemoryType.FACT, "a long fact", "short enough")
+    assert store.get_entity(cur, memory_id)["delivery"] == str(Delivery.PULL_ONLY)
+
+    store.add_version(
+        cur,
+        memory_id=memory_id,
+        content="word " * 3000,
+        source_type=SourceType.USER,
+        created_by="user",
+        actor="user",
+        based_on_version=first,
+        adopt=True,
+    )
+    assert store.get_entity(cur, memory_id)["active_version"] != first
+
+
+def test_one_scope_state_does_not_count_against_another(cur, scope_id, write):
+    """scope_required is measured against the pack a session in that scope gets."""
+    other = store.create_scope(cur, name="another scope", actor="user")
+    write(MemoryType.STATE, "the other scope stands here", "word " * 300, scope=other)
+
+    memory_id, _ = write(MemoryType.STATE, "this scope stands here", "word " * 300)
+    entity = store.get_entity(cur, memory_id)
+    assert entity["active_version"] is not None
+
+    fits, cost = bootstrap.would_fit(cur, scope_id=scope_id)
+    assert fits, cost

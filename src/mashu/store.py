@@ -697,6 +697,40 @@ def _set_latest(cur: psycopg.Cursor, memory_id: UUID, version_id: UUID) -> None:
     )
 
 
+def _check_still_fits(cur: psycopg.Cursor, *, entity: dict, version_id: UUID) -> None:
+    """Refuse to adopt a version that would burst the session-start pack (21.2).
+
+    The check belongs on the pointer rather than on the delivery setting,
+    because a memory that is already pushed bursts the pack by growing, not by
+    being promoted. Every route to adopting a version runs through here, which
+    is the only way the ceiling holds against all of them.
+
+    Handing it back is the point. Section 21.2 refuses to trim a pushed memory
+    down to its title, because what would be dropped is exactly the standing
+    rule the session was going to be told, and nobody would see it go.
+    """
+    from mashu import bootstrap
+
+    delivery = Delivery(entity["delivery"])
+    if delivery is Delivery.PULL_ONLY:
+        return
+
+    version = get_version(cur, version_id)
+    scope_id = entity["scope_id"] if delivery is Delivery.SCOPE_REQUIRED else None
+    fits, cost = bootstrap.would_fit(
+        cur,
+        memory_id=entity["memory_id"],
+        content=version["directive"] or version["content"],
+        scope_id=scope_id,
+    )
+    if not fits:
+        raise DeliveryError(
+            f"adopting this version puts the {delivery} pack at {cost} token, over "
+            f"{bootstrap.BOOTSTRAP_TOKEN_BUDGET}; shorten it, give it a directive, "
+            f"or move something out of the pack first"
+        )
+
+
 def _point_active_at(
     cur: psycopg.Cursor,
     *,
@@ -710,6 +744,8 @@ def _point_active_at(
     previous = entity["active_version"]
     if previous == version_id:
         return
+
+    _check_still_fits(cur, entity=entity, version_id=version_id)
 
     if previous is not None:
         previous_status = VersionStatus(get_version(cur, previous)["status"])

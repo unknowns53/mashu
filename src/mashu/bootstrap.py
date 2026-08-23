@@ -228,15 +228,21 @@ def would_fit(
     *,
     memory_id: UUID | None = None,
     content: str | None = None,
+    scope_id: UUID | None = None,
     budget: int = BOOTSTRAP_TOKEN_BUDGET,
 ) -> tuple[bool, int]:
-    """Whether the startup pack still fits, optionally with one memory changed.
+    """Whether the pushed pack still fits, optionally with one memory changed.
 
     Trimming an over-budget pack down to titles is not the same as keeping it
     inside the budget, because what gets trimmed is exactly the standing rules
     the session was going to be told. A pack that has to be trimmed has already
     failed; the place to catch that is where the change that would cause it is
     being approved, while there is still someone to hand it back to.
+
+    scope_id adds that scope's scope_required memories, which is the pack a
+    session working in it actually receives. Without it this measured only the
+    part of the pack that is the same for everyone, and a current state is
+    never in that part.
     """
     cur.execute(_SCOPE_INDEX_SQL)
     index = [
@@ -244,6 +250,9 @@ def would_fit(
     ]
     cur.execute(_PUSHED_SQL, {"scopes": None, "delivery": str(Delivery.STARTUP_REQUIRED)})
     pack = [dict(row) for row in cur.fetchall()]
+    if scope_id is not None:
+        cur.execute(_PUSHED_SQL, {"scopes": [scope_id], "delivery": str(Delivery.SCOPE_REQUIRED)})
+        pack += [dict(row) for row in cur.fetchall()]
 
     if memory_id is not None:
         for row in pack:
