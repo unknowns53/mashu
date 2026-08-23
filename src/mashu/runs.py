@@ -408,10 +408,17 @@ def _warning(row: dict[str, Any]) -> str:
 
 
 def _finish(cur, run_id, state, model, inp, out, note, error) -> dict[str, Any]:
+    # coalesce, not assignment. The counters are accumulated by spend() as each
+    # model call happens, and a windowed run finishes with nothing more to add;
+    # writing NULL over them at the end would erase the whole bill for exactly
+    # the long sessions the daily budget exists to bound.
     cur.execute(
         """
         UPDATE extraction_run
-        SET state = %s, model = %s, input_tokens = %s, output_tokens = %s,
+        SET state = %s,
+            model = coalesce(%s, model),
+            input_tokens = coalesce(%s, input_tokens),
+            output_tokens = coalesce(%s, output_tokens),
             note = %s, last_error = %s, completed_at = now(), next_retry_at = NULL
         WHERE run_id = %s
         RETURNING *

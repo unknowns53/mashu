@@ -670,6 +670,37 @@ def test_every_window_is_charged_as_it_happens(cur, tmp_path, queued, route, mon
     assert runs.spent_today(cur) >= row["input_tokens"]
 
 
+def test_the_bill_survives_the_run_finishing(cur, tmp_path, queued, route, monkeypatch):
+    """The counters are accumulated per call; the closing write must not erase
+    them, or the longest sessions report the smallest bills."""
+    monkeypatch.setattr(worker, "MAX_INPUT_TOKENS", 200)
+    long_turns = [
+        {
+            "type": "user",
+            "sessionId": "s-1",
+            "cwd": "/work/proj",
+            "message": {"content": f"{n} 番目 " + "本文 " * 80},
+        }
+        for n in range(3)
+    ]
+    run = queued(write_claude(tmp_path, long_turns))
+    stub = extract.StubExtractor(answer())
+    state = "windowed"
+    while state == "windowed":
+        claimed = runs.claim(cur, limit=1)
+        if not claimed:
+            break
+        state = worker.process(cur, claimed[0], extractor=stub).state
+
+    cur.execute(
+        "SELECT state, input_tokens FROM extraction_run WHERE run_id = %s", (run["run_id"],)
+    )
+    row = cur.fetchone()
+    assert row["state"] == "succeeded"
+    assert row["input_tokens"] and row["input_tokens"] > 0
+    assert len(stub.prompts) >= 2
+
+
 def test_the_transcript_is_fenced_as_data_rather_than_pasted_in(cur, tmp_path, queued, route):
     """A log carries whatever the session read; a heading inside it is
     otherwise indistinguishable from a heading of ours."""
