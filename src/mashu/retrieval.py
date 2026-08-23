@@ -15,11 +15,12 @@ So the three layers differ in what they hand over, not merely in order.
   agent to treat it as current, which is what the active version filter exists
   to prevent
 
-Layer 2 is capped twice (21.1). The absolute cap is a token budget. The
-relative cap keeps layer 2 no larger than layer 1, and it is there for the
-tag rather than the budget: a tag only changes behaviour while untagged
-material sits beside it, so a context that is mostly unreviewed makes the tag
-meaningless whichever way the agent reads it.
+Layer 2 is capped once, by a token budget (21.1). It used to be capped twice:
+a relative cap kept it no larger than layer 1, on the grounds that a tag only
+changes behaviour while untagged material sits beside it. v0.11 withdrew that,
+because it also emptied the layer whenever nothing was adopted, which made
+review the gate to use rather than the confirmation of quality. What it
+protected is measured afterwards as the tag ratio (27.3) instead of enforced.
 """
 
 from __future__ import annotations
@@ -46,6 +47,20 @@ LAYER2_TOKEN_BUDGET = 1500
 #: Cosine similarity a scope has to reach to be counted as detected.
 #: Similarity scales differ by model, so this is per model and provisional in
 #: the same way the entity resolution threshold is: 27.2 measures both.
+#: Deliberately above everything this mechanism produces, which is to say scope
+#: detection is off (27.2, tools/measure_thresholds.py). Measured against the
+#: real ledger, every query scored between 0.72 and 0.81 against every scope,
+#: and the ranking was wrong on four of seven queries: a query about
+#: delegation ranked two unrelated scopes above the one that holds the
+#: delegation rules, and a query about the weather scored 0.759, inside the
+#: range the real matches occupy.
+#:
+#: Matching a query against a scope's name and one-line description does not
+#: work here. Tuning the number would only make it fire wrongly, so it stays
+#: high on purpose and detect_scopes returns nothing, which the caller already
+#: reads as "search everything" — the safe direction. The repair is to detect a
+#: scope from the memories it holds rather than from its label, and that is a
+#: design change, not a constant.
 SCOPE_MATCH_THRESHOLDS = {
     "intfloat/multilingual-e5-large": 0.85,
     "hashing": 0.50,

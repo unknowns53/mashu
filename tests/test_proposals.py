@@ -435,3 +435,144 @@ def test_types_the_section_does_not_name_still_sort_by_grounds(cur, scope_id, se
         MemoryType.DECISION,
         MemoryType.TASK,
     ]
+
+
+def test_an_auto_committed_task_completion_actually_completes_it(cur, scope_id):
+    """Section 17 puts a simple task completion on the auto line.
+
+    The proposal used to be marked auto_committed while the version did not
+    move, which is section 1's "a finished task is treated as unfinished"
+    produced by the thing built to prevent it.
+    """
+    memory_id, version_id = store.create_entity(
+        cur,
+        scope_id=scope_id,
+        type=MemoryType.TASK,
+        title="rerun the sweep once the guard is in",
+        content="carried over because the next session would proceed on the old numbers",
+        source_type=SourceType.AGENT,
+        created_by="claude",
+        actor="claude",
+        adopt=True,
+    )
+
+    result = proposals.propose(
+        cur,
+        actor="claude",
+        operation=ProposalOperation.CHANGE_STATUS,
+        payload={
+            "version_id": str(version_id),
+            "status": str(VersionStatus.COMPLETED),
+            "reason": "the sweep finished and the numbers are in",
+        },
+        target_memory=memory_id,
+    )
+
+    assert result["proposal"]["status"] == "auto_committed"
+    assert store.get_version(cur, version_id)["status"] == str(VersionStatus.COMPLETED)
+    assert store.get_entity(cur, memory_id)["active_version"] == version_id
+
+
+def test_a_status_change_that_waits_does_not_move_the_version(cur, scope_id):
+    """Only the auto line writes at propose time; the rest waits for the review."""
+    memory_id, version_id = store.create_entity(
+        cur,
+        scope_id=scope_id,
+        type=MemoryType.FACT,
+        title="the probe reports the enemy column",
+        content="read as the friendly column for two sessions",
+        source_type=SourceType.AGENT,
+        created_by="claude",
+        actor="claude",
+        adopt=True,
+    )
+
+    result = proposals.propose(
+        cur,
+        actor="claude",
+        operation=ProposalOperation.CHANGE_STATUS,
+        payload={
+            "version_id": str(version_id),
+            "status": str(VersionStatus.DISPROVEN),
+            "reason": "the column belongs to the other side",
+        },
+        target_memory=memory_id,
+    )
+
+    assert result["proposal"]["status"] == "pending"
+    assert store.get_version(cur, version_id)["status"] == str(VersionStatus.CANDIDATE)
+
+
+def test_a_rejected_idea_worded_differently_still_comes_back_with_its_reason(cur, scope_id):
+    """Specification 15.1's stated purpose, which an exact title test could not serve.
+
+    A rejection the proposer never learns about is one it walks into again,
+    and an extraction running unattended words the same insight differently
+    every night.
+    """
+    first = proposals.propose(
+        cur,
+        actor="claude",
+        operation=ProposalOperation.CREATE,
+        payload={
+            "scope_id": str(scope_id),
+            "type": str(MemoryType.FACT),
+            "title": "the enclosure bridge chip times out",
+            "content": "the drive drops off the bus under load",
+            "source_type": str(SourceType.AGENT),
+        },
+    )
+    proposals.reject(
+        cur,
+        first["proposal"]["proposal_id"],
+        reviewer="user",
+        reason="the bridge chip is fine; the enclosure loses power",
+    )
+
+    with pytest.raises(DuplicateProposalError) as caught:
+        proposals.propose(
+            cur,
+            actor="claude",
+            operation=ProposalOperation.CREATE,
+            payload={
+                "scope_id": str(scope_id),
+                "type": str(MemoryType.FACT),
+                "title": "the enclosure bridge chip times out under load",
+                "content": "a second run of the same reading",
+                "source_type": str(SourceType.AGENT),
+            },
+            allow_similar=True,
+        )
+
+    turned_down = caught.value.rejected
+    assert len(turned_down) == 1
+    assert turned_down[0]["decision_reason"] == "the bridge chip is fine; the enclosure loses power"
+
+
+def test_an_unrelated_title_in_the_same_scope_is_not_a_duplicate(cur, scope_id):
+    proposals.propose(
+        cur,
+        actor="claude",
+        operation=ProposalOperation.CREATE,
+        payload={
+            "scope_id": str(scope_id),
+            "type": str(MemoryType.FACT),
+            "title": "the enclosure bridge chip times out",
+            "content": "the drive drops off the bus under load",
+            "source_type": str(SourceType.AGENT),
+        },
+    )
+    result = proposals.propose(
+        cur,
+        actor="claude",
+        operation=ProposalOperation.CREATE,
+        payload={
+            "scope_id": str(scope_id),
+            "type": str(MemoryType.PREFERENCE),
+            "title": "read the echo line before reading the numbers",
+            "content": "the probe prints what it was given before it prints results",
+            "source_type": str(SourceType.AGENT),
+        },
+        allow_similar=True,
+    )
+    assert result["proposal"]["status"] == "pending"

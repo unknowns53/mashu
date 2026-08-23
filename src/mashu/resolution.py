@@ -29,10 +29,22 @@ from mashu.errors import MashuError
 
 THRESHOLD_ENV_VAR = "MASHU_RESOLUTION_THRESHOLD"
 
-#: Placeholders until 27.2 measures them. Similarity scales differ by model,
-#: so a single number across models would be wrong for all but one of them.
+#: Measured, not guessed (27.2, tools/measure_thresholds.py). Against the real
+#: store the same-scope pairs of distinct concepts run to a maximum of 0.921,
+#: and ten rewordings of real titles run from 0.891 up. The two overlap, so no
+#: value separates them and the number is a choice about which error to make.
+#:
+#: The sweep: 0.89 catches all ten rewordings and flags 11 of 1046 real pairs,
+#: 0.90 catches eight and flags five, 0.94 catches one and flags none. The
+#: placeholder was 0.94, which is to say it was off.
+#:
+#: 0.90 is taken because a missed duplicate compounds — the store fragments and
+#: the same knowledge sits under two titles — while a false flag costs one
+#: decision and, at 0.90, lands on pairs that read as genuinely adjacent. It
+#: wants revisiting once something decides what an unattended capture does with
+#: a flag, since that is what sets the price of the flag.
 PROVISIONAL_THRESHOLDS = {
-    "intfloat/multilingual-e5-large": 0.94,
+    "intfloat/multilingual-e5-large": 0.90,
     "hashing": 0.60,
 }
 FALLBACK_THRESHOLD = 0.90
