@@ -15,11 +15,12 @@ So the three layers differ in what they hand over, not merely in order.
   agent to treat it as current, which is what the active version filter exists
   to prevent
 
-Layer 2 is capped twice (21.1). The absolute cap is a token budget. The
-relative cap keeps layer 2 no larger than layer 1, and it is there for the
-tag rather than the budget: a tag only changes behaviour while untagged
-material sits beside it, so a context that is mostly unreviewed makes the tag
-meaningless whichever way the agent reads it.
+Layer 2 is capped once, by a token budget (21.1). It used to be capped twice:
+a relative cap kept it no larger than layer 1, on the grounds that a tag only
+changes behaviour while untagged material sits beside it. v0.11 withdrew that,
+because it also emptied the layer whenever nothing was adopted, which made
+review the gate to use rather than the confirmation of quality. What it
+protected is measured afterwards as the tag ratio (27.3) instead of enforced.
 """
 
 from __future__ import annotations

@@ -280,6 +280,7 @@ def test_a_caller_cannot_skip_the_similarity_check(call, scope):
     )
     call("memory_propose", operation="create", payload=first)
 
+    # allow_duplicate gets past 15.1, so what stops this is section 20 alone.
     answer = call(
         "memory_propose",
         operation="create",
@@ -289,6 +290,7 @@ def test_a_caller_cannot_skip_the_similarity_check(call, scope):
             content="a second reading",
             entity_status="active",
         ),
+        allow_duplicate=True,
     )
     assert answer["ok"] is False
     assert "allow_similar" in answer["error"]

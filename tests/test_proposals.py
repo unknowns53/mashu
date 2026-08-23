@@ -501,3 +501,78 @@ def test_a_status_change_that_waits_does_not_move_the_version(cur, scope_id):
 
     assert result["proposal"]["status"] == "pending"
     assert store.get_version(cur, version_id)["status"] == str(VersionStatus.CANDIDATE)
+
+
+def test_a_rejected_idea_worded_differently_still_comes_back_with_its_reason(cur, scope_id):
+    """Specification 15.1's stated purpose, which an exact title test could not serve.
+
+    A rejection the proposer never learns about is one it walks into again,
+    and an extraction running unattended words the same insight differently
+    every night.
+    """
+    first = proposals.propose(
+        cur,
+        actor="claude",
+        operation=ProposalOperation.CREATE,
+        payload={
+            "scope_id": str(scope_id),
+            "type": str(MemoryType.FACT),
+            "title": "the enclosure bridge chip times out",
+            "content": "the drive drops off the bus under load",
+            "source_type": str(SourceType.AGENT),
+        },
+    )
+    proposals.reject(
+        cur,
+        first["proposal"]["proposal_id"],
+        reviewer="user",
+        reason="the bridge chip is fine; the enclosure loses power",
+    )
+
+    with pytest.raises(DuplicateProposalError) as caught:
+        proposals.propose(
+            cur,
+            actor="claude",
+            operation=ProposalOperation.CREATE,
+            payload={
+                "scope_id": str(scope_id),
+                "type": str(MemoryType.FACT),
+                "title": "the enclosure bridge chip times out under load",
+                "content": "a second run of the same reading",
+                "source_type": str(SourceType.AGENT),
+            },
+            allow_similar=True,
+        )
+
+    turned_down = caught.value.rejected
+    assert len(turned_down) == 1
+    assert turned_down[0]["decision_reason"] == "the bridge chip is fine; the enclosure loses power"
+
+
+def test_an_unrelated_title_in_the_same_scope_is_not_a_duplicate(cur, scope_id):
+    proposals.propose(
+        cur,
+        actor="claude",
+        operation=ProposalOperation.CREATE,
+        payload={
+            "scope_id": str(scope_id),
+            "type": str(MemoryType.FACT),
+            "title": "the enclosure bridge chip times out",
+            "content": "the drive drops off the bus under load",
+            "source_type": str(SourceType.AGENT),
+        },
+    )
+    result = proposals.propose(
+        cur,
+        actor="claude",
+        operation=ProposalOperation.CREATE,
+        payload={
+            "scope_id": str(scope_id),
+            "type": str(MemoryType.PREFERENCE),
+            "title": "read the echo line before reading the numbers",
+            "content": "the probe prints what it was given before it prints results",
+            "source_type": str(SourceType.AGENT),
+        },
+        allow_similar=True,
+    )
+    assert result["proposal"]["status"] == "pending"

@@ -75,9 +75,16 @@ def find_duplicate_proposals(
     proposal table records.
 
     For a change to an existing entity the test is exact: same target. For a
-    creation there is no target yet, so the test is on the title within the
-    scope. Entity resolution (20) is what catches a differently worded rival;
-    this check catches the proposer repeating itself.
+    creation there is no target yet, so the test is on how close the title is
+    to one already proposed in that scope, at the same threshold entity
+    resolution uses (15.1, 20).
+
+    Comparing the strings instead, which is what this did until v0.11, made the
+    check useless for the case section 15.1 says matters most. A proposer that
+    words a rejected idea differently the second time gets no reason back, and
+    an extraction that runs unattended phrases the same insight differently
+    every night, so an exact test would let one rejected idea return
+    indefinitely at the cost of a review each time.
     """
     if target_memory is not None:
         cur.execute(
@@ -95,19 +102,32 @@ def find_duplicate_proposals(
 
     if scope_id is None or title is None:
         return []
+    # The entity a create proposal made carries the embedding, so nothing has
+    # to be stored on the proposal itself. An exact title still counts even
+    # when the entity is gone, which keeps rows written before this changed.
     cur.execute(
         """
-        SELECT proposal_id, actor, operation, payload, status, decision_reason,
-               created_at, decided_at,
-               EXTRACT(DAY FROM now() - created_at)::int AS days_pending
-        FROM proposal
-        WHERE status IN ('pending', 'rejected')
-          AND operation = 'create'
-          AND payload ->> 'scope_id' = %s
-          AND payload ->> 'title' = %s
-        ORDER BY created_at
+        SELECT p.proposal_id, p.actor, p.operation, p.payload, p.status,
+               p.decision_reason, p.created_at, p.decided_at,
+               EXTRACT(DAY FROM now() - p.created_at)::int AS days_pending
+        FROM proposal p
+        LEFT JOIN memory_entity e ON e.memory_id = p.target_memory
+        WHERE p.status IN ('pending', 'rejected')
+          AND p.operation = 'create'
+          AND p.payload ->> 'scope_id' = %(scope_id)s
+          AND (
+                p.payload ->> 'title' = %(title)s
+             OR (e.title_embedding IS NOT NULL
+                 AND 1 - (e.title_embedding <=> %(q)s::vector) >= %(threshold)s)
+          )
+        ORDER BY p.created_at
         """,
-        (str(scope_id), title),
+        {
+            "scope_id": str(scope_id),
+            "title": title,
+            "q": store.embed_text(title),
+            "threshold": resolution.threshold(),
+        },
     )
     return cur.fetchall()
 
