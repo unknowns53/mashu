@@ -27,6 +27,13 @@ MAX_ATTEMPTS = 3
 FAILED_WARNING_THRESHOLD = 1
 STALE_QUEUE_HOURS = 24
 
+#: After this, a run still marked running is taken to belong to a worker that
+#: died. Nothing else would ever move it: the process that owned it is gone, so
+#: without this the row sits in a state no query counts and the transcript is
+#: never read again — the silent failure this ledger exists to prevent, arriving
+#: through the ledger itself.
+STALE_RUNNING_HOURS = 2
+
 #: Input tokens capture may spend in one day (16.3). Over it, work is deferred
 #: rather than dropped: a transcript nobody read is knowledge that never
 #: arrives, and the ledger cannot tell that apart from a night with nothing to
@@ -104,13 +111,15 @@ def claim(cur: psycopg.Cursor, *, limit: int = 1) -> list[dict[str, Any]]:
             SELECT run_id FROM extraction_run
             WHERE (state = 'queued')
                OR (state = 'retrying' AND (next_retry_at IS NULL OR next_retry_at <= now()))
+               OR (state = 'running'
+                   AND created_at < now() - make_interval(hours => %s))
             ORDER BY seq
             LIMIT %s
             FOR UPDATE SKIP LOCKED
         )
         RETURNING *
         """,
-        (limit,),
+        (STALE_RUNNING_HOURS, limit),
     )
     return sorted(cur.fetchall(), key=lambda row: row["seq"])
 
@@ -193,6 +202,20 @@ def defer(cur: psycopg.Cursor, *, run_id: UUID, until_hours: int, note: str) -> 
     return row
 
 
+def unclaim(cur: psycopg.Cursor, *, run_id: UUID) -> None:
+    """Put a claimed run back untouched, without spending an attempt.
+
+    A dry run reads and measures and decides nothing, so leaving the row marked
+    running would strand it: no query counts that state and no later pass would
+    pick it up.
+    """
+    cur.execute(
+        "UPDATE extraction_run SET state = 'queued', attempts = greatest(attempts - 1, 0) "
+        "WHERE run_id = %s AND state = 'running'",
+        (run_id,),
+    )
+
+
 def advance(cur: psycopg.Cursor, *, run_id: UUID, checkpoint: int) -> None:
     """Move the mark without finishing the run (16.3).
 
@@ -248,7 +271,10 @@ def failed(cur: psycopg.Cursor, *, run_id: UUID, error: str) -> dict[str, Any]:
     if row["attempts"] >= MAX_ATTEMPTS:
         return _finish(cur, run_id, "failed", None, None, None, None, error)
 
-    backoff = 5 * (4 ** (row["attempts"] - 1))
+    # Integer minutes, and never a negative exponent: make_interval takes an
+    # int, and a run that failed before its attempt was counted would otherwise
+    # ask for a fractional wait and take down the recording of the failure.
+    backoff = 5 * (4 ** max(row["attempts"] - 1, 0))
     cur.execute(
         """
         UPDATE extraction_run
@@ -272,6 +298,8 @@ def health(cur: psycopg.Cursor) -> dict[str, Any]:
           count(*) FILTER (WHERE state = 'succeeded') AS succeeded,
           count(*) FILTER (WHERE state = 'skipped') AS skipped,
           count(*) FILTER (WHERE state = 'held') AS held,
+          count(*) FILTER (WHERE state = 'running'
+                       AND created_at < now() - make_interval(hours => 2)) AS stranded,
           EXTRACT(EPOCH FROM now() - min(created_at)
                   FILTER (WHERE state IN ('queued', 'retrying'))) / 3600 AS oldest_wait_hours
         FROM extraction_run
@@ -283,6 +311,7 @@ def health(cur: psycopg.Cursor) -> dict[str, Any]:
     row["ok"] = (
         row["failed"] < FAILED_WARNING_THRESHOLD
         and not row["held"]
+        and not row["stranded"]
         and (oldest is None or float(oldest) < STALE_QUEUE_HOURS)
     )
     row["warning"] = None if row["ok"] else _warning(row)
@@ -295,6 +324,11 @@ def _warning(row: dict[str, Any]) -> str:
         parts.append(f"{row['failed']} transcript(s) gave up after {MAX_ATTEMPTS} attempts")
     if row["oldest_wait_hours"] and row["oldest_wait_hours"] >= STALE_QUEUE_HOURS:
         parts.append(f"the oldest queued transcript has waited {row['oldest_wait_hours']}h")
+    if row.get("stranded"):
+        parts.append(
+            f"{row['stranded']} run(s) have been marked running for over "
+            f"{STALE_RUNNING_HOURS}h, which means a worker died holding them"
+        )
     if row.get("held"):
         parts.append(
             f"{row['held']} transcript(s) are held because their working directory maps to no scope"

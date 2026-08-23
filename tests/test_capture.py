@@ -567,3 +567,43 @@ def test_a_night_of_extraction_is_one_bundle_rather_than_loose_items(cur, tmp_pa
     assert len(bundles) == 1
     assert bundles[0]["session_id"] is not None
     assert bundles[0]["count"] == 2
+
+
+def test_the_sweeper_leaves_subagent_transcripts_alone(tmp_path, monkeypatch, committing_dsn):
+    """A sidechain is not a session; its records are dropped and the file arrives empty."""
+    root = tmp_path / "projects" / "proj"
+    (root / "subagents").mkdir(parents=True)
+    write_claude(root, name="parent.jsonl")
+    write_claude(root / "subagents", name="agent-1.jsonl")
+
+    found = worker.sweep(committing_dsn, roots={"claude": str(tmp_path / "projects")})
+    assert [r["transcript_path"] for r in found] == [str(root / "parent.jsonl")]
+
+
+def test_a_dry_run_gives_the_claim_back_instead_of_stranding_it(cur, tmp_path, queued, route):
+    """No query counts a running row, so one left behind is never read again."""
+    run = queued(write_claude(tmp_path))
+    cur.execute(
+        "UPDATE extraction_run SET state = 'running', attempts = 1 WHERE run_id = %s",
+        (run["run_id"],),
+    )
+    got = worker.process(cur, run, extractor=extract.StubExtractor(answer()), dry_run=True)
+
+    assert got.state == "dry-run"
+    cur.execute("SELECT state, attempts FROM extraction_run WHERE run_id = %s", (run["run_id"],))
+    assert cur.fetchone() == {"state": "queued", "attempts": 0}
+
+
+def test_a_worker_that_died_holding_a_run_does_not_hide_it_forever(cur, tmp_path, queued):
+    """The one silent failure the ledger could produce by itself."""
+    run = queued(write_claude(tmp_path))
+    cur.execute(
+        "UPDATE extraction_run SET state = 'running', "
+        "created_at = now() - interval '6 hours' WHERE run_id = %s",
+        (run["run_id"],),
+    )
+    state = runs.health(cur)
+    assert state["stranded"] == 1
+    assert not state["ok"]
+    assert "a worker died holding them" in state["warning"]
+    assert [r["run_id"] for r in runs.claim(cur, limit=1)] == [run["run_id"]]

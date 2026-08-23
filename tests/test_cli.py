@@ -1018,3 +1018,6 @@ def test_a_route_is_stated_and_a_held_transcript_is_released_when_it_appears(
     code, out = run("route", "--add", "/tmp/routed", "--scope", name)
     assert code == 0
     assert "released 1 held transcript" in out
+
+    with transaction(test_dsn) as cur:
+        cur.execute("DELETE FROM extraction_run WHERE run_id = %s", (held["run_id"],))

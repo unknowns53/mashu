@@ -165,6 +165,7 @@ def process(
         return Outcome(run_id, "deferred", note)
 
     if dry_run:
+        runs.unclaim(cur, run_id=run_id)
         return Outcome(run_id, "dry-run", f"{estimated} input token, {len(active)} active")
 
     answer = extractor.run(prompt)
@@ -537,6 +538,13 @@ TRANSCRIPT_ROOTS = {
     "codex": "~/.codex/sessions",
 }
 
+#: Path components whose files are not sessions in their own right. A subagent
+#: transcript is a sidechain of the session that spawned it: the reader drops
+#: those records, so the file arrives empty, and enqueueing it buys a ledger row
+#: and a skip for something that was never going to be read. What the subagent
+#: concluded reaches the extraction through its parent's transcript.
+NOT_A_SESSION = ("subagents",)
+
 
 def sweep(
     dsn: str | None = None,
@@ -563,6 +571,8 @@ def sweep(
         for path in sorted(base.rglob("*.jsonl"), key=lambda p: -p.stat().st_mtime)[:limit]:
             if path.stat().st_mtime < cutoff:
                 break
+            if any(part in NOT_A_SESSION for part in path.parts):
+                continue
             try:
                 session = transcript.read(path, source_cli=cli)
             except OSError:
