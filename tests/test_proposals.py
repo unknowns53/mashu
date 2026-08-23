@@ -435,3 +435,69 @@ def test_types_the_section_does_not_name_still_sort_by_grounds(cur, scope_id, se
         MemoryType.DECISION,
         MemoryType.TASK,
     ]
+
+
+def test_an_auto_committed_task_completion_actually_completes_it(cur, scope_id):
+    """Section 17 puts a simple task completion on the auto line.
+
+    The proposal used to be marked auto_committed while the version did not
+    move, which is section 1's "a finished task is treated as unfinished"
+    produced by the thing built to prevent it.
+    """
+    memory_id, version_id = store.create_entity(
+        cur,
+        scope_id=scope_id,
+        type=MemoryType.TASK,
+        title="rerun the sweep once the guard is in",
+        content="carried over because the next session would proceed on the old numbers",
+        source_type=SourceType.AGENT,
+        created_by="claude",
+        actor="claude",
+        adopt=True,
+    )
+
+    result = proposals.propose(
+        cur,
+        actor="claude",
+        operation=ProposalOperation.CHANGE_STATUS,
+        payload={
+            "version_id": str(version_id),
+            "status": str(VersionStatus.COMPLETED),
+            "reason": "the sweep finished and the numbers are in",
+        },
+        target_memory=memory_id,
+    )
+
+    assert result["proposal"]["status"] == "auto_committed"
+    assert store.get_version(cur, version_id)["status"] == str(VersionStatus.COMPLETED)
+    assert store.get_entity(cur, memory_id)["active_version"] == version_id
+
+
+def test_a_status_change_that_waits_does_not_move_the_version(cur, scope_id):
+    """Only the auto line writes at propose time; the rest waits for the review."""
+    memory_id, version_id = store.create_entity(
+        cur,
+        scope_id=scope_id,
+        type=MemoryType.FACT,
+        title="the probe reports the enemy column",
+        content="read as the friendly column for two sessions",
+        source_type=SourceType.AGENT,
+        created_by="claude",
+        actor="claude",
+        adopt=True,
+    )
+
+    result = proposals.propose(
+        cur,
+        actor="claude",
+        operation=ProposalOperation.CHANGE_STATUS,
+        payload={
+            "version_id": str(version_id),
+            "status": str(VersionStatus.DISPROVEN),
+            "reason": "the column belongs to the other side",
+        },
+        target_memory=memory_id,
+    )
+
+    assert result["proposal"]["status"] == "pending"
+    assert store.get_version(cur, version_id)["status"] == str(VersionStatus.CANDIDATE)

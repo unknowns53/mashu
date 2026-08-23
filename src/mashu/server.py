@@ -39,7 +39,7 @@ import psycopg
 
 from mashu import bootstrap, db, proposals, resolution, retrieval, store
 from mashu.errors import DuplicateProposalError, MashuError
-from mashu.models import MemoryType, ProposalOperation, VersionStatus
+from mashu.models import MemoryType, ProposalOperation, SourceType, VersionStatus
 
 #: The identity the client was configured with. Set it in the MCP client's own
 #: configuration, one entry per agent, so that the event log names which agent
@@ -98,6 +98,31 @@ def _failure(error: MashuError, **extra: Any) -> dict[str, Any]:
     is data, so it comes back as data.
     """
     return _plain({"ok": False, "error": str(error), **extra})
+
+
+def _from_agent(payload: dict[str, Any]) -> dict[str, Any]:
+    """Strip the fields a caller must not be able to set for itself.
+
+    Two of them, and both decide which commit line the change takes.
+
+    source_type is the whole of the preference rule in section 17: a preference
+    the user stated is applied at once, and one an agent inferred waits for a
+    review. A caller that can label its own proposal user-stated can hand
+    itself the standing instructions every later session follows, which is the
+    hole the gate was changed to close. The user's own words come in through
+    the command line, where a person typed them.
+
+    entity_status is the entity resolution check of section 20: propose only
+    runs it when the payload does not already carry a status, so a caller that
+    sets one skips the similarity test and never becomes provisional.
+
+    An agent with a shell can still write to the store directly, and nothing
+    here changes that. What this fixes is the declared interface, which is the
+    surface every other agent is told to use.
+    """
+    return {k: v for k, v in payload.items() if k not in ("source_type", "entity_status")} | {
+        "source_type": str(SourceType.AGENT)
+    }
 
 
 def build_server() -> Any:
@@ -247,6 +272,11 @@ def build_server() -> Any:
         proposal already exists, or that a similar entity does, comes back with
         what was found; look at it, and pass allow_duplicate or allow_similar
         only if it really is different.
+
+        source_type is set here, not taken from the caller: everything proposed
+        through this tool is from an agent. Relaying something the user said
+        does not make it user-stated, because a claim about who said it is
+        exactly what an injected instruction would make.
         """
         with db.transaction() as cur:
             try:
@@ -254,7 +284,7 @@ def build_server() -> Any:
                     cur,
                     actor=actor(),
                     operation=ProposalOperation(operation),
-                    payload=payload,
+                    payload=_from_agent(payload),
                     target_memory=UUID(memory_id) if memory_id else None,
                     based_on_version=UUID(based_on_version) if based_on_version else None,
                     session_id=session(cur),

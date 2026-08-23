@@ -534,12 +534,17 @@ def _rule(
     )
 
 
+def _as_uuid(value: UUID | str) -> UUID:
+    """A payload id, which is a string once it has been through JSONB."""
+    return value if isinstance(value, UUID) else UUID(str(value))
+
+
 def _evidence(payload: dict[str, Any]) -> list[UUID] | None:
     """Read the grounds a proposal names, which arrive as strings through JSONB."""
     raw = payload.get("evidence")
     if not raw:
         return None
-    return [item if isinstance(item, UUID) else UUID(str(item)) for item in raw]
+    return [_as_uuid(item) for item in raw]
 
 
 def _write_now(
@@ -579,6 +584,23 @@ def _write_now(
             (store.get_version(cur, version_id)["memory_id"], proposal["proposal_id"]),
         )
         return version_id
+
+    if operation is ProposalOperation.CHANGE_STATUS:
+        # Section 17 puts a simple task completion on the auto line, and a
+        # status change the user states lands there too. Without this the
+        # proposal was marked auto_committed and the version did not move,
+        # which is section 1's "a finished task is treated as unfinished"
+        # produced by the thing built to prevent it.
+        if not adopt:
+            return None
+        store.set_status(
+            cur,
+            version_id=_as_uuid(payload["version_id"]),
+            target=VersionStatus(payload["status"]),
+            actor=actor,
+            reason=payload["reason"],
+        )
+        return None
 
     if operation is ProposalOperation.UPDATE_VERSION:
         if ruling.decision is CommitDecision.HUMAN_REVIEW:
