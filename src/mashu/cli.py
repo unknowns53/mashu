@@ -126,6 +126,7 @@ def cmd_show(args) -> int:
             print(f"\nentity     {entity['title']}  [{entity['type']}, {entity['status']}]")
             print("\nproposed:")
             print(_wrap(version["content"]))
+            _print_grounds(cur, version["version_id"])
             if entity["active_version"] and entity["active_version"] != version["version_id"]:
                 current = store.get_version(cur, entity["active_version"])
                 print("\ncurrently active:")
@@ -135,6 +136,21 @@ def cmd_show(args) -> int:
             for key, value in proposal["payload"].items():
                 print(f"    {key}: {value}")
     return 0
+
+
+def _print_grounds(cur, version_id) -> None:
+    """List what a version says it rests on (14, 19).
+
+    A summary that may say only what its references say cannot be reviewed
+    without them in front of the reader.
+    """
+    grounds = store.evidence_for(cur, version_id)
+    if not grounds:
+        return
+    print(f"\nresting on ({len(grounds)}):")
+    for row in grounds:
+        standing = row["version_status"] or "nothing adopted yet"
+        print(f"    {_short(row['memory_id'])}  [{row['type']}] {row['title']}  ({standing})")
 
 
 def _show_bundle(cur, prefix: str) -> int:
@@ -460,20 +476,26 @@ def cmd_evidence(args) -> int:
     with transaction(args.dsn) as cur:
         entity = _resolve_entity(cur, args.memory)
         cur.execute(
-            "SELECT active_version FROM memory_entity WHERE memory_id = %s",
+            "SELECT active_version, latest_version FROM memory_entity WHERE memory_id = %s",
             (entity["memory_id"],),
         )
-        active = cur.fetchone()["active_version"]
+        row = cur.fetchone()
+        # A memory under review has no active version, and its grounds are
+        # exactly what the reviewer needs; falling back to the latest is not a
+        # loosening, because this reads edges and never content.
+        reading = row["active_version"] or row["latest_version"]
+        which = "active" if row["active_version"] else "awaiting review"
 
         print(f"{_short(entity['memory_id'])}  {entity['title']}\n")
 
-        grounds = store.evidence_for(cur, active) if active else []
-        print(f"rests on ({len(grounds)})")
-        for row in grounds:
-            standing = row["version_status"] or "no active version"
-            print(f"  {_short(row['memory_id'])}  [{row['type']}] {row['title']}  ({standing})")
-        if active is None:
-            print("  (nothing active to read grounds from)")
+        grounds = store.evidence_for(cur, reading) if reading else []
+        print(f"rests on ({len(grounds)}, read from the {which} version)")
+        for ground in grounds:
+            standing = ground["version_status"] or "nothing adopted yet"
+            print(
+                f"  {_short(ground['memory_id'])}  [{ground['type']}] "
+                f"{ground['title']}  ({standing})"
+            )
 
         dependants = store.resting_on(cur, entity["memory_id"])
         print(f"\nsupports ({len(dependants)})")

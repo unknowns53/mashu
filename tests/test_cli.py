@@ -495,9 +495,47 @@ def test_evidence_shows_both_directions(run, test_dsn, committed_scope, tmp_path
 
     code, out = run("evidence", ground_id[:8])
     assert code == 0
-    assert "rests on (0)" in out
+    assert "rests on (0" in out
     assert "supports (1)" in out
     assert "current state" in out
+
+
+def test_the_grounds_are_readable_while_the_state_is_still_waiting(
+    run, test_dsn, committed_scope, tmp_path
+):
+    """A summary that may say only what its references say cannot be reviewed
+    without them, and under review it has no active version to read them from."""
+    ground = _propose(test_dsn, committed_scope, "the measurement", "eight seeds")
+    ground_id = str(ground["target_memory"])
+
+    draft = tmp_path / "state.md"
+    draft.write_text("what the measurement means", "utf-8")
+    _, out = run(
+        "state",
+        str(draft),
+        "--scope",
+        _scope_name(test_dsn, committed_scope),
+        "--title",
+        "current state",
+        "--evidence",
+        ground_id[:8],
+    )
+    proposal_id = out.split("proposal ")[1].split()[0]
+
+    _, shown = run("show", proposal_id)
+    assert "resting on (1)" in shown
+    assert "the measurement" in shown
+
+    with transaction(test_dsn) as cur:
+        cur.execute(
+            "SELECT memory_id FROM memory_entity WHERE scope_id = %s AND type = 'state'",
+            (committed_scope,),
+        )
+        state_id = str(cur.fetchone()["memory_id"])
+
+    _, listed = run("evidence", state_id[:8])
+    assert "awaiting review" in listed
+    assert "the measurement" in listed
 
 
 def test_redrafting_a_state_that_is_still_waiting_is_stopped(
