@@ -231,6 +231,68 @@ def test_import_places_a_file_of_memories_into_a_scope(run, test_dsn, committed_
     assert "source_reference" in out, "the item without an origin has to be reported"
 
 
+def test_an_import_run_is_one_bundle(run, test_dsn, committed_scope, tmp_path):
+    """18.1 has the reviewer rebuild context once per bundle.
+
+    Leaving a migration unattached puts every imported file into the single
+    unnamed bundle, whose size then grows with the store rather than with the
+    run, and the one thing the bundle was for is gone.
+    """
+    import json
+
+    with transaction(test_dsn) as cur:
+        cur.execute("SELECT name FROM scope WHERE scope_id = %s", (committed_scope,))
+        scope_name = cur.fetchone()["name"]
+
+    path = tmp_path / "run.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "type": "observation",
+                    "title": f"bundled import {i}",
+                    "content": f"the {i}th reading of the enclosure timing out",
+                    "source_reference": f"memory/run-{i}.md",
+                }
+                for i in range(3)
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    code, out = run("import", str(path), "--scope", scope_name)
+    assert code == 0
+    assert "bundle " in out
+
+    with transaction(test_dsn) as cur:
+        cur.execute(
+            "SELECT DISTINCT session_id FROM proposal "
+            "WHERE (payload ->> 'scope_id')::uuid = %s",
+            (committed_scope,),
+        )
+        sessions = [row["session_id"] for row in cur.fetchall()]
+    assert len(sessions) == 1
+    assert sessions[0] is not None
+
+
+def test_the_queue_shows_which_scope_each_proposal_landed_in(
+    run, test_dsn, committed_scope
+):
+    """The scope is the one decision review cannot revise.
+
+    Nothing moves an entity between scopes, so a reviewer who cannot see the
+    scope cannot check the only choice that will outlast their verdict.
+    """
+    _propose(test_dsn, committed_scope, "scope shown in the queue", "the ramp overshot")
+    with transaction(test_dsn) as cur:
+        cur.execute("SELECT name FROM scope WHERE scope_id = %s", (committed_scope,))
+        scope_name = cur.fetchone()["name"]
+
+    code, out = run("queue")
+    assert code == 0
+    assert scope_name[:14] in out
+
+
 def test_import_refuses_a_scope_that_does_not_exist(run, tmp_path):
     path = tmp_path / "memories.json"
     path.write_text("[]", encoding="utf-8")

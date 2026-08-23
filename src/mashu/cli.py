@@ -59,9 +59,13 @@ def cmd_queue(args) -> int:
                 f"waiting {bundle['days_pending']} day(s)"
             )
             for item in bundle["proposals"]:
+                # The scope is printed because it is the one decision review
+                # cannot revise: nothing moves an entity between scopes, so a
+                # reviewer who cannot see it cannot check it.
                 print(
                     f"  {_short(item['proposal_id'])}  {item['operation']:<14} "
-                    f"{item['memory_type'] or '-':<14} {item['title'] or ''}"
+                    f"{item['memory_type'] or '-':<12} "
+                    f"[{(item['scope_name'] or '-')[:14]:<14}] {item['title'] or ''}"
                 )
             print()
 
@@ -222,10 +226,21 @@ def cmd_import(args) -> int:
         items = items.get("memories") or items.get("items") or []
 
     with transaction(args.dsn) as cur:
-        row = {"scope_id": _scope_by_name(cur, args.scope)}
-        summary = importer.import_items(
-            cur, scope_id=row["scope_id"], items=items, actor=args.actor
+        scope_id = _scope_by_name(cur, args.scope)
+        # One run is one bundle. Section 18.1 has the reviewer rebuild context
+        # once per bundle, so leaving a whole migration unattached would make
+        # every imported file part of a single unnamed pile whose size is the
+        # size of the store.
+        cur.execute(
+            "INSERT INTO agent_session (agent) VALUES (%s) RETURNING session_id",
+            (args.actor,),
         )
+        session_id = cur.fetchone()["session_id"]
+        summary = importer.import_items(
+            cur, scope_id=scope_id, items=items, actor=args.actor, session_id=session_id
+        )
+
+    print(f"bundle {_short(session_id)}")
 
     print(f"{len(summary['created'])} new entity proposal(s)")
     for row in summary["created"]:

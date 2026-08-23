@@ -139,9 +139,12 @@ def session_queue(cur: psycopg.Cursor) -> list[dict]:
                p.payload, p.created_at, p.seq,
                EXTRACT(DAY FROM now() - p.created_at)::int AS days_pending,
                COALESCE(e.type, p.payload ->> 'type') AS memory_type,
-               COALESCE(e.title, p.payload ->> 'title') AS title
+               COALESCE(e.title, p.payload ->> 'title') AS title,
+               s.name AS scope_name
         FROM proposal p
         LEFT JOIN memory_entity e ON e.memory_id = p.target_memory
+        LEFT JOIN scope s
+               ON s.scope_id = COALESCE(e.scope_id, (p.payload ->> 'scope_id')::uuid)
         WHERE p.status = 'pending'
         ORDER BY p.session_id NULLS LAST, p.seq
         """
