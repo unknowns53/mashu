@@ -8,7 +8,14 @@ from __future__ import annotations
 import pytest
 
 from mashu import proposals, retrieval, store
-from mashu.models import EventType, MemoryType, ProposalOperation, SourceType, VersionStatus
+from mashu.models import (
+    EntityStatus,
+    EventType,
+    MemoryType,
+    ProposalOperation,
+    SourceType,
+    VersionStatus,
+)
 
 
 @pytest.fixture
@@ -383,3 +390,48 @@ def test_the_ledger_is_not_re_encoded_on_every_query(cur, scope_id, author, monk
     embed.set_embedder(Watched())
     retrieval.retrieve(cur, "ramp rate", actor="claude")
     assert calls == []
+
+
+# --------------------------------------------------------------------------
+# the whole active set, which retirement detection reads instead of querying
+# --------------------------------------------------------------------------
+def test_the_active_set_returns_everything_the_scope_holds_as_true(cur, scope_id, author):
+    """No ranking, no limit: what is not asked for is what goes on being wrong."""
+    for n in range(30):
+        author(f"memory {n:02d}", f"the body of memory {n:02d}")
+
+    rows = retrieval.active_set(cur, scope_id=scope_id)
+    assert len(rows) == 30
+    assert all(row["content"] for row in rows)
+
+
+def test_the_active_set_leaves_out_what_has_no_current_truth(cur, scope_id, author):
+    author("adopted", "this one stands")
+    author("still waiting", "this one has not been reviewed", adopt=False)
+
+    assert _titles(retrieval.active_set(cur, scope_id=scope_id)) == ["adopted"]
+
+
+def test_a_provisional_entity_is_not_yet_part_of_what_the_scope_holds(cur, scope_id, author):
+    """Section 20.1: it is still waiting to be told apart from another entity."""
+    memory_id, _ = author("under a second name", "the same investigation")
+    store.set_entity_status(
+        cur,
+        memory_id=memory_id,
+        target=EntityStatus.PROVISIONAL,
+        actor="user",
+        reason="a title similarity above the threshold",
+    )
+    assert retrieval.active_set(cur, scope_id=scope_id) == []
+
+
+def test_the_active_set_is_not_logged_as_context(cur, scope_id, author):
+    """It is an input to extraction, not something an agent was handed."""
+    author("a memory", "a body")
+    retrieval.active_set(cur, scope_id=scope_id)
+
+    cur.execute(
+        "SELECT count(*) AS n FROM event_log WHERE event_type = %s",
+        (str(EventType.CONTEXT_ASSEMBLED),),
+    )
+    assert cur.fetchone()["n"] == 0
