@@ -507,6 +507,30 @@ def cmd_active(args) -> int:
     return 0
 
 
+def cmd_retype(args) -> int:
+    """Correct what kind of thing an entity is (8).
+
+    The user runs it directly, the way a merge is run directly: the judgement
+    it needs — is this a decision or an observation — is the user's, and a
+    proposal from an agent asking for it waits for them anyway (17).
+
+    No version is created. The content does not change, and putting an
+    identical body in the history would make a correction look like a change of
+    mind.
+    """
+    with transaction(args.dsn) as cur:
+        entity = _resolve_entity(cur, args.memory)
+        moved = store.set_type(
+            cur,
+            memory_id=entity["memory_id"],
+            target=MemoryType(args.to),
+            actor=args.actor,
+            reason=args.reason,
+        )
+    print(f"{moved['title']}\n  {moved['from']} -> {moved['to']}")
+    return 0
+
+
 def cmd_merge(args) -> int:
     """Fold one entity into another, keeping the history (20.2).
 
@@ -784,6 +808,13 @@ def build_parser() -> argparse.ArgumentParser:
     ac.add_argument("--json", action="store_true", help="the form the extraction prompt takes")
     ac.add_argument("--full", action="store_true", help="print each body as well as its title")
     ac.set_defaults(func=cmd_active)
+
+    rt = sub.add_parser("retype", help="correct what kind of thing an entity is (8)")
+    rt.add_argument("memory")
+    rt.add_argument("--to", required=True, choices=[str(t) for t in MemoryType])
+    rt.add_argument("--reason", required=True)
+    rt.add_argument("--actor", default="user")
+    rt.set_defaults(func=cmd_retype)
 
     mg = sub.add_parser("merge", help="fold one entity into another (20.2)")
     mg.add_argument("source", help="the entity that stops being separate")

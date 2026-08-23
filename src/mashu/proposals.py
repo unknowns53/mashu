@@ -663,6 +663,16 @@ def _apply_on_approval(cur: psycopg.Cursor, proposal: dict, *, actor: str) -> No
         )
         return
 
+    if operation is ProposalOperation.RETYPE:
+        store.set_type(
+            cur,
+            memory_id=proposal["target_memory"],
+            target=MemoryType(payload["type"]),
+            actor=actor,
+            reason=payload["reason"],
+        )
+        return
+
     if operation is ProposalOperation.MERGE:
         store.merge_entities(
             cur,

@@ -114,6 +114,10 @@ def classify(
         return GateRuling(CommitDecision.HUMAN_REVIEW, "entity merge")
     if operation is ProposalOperation.RESTORE:
         return GateRuling(CommitDecision.HUMAN_REVIEW, "restore")
+    if operation is ProposalOperation.RETYPE:
+        # The type decides which line this entity's later changes take, so an
+        # agent allowed to set it could choose its own route past review.
+        return GateRuling(CommitDecision.HUMAN_REVIEW, "correcting an entity's type")
     if target_status is VersionStatus.DISPROVEN:
         return GateRuling(CommitDecision.HUMAN_REVIEW, "disproving a version")
     if entity_status is EntityStatus.PROVISIONAL:

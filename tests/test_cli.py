@@ -664,3 +664,29 @@ def test_the_scope_command_counts_without_gating_anything(run, test_dsn, committ
     line = next(row for row in out.splitlines() if _scope_name(test_dsn, committed_scope) in row)
     assert "adopted 1" in line
     assert "unreviewed 1" in line
+
+
+def test_retype_corrects_the_kind_without_touching_the_content(run, test_dsn, committed_scope):
+    """v0.11: the correction that used to take a new entity and a merge."""
+    proposal = _propose(
+        test_dsn, committed_scope, "the ordering was settled", "one first, then two"
+    )
+    with transaction(test_dsn) as cur:
+        proposals.approve(cur, proposal["proposal_id"], reviewer="user", reason="it stands")
+        before = store.get_entity(cur, proposal["target_memory"])["active_version"]
+
+    code, out = run(
+        "retype",
+        str(proposal["target_memory"])[:8],
+        "--to",
+        "decision",
+        "--reason",
+        "the body says the user decided it",
+    )
+    assert code == 0
+    assert "observation -> decision" in out
+
+    with transaction(test_dsn) as cur:
+        after = store.get_entity(cur, proposal["target_memory"])
+        assert after["type"] == "decision"
+        assert after["active_version"] == before

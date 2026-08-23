@@ -234,6 +234,20 @@ Memory Entity は概念単位。
 - title_embedding(Entity Resolution 用)
 - created_at
 
+**type の訂正(v0.11)**
+
+type を変える操作を持つ。v0.10 まで操作が無く、結果として不変だった。
+
+不変であることに理由があったわけではない。無かっただけである。実害が出たのは 27.1 の移植で、数十件の type を一括で当てた結果、後から見て別の type であるべきものが混じった。操作が無いと、直すには**同内容の Entity を新設して Merge する**しかない——Proposal・承認・Merge の三段で、しかも中身は一文字も変わらない。判断は「これは Decision か Fact か」の一つだけなのに、操作が三つ要る。
+
+type の変更が軽い操作でないことは変わらない。type は 17節の Commit Gate の分類軸であり、type が変われば**その Entity への以後の変更がどの経路を通るかが変わる**。Agent が自分で変えられるなら、自分の書き込み経路を選べることになる。したがって:
+
+- Agent が提案する retype は Human Review Required とする(17節)
+- Version は動かさない。内容についての判断ではないので、履歴に新しい Version を作らない
+- delivery(21.2節)は連動させない。type が state になっても push には入らない。push へ入れるのは admission control を通る別の操作である
+
+**変えないもの**: Entity の同一性。retype は概念が同じままその分類を訂正する操作であり、別概念になったのなら新しい Entity を作って Merge する(20.2節)。
+
 ## 9. Memory Version
 
 Memory Version は不変履歴。
@@ -355,7 +369,7 @@ Open Question は references で表現できないため、summary 内の自由�
 
 - proposal_id
 - actor
-- operation(create / update_version / change_status / restore / merge)
+- operation(create / update_version / change_status / restore / merge / retype)
 - target_memory
 - based_on_version(楽観ロック用。24節)
 - session_id(由来セッション。Review の束ね単位。18.1節)
@@ -476,6 +490,7 @@ v0.10 での変更: Preference を type だけで Auto Commit する規則を廃
 - Restore
 - Entity 作成(類似度が閾値超過)
 - Entity Merge
+- Entity の type 訂正(8節)
 - Conflict 解決
 
 Entity 作成が Review 対象になるのは、類似度が閾値を超えているにもかかわらず Agent が新規作成を選んだ場合に限る(20節)。閾値未満の新規作成は Review を経ない。
@@ -884,7 +899,7 @@ CREATE TABLE proposal (
     proposal_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     actor            TEXT NOT NULL,
     operation        TEXT NOT NULL,
-        -- create / update_version / change_status / restore / merge
+        -- create / update_version / change_status / restore / merge / retype
     target_memory    UUID REFERENCES memory_entity(memory_id),
     based_on_version UUID REFERENCES memory_version(version_id),
     session_id       UUID REFERENCES agent_session(session_id),
