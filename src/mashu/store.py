@@ -19,7 +19,13 @@ import psycopg
 
 from mashu import events
 from mashu.embed import get_embedder
-from mashu.errors import ConcurrentUpdateError, DeliveryError, MergeError, NotFoundError
+from mashu.errors import (
+    ConcurrentUpdateError,
+    DeliveryError,
+    MashuError,
+    MergeError,
+    NotFoundError,
+)
 from mashu.models import (
     Delivery,
     EntityStatus,
@@ -103,6 +109,7 @@ def create_entity(
     entity_status: EntityStatus = EntityStatus.ACTIVE,
     reason: str | None = None,
     directive: str | None = None,
+    evidence: list[UUID] | None = None,
 ) -> tuple[UUID, UUID]:
     """Create an entity together with its first version.
 
@@ -163,6 +170,8 @@ def create_entity(
         actor=actor,
         directive=directive,
     )
+    if evidence:
+        record_evidence(cur, from_version=version_id, to_memory=evidence, actor=actor)
     _set_latest(cur, memory_id, version_id)
     if adopt:
         _point_active_at(cur, memory_id=memory_id, version_id=version_id, actor=actor)
@@ -183,6 +192,7 @@ def add_version(
     status: VersionStatus = VersionStatus.CANDIDATE,
     reason: str | None = None,
     directive: str | None = None,
+    evidence: list[UUID] | None = None,
 ) -> UUID:
     """Add a version to an existing entity.
 
@@ -213,6 +223,8 @@ def add_version(
         actor=actor,
         directive=directive,
     )
+    if evidence:
+        record_evidence(cur, from_version=version_id, to_memory=evidence, actor=actor)
     _set_latest(cur, memory_id, version_id)
     if adopt:
         _point_active_at(
@@ -289,6 +301,96 @@ def set_active(
         )
     check_can_be_active(VersionStatus(version["status"]))
     _point_active_at(cur, memory_id=memory_id, version_id=version_id, actor=actor, reason=reason)
+
+
+def record_evidence(
+    cur: psycopg.Cursor,
+    *,
+    from_version: UUID,
+    to_memory: list[UUID] | tuple[UUID, ...],
+    actor: str,
+) -> int:
+    """Record what a version rests on (specification 19).
+
+    Only the edges are kept, not a dependency graph. The point is the reverse
+    lookup: when a memory turns out to be wrong, the question asked next is
+    what was built on it, and that has to be answerable without walking the
+    whole store.
+
+    Nothing cascades from an edge. A disproven ground puts its dependants in
+    front of a reviewer; it does not retire them, because whether a conclusion
+    survives losing one of its grounds is not something the layer can decide.
+
+    A version may not cite its own entity. Section 14 lets a current state's
+    summary say only what its references already say, and an entity that is its
+    own reference makes that condition vacuous.
+    """
+    own = get_version(cur, from_version)["memory_id"]
+    written = 0
+    for memory_id in to_memory:
+        if memory_id == own:
+            raise MashuError(
+                f"version {from_version} cannot rest on its own entity {own}; "
+                f"a reference has to point outside the thing it supports"
+            )
+        get_entity(cur, memory_id)
+        cur.execute(
+            "INSERT INTO memory_evidence (from_version, to_memory) VALUES (%s, %s) "
+            "ON CONFLICT DO NOTHING",
+            (from_version, memory_id),
+        )
+        written += cur.rowcount
+
+    if written:
+        events.record(
+            cur,
+            EventType.EVIDENCE_RECORDED,
+            actor,
+            memory_id=own,
+            version_id=from_version,
+            detail={"to_memory": [str(m) for m in to_memory], "written": written},
+        )
+    return written
+
+
+def evidence_for(cur: psycopg.Cursor, version_id: UUID) -> list[dict[str, Any]]:
+    """What this version says it rests on, with each ground's current standing."""
+    cur.execute(
+        """
+        SELECT e.memory_id, e.type, e.title, e.status AS entity_status,
+               v.status AS version_status
+        FROM memory_evidence ev
+        JOIN memory_entity e ON e.memory_id = ev.to_memory
+        LEFT JOIN memory_version v ON v.version_id = e.active_version
+        WHERE ev.from_version = %s
+        ORDER BY e.title
+        """,
+        (version_id,),
+    )
+    return cur.fetchall()
+
+
+def resting_on(cur: psycopg.Cursor, memory_id: UUID) -> list[dict[str, Any]]:
+    """The reverse lookup of specification 19: what was built on this memory.
+
+    Answers for every citing version, not only the active ones, and says which
+    of them an entity currently points at. A retired version that cited this
+    memory is not a live concern, and the caller has to be able to tell the two
+    apart without a second query.
+    """
+    cur.execute(
+        """
+        SELECT e.memory_id, e.type, e.title, v.version_id, v.status,
+               v.version_id = e.active_version AS is_active
+        FROM memory_evidence ev
+        JOIN memory_version v ON v.version_id = ev.from_version
+        JOIN memory_entity e ON e.memory_id = v.memory_id
+        WHERE ev.to_memory = %s
+        ORDER BY is_active DESC, e.title
+        """,
+        (memory_id,),
+    )
+    return cur.fetchall()
 
 
 def set_delivery(
@@ -595,6 +697,40 @@ def _set_latest(cur: psycopg.Cursor, memory_id: UUID, version_id: UUID) -> None:
     )
 
 
+def _check_still_fits(cur: psycopg.Cursor, *, entity: dict, version_id: UUID) -> None:
+    """Refuse to adopt a version that would burst the session-start pack (21.2).
+
+    The check belongs on the pointer rather than on the delivery setting,
+    because a memory that is already pushed bursts the pack by growing, not by
+    being promoted. Every route to adopting a version runs through here, which
+    is the only way the ceiling holds against all of them.
+
+    Handing it back is the point. Section 21.2 refuses to trim a pushed memory
+    down to its title, because what would be dropped is exactly the standing
+    rule the session was going to be told, and nobody would see it go.
+    """
+    from mashu import bootstrap
+
+    delivery = Delivery(entity["delivery"])
+    if delivery is Delivery.PULL_ONLY:
+        return
+
+    version = get_version(cur, version_id)
+    scope_id = entity["scope_id"] if delivery is Delivery.SCOPE_REQUIRED else None
+    fits, cost = bootstrap.would_fit(
+        cur,
+        memory_id=entity["memory_id"],
+        content=version["directive"] or version["content"],
+        scope_id=scope_id,
+    )
+    if not fits:
+        raise DeliveryError(
+            f"adopting this version puts the {delivery} pack at {cost} token, over "
+            f"{bootstrap.BOOTSTRAP_TOKEN_BUDGET}; shorten it, give it a directive, "
+            f"or move something out of the pack first"
+        )
+
+
 def _point_active_at(
     cur: psycopg.Cursor,
     *,
@@ -608,6 +744,8 @@ def _point_active_at(
     previous = entity["active_version"]
     if previous == version_id:
         return
+
+    _check_still_fits(cur, entity=entity, version_id=version_id)
 
     if previous is not None:
         previous_status = VersionStatus(get_version(cur, previous)["status"])
