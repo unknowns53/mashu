@@ -32,7 +32,23 @@ WIDTH = 88
 
 
 def _wrap(text: str, indent: str = "    ") -> str:
-    return textwrap.fill(text.strip(), width=WIDTH, initial_indent=indent, subsequent_indent=indent)
+    """Wrap for reading, keeping the line breaks the writer put in.
+
+    Filling the whole thing as one paragraph collapses a list of points into a
+    wall, and the imported memories are mostly lists of points. The review
+    reads these; making them harder to read to save a few lines would be the
+    wrong trade in the one place where reading is the work.
+    """
+    out = []
+    for line in text.strip().splitlines():
+        if not line.strip():
+            out.append("")
+            continue
+        hang = indent + "  " if line.lstrip().startswith(("-", "*", "•")) else indent
+        out.append(
+            textwrap.fill(line.strip(), width=WIDTH, initial_indent=indent, subsequent_indent=hang)
+        )
+    return "\n".join(out)
 
 
 def _short(value: UUID | str) -> str:
@@ -85,8 +101,18 @@ def cmd_queue(args) -> int:
 
 
 def cmd_show(args) -> int:
-    """Everything about one proposal, including what it would replace."""
+    """Everything about one proposal, or a whole bundle read end to end.
+
+    Section 18.1 makes the bundle the unit of review because the cost is not
+    the number of proposals but the number of times the reader rebuilds
+    context. Showing them one at a time puts that cost back: sixty-three
+    invocations is sixty-three re-entries into the same subject. So a bundle
+    prints as one document, in the order the section asks for, grounds before
+    the conclusions drawn from them.
+    """
     with transaction(args.dsn) as cur:
+        if args.bundle:
+            return _show_bundle(cur, args.bundle)
         proposal = _resolve_proposal(cur, args.proposal_id)
         print(f"proposal   {proposal['proposal_id']}")
         print(f"operation  {proposal['operation']}")
@@ -108,6 +134,50 @@ def cmd_show(args) -> int:
             print("\npayload:")
             for key, value in proposal["payload"].items():
                 print(f"    {key}: {value}")
+    return 0
+
+
+def _show_bundle(cur, prefix: str) -> int:
+    """One bundle printed as a single reading, with what each item would do."""
+    session_id = None if prefix == "none" else _resolve_session(cur, prefix)
+    bundle = next((b for b in proposals.session_queue(cur) if b["session_id"] == session_id), None)
+    if bundle is None:
+        print("no such bundle waiting for review")
+        return 1
+
+    scope = bundle["proposals"][0]["scope_name"] or "-"
+    print(
+        f"bundle {prefix}  [{scope}]  {bundle['count']} proposal(s), "
+        f"waiting {bundle['days_pending']} day(s)\n"
+    )
+
+    for index, item in enumerate(bundle["proposals"], 1):
+        print(f"{'-' * WIDTH}")
+        print(
+            f"{index:>3}/{bundle['count']}  {_short(item['proposal_id'])}  "
+            f"{item['memory_type'] or '-'}  [{item['scope_name'] or '-'}]"
+        )
+        print(f"     {item['title'] or ''}\n")
+
+        version_id = item.get("applied_version")
+        if version_id is None:
+            cur.execute(
+                "SELECT applied_version FROM proposal WHERE proposal_id = %s",
+                (item["proposal_id"],),
+            )
+            version_id = cur.fetchone()["applied_version"]
+        if version_id is None:
+            print(_wrap("(nothing written yet; this proposal waits before it changes anything)"))
+            continue
+
+        version = store.get_version(cur, version_id)
+        if version["directive"]:
+            print(_wrap(version["directive"], indent="  > "))
+            print()
+        print(_wrap(version["content"]))
+        if version["source_reference"]:
+            print(f"\n     from {version['source_reference']}")
+    print(f"{'-' * WIDTH}")
     return 0
 
 
@@ -436,8 +506,9 @@ def build_parser() -> argparse.ArgumentParser:
     q = sub.add_parser("queue", help="list proposals waiting for review, by session")
     q.set_defaults(func=cmd_queue)
 
-    s = sub.add_parser("show", help="show one proposal in full")
-    s.add_argument("proposal_id")
+    s = sub.add_parser("show", help="show one proposal, or a whole bundle, in full")
+    s.add_argument("proposal_id", nargs="?")
+    s.add_argument("--bundle", help="session id prefix, or 'none', to read the whole bundle")
     s.set_defaults(func=cmd_show)
 
     a = sub.add_parser("approve", help="approve a proposal or a whole bundle")

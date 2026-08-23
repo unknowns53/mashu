@@ -274,6 +274,83 @@ def test_an_import_run_is_one_bundle(run, test_dsn, committed_scope, tmp_path):
     assert sessions[0] is not None
 
 
+def test_a_bundle_can_be_read_as_one_document(run, test_dsn, committed_scope):
+    """18.1 makes the bundle the unit because rebuilding context is the cost.
+
+    Showing sixty-three proposals one at a time puts that cost straight back,
+    so the whole bundle prints as one reading, in the order the section asks
+    for.
+    """
+    import uuid as _uuid
+
+    with transaction(test_dsn) as cur:
+        cur.execute("INSERT INTO agent_session (agent) VALUES ('claude') RETURNING session_id")
+        session_id = cur.fetchone()["session_id"]
+
+    _propose(
+        test_dsn,
+        committed_scope,
+        f"the conclusion {_uuid.uuid4()}",
+        "so we kept the runner",
+        type=MemoryType.DECISION,
+        session_id=session_id,
+    )
+    _propose(
+        test_dsn,
+        committed_scope,
+        f"the grounds {_uuid.uuid4()}",
+        "the exit code was 1",
+        type=MemoryType.OBSERVATION,
+        session_id=session_id,
+    )
+
+    code, out = run("show", "--bundle", str(session_id)[:8])
+    assert code == 0
+    assert "2 proposal(s)" in out
+    assert "the exit code was 1" in out
+    assert "so we kept the runner" in out
+    assert out.index("the exit code was 1") < out.index("so we kept the runner")
+
+
+def test_a_bundle_shows_where_each_memory_came_from(run, test_dsn, committed_scope, tmp_path):
+    """27.1 makes the origin mandatory; the review is where it gets read."""
+    import json
+
+    with transaction(test_dsn) as cur:
+        cur.execute("SELECT name FROM scope WHERE scope_id = %s", (committed_scope,))
+        scope_name = cur.fetchone()["name"]
+
+    path = tmp_path / "sourced.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "type": "fact",
+                    "title": "a memory with an origin",
+                    "content": "the enclosure timed out",
+                    "source_reference": "memory/ssd-timeout.md",
+                    "directive": "check the enclosure first",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _, out = run("import", str(path), "--scope", scope_name)
+    bundle = out.splitlines()[0].split()[1]
+
+    code, shown = run("show", "--bundle", bundle)
+    assert code == 0
+    assert "memory/ssd-timeout.md" in shown
+    assert "check the enclosure first" in shown
+
+
+def test_wrapping_keeps_the_line_breaks_the_writer_put_in():
+    """The imported memories are lists of points; filling them makes a wall."""
+    wrapped = cli._wrap("- the first point\n- the second point")
+    assert wrapped.count("\n") >= 1
+    assert "- the first point" in wrapped
+
+
 def test_the_queue_shows_which_scope_each_proposal_landed_in(run, test_dsn, committed_scope):
     """The scope is the one decision review cannot revise.
 
