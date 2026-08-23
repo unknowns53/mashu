@@ -30,6 +30,7 @@ from uuid import UUID
 
 import psycopg
 
+from mashu import context, runs
 from mashu.events import record
 from mashu.models import Delivery, EventType
 from mashu.retrieval import estimate_tokens
@@ -79,6 +80,14 @@ class Bootstrapped:
     startup: list[dict[str, Any]] = field(default_factory=list)
     #: Pushed only for the scopes the session named.
     scoped: list[dict[str, Any]] = field(default_factory=list)
+    #: What applies until a stated moment (25.2). Beside the three layers
+    #: rather than inside them: these are the conditions of the moment, not
+    #: knowledge, and they leave by the clock rather than by a judgement.
+    temporary: list[dict[str, Any]] = field(default_factory=list)
+    #: Whether automatic capture is still working (16.3). It rides here because
+    #: during a week nobody attends, the next session is the only reader
+    #: guaranteed to arrive.
+    health: dict[str, Any] = field(default_factory=dict)
     #: Memory IDs whose content was dropped to stay inside the budget. They are
     #: still listed, by title, so memory_get can fetch what was cut.
     trimmed: list[UUID] = field(default_factory=list)
@@ -131,11 +140,20 @@ def session_bootstrap(
         cur.execute(_PUSHED_SQL, {"scopes": scopes, "delivery": str(Delivery.SCOPE_REQUIRED)})
         scoped = cur.fetchall()
 
+    # 25.2: what applies right now, and only what a person put there. An agent
+    # may write a window but may not have it pushed: a session start reaches
+    # every session including the ones that never asked about it.
+    temporary = context.live(
+        cur, scopes=scopes, pushed_only=True, limit=context.BOOTSTRAP_ITEM_LIMIT
+    )
+
     trimmed = _fit(scope_index, scoped, startup, budget=budget)
     result = Bootstrapped(
         scope_index=scope_index,
         startup=startup,
         scoped=scoped,
+        temporary=temporary,
+        health=runs.health(cur),
         trimmed=trimmed,
         tokens=_total_tokens(scope_index, startup, scoped),
     )
@@ -153,6 +171,8 @@ def session_bootstrap(
                 "trimmed": [str(m) for m in trimmed],
                 "tokens": result.tokens,
                 "over_budget": result.over_budget,
+                "temporary": [str(row["context_id"]) for row in temporary],
+                "capture_ok": result.health.get("ok"),
             },
         )
     return result
