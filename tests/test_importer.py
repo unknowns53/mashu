@@ -180,9 +180,7 @@ def test_the_short_standing_form_comes_across_when_the_file_marked_one(cur, scop
     """
     item = _item("measurement discipline", "the whole rule with its reasons attached")
     item["directive"] = "say what each branch will lead to before starting"
-    summary = importer.import_items(
-        cur, scope_id=scope_id, items=[item], actor="import"
-    )
+    summary = importer.import_items(cur, scope_id=scope_id, items=[item], actor="import")
 
     proposal = proposals.get(cur, summary["created"][0]["proposal_id"])
     version = store.get_version(cur, proposal["applied_version"])

@@ -128,9 +128,7 @@ def session_bootstrap(
     startup = cur.fetchall()
     scoped: list[dict[str, Any]] = []
     if scopes:
-        cur.execute(
-            _PUSHED_SQL, {"scopes": scopes, "delivery": str(Delivery.SCOPE_REQUIRED)}
-        )
+        cur.execute(_PUSHED_SQL, {"scopes": scopes, "delivery": str(Delivery.SCOPE_REQUIRED)})
         scoped = cur.fetchall()
 
     trimmed = _fit(scope_index, scoped, startup, budget=budget)
@@ -242,8 +240,7 @@ def would_fit(
     """
     cur.execute(_SCOPE_INDEX_SQL)
     index = [
-        {"name": row["name"], "summary": _one_line(row["description"])}
-        for row in cur.fetchall()
+        {"name": row["name"], "summary": _one_line(row["description"])} for row in cur.fetchall()
     ]
     cur.execute(_PUSHED_SQL, {"scopes": None, "delivery": str(Delivery.STARTUP_REQUIRED)})
     pack = [dict(row) for row in cur.fetchall()]

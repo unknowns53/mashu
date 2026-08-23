@@ -175,9 +175,7 @@ def test_a_directive_short_enough_gets_in_where_the_content_would_not(cur, write
         "long prose " * 3000,
         directive="keep it short",
     )
-    store.set_delivery(
-        cur, memory_id=memory_id, delivery=Delivery.STARTUP_REQUIRED, actor="user"
-    )
+    store.set_delivery(cur, memory_id=memory_id, delivery=Delivery.STARTUP_REQUIRED, actor="user")
     got = bootstrap.session_bootstrap(cur, actor="claude")
     assert got.startup[0]["content"] == "keep it short"
     assert got.over_budget is False
