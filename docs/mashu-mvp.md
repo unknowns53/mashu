@@ -6,6 +6,7 @@
 - v0.2: Actor モデル、Commit Gate、Write Policy、Entity Resolution、Review UI を追加
 - v0.3: スキーマ確定、接続方式を MCP に確定、MVP スコープ縮小、開発計画を実測ベースに改訂、プロジェクト名を Mashu に確定
 - v0.4: Harness シナリオの書き下しで判明した欠落を補う。Retrieval の三層出力(21節)、Entity Status と Merge 手順(20節)、Proposal の重複チェック(15節)、Commit Gate への Entity 作成の追加(17節)、entity.status 列と disproven の reason 必須制約(26節)、滞留時間指標(27.3)
+- v0.5: Session Bootstrap を復活させる。v4 の Always Inject Context が MVP 化で落ちていたことによる退行の修復。session_bootstrap Tool と呼び出し要件(6節)、Bootstrap の内容と token 上限(21.2節)、native memory からの移植規則と棚卸し単位(27.1節)、切替試験(27.5節)、成功条件2件の追加(31節)
 
 ---
 
@@ -157,11 +158,28 @@ Context Gateway は MCP(Model Context Protocol)Server として実装する。
 - `memory_propose`: Proposal 作成
 - `scope_list`: Scope 一覧
 - `entity_resolve`: Entity 候補検索(Proposal 前の同一性確認)
+- `session_bootstrap`: Session 開始時に渡す固定コンテキストの取得(21.2節)
 
 MVP では Claude 1体のみを接続する。
 Codex / Gemini は MVP 後の接続とする。
 
 注記: 各 CLI の MCP 対応状況は変化が速いため、Phase 3 着手時に最新ドキュメントで再確認する。
+
+### 6.1 Session 開始時の呼び出し要件
+
+MCP Tool は Agent が呼ばなければ動かない。一方、CLI が備える native な記憶機構は毎セッション自動で文脈へ入る。この非対称を放置すると、Agent が `memory_search` を呼ばなかったセッションは知識状態ゼロで始まる。
+
+呼ぶかどうかを Agent の判断に委ねると、Agent は「知らないことを知らない」ため呼ぶ動機を持てない。したがって Bootstrap の取得は Retrieval とは別に、呼び出しを強制する経路を用意する。
+
+二段構えとする。
+
+**第一段(MVP)**: 各 CLI の指示ファイル(`CLAUDE.md` / `AGENTS.md` / `GEMINI.md`)に「セッション開始時に必ず `session_bootstrap` を呼ぶ」と記載する。
+
+Agent の従順さに依存する擬似 push であるが、三 CLI に共通して効くのが利点である。MVP はこれで足りる。
+
+**第二段(MVP 後)**: Claude Code のセッション開始フックから注入する。
+
+フック経由であれば Agent の判断と無関係に文脈へ入るため、本物の push になる。ただしフック機構は製品側の変化が速い領域のため、Phase 3 着手時に最新ドキュメントで確認する。
 
 ## 7. Scope
 
@@ -523,6 +541,38 @@ MVP の既定:
 
 Layer 1 は常に返す。Layer 2 と Layer 3 は、Layer 1 で当たった Entity と同一 Scope のものに限る。Scope 全体を返す形は、Layer 3 が肥大したときに Context を圧迫するため MVP では採らない。
 
+### 21.2 Session Bootstrap
+
+21節のパイプラインは Query 起点であり、Agent が引かなければ何も返さない。Session Bootstrap は Query なしで、Session 開始時に必ず渡す固定コンテキストである。
+
+本節は v4 に Always Inject Context として存在した機構の復活である。MVP 化の際に落ち、v0.1 から v0.4 まで欠けていた。
+
+内容は三つ。
+
+1. **Active な Preference の全件**: type = preference の Active Version
+2. **対象 Scope の Current State**: type = state の Active Version(14節)
+3. **Scope 索引**: scope 台帳の全件と、各 Scope の一行要約
+
+三つ目が最も重要である。
+
+セッション中の pull が機能しない根本の理由は、Agent が「知らないことを知らない」ために検索の動機を持てないことにある。三つ目は知識の中身ではなく**知識の地図**であり、Mashu が何を知っているかの索引が最初に入って初めて、以後の `memory_search` が動機を持つ。地図があれば pull は生きる、地図が無ければ pull は死ぬ。
+
+実装:
+
+type が preference と state の Active Version を返し、scope 台帳を一行要約付きで並べるだけである。スキーマの追加を必要とせず、既存の Retrieval 部品の組み合わせで足りる。14節で Current State を専用テーブルから type = State の Entity へ統合した決定が、ここで効いている。
+
+Token 上限:
+
+Bootstrap は毎セッション必ず消費する固定費であり、上限を設けないと予算が Memory 件数に比例して膨らむ。上限は 2000 token とする。
+
+超える場合は Scope 索引を全件残し、Preference と Current State の側を削る。削った項目は Memory ID と title のみを示し、本文を落とす。地図さえ残れば Agent は `memory_get` で取りに行けるが、地図を削ると取りに行く先が分からなくなるためである。
+
+上限値は 27.5 の切替試験で実測して見直す。
+
+記録:
+
+Bootstrap で渡した Memory ID の集合も、Context Assembly と同様に event_log へ記録する(22節)。
+
 ## 22. Context Artifact(簡略化)
 
 v0.2 からの変更:
@@ -723,6 +773,21 @@ Phase 3(Agent 接続)の前に、User 自身が Agent 役として CLI から運
 
 Harness シナリオ 1・2 はこの段階で Agent なしで検証できる。
 
+本節は Retrieval の検証であると同時に、CLI の native な記憶機構に溜まった内容を Mashu へ移す作業の先行分でもある。登録元は新規に書き下ろすのではなく、実在の記憶機構の中身を用いる。
+
+移植の規則:
+
+- インポートした項目は例外なく **candidate として入れ、Review を通す**。native な記憶機構の内容は要約の塊で、Observation と Interpretation が溶け合っている。無審査で Active にすると、Mashu が防ごうとしている汚染をそのまま初期在庫として輸入することになる
+- **source_reference に由来を必ず記録する**(元ファイル名、あるいはセッション id)
+
+棚卸しの単位:
+
+移行は履歴の再生ではなく、状態の再構築である。棚卸しの単位はログやファイルの本数ではなく **Scope** とする。
+
+各 Scope の Current State、Active な Preference、主要な Decision が立ち上がった時点で、その Scope は移行済みとみなす。残りのログは必要が生じたときの遅延移植でよい。
+
+全件処理を切替の前提条件にすると、移行コストが在庫量に比例して膨らみ、移行そのものが失敗する。
+
 ### 27.2 Entity Resolution 閾値
 
 紛らわしい Entity 名(SSD障害解析 / SSDデバッグ / 外付けSSD問題)を意図的に登録し、採用した埋め込みモデルでの類似度スコア分布を実測して閾値を決定する。
@@ -751,6 +816,27 @@ Harness シナリオ 1・2 はこの段階で Agent なしで検証できる。
 過去の Agent セッションログ 5 本程度に対し、抽出プロンプトを適用して Proposal 案を生成させる。
 抽出結果が Scratch 級の内容ばかりであれば、Write Policy 自体を再設計する。
 本検証はシステム実装を必要とせず、いつでも実施可能。最優先で早期に行う。
+
+本節は Write Policy の検証であると同時に、移行後の運用で実際に何が Proposal として上がってくるかを事前に見る先行分でもある。27.1 が既存在庫の移植を扱うのに対し、本節は移行後の流入を扱う。
+
+### 27.5 切替試験
+
+CLI の native な記憶機構を無効化した状態で 2 週間運用する。
+
+記録するもの:
+
+**「Mashu 内に Active として存在する知識を、Agent が取得できないまま作業した」事故の件数。**
+
+事故の定義: Mashu に Active な Version として存在する内容があるにもかかわらず、Agent がそれを取得せずに作業し、その結果として誤った前提で進んだ場合を 1 件と数える。
+
+「数週間まわる」のような体感で判定しない。判定が印象に依存すると、移行できたかどうかが測れないためである。
+
+事故が発生した場合は、原因を次のどちらかに切り分けて記録する。
+
+- Bootstrap の内容不足(21.2節に入れるべきものが入っていなかった)
+- pull の動機不足(索引はあったが Agent が引きに行かなかった)
+
+前者は Bootstrap の内容と token 上限の見直しへ、後者は 6.1節の呼び出し要件の見直し(第一段から第二段への移行判断)へつなぐ。
 
 ## 28. Test Harness
 
@@ -809,6 +895,8 @@ MVP(3ヶ月)の成功条件:
 - 変更履歴と判断理由(却下理由を含む)を追跡できる
 - 人間が CLI から Memory 状態を修正できる
 - Claude が MCP 経由で Retrieval / Proposal を実行できる
+- CLI の native な記憶機構の内容が Mashu へ移植済みである。移植は全件 candidate として入れ Review を通したものであり、各項目が source_reference に由来を持つ(27.1節)
+- 切替試験(27.5節)を実施し、native な記憶機構を切った状態での取得失敗事故の件数を記録している
 
 最終成功条件(MVP 後):
 
