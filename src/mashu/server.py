@@ -123,9 +123,9 @@ def build_server() -> Any:
 
         Pass scopes once you know which scopes the session is working in, to
         get their current state as well. The index always covers the whole
-        ledger, and says which scopes are still seeding — a seeding scope
-        holds material nobody has confirmed yet, so an empty answer from one
-        means wait or ask, not that nothing is known.
+        ledger, which is what makes everything else reachable by name: a body
+        you are missing can be fetched, but a scope you do not know about
+        cannot be asked for.
         """
         with db.transaction() as cur:
             session(cur)
