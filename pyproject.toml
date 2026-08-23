@@ -8,9 +8,6 @@ dependencies = [
     "pydantic>=2.9",
 ]
 
-[project.scripts]
-mashu = "mashu.cli:main"
-
 [project.optional-dependencies]
 embed = [
     "sentence-transformers>=3.0",
