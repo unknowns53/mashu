@@ -126,18 +126,24 @@ def session_queue(cur: psycopg.Cursor) -> list[dict]:
 
     Proposals with no session sit in one unnamed bundle rather than being
     dropped, so nothing can go missing from the queue by lacking provenance.
+
+    Within a rank the tiebreak is seq and not created_at. created_at is now(),
+    which is transaction start time, so a batch of proposals written in one
+    transaction carries a single identical timestamp and leaves the order
+    inside a rank to whatever the scan happens to return. The import of 27.1 is
+    exactly such a batch.
     """
     cur.execute(
         """
         SELECT p.proposal_id, p.session_id, p.actor, p.operation, p.target_memory,
-               p.payload, p.created_at,
+               p.payload, p.created_at, p.seq,
                EXTRACT(DAY FROM now() - p.created_at)::int AS days_pending,
                COALESCE(e.type, p.payload ->> 'type') AS memory_type,
                COALESCE(e.title, p.payload ->> 'title') AS title
         FROM proposal p
         LEFT JOIN memory_entity e ON e.memory_id = p.target_memory
         WHERE p.status = 'pending'
-        ORDER BY p.session_id NULLS LAST, p.created_at
+        ORDER BY p.session_id NULLS LAST, p.seq
         """
     )
     rows = cur.fetchall()
@@ -161,7 +167,7 @@ def session_queue(cur: psycopg.Cursor) -> list[dict]:
 
     out = []
     for session_id, items in bundles.items():
-        items.sort(key=lambda r: (rank.get(r["memory_type"], 3), r["created_at"]))
+        items.sort(key=lambda r: (rank.get(r["memory_type"], 3), r["seq"]))
         out.append(
             {
                 "session_id": session_id,

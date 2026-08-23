@@ -372,6 +372,30 @@ def test_an_empty_bundle_is_not_an_error(cur):
     assert proposals.approve_bundle(cur, uuid.uuid4(), reviewer="user") == []
 
 
+def test_within_one_rank_the_order_is_the_order_they_were_made_in(cur, scope_id, session_id):
+    """The tiebreak has to be an answer, not whatever the scan returns.
+
+    Every proposal in one transaction carries the same created_at, since now()
+    is transaction start time. Sorting on it left the order inside a rank
+    undefined, and the import of 27.1 writes a whole file in one transaction.
+    """
+    titles = ("the ramp overshot", "the pump cavitated", "the logger dropped a frame")
+    for title in titles:
+        _propose_in_session(cur, scope_id, session_id, MemoryType.FACT, title)
+
+    bundle = proposals.session_queue(cur)[0]
+    stamps = {row["created_at"] for row in bundle["proposals"]}
+    assert len(stamps) == 1, "the premise: one transaction gives one timestamp to all of them"
+
+    # The order itself is the weaker check, because a small freshly written
+    # table tends to come back in insertion order whatever the query asks for.
+    # What the degenerate key could not do is distinguish these rows at all.
+    keys = [row["seq"] for row in bundle["proposals"]]
+    assert len(set(keys)) == len(titles)
+    assert keys == sorted(keys)
+    assert [row["title"] for row in bundle["proposals"]] == list(titles)
+
+
 def test_types_the_section_does_not_name_still_sort_by_grounds(cur, scope_id, session_id):
     """A bundle must never read a decision before the fact supporting it."""
     _propose_in_session(cur, scope_id, session_id, MemoryType.DECISION, "so we kept OPLS-AA")
