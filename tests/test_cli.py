@@ -8,6 +8,7 @@ database does not make them depend on each other.
 
 from __future__ import annotations
 
+import json
 import uuid
 
 import pytest
@@ -642,3 +643,29 @@ def test_which_side_survives_can_be_named_before_the_versions_exist(run, test_ds
     with transaction(test_dsn) as cur:
         entity = store.get_entity(cur, target["target_memory"])
         assert store.get_version(cur, entity["active_version"])["content"] == "another reading"
+
+
+def test_the_active_set_prints_as_the_prompt_takes_it(run, test_dsn, committed_scope):
+    """The json form is input 2 of session end extraction (16.1)."""
+    proposal = _propose(test_dsn, committed_scope, "a standing memory", "the body of it")
+    with transaction(test_dsn) as cur:
+        proposals.approve(cur, proposal["proposal_id"], reviewer="user", reason="it stands")
+
+    code, out = run("active", "--scope", _scope_name(test_dsn, committed_scope), "--json")
+    assert code == 0
+
+    listed = json.loads(out)
+    assert [row["title"] for row in listed] == ["a standing memory"]
+    assert listed[0]["content"] == "the body of it"
+    assert set(listed[0]) == {"memory_id", "type", "title", "content"}
+
+
+def test_the_active_set_counts_what_it_is_about_to_hand_over(run, test_dsn, committed_scope):
+    proposal = _propose(test_dsn, committed_scope, "a standing memory", "the body of it")
+    with transaction(test_dsn) as cur:
+        proposals.approve(cur, proposal["proposal_id"], reviewer="user", reason="it stands")
+
+    code, out = run("active", "--scope", _scope_name(test_dsn, committed_scope), "--full")
+    assert code == 0
+    assert "1 active memory(ies)" in out
+    assert "the body of it" in out

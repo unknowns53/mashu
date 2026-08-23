@@ -126,6 +126,34 @@ def detect_scopes(cur: psycopg.Cursor, query_vector: str) -> list[UUID]:
 # --------------------------------------------------------------------------
 # the layers
 # --------------------------------------------------------------------------
+ACTIVE_SET_SQL = """
+SELECT e.memory_id, e.scope_id, e.type, e.title, v.version_id, v.content,
+       v.created_at
+FROM memory_entity e
+JOIN memory_version v ON v.version_id = e.active_version AND v.memory_id = e.memory_id
+WHERE e.status = 'active'
+  AND (%(scopes)s::uuid[] IS NULL OR e.scope_id = ANY(%(scopes)s::uuid[]))
+ORDER BY e.type, e.title
+"""
+
+
+def active_set(cur: psycopg.Cursor, *, scope_id: UUID | None = None) -> list[dict[str, Any]]:
+    """Everything a scope currently holds as true, whole (16.1).
+
+    The retirement half of session end extraction cannot work from a query.
+    Asking what has been overtaken means reading every standing memory against
+    what the session observed, and a memory nobody thought to search for is
+    exactly the one that goes on being wrong. So this is the one read with no
+    ranking, no limit and no caps.
+
+    It answers with the same set layer 1 draws from, provisional entities
+    excluded, because an entity still waiting to be told apart from another is
+    not yet something the scope holds as true.
+    """
+    cur.execute(ACTIVE_SET_SQL, {"scopes": [scope_id] if scope_id else None})
+    return cur.fetchall()
+
+
 _LAYER1_SQL = """
 SELECT e.memory_id, e.scope_id, e.type, e.title, v.version_id, v.content,
        1 - (v.content_embedding <=> %(q)s::vector) AS similarity

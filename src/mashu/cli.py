@@ -471,6 +471,49 @@ def cmd_state(args) -> int:
     return 0
 
 
+def cmd_active(args) -> int:
+    """Everything a scope holds as true, whole (16.1, 27.4b).
+
+    This is the second input to session end extraction. Retirement detection
+    reads every standing memory against what the session observed, so unlike
+    every other read here it ranks nothing and hides nothing: a memory nobody
+    thought to search for is the one that goes on being wrong.
+
+    The json form is what gets handed to the prompt. The plain form is for a
+    person checking what is about to be handed over.
+    """
+    with transaction(args.dsn) as cur:
+        rows = retrieval.active_set(
+            cur, scope_id=_scope_by_name(cur, args.scope) if args.scope else None
+        )
+
+    if args.json:
+        print(
+            json.dumps(
+                [
+                    {
+                        "memory_id": str(row["memory_id"]),
+                        "type": row["type"],
+                        "title": row["title"],
+                        "content": row["content"],
+                    }
+                    for row in rows
+                ],
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+
+    print(f"{len(rows)} active memory(ies)\n")
+    for row in rows:
+        print(f"{_short(row['memory_id'])}  [{row['type']}] {row['title']}")
+        if args.full:
+            print(_wrap(row["content"]))
+            print()
+    return 0
+
+
 def cmd_merge(args) -> int:
     """Fold one entity into another, keeping the history (20.2).
 
@@ -769,6 +812,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="propose even though an equivalent one is already waiting (15.1)",
     )
     t.set_defaults(func=cmd_state)
+
+    ac = sub.add_parser("active", help="everything a scope holds as true (16.1, 27.4b)")
+    ac.add_argument("--scope", help="name of an existing scope; omit for every scope")
+    ac.add_argument("--json", action="store_true", help="the form the extraction prompt takes")
+    ac.add_argument("--full", action="store_true", help="print each body as well as its title")
+    ac.set_defaults(func=cmd_active)
 
     mg = sub.add_parser("merge", help="fold one entity into another (20.2)")
     mg.add_argument("source", help="the entity that stops being separate")
