@@ -88,18 +88,31 @@ def enqueue(
         ),
     )
     row = cur.fetchone()
-    if row is not None:
-        return row
+    if row is None:
+        cur.execute(
+            """
+            SELECT * FROM extraction_run
+            WHERE source_cli = %s AND external_session_id = %s
+              AND transcript_digest = %s AND extractor_version = %s
+            """,
+            (source_cli, external_session_id, transcript_digest, extractor_version),
+        )
+        return cur.fetchone()
 
+    # A held row for the same session is about the same conversation, one
+    # digest older. Left standing, adding the route releases both and two runs
+    # read the session from the same mark.
     cur.execute(
         """
-        SELECT * FROM extraction_run
-        WHERE source_cli = %s AND external_session_id = %s
-          AND transcript_digest = %s AND extractor_version = %s
+        UPDATE extraction_run
+        SET state = 'skipped', completed_at = now(),
+            note = 'superseded by a later digest of the same session'
+        WHERE source_cli = %s AND external_session_id = %s AND state = 'held'
+          AND run_id <> %s
         """,
-        (source_cli, external_session_id, transcript_digest, extractor_version),
+        (source_cli, external_session_id, row["run_id"]),
     )
-    return cur.fetchone()
+    return row
 
 
 def claim(cur: psycopg.Cursor, *, limit: int = 1) -> list[dict[str, Any]]:

@@ -812,3 +812,112 @@ def test_an_identifier_may_not_enter_the_store_whoever_proposes_it(
                 "source_type": str(SourceType.USER),
             },
         )
+
+
+def test_an_old_rejection_stops_being_a_bar_and_becomes_an_argument(cur, tmp_path, queued, route):
+    """15.1 was written for a proposer that can look at what was ruled on.
+
+    The worker cannot look, so for it the check is a permanent silent ban: a
+    retirement turned down as premature could never be raised again even once
+    the task genuinely finished.
+    """
+    stub = extract.StubExtractor(answer([a_proposal()]))
+    worker.process(cur, queued(write_claude(tmp_path)), extractor=stub)
+
+    cur.execute("SELECT proposal_id FROM proposal WHERE actor = %s", (worker.WORKER_ACTOR,))
+    proposals.reject(cur, cur.fetchone()["proposal_id"], reviewer="user", reason="まだ早い")
+    cur.execute(
+        "UPDATE proposal SET decided_at = now() - interval '60 days' WHERE status = 'rejected'"
+    )
+
+    file = write_claude(
+        tmp_path,
+        [
+            *CLAUDE_TURNS,
+            {
+                "type": "user",
+                "sessionId": "s-1",
+                "cwd": "/work/proj",
+                "message": {"content": "続き " * 300},
+            },
+        ],
+    )
+    got = worker.process(cur, queued(file), extractor=stub)
+
+    assert got.proposals_filed == 1
+    cur.execute(
+        "SELECT payload FROM proposal WHERE status = 'pending' AND actor = %s "
+        "ORDER BY seq DESC LIMIT 1",
+        (worker.WORKER_ACTOR,),
+    )
+    assert cur.fetchone()["payload"]["previously_rejected"]["reason"] == "まだ早い"
+
+
+def test_a_recent_rejection_still_bars_the_worker(cur, tmp_path, queued, route):
+    stub = extract.StubExtractor(answer([a_proposal()]))
+    worker.process(cur, queued(write_claude(tmp_path)), extractor=stub)
+    cur.execute("SELECT proposal_id FROM proposal WHERE actor = %s", (worker.WORKER_ACTOR,))
+    proposals.reject(cur, cur.fetchone()["proposal_id"], reviewer="user", reason="違う")
+
+    file = write_claude(
+        tmp_path,
+        [
+            *CLAUDE_TURNS,
+            {
+                "type": "user",
+                "sessionId": "s-1",
+                "cwd": "/work/proj",
+                "message": {"content": "続き " * 300},
+            },
+        ],
+    )
+    got = worker.process(cur, queued(file), extractor=stub)
+    assert got.proposals_filed == 0
+    assert any("already proposed" in r for r in got.refused)
+
+
+def test_a_proposal_still_waiting_is_never_doubled(cur, tmp_path, queued, route):
+    """A pending item is a reviewer who has not looked; proposing beside it
+    doubles their work rather than informing it."""
+    stub = extract.StubExtractor(answer([a_proposal()]))
+    worker.process(cur, queued(write_claude(tmp_path)), extractor=stub)
+
+    file = write_claude(
+        tmp_path,
+        [
+            *CLAUDE_TURNS,
+            {
+                "type": "user",
+                "sessionId": "s-1",
+                "cwd": "/work/proj",
+                "message": {"content": "続き " * 300},
+            },
+        ],
+    )
+    got = worker.process(cur, queued(file), extractor=stub)
+    assert got.proposals_filed == 0
+
+
+def test_a_held_run_is_closed_when_the_same_session_arrives_again(cur, tmp_path, queued):
+    """Otherwise adding the route releases both and two runs read one session."""
+    held = queued(write_claude(tmp_path))
+    worker.process(cur, held, extractor=extract.StubExtractor(answer()))
+    assert runs.health(cur)["held"] == 1
+
+    grown = write_claude(
+        tmp_path,
+        [
+            *CLAUDE_TURNS,
+            {
+                "type": "user",
+                "sessionId": "s-1",
+                "cwd": "/work/proj",
+                "message": {"content": "続き"},
+            },
+        ],
+    )
+    queued(grown)
+
+    cur.execute("SELECT state FROM extraction_run WHERE run_id = %s", (held["run_id"],))
+    assert cur.fetchone()["state"] == "skipped"
+    assert runs.health(cur)["held"] == 0

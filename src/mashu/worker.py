@@ -91,6 +91,19 @@ WORKER_ACTOR = "mashu-worker"
 #: Why every retirement this worker proposes is held, even the ones section 17
 #: would commit. Recorded on the proposal so a reviewer sees the reason rather
 #: than an unexplained hold.
+#: How long a rejection keeps the worker from proposing the same thing again.
+#:
+#: Section 15.1's duplicate check was written for a proposer that can look at
+#: what was already ruled on and decide. The worker cannot look, so for it the
+#: check is a permanent, silent ban: one rejected title suppresses everything
+#: near it in that scope forever, and a retirement turned down as premature can
+#: never be proposed again even once the task genuinely finishes.
+#:
+#: So a rejection expires as a bar, not as a fact. After the horizon the worker
+#: may raise it again, and it carries the earlier verdict into the new proposal
+#: so the reviewer meets an argument rather than a repetition.
+REJECTION_HORIZON_DAYS = 30
+
 RETIREMENT_HOLD = (
     "proposed by the unattended extraction worker; agent-inferred retirement "
     "does not fall on its own (30 段 B)"
@@ -233,7 +246,7 @@ def land(cur: psycopg.Cursor, plan: Plan, answer: str, *, extractor: extract.Ext
         outcome=outcome,
         session_id=plan.session_id,
     )
-    _link_evidence(cur, result, filed)
+    _link_evidence(cur, result, filed, outcome)
     _file_updates(
         cur, result, session=plan.session, run=run, outcome=outcome, session_id=plan.session_id
     )
@@ -471,9 +484,20 @@ def _file_proposals(
                 session_id=session_id,
                 allow_similar=True,
             )
-        except DuplicateProposalError:
-            outcome.refused.append(f"already proposed: {draft.title}")
-            continue
+        except DuplicateProposalError as clash:
+            earlier = _stale_rejection(clash)
+            if earlier is None:
+                outcome.refused.append(f"already proposed: {draft.title}")
+                continue
+            made = proposals.propose(
+                cur,
+                actor=WORKER_ACTOR,
+                operation=ProposalOperation.CREATE,
+                payload=dict(payload, previously_rejected=earlier),
+                session_id=session_id,
+                allow_similar=True,
+                allow_duplicate=True,
+            )
         except resolution.SimilarEntityError as failure:
             outcome.refused.append(f"similar entity, not filed: {draft.title} ({failure})")
             continue
@@ -488,7 +512,12 @@ def _file_proposals(
     return filed
 
 
-def _link_evidence(cur: psycopg.Cursor, result: extract.Extraction, filed: dict[str, UUID]) -> None:
+def _link_evidence(
+    cur: psycopg.Cursor,
+    result: extract.Extraction,
+    filed: dict[str, UUID],
+    outcome: Outcome | None = None,
+) -> None:
     """Join up the grounds the extraction named within its own batch (19).
 
     Only titles from this same session resolve. A name the batch does not
@@ -509,8 +538,9 @@ def _link_evidence(cur: psycopg.Cursor, result: extract.Extraction, filed: dict[
                 store.record_evidence(
                     cur, from_version=version, to_memory=grounds, actor=WORKER_ACTOR
                 )
-            except MashuError:
-                continue
+            except MashuError as failure:
+                if outcome is not None:
+                    outcome.refused.append(f"grounds not linked for {draft.title}: {failure}")
 
 
 def _file_updates(
@@ -614,13 +644,52 @@ def _file_retirements(
                 session_id=session_id,
                 hold_for_review=RETIREMENT_HOLD,
             )
-        except DuplicateProposalError:
-            outcome.refused.append(f"retirement already proposed: {entity['title']}")
-            continue
+        except DuplicateProposalError as clash:
+            earlier = _stale_rejection(clash)
+            if earlier is None:
+                outcome.refused.append(f"retirement already proposed: {entity['title']}")
+                continue
+            proposals.propose(
+                cur,
+                actor=WORKER_ACTOR,
+                operation=ProposalOperation.CHANGE_STATUS,
+                payload=dict(payload, previously_rejected=earlier),
+                target_memory=draft.memory_id,
+                session_id=session_id,
+                allow_duplicate=True,
+                hold_for_review=RETIREMENT_HOLD,
+            )
         except MashuError as failure:
             outcome.refused.append(f"{entity['title']}: {failure}")
             continue
         outcome.retirements_filed += 1
+
+
+def _stale_rejection(clash: DuplicateProposalError) -> dict[str, Any] | None:
+    """Whether an old rejection has stopped being a bar (see REJECTION_HORIZON_DAYS).
+
+    Nothing is unblocked while a proposal is still waiting: a pending item is a
+    reviewer who has not looked yet, and proposing beside it doubles their work
+    rather than informing it.
+    """
+    if any(row["status"] == "pending" for row in clash.existing):
+        return None
+    turned_down = clash.rejected
+    if not turned_down:
+        return None
+
+    latest = max(turned_down, key=lambda row: row["decided_at"] or datetime.min)
+    decided = latest["decided_at"]
+    if decided is None:
+        return None
+    age = datetime.now(decided.tzinfo) - decided
+    if age < timedelta(days=REJECTION_HORIZON_DAYS):
+        return None
+    return {
+        "decided_at": decided.isoformat(),
+        "reason": latest["decision_reason"],
+        "proposal_id": str(latest["proposal_id"]),
+    }
 
 
 def _note(outcome: Outcome, result: extract.Extraction) -> str:
