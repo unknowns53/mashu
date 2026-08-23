@@ -284,3 +284,19 @@ def test_approving_a_bundle_leaves_out_what_was_rejected(cur, scope_id, session_
 
 def test_an_empty_bundle_is_not_an_error(cur):
     assert proposals.approve_bundle(cur, uuid.uuid4(), reviewer="user") == []
+
+
+def test_types_the_section_does_not_name_still_sort_by_grounds(cur, scope_id, session_id):
+    """A bundle must never read a decision before the fact supporting it."""
+    _propose_in_session(cur, scope_id, session_id, MemoryType.DECISION, "so we kept OPLS-AA")
+    _propose_in_session(cur, scope_id, session_id, MemoryType.HYPOTHESIS, "GAFF may be soft")
+    _propose_in_session(cur, scope_id, session_id, MemoryType.FACT, "GAFF ran ten kelvin low")
+    _propose_in_session(cur, scope_id, session_id, MemoryType.TASK, "rerun the sweep")
+
+    bundle = proposals.session_queue(cur)[0]
+    assert [p["memory_type"] for p in bundle["proposals"]] == [
+        MemoryType.FACT,
+        MemoryType.HYPOTHESIS,
+        MemoryType.DECISION,
+        MemoryType.TASK,
+    ]

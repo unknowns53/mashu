@@ -104,8 +104,13 @@ def session_queue(cur: psycopg.Cursor) -> list[dict]:
     """Pending proposals grouped into session bundles (specification 18.1).
 
     Within a bundle the order is observation, then interpretation, then
-    decision: grounds before conclusions, so the context is built once. Types
-    the ordering does not name keep their arrival order after those three.
+    decision: grounds before conclusions, so the context is built once.
+
+    Section 18.1 names only those three, and putting the other five at the end
+    would leave a bundle reading decision first and its supporting fact after,
+    which is the arrangement the ordering exists to prevent. So every type sits
+    on the same axis: what was seen, what it was taken to mean, what was
+    settled.
 
     Proposals with no session sit in one unnamed bundle rather than being
     dropped, so nothing can go missing from the queue by lacking provenance.
@@ -126,9 +131,17 @@ def session_queue(cur: psycopg.Cursor) -> list[dict]:
     rows = cur.fetchall()
 
     rank = {
+        # what was seen
         str(MemoryType.OBSERVATION): 0,
+        str(MemoryType.FACT): 0,
+        str(MemoryType.STATE): 0,
+        # what it was taken to mean
         str(MemoryType.INTERPRETATION): 1,
+        str(MemoryType.HYPOTHESIS): 1,
+        # what was settled, and what follows from it
         str(MemoryType.DECISION): 2,
+        str(MemoryType.TASK): 2,
+        str(MemoryType.PREFERENCE): 2,
     }
     bundles: dict[UUID | None, list[dict]] = {}
     for row in rows:
