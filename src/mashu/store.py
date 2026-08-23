@@ -18,6 +18,7 @@ from uuid import UUID
 import psycopg
 
 from mashu import events
+from mashu.embed import get_embedder
 from mashu.errors import ConcurrentUpdateError, MergeError, NotFoundError
 from mashu.models import EntityStatus, EventType, MemoryType, SourceType, VersionStatus
 from mashu.transitions import check_can_be_active, check_transition
@@ -99,10 +100,16 @@ def create_entity(
     """
     cur.execute(
         """
-        INSERT INTO memory_entity (scope_id, type, title, status)
-        VALUES (%s, %s, %s, %s) RETURNING memory_id
+        INSERT INTO memory_entity (scope_id, type, title, status, title_embedding)
+        VALUES (%s, %s, %s, %s, %s) RETURNING memory_id
         """,
-        (scope_id, str(MemoryType(type)), title, str(EntityStatus(entity_status))),
+        (
+            scope_id,
+            str(MemoryType(type)),
+            title,
+            str(EntityStatus(entity_status)),
+            embed_text(title),
+        ),
     )
     memory_id = cur.fetchone()["memory_id"]
     events.record(
@@ -430,6 +437,18 @@ def _choose_surviving_active(
 _ACTIVE_OK = frozenset({VersionStatus.CANDIDATE, VersionStatus.COMPLETED})
 
 
+def embed_text(text: str) -> str:
+    """One document vector in pgvector's text form.
+
+    Embedding happens on write rather than in a later pass so that a memory is
+    searchable the moment it exists. A candidate that could not be found until
+    some batch job caught up would be invisible to layer 2 exactly while its
+    review is outstanding, which is when it is most wanted.
+    """
+    vector = get_embedder().embed_documents([text])[0]
+    return "[" + ",".join(f"{v:.8f}" for v in vector) + "]"
+
+
 def _insert_version(
     cur: psycopg.Cursor,
     *,
@@ -446,8 +465,8 @@ def _insert_version(
         """
         INSERT INTO memory_version
             (memory_id, content, status, supersedes, reason,
-             source_type, created_by)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+             source_type, created_by, content_embedding)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING version_id
         """,
         (
@@ -458,6 +477,7 @@ def _insert_version(
             reason,
             str(SourceType(source_type)),
             created_by,
+            embed_text(content),
         ),
     )
     version_id = cur.fetchone()["version_id"]

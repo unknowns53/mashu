@@ -8,10 +8,7 @@ than by weighting recency, which is why the scenario checks the pointer and the
 status rather than an ordering.
 """
 
-import pytest
-
-from harness_marks import skip_until_retrieval
-from mashu import store
+from mashu import retrieval, store
 from mashu.models import SourceType, VersionStatus
 
 
@@ -54,7 +51,31 @@ def test_the_old_wording_survives_in_history(cur, author):
     assert store.get_version(cur, first)["content"] == "the analysis runs on Python 3.11"
 
 
-@pytest.mark.pending_phase("retrieval")
-@skip_until_retrieval
-def test_context_assembly_carries_only_the_current_wording():
-    """Query the corrected memory and assert the superseded text is absent."""
+def test_context_assembly_carries_only_the_current_wording(cur, scope_id, author):
+    """The superseded wording must not appear in any of the three layers.
+
+    Layer 3 is checked as well as layer 1. Superseded content is deliberately
+    not retired knowledge: the entity has a current answer, and showing the old
+    wording alongside it would put two readings of one memory in front of the
+    agent with nothing to choose between them.
+    """
+    memory_id, first = author("the ramp rate", "the cloud point ramp is one degree per minute")
+    store.add_version(
+        cur,
+        memory_id=memory_id,
+        content="the cloud point ramp is half a degree per minute",
+        source_type=SourceType.AGENT,
+        created_by="claude",
+        actor="claude",
+        based_on_version=first,
+        adopt=True,
+    )
+
+    got = retrieval.retrieve(cur, "the ramp rate", actor="claude", scope_id=scope_id)
+    handed_over = " ".join(
+        row.get("content", "") + row.get("reason", "") or ""
+        for row in (*got.active, *got.unreviewed, *got.retired)
+    )
+    assert "one degree per minute" not in handed_over
+    assert "half a degree per minute" in handed_over
+    assert [row["memory_id"] for row in got.retired] == []

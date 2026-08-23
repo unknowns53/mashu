@@ -24,10 +24,7 @@ a disproven version without a reason is refused, because layer 3 would have
 nothing to hand over.
 """
 
-import pytest
-
-from harness_marks import skip_until_retrieval
-from mashu import store
+from mashu import retrieval, store
 from mashu.models import MemoryType, VersionStatus
 
 
@@ -74,7 +71,34 @@ def test_the_refutation_and_its_reason_stay_readable(cur, author):
     assert "the timeout reproduced over a direct SATA connection" in reasons
 
 
-@pytest.mark.pending_phase("retrieval")
-@skip_until_retrieval
-def test_day_10_the_same_question_does_not_return_the_disproven_hypothesis():
-    """Ask the day 1 question again and assert the content is absent."""
+def test_day_10_the_same_question_does_not_return_the_disproven_hypothesis(cur, scope_id, author):
+    """The refutation comes back; the refuted claim does not.
+
+    Absence alone would not close the scenario. An agent told nothing about the
+    bridge chip is free to propose the bridge chip again, so layer 3 hands over
+    the reason instead of the content: what stops the rederivation is the
+    measurement that killed it, not the silence.
+    """
+    memory_id, version_id = author(
+        "SSD timeout cause",
+        "the timeout comes from the enclosure bridge chip",
+        type=MemoryType.HYPOTHESIS,
+    )
+    store.set_status(
+        cur,
+        version_id=version_id,
+        target=VersionStatus.DISPROVEN,
+        actor="user",
+        reason="the timeout reproduced over a direct SATA connection",
+    )
+
+    got = retrieval.retrieve(cur, "why does the SSD time out", actor="claude", scope_id=scope_id)
+
+    assert all("bridge chip" not in row["content"] for row in got.active)
+    assert all("bridge chip" not in row["content"] for row in got.unreviewed)
+
+    retired = {row["memory_id"]: row for row in got.retired}
+    assert memory_id in retired
+    assert retired[memory_id]["status"] == VersionStatus.DISPROVEN
+    assert "direct SATA connection" in retired[memory_id]["reason"]
+    assert "content" not in retired[memory_id]

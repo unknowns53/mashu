@@ -24,7 +24,6 @@ out the merge that follows when the review calls it a duplicate.
 
 import pytest
 
-from harness_marks import skip_until_entity_resolution
 from mashu.models import MemoryType
 
 NEAR_DUPLICATE_TITLES = [
@@ -47,16 +46,68 @@ def test_the_titles_the_threshold_has_to_separate(cur, scope_id, author):
     assert len({memory_id for memory_id, _ in created}) == 3
 
 
-@pytest.mark.pending_phase("entity_resolution")
-@skip_until_entity_resolution
-def test_a_confusable_title_offers_the_existing_entities_first():
-    """Propose the third title and assert the first two come back as candidates."""
+def test_a_confusable_title_offers_the_existing_entities_first(cur, scope_id, author):
+    """The third title has to meet the first two before it can become an entity.
+
+    Proposing raises rather than returning, because a return value is easy to
+    ignore and this is the one place section 20 forbids full automation.
+    """
+    from mashu import proposals, resolution
+    from mashu.models import MemoryType, ProposalOperation, SourceType
+
+    author("SSD failure analysis", "the enclosure bridge chip times out")
+    author("SSD debugging", "the drive times out over the enclosure")
+
+    with pytest.raises(resolution.SimilarEntityError) as caught:
+        proposals.propose(
+            cur,
+            actor="claude",
+            operation=ProposalOperation.CREATE,
+            payload={
+                "scope_id": str(scope_id),
+                "type": str(MemoryType.OBSERVATION),
+                "title": "SSD failure analysis",
+                "content": "the timeout appears again on a third enclosure",
+                "source_type": str(SourceType.AGENT),
+            },
+        )
+    assert caught.value.candidates
+    assert "SSD failure analysis" in {row["title"] for row in caught.value.candidates}
 
 
-@pytest.mark.pending_phase("entity_resolution")
-@skip_until_entity_resolution
-def test_creating_anyway_above_the_threshold_goes_to_review():
-    """Choose new entity despite a high score and assert a review item appears."""
+def test_creating_anyway_above_the_threshold_goes_to_review(cur, scope_id, author):
+    """The agent may still create. What it gets is provisional, and queued."""
+    from mashu import proposals, retrieval
+    from mashu.models import EntityStatus, MemoryType, ProposalOperation, SourceType
+
+    author("SSD failure analysis", "the enclosure bridge chip times out")
+
+    result = proposals.propose(
+        cur,
+        actor="claude",
+        operation=ProposalOperation.CREATE,
+        payload={
+            "scope_id": str(scope_id),
+            "type": str(MemoryType.OBSERVATION),
+            "title": "SSD failure analysis",
+            "content": "a separate investigation that happens to share the name",
+            "source_type": str(SourceType.AGENT),
+        },
+        allow_similar=True,
+        allow_duplicate=True,
+    )
+    created = result["proposal"]["target_memory"]
+
+    from mashu import store as _store
+
+    assert _store.get_entity(cur, created)["status"] == EntityStatus.PROVISIONAL
+    assert created in {
+        p["target_memory"] for b in proposals.session_queue(cur) for p in b["proposals"]
+    }
+
+    got = retrieval.retrieve(cur, "SSD failure analysis", actor="claude", scope_id=scope_id)
+    assert created not in {row["memory_id"] for row in got.active}
+    assert created in {row["memory_id"] for row in got.unreviewed}
 
 
 def test_review_calling_it_a_duplicate_folds_the_entity_back_in(cur, scope_id, author):

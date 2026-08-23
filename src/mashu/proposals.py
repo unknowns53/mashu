@@ -23,7 +23,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Jsonb
 
-from mashu import events, store
+from mashu import events, resolution, store
 from mashu.errors import DuplicatePendingError, NotFoundError, ProposalError
 from mashu.gate import CommitDecision, GateRuling, classify
 from mashu.models import (
@@ -149,6 +149,38 @@ def session_queue(cur: psycopg.Cursor) -> list[dict]:
     return out
 
 
+_ORPHAN_SQL = """
+SELECT e.memory_id, e.title, e.type, v.version_id, v.created_by, v.created_at,
+       EXTRACT(DAY FROM now() - v.created_at)::int AS days_pending
+FROM memory_version v
+JOIN memory_entity e ON e.memory_id = v.memory_id
+LEFT JOIN proposal p
+       ON p.applied_version = v.version_id AND p.status = 'pending'
+WHERE v.status = 'candidate'
+  AND (e.active_version IS NULL OR e.active_version <> v.version_id)
+  AND p.proposal_id IS NULL
+ORDER BY v.created_at
+"""
+
+
+def orphaned_candidates(cur: psycopg.Cursor) -> list[dict]:
+    """Candidate versions that no pending proposal is waiting on.
+
+    Layer 2 of retrieval is built from versions and the review queue is built
+    from proposals, so a candidate written straight into the store rather than
+    proposed is in a state with no way out: agents can read it, tagged
+    unreviewed, and no review will ever settle it.
+
+    Normal operation cannot produce one, because everything enters through
+    propose. Bulk work can: the migration of 27.1 imports existing content as
+    candidates, and importing it by writing versions directly would strand
+    every one of them. Surfacing them is cheaper than trusting that nobody
+    does that.
+    """
+    cur.execute(_ORPHAN_SQL)
+    return cur.fetchall()
+
+
 # --------------------------------------------------------------------------
 # writing a proposal
 # --------------------------------------------------------------------------
@@ -162,11 +194,20 @@ def propose(
     based_on_version: UUID | None = None,
     session_id: UUID | None = None,
     allow_duplicate: bool = False,
+    allow_similar: bool = False,
 ) -> dict[str, Any]:
     """Record a proposed change and take it as far as the gate allows.
 
     Returns the proposal row together with the gate's ruling, so the caller can
     tell an applied change from one that is now waiting.
+
+    Two checks run before the gate does, and both of them stop by raising
+    rather than by writing. They are not the same check. The duplicate check
+    (15.1) looks for a proposal that has already been made and is still
+    waiting; entity resolution (20) looks for a concept that already exists.
+    Passing allow_duplicate or allow_similar says the caller has looked at what
+    was found and judged this different, which is the choice section 20 gives
+    the agent.
     """
     operation = ProposalOperation(operation)
 
@@ -183,6 +224,22 @@ def propose(
                 f"look at them, and pass allow_duplicate to propose anyway",
                 existing,
             )
+
+    if operation is ProposalOperation.CREATE and "entity_status" not in payload:
+        similar = resolution.needs_similar_review(
+            cur, scope_id=payload["scope_id"], title=payload["title"]
+        )
+        if similar and not allow_similar:
+            raise resolution.SimilarEntityError(
+                f"{len(similar)} entity(ies) in this scope already look like "
+                f"'{payload['title']}'; add a version to one, or pass "
+                f"allow_similar to create a provisional entity alongside them",
+                similar,
+            )
+        if similar:
+            # Section 20: creating despite the similarity is the agent's to
+            # choose, and the resulting entity waits for a human either way.
+            payload = dict(payload, entity_status=str(EntityStatus.PROVISIONAL))
 
     ruling = _rule(cur, operation, payload, target_memory)
     status = (
