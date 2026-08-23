@@ -1,4 +1,4 @@
-# Mashu — Shared Agent Memory Layer / MVP 実装仕様書 v0.4
+# Mashu — Shared Agent Memory Layer / MVP 実装仕様書 v0.6
 
 改訂履歴:
 
@@ -7,6 +7,7 @@
 - v0.3: スキーマ確定、接続方式を MCP に確定、MVP スコープ縮小、開発計画を実測ベースに改訂、プロジェクト名を Mashu に確定
 - v0.4: Harness シナリオの書き下しで判明した欠落を補う。Retrieval の三層出力(21節)、Entity Status と Merge 手順(20節)、Proposal の重複チェック(15節)、Commit Gate への Entity 作成の追加(17節)、entity.status 列と disproven の reason 必須制約(26節)、滞留時間指標(27.3)
 - v0.5: Session Bootstrap を復活させる。v4 の Always Inject Context が MVP 化で落ちていたことによる退行の修復。session_bootstrap Tool と呼び出し要件(6節)、Bootstrap の内容と token 上限(21.2節)、native memory からの移植規則と棚卸し単位(27.1節)、切替試験(27.5節)、成功条件2件の追加(31節)
+- v0.6: Write Policy に退役の契機を追加(16.1節)。開発計画を較正点の発動により引き直す(30節)
 
 ---
 
@@ -366,6 +367,36 @@ Proposal 作成タイミングは二本立てとする。
 2. **Session End Extraction**: Session 終了時、Agent が長期価値のある情報を抽出して Proposal 化。それ以外は Scratch に残す
 
 Session End Extraction の抽出品質は実装前にオフラインで検証する(27節)。
+
+### 16.1 退役の契機
+
+上の二つは、いずれも新しい知識を**書き込む**契機である。既存の Active な Memory を completed / disproven / dormant へ落とす契機は、v0.5 まで仕様のどこにも定義されていなかった。
+
+これは 1 節の解決対象のうち「終了済み Task が未完了として扱われる」「棄却された仮説が再利用される」に対応する機構が無い状態である。15 節の operation には change_status があるため、欠けていたのは操作ではなく契機のほうである。
+
+21.1 節の Layer 3 とも直結する。disproven な Memory を警告として返す設計にしても、disproven 化を提案する契機が無ければ Layer 3 は永久に空のままになる。
+
+したがって、二つのタイミングの守備範囲を次のように広げる。
+
+**User Explicit(拡張)**
+
+「これは覚えておいて」等の記録要求に加えて、「終わった」「その説は違った」「もうその前提は無い」といった発話を change_status Proposal の契機とする。
+
+対象 Memory の同定が曖昧な場合は、候補を提示して User に選ばせる。Agent が対象を推定して確定させない。
+
+**Session End Extraction(拡張)**
+
+新しい知識の抽出に加えて、そのセッションで完了または棄却が観測された既存 Memory の洗い出しを行う。
+
+このため入力は会話ログだけでは足りず、当該 Scope の Active な Memory 一覧を含める。
+
+判定の非対称:
+
+新規の抽出では、迷ったら Scratch にする。偽陽性が Review 負荷を直接増やすためである。
+
+退役の洗い出しでは、**迷ったら提案する**。理由は二つある。disproven 化と Active Version の切替は 17 節で Human Review Required であり、契機が増えても User の承認なしに落ちることはない。一方、退役し損ねた Memory は誰にも気づかれないまま、以後のすべてのセッションを汚染しつづける。偽陰性のコストのほうが高い。
+
+洗い出しの品質も、新規抽出と同じく 27.4 でオフラインに検証する。
 
 ## 17. Commit Gate
 
@@ -865,24 +896,48 @@ Phase 0 から作成し、各 Phase と並走させる。
 - Graph Database
 - Policy Learning
 
-## 30. 開発計画(3ヶ月、週10〜15時間想定)
+## 30. 開発計画(3ヶ月)
 
-| 期間 | Phase | 内容 |
+v0.3 の週割りは実装時間を軸に組んでいた。較正点の発動(後述)によりこれを破棄し、**暦でしか進まない人間の検証期間**を軸に組み直す。
+
+圧縮不能の芯は二つある。
+
+- **手動運用 3 週**(27.1〜27.3): Review 負荷と滞留時間は日単位で積み上がるため、まとめて短縮できない
+- **切替試験 2 週**(27.5): 事故は運用日数に比例してしか観測されない
+
+この 5 週は並列化も前倒しもできない。実装はこの芯の隙間と並走に入る。
+
+| 期間 | 内容 | 暦の消費 |
 |---|---|---|
-| Week 1–2 | Phase 0 | DB スキーマ、event_log、Status 遷移の決定的ロジック、Harness シナリオ書き下し |
-| Week 3–5 | Phase 1 | Proposal / Commit Gate / Memory Hub API |
-| Week 6–8 | Phase 2 | Review CLI、実データ移植(30〜50件)、手動運用開始 |
-| 随時(早期) | — | 27.4 抽出オフライン検証(実装不要のため最優先) |
-| Week 9–10 | Phase 2 | Retrieval Pipeline、Entity Resolution 閾値実測 |
-| Week 11–13 | Phase 3 | MCP Server 化、Claude 接続、シナリオ 1〜4 通過 |
+| 完了 | Phase 0: DB スキーマ、event_log、Status 遷移、Harness シナリオ書き下し | — |
+| Week 1 | Phase 1: Proposal / Commit Gate / Memory Hub API | 実装 |
+| Week 1 | 27.4 オフライン検証(抽出と退役の洗い出し。実装不要) | 実装と並走 |
+| Week 2 | Phase 2a: 埋め込み生成、Retrieval Pipeline、三層出力、Entity Resolution | 実装 |
+| Week 3 | Phase 2b: Review CLI、native memory の移植(Scope 単位、27.1 の規則) | 実装 |
+| **Week 4–6** | **手動運用 3 週**: 27.1 Retrieval 品質 / 27.2 閾値実測 / 27.3 Review 負荷と滞留時間 | **暦・圧縮不能** |
+| Week 4–6 | 並走: Phase 3 実装(MCP Server、session_bootstrap、指示ファイル要件) | 実装 |
+| Week 7 | Claude 接続、Bootstrap 込みの通し確認、Harness シナリオ 1〜4 通過 | 実装 |
+| **Week 8–9** | **切替試験 2 週**: 27.5。native な記憶機構を切り、取得失敗事故を記録 | **暦・圧縮不能** |
+| Week 10 | 事故ログの反映: Bootstrap の内容と token 上限、6.1節の呼び出し要件の見直し | 実装 |
+| Week 11–13 | 緩衝 | 緩衝 |
+
+緩衝 3 週の使いみち:
+
+手動運用が 3 週で足りなかった場合の延長、切替試験のやり直し、Auto Commit 範囲の調整。実装の遅れではなく、**芯の期間が伸びたとき**に使う。
 
 較正点:
 
-Phase 0 を 2 週間で完了できるかを最初の較正点とし、超過した場合は全体計画を引き直す。
+v0.3 の較正点「Phase 0 を 2 週間で完了できるか」は**発動済み**である。
+
+実際の所要は 1 セッションで、超過ではなく大幅な下振れだった。しかし較正点の趣旨は所要時間そのものではなく、見積もりの前提が保たれているかにある。「人間が手で書く」という前提が崩れた以上、方向が逆でも計画は引き直す。
+
+**新しい較正点は手動運用の開始日とする。** Week 3 の終わりまでに手動運用へ入れない場合、5 週の芯と緩衝が 3 ヶ月に収まらないため、その時点で再度引き直す。
+
+実装の所要時間は較正点にしない。前提が崩れた以上、それは拘束条件ではなくなったためである。
 
 3ヶ月時点の到達目標:
 
-**Claude 1体を MCP 接続し、Harness シナリオ 1〜4 が通過すること。**
+**Claude 1 体を MCP 接続して Harness シナリオ 1〜4 が通過し、かつ native な記憶機構を切った状態で切替試験を完了して、取得失敗事故の件数を手元に持っていること。**
 
 MVP 後(4ヶ月目以降): Codex / Gemini 接続、Web UI、Conflict 検出、Auto Commit 範囲の調整。
 

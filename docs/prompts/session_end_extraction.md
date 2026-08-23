@@ -2,8 +2,14 @@
 
 仕様 16 節の Session End Extraction で用いる。27.4 のオフライン検証の対象でもある。
 
-入力は 1 セッション分の圧縮済み会話ログ（`tools/condense_session.py` の出力）。
-出力は Memory Proposal 案と、Proposal にしなかったもの（Scratch）の一覧。
+入力は 2 つ。
+
+1. 1 セッション分の圧縮済み会話ログ（`tools/condense_session.py` の出力）
+2. 当該 Scope の Active な Memory 一覧（memory_id / type / title / content）
+
+出力は 3 つ。新規の Memory Proposal 案、既存 Memory の退役提案、そして Proposal にしなかったもの（Scratch）。
+
+2 つ目の入力と出力が要るのは仕様 16.1 節による。書き込む契機しか無いと、終わった作業と覆った前提が Active のまま残りつづけ、21.1 節の Layer 3 も永久に空になる。
 
 ---
 
@@ -39,6 +45,8 @@ Review の際に、移植なのか新規なのかを User が判断できるよ�
 判定に迷ったら Scratch にする。Proposal は User の Review 負荷を直接増やすため、
 偽陽性のコストは偽陰性のコストより高い。
 
+**この非対称は退役の側では逆転する。後述する。**
+
 ### Type の割り当て
 
 仕様 13 節の Type から選ぶ。
@@ -55,6 +63,25 @@ Review の際に、移植なのか新規なのかを User が判断できるよ�
 | state | Scope の現在状態 | Scope ごとに 1 つ |
 
 `decision` は理由を必ず本文に含めること。理由のない decision は、後から覆せないため価値が低い。
+
+### 退役の洗い出し
+
+入力 2 の Active な Memory を 1 件ずつ見て、このセッションで次のいずれかが観測されたかを判定する。
+
+| 落とす先 | 条件 |
+|---|---|
+| completed | その Task が終わったことがセッション中に確認できる |
+| disproven | セッション中の観測がその内容と矛盾した。前提が覆った |
+| dormant | 前提が変わって当面は使わないが、将来再評価しうる |
+
+**退役では、迷ったら提案する。** 新規抽出とは非対称であり、理由は 2 つある。
+
+- disproven 化と Active Version の切替は仕様 17 節で Human Review Required なので、提案が増えても User の承認なしに落ちることはない
+- 退役し損ねた Memory は誰にも気づかれないまま、以後のすべてのセッションを汚染しつづける
+
+つまり退役では偽陰性のコストのほうが高い。
+
+対象 Memory の同定が曖昧なときは、提案を諦めるのではなく、候補を複数挙げて `ambiguous` に true を立てる。どれを落とすかの確定は User が行う。
 
 ### 出力形式
 
@@ -73,6 +100,16 @@ JSON で出力する。前置きも後書きも付けない。
       "commit_gate": "auto | candidate",
       "evidence": ["同じセッションから抽出した他の proposal の title。無ければ空"],
       "duplicates": ["既存の記憶置き場にある同じ論点の項目名。無ければ空"]
+    }
+  ],
+  "retirements": [
+    {
+      "memory_id": "入力2にあった Memory の id",
+      "title": "その Memory の title",
+      "target": "completed | disproven | dormant",
+      "reason": "セッション中の何を根拠にそう判定したか。disproven では必須",
+      "ambiguous": false,
+      "alternatives": ["同定が曖昧なときの他の候補 memory_id。無ければ空"]
     }
   ],
   "scratch": [
