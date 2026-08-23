@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local configuration / secrets
+.env
+.env.*
+!.env.example
+
+# Local banned-pattern list: must never be committed
+.git-banned-patterns
+
+# Data and intermediates
+data/
+*.dump
+*.sql.gz
+*.db
+*.sqlite3
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Claude Code local settings
+.claude/settings.local.json

@@ -1,0 +1,45 @@
+#!/bin/sh
+# Reject staged paths or staged content matching the local banned-pattern list.
+set -eu
+
+hook_dir=$(dirname "$0")
+. "$hook_dir/_banned.sh"
+
+banned_load || exit 1
+trap 'rm -f "$BANNED_PATTERNS_FILE"' EXIT
+
+files=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -n "$files" ] || exit 0
+
+failed=0
+
+# 1. Paths.
+offending_paths=$(printf '%s\n' "$files" | grep -E -f "$BANNED_PATTERNS_FILE" || true)
+if [ -n "$offending_paths" ]; then
+    printf '%s\n' "pre-commit: banned pattern in staged path(s):" >&2
+    printf '%s\n' "$offending_paths" | sed 's/^/    /' >&2
+    failed=1
+fi
+
+# 2. Contents of the staged blobs, not just the added lines.
+#    Iterated with IFS=newline so the loop body runs in this shell, not a subshell.
+old_ifs=$IFS
+IFS='
+'
+for f in $files; do
+    [ -n "$f" ] || continue
+    hits=$(git show ":$f" 2>/dev/null | grep -n -E -f "$BANNED_PATTERNS_FILE" || true)
+    if [ -n "$hits" ]; then
+        printf '%s\n' "pre-commit: banned pattern in $f:" >&2
+        printf '%s\n' "$hits" | sed 's/^/    /' >&2
+        failed=1
+    fi
+done
+IFS=$old_ifs
+
+if [ "$failed" -ne 0 ]; then
+    printf '%s\n' "pre-commit: commit aborted. Remove the flagged text; do not use --no-verify." >&2
+    exit 1
+fi
+
+exit 0
