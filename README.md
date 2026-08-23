@@ -105,6 +105,7 @@ fresh clone では git hook を入れる。
 
 | コマンド | 内容 |
 |---|---|
+| `mashu remember <body>` | User が述べた知識を記録する。Review を待たず active になる |
 | `mashu queue` | Review 待ちをセッション束ごとに並べる |
 | `mashu show <id>` / `--bundle <id>` | 1 件、または束を 1 つの読み物として表示 |
 | `mashu approve <id>` / `--bundle <id>` | 承認。`--skip` で束から抜ける |
