@@ -1,4 +1,4 @@
-# Mashu — Shared Agent Memory Layer / MVP 実装仕様書 v0.8
+# Mashu — Shared Agent Memory Layer / MVP 実装仕様書 v0.9
 
 改訂履歴:
 
@@ -10,6 +10,7 @@
 - v0.6: Write Policy に退役の契機を追加(16.1節)。27.4 を前提条件の異なる 27.4a / 27.4b に分割。開発計画を較正点の発動により引き直す(30節)
 - v0.7: 27.4a の実測を受けた Review 負荷対策。Review の単位をセッション束へ(18.1節)、candidate を準承認として本文まで渡す(21.1節)、Task の範囲を限定(16.2節)、proposal に由来セッションを追加(15・26節)
 - v0.8: 準承認の導入で開いた二つの穴を塞ぐ。Layer 2 の相対・絶対上限(21.1節)、Review 負荷指標を束単位へ改め未審査比率を追加、行き先を失っていた閾値を差し替え(27.3節)
+- v0.9: 却下された Proposal の後始末を dormant から分離する。version.status に rejected を追加(11・12・26節)、Layer 3 に rejected を追加(21.1節)、重複チェックの対象を却下済みへ拡大(15.1節)
 
 ---
 
@@ -250,7 +251,7 @@ v0.3 では以下に統一する。
 **「Active な Version」とは entity.active_version が指している Version のことである。**
 
 - version.status から Active を廃止する
-- version.status は candidate / superseded / disproven / dormant / completed のみを持つ
+- version.status は candidate / superseded / disproven / dormant / rejected / completed のみを持つ
 - active_version の切替は System が Status 遷移と同一トランザクションで行う
 
 これにより「ポインタは v2 を指すが v3 が Active を名乗る」という不整合が構造的に発生しない。
@@ -263,9 +264,16 @@ Version が持つ状態:
 - **superseded**: 新しい Version に置換された
 - **disproven**: 誤りと判明した
 - **dormant**: 現在利用しないが、将来再評価可能
+- **rejected**: その Version を運んできた Proposal が却下された
 - **completed**: 終了済み(Task 等)
 
 Active は状態ではなくポインタで表現する(10節)。
+
+rejected だけは、内容についての読みではない。
+
+dormant は「いまは使わないが将来再評価しうる」という**知識の見込みについての評価**であり、rejected は「その Proposal を通さないと判断した」という**手続きについての判断**である。内容が将来有望かどうかとは別の軸なので、却下の後始末を dormant に寄せない。寄せると、16.1節の再評価候補の洗い出しが却下の残骸を拾って濁る。却下はこの系で最も件数の出る事象なので、埋もれるのは数少ない本物の dormant のほうである。
+
+この区別は誰が書けるかにも現れる。completed / disproven / dormant は Agent が Proposal として提出できる読みだが、**rejected は Review の行為そのものなので Agent は提出できない**。書き込むのは却下処理だけである。
 
 ## 12. Status 遷移
 
@@ -279,7 +287,11 @@ candidate ──(承認 + active_version 切替)──> 採用
          superseded     disproven        dormant
                                             |
                                      (再評価 → 新 Version)
+
+candidate ──(却下)──> rejected
 ```
+
+rejected は candidate からのみ到達する。既に結論の出た Version は誰の裁定も待っていないためである。
 
 過去状態の復活は、既存 Version の状態変更ではなく新 Version の作成(Restore)として行う。
 既存 Version の復活は禁止。
@@ -344,21 +356,23 @@ reviewer / decided_at / decision_reason を追加。
 
 ### 15.1 重複チェック
 
-Proposal 作成時、同じ対象に対する pending な Proposal が既に存在するかを確認する。
+Proposal 作成時、同じ対象に対する Proposal が既に存在するかを確認する。対象は **pending と rejected の両方**とする。
 
 target_memory が指定されている場合:
 
-同一 target_memory の pending Proposal を検索する。
+同一 target_memory の pending / rejected Proposal を検索する。
 
 target_memory が NULL(operation = create)の場合:
 
-同一 Scope 内の pending な create Proposal のうち、payload の title の title_embedding 類似度が Entity Resolution と同じ閾値(20節)以上のものを検索する。
+同一 Scope 内の pending / rejected な create Proposal のうち、payload の title の title_embedding 類似度が Entity Resolution と同じ閾値(20節)以上のものを検索する。
 
-該当がある場合、新規 Proposal を作成せず、既存 Proposal の proposal_id・payload・created_at・滞留日数を提案者へ返す。
+該当がある場合、新規 Proposal を作成せず、既存 Proposal の proposal_id・payload・status・created_at・滞留日数を提案者へ返す。却下済みのものについては decision_reason(15節)も返す。
 
 理由:
 
 未承認の候補は Retrieval の Layer 1 に現れない(21.1節)。v0.7 で Layer 2 が本文を渡すようになったため、その Scope を実際に引いた Agent であれば自分の提案に気づけるが、Retrieval は Query 起点であり、引かなかった Agent は気づけない。重複チェックがなければ、Review が遅れるほど同一内容の Proposal が Queue に積み上がる。これは User の Review 負荷を、知識状態の改善を伴わずに増やす。
+
+却下済みを対象に含めるのは、pending の場合より重い理由による。**提案者に伝わらない却下は、同じ却下をもう一度踏みにいく。** User は同じ判断に同じ時間を二度払うことになり、しかも二度目に払ったことは記録のどこにも現れない。却下理由を添えて返せば、提案者は同じ結論へ向かう前にその理由を読む。
 
 重複チェックは作成の機械的な禁止ではない。目的は既存 Proposal の存在を提案者に見せることであり、提案者が確認したうえで「別物である」と明示した場合は新規作成を許す。その場合は両方が Review Queue に並び、User が Merge するか一方を却下する。
 
@@ -584,9 +598,11 @@ Active Version Filter は古い情報と棄却済み情報を Context から除�
 |---|---|---|---|
 | Layer 1 Active | status = active な Entity の active_version | Memory ID / type / title / content | 現在の知識として利用してよい |
 | Layer 2 Unreviewed | active_version が指していない candidate、および status = provisional な Entity | Memory ID / title / content / 提案者 / created_at / 滞留日数 / `unreviewed` タグ | 未審査の情報として利用してよい。ただしこれを根拠に確定的な主張をしない。同一内容を再提案しない |
-| Layer 3 Retired | status = disproven / dormant の Version | Memory ID / title / status / reason | 再導出しない。reason に反する主張をする場合は新たな根拠を示す |
+| Layer 3 Retired | status = disproven / dormant / rejected の Version | Memory ID / title / status / reason | 再導出しない。reason に反する主張をする場合は新たな根拠を示す |
 
 Layer 3 で content を渡さないのは、退役した知識だからである。本文を渡せば Agent がそれを現在値として扱う危険があり、Active Version Filter を設けた意味がなくなる。渡すのは「何が、なぜ否定されたか」のみとする。否定された主張そのものより、否定した根拠のほうが Agent の再導出を止めるからである。
+
+rejected は内容についての読みではない(11節)が、この層に置く。層の役割は「再導出させないこと」であり、「Review が見て通さなかった、理由はこれ」はその指示そのものだからである。読みなのか手続きなのかは、同時に渡す status で Agent 側が判別できる。
 
 #### 準承認としての Layer 2
 
@@ -779,7 +795,7 @@ CREATE TABLE memory_version (
     memory_id         UUID NOT NULL REFERENCES memory_entity(memory_id),
     content           TEXT NOT NULL,
     status            TEXT NOT NULL,
-        -- candidate / superseded / disproven / dormant / completed
+        -- candidate / superseded / disproven / dormant / rejected / completed
         -- active は状態ではなく entity.active_version で表現(10節)
     supersedes        UUID REFERENCES memory_version(version_id),
     reason            TEXT,

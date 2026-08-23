@@ -176,7 +176,13 @@ def test_a_disproven_memory_returns_its_reason_and_not_its_content(cur, scope_id
     assert all("bridge chip" not in row["content"] for row in got.active)
 
 
-def test_a_rejected_candidate_shows_up_as_retired(cur, scope_id, author):
+def test_a_rejected_candidate_shows_up_as_retired_and_leaves_layer_two(cur, scope_id, author):
+    """Turned down, so it is no longer unreviewed and no longer readable.
+
+    Layer 2 selects on the version status alone. That only stays honest while
+    a rejection actually moves the version off candidate, which is the reason
+    rejected is a status and not a fact kept over in the proposal table.
+    """
     result = proposals.propose(
         cur,
         actor="claude",
@@ -198,7 +204,39 @@ def test_a_rejected_candidate_shows_up_as_retired(cur, scope_id, author):
 
     got = retrieval.retrieve(cur, "ramp overshoot", actor="claude", scope_id=scope_id)
     assert _titles(got.retired) == ["ramp overshoot"]
-    assert got.retired[0]["reason"] == "that was the uncalibrated thermocouple"
+    retired = got.retired[0]
+    assert retired["status"] == VersionStatus.REJECTED
+    assert retired["reason"] == "that was the uncalibrated thermocouple"
+    assert "content" not in retired
+    assert _titles(got.unreviewed) == []
+
+
+def test_a_scope_with_nothing_left_active_still_answers_from_layer_three(cur, scope_id, author):
+    """Day 10 of scenario 1, without the scope handed in.
+
+    Layers 2 and 3 are confined to the scopes layer 1 hit, which works while
+    something is active to confine them to. Once every memory in the scope has
+    been retired there is nothing to confine by, and treating that as "confine
+    to nothing" silenced the refutation in the one case it was written for.
+    """
+    memory_id, version_id = author(
+        "SSD timeout cause",
+        "the timeout comes from the enclosure bridge chip",
+        type=MemoryType.HYPOTHESIS,
+    )
+    store.set_status(
+        cur,
+        version_id=version_id,
+        target=VersionStatus.DISPROVEN,
+        actor="user",
+        reason="the timeout reproduced over a direct SATA connection",
+    )
+
+    got = retrieval.retrieve(cur, "why does the SSD time out", actor="claude")
+
+    assert got.active == []
+    assert [row["memory_id"] for row in got.retired] == [memory_id]
+    assert "direct SATA connection" in got.retired[0]["reason"]
 
 
 # --------------------------------------------------------------------------

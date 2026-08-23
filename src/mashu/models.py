@@ -26,12 +26,18 @@ class VersionStatus(StrEnum):
 
     There is deliberately no active member. Whether a version is active is read
     off memory_entity.active_version and nowhere else (specification 10).
+
+    rejected is the only member that is not a reading of the content. It says
+    the proposal that carried this version was turned down, which is separate
+    from whether the content might one day be worth revisiting; that question
+    is what dormant answers.
     """
 
     CANDIDATE = "candidate"
     SUPERSEDED = "superseded"
     DISPROVEN = "disproven"
     DORMANT = "dormant"
+    REJECTED = "rejected"
     COMPLETED = "completed"
 
 

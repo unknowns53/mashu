@@ -24,7 +24,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from mashu import events, resolution, store
-from mashu.errors import DuplicatePendingError, NotFoundError, ProposalError
+from mashu.errors import DuplicateProposalError, NotFoundError, ProposalError
 from mashu.gate import CommitDecision, GateRuling, classify
 from mashu.models import (
     EntityStatus,
@@ -53,29 +53,40 @@ def get(cur: psycopg.Cursor, proposal_id: UUID) -> dict:
     return row
 
 
-def find_duplicate_pending(
+def find_duplicate_proposals(
     cur: psycopg.Cursor,
     *,
     target_memory: UUID | None,
     scope_id: UUID | None = None,
     title: str | None = None,
 ) -> list[dict]:
-    """Pending proposals that would change the same thing (specification 15.1).
+    """Proposals that already covered this change (specification 15.1).
+
+    Two kinds count. One is still waiting, which is the case section 15.1 is
+    written for: proposing it again grows the queue with duplicates of one
+    unreviewed idea. The other was turned down, which section 15.1 does not
+    mention but which matters more, because a rejection the proposer never
+    learns about is a rejection it will walk into again.
+
+    A turned-down proposal keeps its decision_reason (specification 15), so the
+    row carries the reviewer's words back to the proposer. Nothing about the
+    version's own status is consulted here; whether the same idea has already
+    been ruled on is a fact about the procedure, and the procedure is what the
+    proposal table records.
 
     For a change to an existing entity the test is exact: same target. For a
     creation there is no target yet, so the test is on the title within the
-    scope. Phase 2a replaces that with title_embedding similarity at the
-    entity resolution threshold; until embeddings exist an exact match is what
-    can be checked, and it catches the case the section is aimed at, an agent
-    re-proposing what it already proposed.
+    scope. Entity resolution (20) is what catches a differently worded rival;
+    this check catches the proposer repeating itself.
     """
     if target_memory is not None:
         cur.execute(
             """
-            SELECT proposal_id, actor, operation, payload, created_at,
+            SELECT proposal_id, actor, operation, payload, status, decision_reason,
+                   created_at, decided_at,
                    EXTRACT(DAY FROM now() - created_at)::int AS days_pending
             FROM proposal
-            WHERE status = 'pending' AND target_memory = %s
+            WHERE status IN ('pending', 'rejected') AND target_memory = %s
             ORDER BY created_at
             """,
             (target_memory,),
@@ -86,10 +97,11 @@ def find_duplicate_pending(
         return []
     cur.execute(
         """
-        SELECT proposal_id, actor, operation, payload, created_at,
+        SELECT proposal_id, actor, operation, payload, status, decision_reason,
+               created_at, decided_at,
                EXTRACT(DAY FROM now() - created_at)::int AS days_pending
         FROM proposal
-        WHERE status = 'pending'
+        WHERE status IN ('pending', 'rejected')
           AND operation = 'create'
           AND payload ->> 'scope_id' = %s
           AND payload ->> 'title' = %s
@@ -222,27 +234,49 @@ def propose(
     apply any of it would import the contamination Mashu exists to keep out.
     It can only ever make the gate stricter.
 
-    Two checks run before the gate does, and both of them stop by raising
-    rather than by writing. They are not the same check. The duplicate check
-    (15.1) looks for a proposal that has already been made and is still
-    waiting; entity resolution (20) looks for a concept that already exists.
+    Three checks run before the gate does, and all of them stop by raising
+    rather than by writing. The first is a vocabulary check: rejected is the
+    reviewer's verdict on a proposal, so a proposal asking for it would be a
+    proposal asking to be turned down.
+
+    The other two are not the same check. The duplicate check (15.1) looks
+    for a proposal that has already been made and has already been ruled on or
+    is still waiting; entity resolution (20) looks for a concept that already
+    exists.
     Passing allow_duplicate or allow_similar says the caller has looked at what
     was found and judged this different, which is the choice section 20 gives
-    the agent.
+    the agent. Neither flag waives the other, and no flag waives the first
+    check: a status the vocabulary does not offer the proposer is not a
+    judgement call.
     """
     operation = ProposalOperation(operation)
 
+    if operation is ProposalOperation.CHANGE_STATUS and payload.get("status") == str(
+        VersionStatus.REJECTED
+    ):
+        raise ProposalError(
+            "rejected is not a status anything can propose; it is what review "
+            "does to a proposal. To retire the content, propose disproven or "
+            "dormant (specification 11)"
+        )
+
     if not allow_duplicate:
-        existing = find_duplicate_pending(
+        existing = find_duplicate_proposals(
             cur,
             target_memory=target_memory,
             scope_id=payload.get("scope_id"),
             title=payload.get("title"),
         )
         if existing:
-            raise DuplicatePendingError(
-                f"{len(existing)} pending proposal(s) already cover this; "
-                f"look at them, and pass allow_duplicate to propose anyway",
+            turned_down = [row for row in existing if row["status"] == "rejected"]
+            if turned_down:
+                why = turned_down[-1]["decision_reason"]
+                detail = f"{len(turned_down)} of them was turned down: {why}"
+            else:
+                detail = f"{len(existing)} of them is still waiting for review"
+            raise DuplicateProposalError(
+                f"this change has already been proposed; {detail}. Look at it, "
+                f"and pass allow_duplicate to propose anyway",
                 existing,
             )
 
@@ -367,8 +401,21 @@ def reject(cur: psycopg.Cursor, proposal_id: UUID, *, reviewer: str, reason: str
     """Turn a pending proposal down. The reason is required.
 
     A candidate that was written at propose time is not deleted but moved to
-    dormant, so that layer 3 of retrieval can tell the agent this was looked at
-    and turned down. Deleting it would let the same proposal come back.
+    rejected, so that layer 3 of retrieval can tell the agent this was looked
+    at and turned down. Deleting it would let the same proposal come back
+    unremarked.
+
+    rejected rather than dormant, though dormant would also have kept the row.
+    dormant says the content is not useful now but may be worth revisiting, and
+    that is a reading of the knowledge; being turned down is a fact about the
+    proposal and says nothing either way about the content. Folding one into
+    the other would leave any later sweep for re-evaluation candidates picking
+    through the leftovers of every rejection.
+
+    The reviewer's words go onto the version as well as onto the proposal.
+    version.reason means the reason the version is in the state it is now
+    (specification 26), and the reason it is rejected is what the reviewer
+    wrote, so layer 3 can hand it over without reaching into the procedure.
     """
     if not reason:
         raise ProposalError("a rejection has to record why (specification 31)")
@@ -380,7 +427,7 @@ def reject(cur: psycopg.Cursor, proposal_id: UUID, *, reviewer: str, reason: str
             store.set_status(
                 cur,
                 version_id=proposal["applied_version"],
-                target=VersionStatus.DORMANT,
+                target=VersionStatus.REJECTED,
                 actor=reviewer,
                 reason=reason,
             )

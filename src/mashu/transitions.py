@@ -10,8 +10,8 @@ Specification 12 draws an adopted state between candidate and the outcomes, but
 specification 11 does not list one, because specification 10 removed active
 from the status vocabulary so that the pointer is the only place activeness
 lives. That leaves a gap the written specification does not close: an approved
-version that is currently the truth needs some status, and none of superseded,
-disproven or dormant fits.
+version that is currently the truth needs some status, and none of the
+outcome states fits.
 
 Reading the three sections together, the resolution that keeps a single source
 of truth is to let status carry only the outcome a version has reached, and to
@@ -20,6 +20,7 @@ let the pointer carry adoption:
     candidate  = no outcome yet; may or may not be the pointer target
     completed  = finished, and still the truth worth retrieving
     superseded, disproven, dormant = no longer the truth
+    rejected   = the proposal that carried it was turned down
 
 So a candidate that the pointer targets is the active version, and a candidate
 the pointer does not target is waiting for review. Adding an adopted status
@@ -38,17 +39,21 @@ _C = VersionStatus
 
 #: What a version in a given status may become.
 #:
-#: superseded, disproven and dormant are absorbing. Specification 12 forbids
-#: reviving an existing version, so coming back from any of them is a new
-#: version created by a Restore, never an edit here.
+#: superseded, disproven, dormant and rejected are absorbing. Specification 12
+#: forbids reviving an existing version, so coming back from any of them is a
+#: new version created by a Restore, never an edit here.
+#:
+#: Only a candidate can be rejected, and only review rejects it. A version that
+#: already reached an outcome is no longer waiting on anyone's verdict.
 ALLOWED_TRANSITIONS: dict[VersionStatus, frozenset[VersionStatus]] = {
-    _C.CANDIDATE: frozenset({_C.SUPERSEDED, _C.DISPROVEN, _C.DORMANT, _C.COMPLETED}),
+    _C.CANDIDATE: frozenset({_C.SUPERSEDED, _C.DISPROVEN, _C.DORMANT, _C.REJECTED, _C.COMPLETED}),
     # A finished task can still be replaced by a newer one, or turn out to have
     # been wrong. It does not go dormant: nothing about it is pending re-use.
     _C.COMPLETED: frozenset({_C.SUPERSEDED, _C.DISPROVEN}),
     _C.SUPERSEDED: frozenset(),
     _C.DISPROVEN: frozenset(),
     _C.DORMANT: frozenset(),
+    _C.REJECTED: frozenset(),
 }
 
 #: The statuses a version may hold while active_version points at it.

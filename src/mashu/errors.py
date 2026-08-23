@@ -38,15 +38,25 @@ class ProposalError(MashuError):
     """A proposal cannot be decided the way the caller asked."""
 
 
-class DuplicatePendingError(MashuError):
-    """An equivalent proposal is already waiting for review (specification 15.1).
+class DuplicateProposalError(MashuError):
+    """An equivalent proposal has already been made (specification 15.1).
 
-    Carries the proposals it found so the caller can look at them and decide.
-    Blocking is not the point; the point is that the proposer sees what is
-    already in the queue. A caller that has looked and judged the change
-    genuinely different can say so and propose anyway.
+    Either it is still waiting for review, or it was turned down. Both are
+    worth stopping for, and the second is worth more: a proposer that never
+    hears about a rejection will make the same proposal again, and the
+    reviewer will spend the same minutes turning it down again.
+
+    Carries the proposals it found, with their decision_reason, so the caller
+    can look at them and decide. Blocking is not the point; the point is that
+    the proposer sees what has already been ruled on. A caller that has looked
+    and judged the change genuinely different can say so and propose anyway.
     """
 
     def __init__(self, message: str, existing: list[dict]) -> None:
         super().__init__(message)
         self.existing = existing
+
+    @property
+    def rejected(self) -> list[dict]:
+        """The ones a reviewer already turned down."""
+        return [row for row in self.existing if row["status"] == "rejected"]

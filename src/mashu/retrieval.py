@@ -158,13 +158,18 @@ LIMIT %(limit)s
 # Layer 3 is ranked on the title, not the content. Ordering by similarity to
 # text the layer will not hand over would rank on evidence the agent never
 # sees, so the handle it does see is the handle it is ranked by.
+#
+# rejected belongs here alongside the two retired readings even though it is
+# not itself a reading. What the layer is for is telling the agent not to
+# re-derive something, and "a reviewer turned this down, here is why" is that
+# same instruction; the status the agent reads back keeps the two apart.
 _LAYER3_SQL = """
 SELECT DISTINCT ON (e.memory_id)
        e.memory_id, e.scope_id, e.type, e.title, v.version_id, v.status, v.reason,
        1 - (e.title_embedding <=> %(q)s::vector) AS similarity
 FROM memory_entity e
 JOIN memory_version v ON v.memory_id = e.memory_id
-WHERE v.status IN ('disproven', 'dormant')
+WHERE v.status IN ('disproven', 'dormant', 'rejected')
   AND e.title_embedding IS NOT NULL
   AND (%(scopes)s::uuid[] IS NULL OR e.scope_id = ANY(%(scopes)s::uuid[]))
   AND (%(types)s::text[] IS NULL OR e.type = ANY(%(types)s::text[]))
@@ -201,6 +206,13 @@ def retrieve(
     # Layers 2 and 3 stay inside the scopes layer 1 actually hit. Returning a
     # whole scope's retired memories would let layer 3 crowd the context out
     # (21.1, MVP default).
+    #
+    # With nothing to narrow by the narrowing does not happen, exactly as when
+    # scope detection comes up empty: an empty scope list means the whole
+    # ledger here, not nothing. Reading it as nothing would silence layer 3 in
+    # the one case where it is the entire answer, which is a scope whose every
+    # memory has been retired. Scenario 1 is that case on day 10, and it only
+    # passed because it hands the scope in.
     hit_scopes = scopes or sorted({row["scope_id"] for row in active})
     narrowed = dict(params, scopes=hit_scopes or None)
 
@@ -209,10 +221,8 @@ def retrieve(
     for row in unreviewed:
         row["tag"] = UNREVIEWED_TAG
 
-    retired: list[dict[str, Any]] = []
-    if hit_scopes:
-        cur.execute(_LAYER3_SQL, narrowed)
-        retired = sorted(cur.fetchall(), key=lambda r: -r["similarity"])[:limit]
+    cur.execute(_LAYER3_SQL, narrowed)
+    retired = sorted(cur.fetchall(), key=lambda r: -r["similarity"])[:limit]
 
     result = Retrieved(
         query=query,

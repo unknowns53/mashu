@@ -10,7 +10,7 @@ import uuid
 import pytest
 
 from mashu import proposals, store
-from mashu.errors import DuplicatePendingError, ProposalError
+from mashu.errors import DuplicateProposalError, ProposalError
 from mashu.gate import CommitDecision
 from mashu.models import (
     EntityStatus,
@@ -20,6 +20,7 @@ from mashu.models import (
     SourceType,
     VersionStatus,
 )
+from mashu.resolution import SimilarEntityError
 
 
 def _create_payload(scope_id, **over):
@@ -34,12 +35,14 @@ def _create_payload(scope_id, **over):
     return payload
 
 
-def _propose_create(cur, scope_id, **over):
+def _propose_create(cur, scope_id, allow_duplicate=False, allow_similar=False, **over):
     return proposals.propose(
         cur,
         actor="agent-1",
         operation=ProposalOperation.CREATE,
         payload=_create_payload(scope_id, **over),
+        allow_duplicate=allow_duplicate,
+        allow_similar=allow_similar,
     )
 
 
@@ -74,8 +77,12 @@ def test_approving_a_candidate_adopts_it(cur, scope_id):
     assert entity["active_version"] == decided["applied_version"]
 
 
-def test_rejecting_makes_the_candidate_dormant_rather_than_deleting_it(cur, scope_id):
-    """Deleting it would let the same proposal come straight back."""
+def test_rejecting_marks_the_candidate_rejected_rather_than_deleting_it(cur, scope_id):
+    """Deleting it would let the same proposal come straight back.
+
+    rejected and not dormant: dormant is a reading of the content, and being
+    turned down says nothing about whether the content might one day hold.
+    """
     result = _propose_create(cur, scope_id)
     pid = result["proposal"]["proposal_id"]
 
@@ -84,7 +91,7 @@ def test_rejecting_makes_the_candidate_dormant_rather_than_deleting_it(cur, scop
     assert decided["decision_reason"]
 
     version = store.get_version(cur, decided["applied_version"])
-    assert version["status"] == VersionStatus.DORMANT
+    assert version["status"] == VersionStatus.REJECTED
     assert version["reason"] == "this was the old harness"
 
 
@@ -176,7 +183,7 @@ def test_disproving_writes_nothing_until_approved(cur, scope_id):
 def test_a_second_proposal_on_the_same_target_shows_the_first(cur, scope_id):
     seed = _propose_create(cur, scope_id)["proposal"]
 
-    with pytest.raises(DuplicatePendingError) as caught:
+    with pytest.raises(DuplicateProposalError) as caught:
         proposals.propose(
             cur,
             actor="agent-2",
@@ -213,7 +220,7 @@ def test_the_proposer_may_look_and_proceed(cur, scope_id):
 
 def test_a_repeated_creation_is_caught_by_title(cur, scope_id):
     _propose_create(cur, scope_id)
-    with pytest.raises(DuplicatePendingError):
+    with pytest.raises(DuplicateProposalError):
         _propose_create(cur, scope_id)
 
 
@@ -221,6 +228,85 @@ def test_a_different_title_is_not_a_duplicate(cur, scope_id):
     _propose_create(cur, scope_id)
     result = _propose_create(cur, scope_id, title="something else entirely")
     assert result["proposal"]["status"] == ProposalStatus.PENDING
+
+
+def test_a_proposal_already_turned_down_comes_back_with_the_reason(cur, scope_id):
+    """A rejection the proposer never hears about is one it walks into again.
+
+    The reviewer already spent the minutes on this once. Showing only pending
+    proposals would have let the same idea return the moment the queue cleared.
+    """
+    seed = _propose_create(cur, scope_id)["proposal"]
+    proposals.reject(
+        cur,
+        seed["proposal_id"],
+        reviewer="user",
+        reason="the harness moved to the new fixture in week 2",
+    )
+
+    with pytest.raises(DuplicateProposalError) as caught:
+        _propose_create(cur, scope_id)
+
+    turned_down = caught.value.rejected
+    assert [row["proposal_id"] for row in turned_down] == [seed["proposal_id"]]
+    assert turned_down[0]["decision_reason"] == "the harness moved to the new fixture in week 2"
+    assert "week 2" in str(caught.value)
+
+
+def test_the_proposer_may_look_at_the_rejection_and_proceed(cur, scope_id):
+    """Same as for a pending duplicate: the check informs, it does not forbid.
+
+    Waving the duplicate check through does not wave entity resolution through
+    with it. The rejected entity is still in the scope, so section 20 stops the
+    caller a second time on a different question: not "did you already propose
+    this" but "does this concept already exist".
+    """
+    seed = _propose_create(cur, scope_id)["proposal"]
+    proposals.reject(cur, seed["proposal_id"], reviewer="user", reason="not this run")
+
+    with pytest.raises(SimilarEntityError):
+        _propose_create(cur, scope_id, allow_duplicate=True)
+
+    again = _propose_create(cur, scope_id, allow_duplicate=True, allow_similar=True)
+    assert again["proposal"]["status"] == ProposalStatus.PENDING
+
+
+def test_no_one_can_propose_a_rejection(cur, scope_id):
+    """rejected is what review does, so asking for it is asking to be turned down.
+
+    The two retirement readings stay open to the proposer; it is only the
+    verdict on the procedure that is not the proposer's to write.
+    """
+    seed = _propose_create(cur, scope_id)["proposal"]
+    with pytest.raises(ProposalError, match="not a status anything can propose"):
+        proposals.propose(
+            cur,
+            actor="agent-2",
+            operation=ProposalOperation.CHANGE_STATUS,
+            target_memory=seed["target_memory"],
+            payload={
+                "version_id": str(seed["applied_version"]),
+                "status": str(VersionStatus.REJECTED),
+                "reason": "I would rather this went away",
+            },
+            allow_duplicate=True,
+        )
+
+
+def test_a_rejected_candidate_is_not_a_re_evaluation_candidate(cur, scope_id):
+    """The reason the state had to be its own: a dormant sweep must stay clean.
+
+    Section 16.1 will look for dormant versions worth revisiting. Rejections
+    are the high-volume event in this system, so parking them in dormant would
+    have buried the few real ones.
+    """
+    seed = _propose_create(cur, scope_id)["proposal"]
+    proposals.reject(cur, seed["proposal_id"], reviewer="user", reason="not this run")
+
+    cur.execute(
+        "SELECT count(*) AS n FROM memory_version WHERE status = 'dormant'",
+    )
+    assert cur.fetchone()["n"] == 0
 
 
 # --------------------------------------------------------------------------
