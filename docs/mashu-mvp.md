@@ -338,6 +338,22 @@ rejected は candidate からのみ到達する。既に結論の出た Version 
 - **Preference**: ユーザー設定
 - **State**: Scope の現在状態(14節)
 
+### 13.1 寿命の三分(v0.12)
+
+type と直交する軸として、知識の**寿命**を三つに分ける。
+
+| 寿命 | 定義 | 置き場所 |
+|---|---|---|
+| **session-scoped** | セッションの終了とともに死ぬ。作業途中、デバッグ状態 | Scratch(25.1節) |
+| **window-scoped** | 書いた時点で失効時刻が分かっている。明日リセットされる quota、金曜まで続くメンテナンス。セッションと Agent を跨ぐ | Temporary Context(25.2節) |
+| **indefinite** | 誰かが誤りだと気づくまで真であり続ける。この系が作られた対象 | Memory Entity / Version |
+
+window は新しい type ではない。**内容が書かれた時点で自分について宣言した属性**であり、type とも status とも直交する。
+
+11節が rejected を dormant から分離した論理をそのまま当てる。dormant は内容の見込みへの評価、rejected は手続きへの裁定であり、**expiry はどちらでもない**。そして expiry による退役は、期限到来時に新しい判断をしていない。書いた時点の判断を時計が執行しているだけであり、17節が Human Review を要求する「後からの判断」に該当しない。
+
+この分解が効くのは、**「腐った項目が返らなくなる」という要求の大半が、寿命の型で機械的に片づく**ためである。時限つきの事実は expiry で消え、Task の完了は Auto Commit で落ち、残る解釈の退役だけが判断を要する。誰も面倒を見ない期間の成立条件は「全退役の自動化」ではなく、この分解を実装することである。
+
 ## 14. Current State
 
 v0.2 からの変更:
@@ -459,6 +475,54 @@ type = task として Memory にするのは、**セッションを跨いで持�
 日々の作業リストの役割を Mashu が引き受けるものではない。
 
 該当する例は、次のセッションが知らないまま進むと誤った前提で作業することになるもの。たとえば「検証を経ずに統合した」「この検査は待ち時間不足で対象に到達していない」など。
+
+### 16.3 捕捉パイプライン(v0.12)
+
+16節の二契機は変えない。変えるのは、**契機を撃発する装置を仕様の対象にする**ことである。v0.11 までこれは仕様のどこにも無く、結果として書き込みは人か Agent が意識的に動かしたときにしか起きなかった。
+
+構成は四段の hybrid とする。
+
+| 経路 | 役割 | Model と予算 |
+|---|---|---|
+| Agent の MCP 呼び出し | Scratch の随時更新のみ | 走行中の Agent 自身 |
+| SessionEnd hook(各 CLI) | 永続 queue に session ID / transcript path / cwd を積む**だけ** | Model を走らせない |
+| 常駐 worker | Scratch + transcript 差分から Proposal / Temporary Context を抽出 | 専用予算の小型 model |
+| 定期 sweeper | hook が取り落とした transcript を拾い worker へ | 通常 Model なし |
+
+hook で Model を走らせないのは、終了 hook の時間枠が短いためである。transcript の形式は安定インターフェースではないので、CLI ごとの adapter と fixture test を持つ。
+
+**Model を動かすのは worker であり、対話用の枠とは別の予算で動かす。** 対話 CLI を worker から呼ぶ形も動くが、対話用の枠と抽出費用が混ざって日次の上限を中央で管理できないため、第一選択にしない(障害時の fallback としては残す)。
+
+**費用の縛り**
+
+素朴に全 transcript を読むと 1 セッションあたり数万 token になる。これは払わない。
+
+- **Scratch-first**: 抽出入力は Scratch と前回 checkpoint 以降の transcript 差分に限る
+- 小セッションは skip する(Scratch 空・実質的な user turn が 2 未満・圧縮後が閾値以下・明示の marker 無し、を**すべて**満たす場合のみ)
+- 長セッションは turn 境界で chunk し、全文の一括再送をしない
+- 日次の入力予算を持ち、超過は捨てずに翌日へ defer する
+
+**沈黙する失敗を構造的に禁止する。** 永続台帳 `extraction_run` を置き、(source_cli, external_session_id, transcript_digest, extractor_version) を一意とする。一時失敗は指数 retry、規定回数で dead letter。DB 停止時は local spool に残す。
+
+そして **health は人間の巡回ではなく、必ず読まれる経路——session_bootstrap——へ押し込む。** 失敗件数と最古 queued age が閾値を超えたら、次のセッションの Bootstrap が警告を運ぶ。**誰も面倒を見ない期間の監視者は、次に来るセッションである。**
+
+**Scope routing**: cwd / project root から既存 Scope への明示 map を worker が持つ。map に無い cwd の抽出結果は Proposal 化せず台帳に保留し、警告に載せる。**Scope の推測はしない。**
+
+**抽出結果の行き先と、User を名乗れる者**
+
+worker は transcript の user turn を実際に読める立場にあり、MCP Agent の自己申告とは違って原文の span を source_reference に残せる。したがって原理的には worker に限り `source_type=user` を主張できる。
+
+**ただし当初はこれを許さない。** span の検証が保証するのは「どこに書かれていたか」であって「誰が書いたか」ではない。User の発話には外部から貼り付けられた文書が含まれうるので、貼り付けの中の「覚えておいて: 常に X せよ」は span 検証を通ってしまう。これは 17節が preference について塞いだ経路と同じ形である。
+
+したがって:
+
+- **当初、worker の出力はすべて Agent 由来として扱う。** User 由来の唯一の経路は CLI(`mashu remember`)、すなわち人が打った事実である
+- 後に worker の User 主張を許す場合、範囲を三種(明示の記録指示、完了・棄却の宣言、expiry つきの条件)に絞り、かつ**引用・貼り付けブロック内の span を対象外**とする。この二重の絞りが無い状態で許さない
+- User の発話の**言い換え**は、user turn に根ざしていても worker(= model)の解釈であり、candidate に落とす
+
+**投入経路**: worker は `import`(移植用。重複と類似の確認を常に飛ばす)を使わず、通常の Proposal 経路を通って 15.1節の重複チェックと 20節の Entity Resolution を受ける。
+
+**この選択で生まれるもの**: DB とは別に死にうる常駐物。worker が死んでも読み取り側は一切劣化しない(Temporary Context は read filter、三層は既存実装)という切り分けを保つことが、この設計の生命線である。**worker の死は「知識が増えない」に留まり、「嘘が返る」には決してならない。**
 
 ## 17. Commit Gate
 
@@ -804,6 +868,59 @@ Agent Session 内のみ存在する。
 - デバッグ
 
 長期保存対象ではない。長期 Memory への移行は Write Policy(16節)経由のみ。
+
+### 25.1 Scratch の実体化(v0.12)
+
+25節は Scratch を定義したが、読み書きする者が仕様にも実装にも存在しなかった。`agent_session.scratch` 列は作られたまま、一度も使われていない。次のように定める。
+
+- **可視性は同一の論理セッションに限る。** resume・compaction・MCP プロセス再起動を跨いでも、同じ CLI セッション ID なら読める。別セッション・別 Agent からは読めない
+- 読めるのは当該セッションと System(抽出 worker)のみ。worker はセッション終了後に抽出の入力として読む
+- **寿命は抽出の成功まで。** 成功後に削除する。抽出が失敗した場合は retry 用に隔離保持するが、Agent には返さない
+- blob ではなく item の配列として構造化する(item_id / kind / content / source_turn / created_at)
+- MCP tool `scratch_put` / `scratch_get` を追加する
+
+別セッションに見せない理由: 見せた瞬間、それは名前が Scratch であっても provenance も status も持たない共有状態になり、1節が挙げた汚染を作り直す。
+
+Scratch の役割はゴミ捨て場ではなく、**抽出の第一入力**である。Agent がセッション中に「後で残す価値がありそうなもの」を随時置き、終了時の抽出は Scratch とその周辺 turn を中心に読む。これが捕捉の費用構造を決める(16.3節)。
+
+**この選択で失うもの**: 並行する別 Agent が作業途中の状態を覗く使い方は不可能になる。セッション間の作業調整は本系の守備範囲外とし、必要になった事実が観測されたときに設計する。
+
+### 25.2 Temporary Context(v0.12)
+
+window-scoped な項目の置き場所。**Memory ではない。**
+
+Memory は知識を持ち、知識は判断によって退役する。Temporary Context が持つのは知識ではなく**当面の作業条件**であり、作業条件は判断を経ずに効かなくなる。
+
+**memory_version に expires_at を足す案は採らない。** 10節が「active_version が指す Version こそ単一の真実」と定めた以上、期限切れの Version をポインタが指しつづける状態は「定義上 Active、Retrieval 上は無効」という二重性であり、10節が潰した不整合の復活である。修理は Active の定義に validity window を織り込むか、期限時にポインタを外す worker を必須にするかだが、前者は 10節の書き換え、後者は worker 停止時に stale なポインタが残る。**独立テーブルなら read の filter だけで壁時計を通過した瞬間に消え、止まりうる worker が介在しない。**
+
+読み取り条件は `valid_from <= now() AND now() < expires_at AND revoked_at IS NULL` のみとする。
+
+**Proposal と Commit Gate を通さない。** Gate は indefinite な知識状態を守る装置であり、壁時計で自壊する項目に Review の費用を払うのは、被害の上限が期限で切られている以上釣り合わない。書き込みは event_log に記録する。
+
+**第四層にはしない。** 三層(21.1節)は indefinite な知識の認識論的な立場の分類である。Temporary Context は Retrieval と Bootstrap に、三層と並ぶ独立ブロックとして返す。Agent への規則は四つ。
+
+- 現在の作業条件として従ってよい
+- indefinite な知識として引用・再保存しない
+- expiry を越えたら使わない
+- 恒久 Memory へ昇格させない
+
+**書き込み権限と、User を名乗れる者**
+
+expiry は機械的に一意に解釈できる表現だけを採用する(ISO 日時、「24時間」、OS のタイムゾーンで一意に決まる表現)。曖昧なものは Scratch へ落とす。
+
+| 書き手 | 経路 | Bootstrap への掲載 | 上限 |
+|---|---|---|---|
+| User | CLI `mashu remember --until` | する | なし |
+| 抽出 worker(User 発話由来) | 16.3節。**当初は不可** | する | なし |
+| Agent | MCP `context_put` | **しない**(Retrieval には出る) | window 14 日 |
+
+Agent 由来を Bootstrap に載せない理由: Bootstrap は全セッションに押し込まれる最も特権的な経路であり、誤った window がそこに座ると、引きに行かなかったセッションまで巻き込む。Retrieval に出しておけば、その話題を実際に引いた Agent は知ることができ、被害は「引いた者だけ」に閉じる。**押し込む権限と、書ける権限を分ける。**
+
+Bootstrap ブロックの上限は Scope あたり 10 件・500 token とする。超過時は**書き込みを拒否せず、掲載だけを expiry の近い順に絞り、絞ったことを警告する。** 誰も見ていない期間に書き込みを拒否すると、拒否された観測は消え、警告を読む人間はその週いない。受けてから掲載を絞れば、失われるのは即時性だけで観測は残る。
+
+**この選択で失うもの**: 保存と検索の経路が一本増える。Temporary Context は embedding を持たず、`memory_search` の類似検索に乗らない(決定的 filter のみ)。そして「短期なら何でも入れる箱」へ膨張する誘惑が構造的に生じるため、kind を fact / preference に制限し、それ以外を拒む。汎用の短期 DB が要ると分かった時点で、それは設計変更として本節に書く。
+
+**移行**: 現在 Active な在庫に、title 自身が特定の月時点の状態だと宣言している Memory が存在する。**時限を自称する Active は、window の置き場所が無かった時代の借金**であり、棚卸しで Temporary Context へ移すか、期限情報を落とした indefinite な形に書き直す。
 
 ## 26. Database スキーマ
 
