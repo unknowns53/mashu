@@ -167,6 +167,12 @@ Context Gateway は MCP(Model Context Protocol)Server として実装する。
 - `entity_resolve`: Entity 候補検索(Proposal 前の同一性確認)
 - `session_bootstrap`: Session 開始時に渡す固定コンテキストの取得(21.2節)
 
+v0.12 で追加:
+
+- `scratch_put` / `scratch_get`: Session 内の作業状態(25.1節)
+
+Scratch の二つが Agent 側にあるのは、**それが抽出の第一入力だから**である(16.3節)。セッションが閉じる時点で transcript を読み直すのではなく、走行中の Agent が「後で残る価値がありそうなもの」を随時置いておけば、抽出の入力が桁で小さくなる。Memory と違い Review を要さないのは、Scratch が同一セッションの外へ出ないためである。
+
 MVP では Claude 1体のみを接続する。
 Codex / Gemini は MVP 後の接続とする。
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC
 
 import pytest
 
@@ -69,7 +70,12 @@ def _write(test_dsn, scope, type, title, content, adopt=True):
 # --------------------------------------------------------------------------
 # the surface itself
 # --------------------------------------------------------------------------
-def test_the_six_tools_of_section_six_are_exposed():
+def test_the_tools_of_section_six_are_exposed_and_no_others():
+    """Pinned as a list, so a tool cannot appear on this surface unremarked.
+
+    The six of the initial set, plus the two scratch tools v0.12 added because
+    scratch is the extraction's first input and the agent is what fills it.
+    """
     built = server.build_server()
     names = {tool.name for tool in asyncio.run(built.list_tools())}
     assert names == {
@@ -79,6 +85,8 @@ def test_the_six_tools_of_section_six_are_exposed():
         "scope_list",
         "entity_resolve",
         "session_bootstrap",
+        "scratch_put",
+        "scratch_get",
     }
 
 
@@ -294,3 +302,54 @@ def test_a_caller_cannot_skip_the_similarity_check(call, scope):
     )
     assert answer["ok"] is False
     assert "allow_similar" in answer["error"]
+
+
+# --------------------------------------------------------------------------
+# scratch, and what a session start now carries (25.1, 25.2, 16.3)
+# --------------------------------------------------------------------------
+def test_an_agent_can_put_scratch_down_and_read_it_back(call):
+    put = call("scratch_put", content="the guard is in but the sweep was not rerun")
+    assert put["ok"] is True
+
+    got = call("scratch_get")
+    assert [item["content"] for item in got["items"]] == [
+        "the guard is in but the sweep was not rerun"
+    ]
+
+
+def test_scratch_does_not_reach_another_session(call, test_dsn, monkeypatch):
+    call("scratch_put", content="mine alone")
+
+    # A second server process is a second logical session.
+    monkeypatch.setattr(server, "_session_id", None)
+    second = server.build_server()
+    got = asyncio.run(second.call_tool("scratch_get", {})).structured_content
+    assert got["items"] == []
+
+
+def test_the_session_start_carries_the_conditions_and_the_capture_health(call, test_dsn, scope):
+    from datetime import datetime, timedelta
+
+    from mashu import context
+    from mashu.models import SourceType
+
+    with transaction(test_dsn) as cur:
+        context.put(
+            cur,
+            content="the delegation quota is free until the reset",
+            expires_at=datetime.now(UTC) + timedelta(hours=8),
+            kind="fact",
+            source_type=SourceType.USER,
+            created_by="user",
+            actor="user",
+        )
+
+    # These tests commit, so other tests' scopeless conditions are live too;
+    # what matters is that this one is carried and that it is a person's.
+    got = call("session_bootstrap")
+    mine = [row for row in got["temporary"] if "delegation quota" in row["content"]]
+    assert len(mine) == 1
+    assert mine[0]["source_type"] == "user"
+    # The health flag itself is asserted where the database rolls back; here
+    # another test has deliberately broken a run in the same store.
+    assert set(got["capture"]) >= {"ok", "failed", "waiting", "warning"}
