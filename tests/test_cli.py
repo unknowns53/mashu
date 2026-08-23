@@ -266,8 +266,7 @@ def test_an_import_run_is_one_bundle(run, test_dsn, committed_scope, tmp_path):
 
     with transaction(test_dsn) as cur:
         cur.execute(
-            "SELECT DISTINCT session_id FROM proposal "
-            "WHERE (payload ->> 'scope_id')::uuid = %s",
+            "SELECT DISTINCT session_id FROM proposal WHERE (payload ->> 'scope_id')::uuid = %s",
             (committed_scope,),
         )
         sessions = [row["session_id"] for row in cur.fetchall()]
@@ -275,9 +274,7 @@ def test_an_import_run_is_one_bundle(run, test_dsn, committed_scope, tmp_path):
     assert sessions[0] is not None
 
 
-def test_the_queue_shows_which_scope_each_proposal_landed_in(
-    run, test_dsn, committed_scope
-):
+def test_the_queue_shows_which_scope_each_proposal_landed_in(run, test_dsn, committed_scope):
     """The scope is the one decision review cannot revise.
 
     Nothing moves an entity between scopes, so a reviewer who cannot see the
