@@ -58,6 +58,14 @@ from mashu.models import EventType, ProposalOperation, SourceType
 SKIP_MIN_USER_TURNS = 2
 SKIP_MIN_CHARS = 800
 
+#: The most a single model call is given (16.3). A whole evening's transcript
+#: runs to hundreds of thousands of tokens, and paying that in one call is the
+#: naive cost the section refuses. So a long session is read in windows at turn
+#: boundaries, the ledger's checkpoint is the cursor, and the run comes back for
+#: the next window instead of the whole thing arriving at once. Nothing is
+#: dropped: what is not read this pass is read on the next one.
+MAX_INPUT_TOKENS = 60_000
+
 #: Phrases that make a session worth reading whatever else is true of it. The
 #: point is not to detect intent reliably — it is that an explicit request to
 #: remember something should never be lost to a size heuristic.
@@ -132,13 +140,19 @@ def process(
     checkpoint = runs.checkpoint_for(
         cur, source_cli=run["source_cli"], external_session_id=run["external_session_id"]
     )
-    turns = session.since(checkpoint)
+    remaining = session.since(checkpoint)
+    turns, more = _window(remaining)
     scratch_items = _scratch(cur, run)
+    internal = _session(cur, run)
     log = transcript.render(session, turns)
 
-    reason = _skip_reason(session, turns, scratch_items, log)
-    if reason:
-        return _skip(cur, run_id, reason)
+    # Only on the first pass. A session already judged worth reading must not
+    # be abandoned half way through because its second window happens to be
+    # short — that would drop the end of every long session it applied to.
+    if not checkpoint:
+        reason = _skip_reason(session, remaining, scratch_items)
+        if reason:
+            return _skip(cur, run_id, reason)
 
     active = retrieval.active_set(cur, scope_id=scope_id)
     prompt = extract.build_prompt(log=log, scratch=scratch_items, active=active)
@@ -158,13 +172,38 @@ def process(
 
     outcome = Outcome(run_id, "succeeded", refused=result.refused)
     filed = _file_proposals(
-        cur, result, scope_id=scope_id, session=session, run=run, outcome=outcome
+        cur,
+        result,
+        scope_id=scope_id,
+        session=session,
+        run=run,
+        outcome=outcome,
+        session_id=internal["session_id"],
     )
     _link_evidence(cur, result, filed)
-    _file_retirements(cur, result, session=session, outcome=outcome)
+    _file_retirements(
+        cur, result, session=session, outcome=outcome, session_id=internal["session_id"]
+    )
+
+    usage = getattr(extractor, "usage", {}) or {}
+    read_to = turns[-1].ordinal if turns else session.records
+
+    if more:
+        # More of this session than one call may hold. The mark moves to the end
+        # of what was read and the run comes back for the rest, so the cost per
+        # call stays bounded without any of the session going unread.
+        runs.advance(cur, run_id=run_id, checkpoint=read_to)
+        runs.defer(
+            cur,
+            run_id=run_id,
+            until_hours=0,
+            note=f"{_note(outcome, result)}; read to turn {read_to}, more to come",
+        )
+        outcome.state = "windowed"
+        outcome.note = f"{_note(outcome, result)}; read to turn {read_to} of {session.records}"
+        return outcome
 
     _clear_scratch(cur, run)
-    usage = getattr(extractor, "usage", {}) or {}
     runs.succeeded(
         cur,
         run_id=run_id,
@@ -190,6 +229,24 @@ def process(
     return outcome
 
 
+def _window(turns: list) -> tuple[list, bool]:
+    """As many turns from the front as one call may hold, and whether more remain.
+
+    From the front, not the back. Reading only the tail would be cheaper and
+    would quietly lose the beginning of every long session, which is where the
+    decisions that the rest of the evening rests on are usually made.
+    """
+    budget = MAX_INPUT_TOKENS
+    taken: list = []
+    for turn in turns:
+        cost = retrieval.estimate_tokens(turn.text)
+        if taken and budget - cost < 0:
+            return taken, True
+        budget -= cost
+        taken.append(turn)
+    return taken, False
+
+
 def _transcript_path(run: dict[str, Any]) -> pathlib.Path | None:
     raw = run.get("transcript_path")
     if not raw:
@@ -203,8 +260,12 @@ def _skip(cur: psycopg.Cursor, run_id: UUID, note: str) -> Outcome:
     return Outcome(run_id, "skipped", note)
 
 
-def _skip_reason(session, turns, scratch_items, log) -> str | None:
+def _skip_reason(session, turns, scratch_items) -> str | None:
     """Whether this session is too small to be worth a model call (16.3).
+
+    Judged on everything still unread, never on the window one call happens to
+    take. The window is a cost decision; this is a worth-reading decision, and
+    conflating them would abandon a long session whose next window is short.
 
     Every condition has to hold at once. Each one alone is wrong: a one-turn
     session can carry the whole point of an evening, and a long one can be
@@ -214,15 +275,43 @@ def _skip_reason(session, turns, scratch_items, log) -> str | None:
         return None
     if session.user_turns(turns) >= SKIP_MIN_USER_TURNS:
         return None
-    if len(log) >= SKIP_MIN_CHARS:
+    size = sum(len(turn.text) for turn in turns)
+    if size >= SKIP_MIN_CHARS:
         return None
-    lowered = log.lower()
-    if any(marker.lower() in lowered for marker in MARKERS):
+    body = "\n".join(turn.text for turn in turns).lower()
+    if any(marker.lower() in body for marker in MARKERS):
         return None
     return (
         f"nothing to read: {session.user_turns(turns)} user turn(s), "
-        f"{len(log)} characters, empty scratch, no explicit marker"
+        f"{size} characters, empty scratch, no explicit marker"
     )
+
+
+def _session(cur: psycopg.Cursor, run: dict[str, Any]) -> dict[str, Any]:
+    """The internal session row for the CLI session this transcript came from.
+
+    Created if the session never spoke to the MCP server, which is most of
+    them. Section 18.1 reviews a bundle at a time and the bundle is a session,
+    so proposals filed without one land in the unnamed heap together with every
+    other night's — the reviewer then rebuilds context per item, which is the
+    cost the bundle exists to pay once.
+    """
+    cur.execute(
+        """
+        INSERT INTO agent_session (agent, source_cli, external_session_id, transcript_digest)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (source_cli, external_session_id) WHERE external_session_id IS NOT NULL
+        DO UPDATE SET transcript_digest = EXCLUDED.transcript_digest
+        RETURNING *
+        """,
+        (
+            run["source_cli"],
+            run["source_cli"],
+            run["external_session_id"],
+            run["transcript_digest"],
+        ),
+    )
+    return cur.fetchone()
 
 
 def _scratch(cur: psycopg.Cursor, run: dict[str, Any]) -> list[dict[str, Any]]:
@@ -259,6 +348,7 @@ def _file_proposals(
     session,
     run: dict[str, Any],
     outcome: Outcome,
+    session_id: UUID,
 ) -> dict[str, UUID]:
     """File new knowledge through the ordinary proposal route (16.3).
 
@@ -292,6 +382,7 @@ def _file_proposals(
                 actor=WORKER_ACTOR,
                 operation=ProposalOperation.CREATE,
                 payload=payload,
+                session_id=session_id,
                 allow_similar=True,
             )
         except DuplicateProposalError:
@@ -337,7 +428,12 @@ def _link_evidence(cur: psycopg.Cursor, result: extract.Extraction, filed: dict[
 
 
 def _file_retirements(
-    cur: psycopg.Cursor, result: extract.Extraction, *, session, outcome: Outcome
+    cur: psycopg.Cursor,
+    result: extract.Extraction,
+    *,
+    session,
+    outcome: Outcome,
+    session_id: UUID,
 ) -> None:
     """Propose retirement, and never let it take effect unattended (30 段 B).
 
@@ -371,6 +467,7 @@ def _file_retirements(
                 operation=ProposalOperation.CHANGE_STATUS,
                 payload=payload,
                 target_memory=draft.memory_id,
+                session_id=session_id,
                 hold_for_review=RETIREMENT_HOLD,
             )
         except DuplicateProposalError:

@@ -883,3 +883,138 @@ def test_a_missing_transcript_does_not_fail_the_hook(run, tmp_path):
     """A non-zero exit here is a visible error for something nobody asked for."""
     code, _ = run("enqueue", str(tmp_path / "gone.jsonl"), "--cli", "claude", "--session", "ext-3")
     assert code == 0
+
+
+# --------------------------------------------------------------------------
+# one sitting (30 段 B, 段 C)
+# --------------------------------------------------------------------------
+def _session(test_dsn, name):
+    with transaction(test_dsn) as cur:
+        cur.execute(
+            "INSERT INTO agent_session (agent, source_cli, external_session_id) "
+            "VALUES ('claude', 'claude', %s) RETURNING session_id",
+            (name,),
+        )
+        return cur.fetchone()["session_id"]
+
+
+def test_a_sitting_approves_rejects_and_puts_off_in_one_pass(test_dsn, run, committed_scope):
+    """段 C: review is optional now, so one sitting has to be enough."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    for title in ("最初の項目", "二番目の項目", "三番目の項目"):
+        _propose(test_dsn, committed_scope, title, f"{title}の本文", session_id=session_id)
+
+    code, out = run(
+        "review",
+        "--bundle",
+        str(session_id)[:8],
+        "--batch",
+        "all; r 2 根拠が薄い; s 3 明日確かめる",
+    )
+    assert code == 0
+    assert "approved" in out and "rejected" in out and "put off" in out
+
+    with transaction(test_dsn) as cur:
+        cur.execute(
+            "SELECT p.status, p.review_note, p.payload ->> 'title' AS title FROM proposal p "
+            "WHERE p.session_id = %s ORDER BY p.seq",
+            (session_id,),
+        )
+        rows = cur.fetchall()
+    by_title = {r["title"]: r for r in rows}
+    assert by_title["最初の項目"]["status"] == "approved"
+    assert by_title["二番目の項目"]["status"] == "rejected"
+    assert by_title["三番目の項目"]["status"] == "pending"
+    assert by_title["三番目の項目"]["review_note"] == "明日確かめる"
+
+
+def test_putting_something_off_without_saying_why_is_refused(test_dsn, run, committed_scope):
+    """A skip that leaves no trace is the same row state as never having looked."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    _propose(test_dsn, committed_scope, "何かの項目", "本文", session_id=session_id)
+
+    code, _ = run("review", "--bundle", str(session_id)[:8], "--batch", "s 1")
+    assert code == 1
+
+
+def test_a_bundle_everyone_has_already_put_off_stops_leading_the_queue(
+    test_dsn, run, committed_scope
+):
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    _propose(test_dsn, committed_scope, "先送りする項目", "本文", session_id=session_id)
+    run("review", "--bundle", str(session_id)[:8], "--batch", "s 1 あとで")
+
+    code, out = run("review", "--batch", "q")
+    assert code == 0
+    assert "先送りする項目" not in out
+
+
+def test_the_user_can_retire_something_themselves(test_dsn, run, committed_scope):
+    """16.1 named the user's own statement as a trigger and gave it no entrance."""
+    with transaction(test_dsn) as cur:
+        memory_id, version_id = store.create_entity(
+            cur,
+            scope_id=committed_scope,
+            type=MemoryType.TASK,
+            title=f"終わる作業 {uuid.uuid4()}",
+            content="いつか終わる",
+            source_type=SourceType.USER,
+            created_by="user",
+            actor="user",
+            adopt=True,
+        )
+
+    code, out = run("retire", str(memory_id)[:8], "completed", "--reason", "この夜に終えた")
+    assert code == 0
+    with transaction(test_dsn) as cur:
+        assert store.get_version(cur, version_id)["status"] == "completed"
+
+
+def test_the_user_disproving_something_is_recorded_as_the_review_it_is(
+    test_dsn, run, committed_scope
+):
+    """17 holds disproven for human review whoever asks; the person here is it."""
+    with transaction(test_dsn) as cur:
+        memory_id, version_id = store.create_entity(
+            cur,
+            scope_id=committed_scope,
+            type=MemoryType.HYPOTHESIS,
+            title=f"覆る仮説 {uuid.uuid4()}",
+            content="ブリッジチップが原因",
+            source_type=SourceType.AGENT,
+            created_by="claude",
+            actor="claude",
+            adopt=True,
+        )
+
+    code, out = run("retire", str(memory_id)[:8], "disproven", "--reason", "直結でも再現した")
+    assert code == 0
+    with transaction(test_dsn) as cur:
+        assert store.get_version(cur, version_id)["status"] == "disproven"
+        cur.execute(
+            "SELECT reviewer, decision_reason FROM proposal WHERE target_memory = %s", (memory_id,)
+        )
+        row = cur.fetchone()
+    assert row["reviewer"] == "user"
+    assert "stated at the terminal" in row["decision_reason"]
+
+
+def test_a_route_is_stated_and_a_held_transcript_is_released_when_it_appears(
+    test_dsn, run, committed_scope
+):
+    with transaction(test_dsn) as cur:
+        cur.execute("SELECT name FROM scope WHERE scope_id = %s", (committed_scope,))
+        name = cur.fetchone()["name"]
+        held = runs.enqueue(
+            cur,
+            source_cli="claude",
+            external_session_id=f"held-{uuid.uuid4()}",
+            transcript_digest=str(uuid.uuid4()),
+            extractor_version="v1",
+            cwd="/tmp/routed/project",
+        )
+        runs.held(cur, run_id=held["run_id"], note="no scope route")
+
+    code, out = run("route", "--add", "/tmp/routed", "--scope", name)
+    assert code == 0
+    assert "released 1 held transcript" in out

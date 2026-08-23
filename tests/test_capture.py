@@ -497,3 +497,73 @@ def test_putting_a_proposal_off_is_a_decision_with_a_reason(cur, scope_id):
     assert item["deferred_at"] is not None
     assert item["review_note"] == "根拠を確かめてから"
     assert bundle["deferred"] == bundle["count"]
+
+
+def test_a_session_too_long_for_one_call_is_read_in_windows_from_the_front(
+    cur, tmp_path, queued, route, monkeypatch
+):
+    """Windows at turn boundaries, with the ledger's mark as the cursor (16.3).
+
+    From the front rather than the tail: the cheap version reads the last of a
+    long evening and silently loses the beginning, which is where the decisions
+    the rest of it rests on were made.
+    """
+    monkeypatch.setattr(worker, "MAX_INPUT_TOKENS", 200)
+    long_turns = [
+        {
+            "type": "user",
+            "sessionId": "s-1",
+            "cwd": "/work/proj",
+            "message": {"content": f"{n} 番目の話 " + "本文 " * 80},
+        }
+        for n in range(4)
+    ]
+    stub = extract.StubExtractor(answer())
+    run = queued(write_claude(tmp_path, long_turns))
+
+    first = worker.process(cur, run, extractor=stub)
+    assert first.state == "windowed"
+    assert "0 番目の話" in stub.prompts[0]
+    assert "3 番目の話" not in stub.prompts[0]
+
+    claimed = runs.claim(cur, limit=1)[0]
+    second = worker.process(cur, claimed, extractor=stub)
+    assert "0 番目の話" not in stub.prompts[1]
+    assert second.state in ("windowed", "succeeded")
+
+
+def test_a_window_costs_no_retry_attempt(cur, tmp_path, queued, route, monkeypatch):
+    """The attempt counter bounds broken transcripts, not long ones."""
+    monkeypatch.setattr(worker, "MAX_INPUT_TOKENS", 200)
+    long_turns = [
+        {
+            "type": "user",
+            "sessionId": "s-1",
+            "cwd": "/work/proj",
+            "message": {"content": f"{n} 番目 " + "本文 " * 80},
+        }
+        for n in range(6)
+    ]
+    run = queued(write_claude(tmp_path, long_turns))
+    for _ in range(3):
+        claimed = runs.claim(cur, limit=1)
+        if not claimed:
+            break
+        worker.process(cur, claimed[0], extractor=extract.StubExtractor(answer()))
+
+    cur.execute("SELECT attempts, state FROM extraction_run WHERE run_id = %s", (run["run_id"],))
+    row = cur.fetchone()
+    assert row["attempts"] <= runs.MAX_ATTEMPTS
+
+
+def test_a_night_of_extraction_is_one_bundle_rather_than_loose_items(cur, tmp_path, queued, route):
+    """18.1 reviews a session at a time; without one, every item is read cold."""
+    stub = extract.StubExtractor(
+        answer([a_proposal(title="ひとつ目"), a_proposal(title="ふたつ目", content="別の本文")])
+    )
+    worker.process(cur, queued(write_claude(tmp_path)), extractor=stub)
+
+    bundles = proposals.session_queue(cur)
+    assert len(bundles) == 1
+    assert bundles[0]["session_id"] is not None
+    assert bundles[0]["count"] == 2

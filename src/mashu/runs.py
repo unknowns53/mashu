@@ -193,12 +193,29 @@ def defer(cur: psycopg.Cursor, *, run_id: UUID, until_hours: int, note: str) -> 
     return row
 
 
+def advance(cur: psycopg.Cursor, *, run_id: UUID, checkpoint: int) -> None:
+    """Move the mark without finishing the run (16.3).
+
+    A session too long for one model call is read in windows at turn
+    boundaries, and the mark has to move as each window is read. Otherwise the
+    next window starts where the last one did and the run never reaches the
+    end, which is the unbounded cost the windowing exists to avoid.
+    """
+    cur.execute("UPDATE extraction_run SET checkpoint = %s WHERE run_id = %s", (checkpoint, run_id))
+
+
 def checkpoint_for(cur: psycopg.Cursor, *, source_cli: str, external_session_id: str) -> int | None:
-    """How far a previous successful run read this session."""
+    """How far this session has already been read.
+
+    Not only by runs that finished. A long session is read in windows, so a run
+    still in progress has a mark too, and ignoring it would make every window
+    start from the beginning.
+    """
     cur.execute(
         """
         SELECT max(checkpoint) AS mark FROM extraction_run
-        WHERE source_cli = %s AND external_session_id = %s AND state = 'succeeded'
+        WHERE source_cli = %s AND external_session_id = %s
+          AND state IN ('succeeded', 'retrying', 'running')
         """,
         (source_cli, external_session_id),
     )

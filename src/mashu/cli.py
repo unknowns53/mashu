@@ -1066,11 +1066,15 @@ def cmd_review(args) -> int:
     bundle display never had.
     """
     with transaction(args.dsn) as cur:
-        bundles = [b for b in proposals.session_queue(cur) if b["deferred"] < b["count"]]
+        waiting = proposals.session_queue(cur)
+        if args.bundle:
+            wanted = None if args.bundle == "none" else _resolve_session(cur, args.bundle)
+            bundles = [b for b in waiting if b["session_id"] == wanted]
+        else:
+            bundles = [b for b in waiting if b["deferred"] < b["count"]]
         if not bundles:
-            deferred = proposals.session_queue(cur)
-            if deferred:
-                print(f"nothing new; {len(deferred)} bundle(s) are put off. --all to see them")
+            if waiting:
+                print(f"nothing new; {len(waiting)} bundle(s) are put off. --all to see them")
             else:
                 print("nothing waiting for review")
             return 0
@@ -1481,6 +1485,7 @@ def build_parser() -> argparse.ArgumentParser:
     re_.set_defaults(func=cmd_retire)
 
     rv = sub.add_parser("review", help="decide a whole bundle in one sitting (18.1)")
+    rv.add_argument("--bundle", help="session id prefix, or 'none'; the oldest if omitted")
     rv.add_argument("--batch", help="the decisions, instead of being asked for them")
     rv.add_argument("--all", action="store_true", help="include items already put off")
     rv.add_argument("--reviewer", default="user")
