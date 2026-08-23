@@ -35,3 +35,7 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]
+markers = [
+    "pending_phase: a harness step whose machinery has not been built yet",
+]
