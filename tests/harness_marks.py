@@ -8,8 +8,8 @@ the schedule in a single place rather than scattered through the scenarios.
 import pytest
 
 skip_until_retrieval = pytest.mark.skip(
-    reason="Retrieval Pipeline (specification 21) is Phase 2, weeks 9 to 10"
+    reason="Retrieval Pipeline (specification 21) is Phase 2a, week 2"
 )
 skip_until_entity_resolution = pytest.mark.skip(
-    reason="Entity Resolution (specification 20) needs embeddings, weeks 9 to 10"
+    reason="Entity Resolution (specification 20) needs embeddings, Phase 2a, week 2"
 )

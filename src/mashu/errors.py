@@ -32,3 +32,21 @@ class ConcurrentUpdateError(MashuError):
 
 class MergeError(MashuError):
     """A merge that cannot be carried out as asked (specification 20.2)."""
+
+
+class ProposalError(MashuError):
+    """A proposal cannot be decided the way the caller asked."""
+
+
+class DuplicatePendingError(MashuError):
+    """An equivalent proposal is already waiting for review (specification 15.1).
+
+    Carries the proposals it found so the caller can look at them and decide.
+    Blocking is not the point; the point is that the proposer sees what is
+    already in the queue. A caller that has looked and judged the change
+    genuinely different can say so and propose anyway.
+    """
+
+    def __init__(self, message: str, existing: list[dict]) -> None:
+        super().__init__(message)
+        self.existing = existing
