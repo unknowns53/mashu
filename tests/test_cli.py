@@ -690,3 +690,96 @@ def test_retype_corrects_the_kind_without_touching_the_content(run, test_dsn, co
         after = store.get_entity(cur, proposal["target_memory"])
         assert after["type"] == "decision"
         assert after["active_version"] == before
+
+
+# --------------------------------------------------------------------------
+# the user explicit trigger, which had no way in (16, 17)
+# --------------------------------------------------------------------------
+def test_what_the_user_states_lands_without_waiting(run, test_dsn, committed_scope):
+    code, out = run(
+        "remember",
+        "the body of the rule, with why and how to apply",
+        "--scope",
+        _scope_name(test_dsn, committed_scope),
+        "--type",
+        "preference",
+        "--title",
+        "a rule the user stated",
+    )
+    assert code == 0
+    assert "active" in out
+    assert "change stated by the user" in out
+
+    with transaction(test_dsn) as cur:
+        cur.execute(
+            "SELECT memory_id, active_version FROM memory_entity "
+            "WHERE scope_id = %s AND title = %s",
+            (committed_scope, "a rule the user stated"),
+        )
+        entity = cur.fetchone()
+        assert entity["active_version"] is not None
+        version = store.get_version(cur, entity["active_version"])
+        assert version["source_type"] == "user"
+
+
+def test_a_similar_title_stops_it_rather_than_writing_beside_it(
+    run, test_dsn, committed_scope, capsys
+):
+    """Whether this is a second memory or a new version of the first is a judgement."""
+    name = _scope_name(test_dsn, committed_scope)
+    run(
+        "remember",
+        "the first reading",
+        "--scope",
+        name,
+        "--type",
+        "fact",
+        "--title",
+        "the enclosure bridge chip times out",
+    )
+
+    with pytest.raises(SystemExit, match="--anyway"):
+        run(
+            "remember",
+            "the second reading",
+            "--scope",
+            name,
+            "--type",
+            "fact",
+            "--title",
+            "the enclosure bridge chip times out",
+        )
+
+
+def test_recording_beside_a_similar_one_waits_for_review(run, test_dsn, committed_scope):
+    """17 checks the entity status before it checks who said it."""
+    name = _scope_name(test_dsn, committed_scope)
+    run("remember", "one", "--scope", name, "--type", "fact", "--title", "the drive drops out")
+
+    code, out = run(
+        "remember",
+        "another",
+        "--scope",
+        name,
+        "--type",
+        "fact",
+        "--title",
+        "the drive drops out",
+        "--anyway",
+    )
+    assert code == 0
+    assert "pending" in out
+
+
+def test_an_empty_body_is_refused(run, test_dsn, committed_scope):
+    with pytest.raises(SystemExit, match="nothing to remember"):
+        run(
+            "remember",
+            "   ",
+            "--scope",
+            _scope_name(test_dsn, committed_scope),
+            "--type",
+            "fact",
+            "--title",
+            "an empty one",
+        )
