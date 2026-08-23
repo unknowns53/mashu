@@ -17,6 +17,7 @@ from typing import Any
 from uuid import UUID
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from mashu.errors import MashuError
 
@@ -32,6 +33,12 @@ STALE_QUEUE_HOURS = 24
 #: without this the row sits in a state no query counts and the transcript is
 #: never read again — the silent failure this ledger exists to prevent, arriving
 #: through the ledger itself.
+#:
+#: Measured from claimed_at, never from created_at. created_at is when the
+#: transcript was enqueued, so a backlog item — or any run the daily budget
+#: deferred for a day — would be "stale" the instant it was claimed, and a
+#: second worker would start the same extraction while the first was still
+#: inside its model call.
 STALE_RUNNING_HOURS = 2
 
 #: Input tokens capture may spend in one day (16.3). Over it, work is deferred
@@ -106,13 +113,14 @@ def claim(cur: psycopg.Cursor, *, limit: int = 1) -> list[dict[str, Any]]:
     """
     cur.execute(
         """
-        UPDATE extraction_run SET state = 'running', attempts = attempts + 1
+        UPDATE extraction_run
+        SET state = 'running', attempts = attempts + 1, claimed_at = now()
         WHERE run_id IN (
             SELECT run_id FROM extraction_run
             WHERE (state = 'queued')
                OR (state = 'retrying' AND (next_retry_at IS NULL OR next_retry_at <= now()))
                OR (state = 'running'
-                   AND created_at < now() - make_interval(hours => %s))
+                   AND claimed_at < now() - make_interval(hours => %s))
             ORDER BY seq
             LIMIT %s
             FOR UPDATE SKIP LOCKED
@@ -216,6 +224,46 @@ def unclaim(cur: psycopg.Cursor, *, run_id: UUID) -> None:
     )
 
 
+def spend(
+    cur: psycopg.Cursor,
+    *,
+    run_id: UUID,
+    input_tokens: int,
+    output_tokens: int | None = None,
+) -> None:
+    """Add one model call's cost to the run, as it happens.
+
+    Recorded per call, not per run. A session read in a dozen windows would
+    otherwise contribute nothing to the day's total until the last one landed,
+    so the budget could not bind on the one workload it exists to bound.
+    """
+    cur.execute(
+        """
+        UPDATE extraction_run
+        SET input_tokens = coalesce(input_tokens, 0) + %s,
+            output_tokens = coalesce(output_tokens, 0) + coalesce(%s, 0)
+        WHERE run_id = %s
+        """,
+        (input_tokens, output_tokens, run_id),
+    )
+
+
+def record_dropped(cur: psycopg.Cursor, *, run_id: UUID, dropped: list[Any]) -> None:
+    """Keep what the extraction read and chose not to propose (30 反証条件 1).
+
+    The plan says a miss is an observable loss because it stays in the scratch.
+    The scratch is cleared once extraction succeeds, so unless what was passed
+    over is written down here, that claim is not true of the implementation and
+    the falsification condition cannot be checked.
+    """
+    if not dropped:
+        return
+    cur.execute(
+        "UPDATE extraction_run SET dropped = %s WHERE run_id = %s",
+        (Jsonb(dropped), run_id),
+    )
+
+
 def advance(cur: psycopg.Cursor, *, run_id: UUID, checkpoint: int) -> None:
     """Move the mark without finishing the run (16.3).
 
@@ -230,15 +278,15 @@ def advance(cur: psycopg.Cursor, *, run_id: UUID, checkpoint: int) -> None:
 def checkpoint_for(cur: psycopg.Cursor, *, source_cli: str, external_session_id: str) -> int | None:
     """How far this session has already been read.
 
-    Not only by runs that finished. A long session is read in windows, so a run
-    still in progress has a mark too, and ignoring it would make every window
-    start from the beginning.
+    Every state counts, including failed. A long session is read in windows, so
+    a run still in progress has a mark; and a run that gave up half way through
+    still read the half it read. Excluding it would make the next digest of the
+    same session pay for that half again.
     """
     cur.execute(
         """
         SELECT max(checkpoint) AS mark FROM extraction_run
         WHERE source_cli = %s AND external_session_id = %s
-          AND state IN ('succeeded', 'retrying', 'running')
         """,
         (source_cli, external_session_id),
     )
@@ -246,11 +294,17 @@ def checkpoint_for(cur: psycopg.Cursor, *, source_cli: str, external_session_id:
 
 
 def spent_today(cur: psycopg.Cursor) -> int:
-    """Input tokens capture has already spent since midnight (16.3)."""
+    """Input tokens capture has already spent since midnight (16.3).
+
+    Counted from when a run was claimed, not from when it finished. A run still
+    working through its windows has already spent what it has spent, and a
+    budget that only sees finished work is blind for exactly as long as the
+    expensive runs take.
+    """
     cur.execute(
         """
         SELECT coalesce(sum(input_tokens), 0) AS spent FROM extraction_run
-        WHERE completed_at >= date_trunc('day', now())
+        WHERE coalesce(completed_at, claimed_at, created_at) >= date_trunc('day', now())
         """
     )
     return int(cur.fetchone()["spent"])
@@ -299,7 +353,7 @@ def health(cur: psycopg.Cursor) -> dict[str, Any]:
           count(*) FILTER (WHERE state = 'skipped') AS skipped,
           count(*) FILTER (WHERE state = 'held') AS held,
           count(*) FILTER (WHERE state = 'running'
-                       AND created_at < now() - make_interval(hours => 2)) AS stranded,
+                       AND claimed_at < now() - make_interval(hours => 2)) AS stranded,
           EXTRACT(EPOCH FROM now() - min(created_at)
                   FILTER (WHERE state IN ('queued', 'retrying'))) / 3600 AS oldest_wait_hours
         FROM extraction_run

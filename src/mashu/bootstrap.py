@@ -58,12 +58,30 @@ ORDER BY name
 # rule as a person reviewed it; content is the whole of it with the reasons.
 # The push takes the first, the pull takes the second, so keeping the session
 # opening small no longer costs the reasons.
+#
+# The retirement note rides along here too (21.1). This is the most privileged
+# read there is — pushed into every session before it asks for anything — so it
+# is the last place that should hand over a memory somebody has argued is
+# finished without saying so.
 _PUSHED_SQL = """
 SELECT e.memory_id, e.scope_id, e.type, e.title, e.delivery,
        v.version_id, coalesce(v.directive, v.content) AS content,
-       v.directive IS NOT NULL AS shortened
+       v.directive IS NOT NULL AS shortened,
+       r.proposed_status, r.proposed_reason, r.proposed_by
 FROM memory_entity e
 JOIN memory_version v ON v.version_id = e.active_version AND v.memory_id = e.memory_id
+LEFT JOIN LATERAL (
+    SELECT p.payload ->> 'status' AS proposed_status,
+           p.payload ->> 'reason' AS proposed_reason,
+           p.actor                AS proposed_by
+    FROM proposal p
+    WHERE p.target_memory = e.memory_id
+      AND p.status = 'pending'
+      AND p.operation = 'change_status'
+      AND p.payload ->> 'status' IN ('disproven', 'dormant', 'completed')
+    ORDER BY p.seq DESC
+    LIMIT 1
+) r ON TRUE
 WHERE e.status = 'active'
   AND e.delivery = %(delivery)s
   AND (%(scopes)s::uuid[] IS NULL OR e.scope_id = ANY(%(scopes)s::uuid[]))

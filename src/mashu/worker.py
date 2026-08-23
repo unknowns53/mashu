@@ -69,6 +69,9 @@ MAX_INPUT_TOKENS = 60_000
 #: Phrases that make a session worth reading whatever else is true of it. The
 #: point is not to detect intent reliably — it is that an explicit request to
 #: remember something should never be lost to a size heuristic.
+#: Deliberately narrow. "note that" and "keep in mind" are ordinary English
+#: technical chatter, and including them turned the size heuristic off for every
+#: English session — every two-line exchange bought a model call.
 MARKERS = (
     "覚えて",
     "記憶して",
@@ -76,8 +79,7 @@ MARKERS = (
     "メモして",
     "忘れないで",
     "remember this",
-    "note that",
-    "keep in mind",
+    "remember that",
     "for future reference",
 )
 
@@ -96,6 +98,30 @@ RETIREMENT_HOLD = (
 
 
 @dataclass
+class Plan:
+    """Everything a model call needs, gathered before the call and held plainly.
+
+    The point of it being a value rather than a cursor is that the model call
+    happens between two transactions instead of inside one. A call can take ten
+    minutes; a transaction open that long holds the row locks this took, blocks
+    a live session writing its own scratch, and on most managed databases is
+    killed by an idle-in-transaction timeout — a failure indistinguishable from
+    the model having gone wrong.
+    """
+
+    run: dict[str, Any]
+    scope_id: UUID
+    session: Any
+    turns: list
+    more: bool
+    records: int
+    session_id: UUID
+    active_ids: set[UUID]
+    prompt: str
+    estimated: int
+
+
+@dataclass
 class Outcome:
     """What one run did, in the words the ledger and the operator both need."""
 
@@ -103,25 +129,23 @@ class Outcome:
     state: str
     note: str = ""
     proposals_filed: int = 0
+    updates_filed: int = 0
     retirements_filed: int = 0
     refused: list[str] = field(default_factory=list)
 
     def line(self) -> str:
-        counts = f"{self.proposals_filed} proposal(s), {self.retirements_filed} retirement(s)"
+        counts = (
+            f"{self.proposals_filed} new, {self.updates_filed} update(s), "
+            f"{self.retirements_filed} retirement(s)"
+        )
         return f"{str(self.run_id)[:8]}  {self.state:<9} {counts}  {self.note}".rstrip()
 
 
 # --------------------------------------------------------------------------
 # one run
 # --------------------------------------------------------------------------
-def process(
-    cur: psycopg.Cursor,
-    run: dict[str, Any],
-    *,
-    extractor: extract.Extractor,
-    dry_run: bool = False,
-) -> Outcome:
-    """Take one claimed run as far as it goes, and leave the ledger true either way."""
+def prepare(cur: psycopg.Cursor, run: dict[str, Any], *, dry_run: bool = False) -> Plan | Outcome:
+    """Everything before the model call. Returns an Outcome when it stops here."""
     run_id = run["run_id"]
 
     path = _transcript_path(run)
@@ -131,7 +155,9 @@ def process(
     session = transcript.read(path, source_cli=run["source_cli"])
     cwd = run.get("cwd") or session.cwd
 
-    scope_id = routing.resolve(cur, cwd)
+    scope_id, ignored = routing.resolve(cur, cwd)
+    if ignored:
+        return _skip(cur, run_id, f"{cwd} is mapped to no scope on purpose")
     if scope_id is None:
         note = f"no scope route for {cwd or 'an unrecorded directory'}"
         runs.held(cur, run_id=run_id, note=note)
@@ -141,10 +167,18 @@ def process(
         cur, source_cli=run["source_cli"], external_session_id=run["external_session_id"]
     )
     remaining = session.since(checkpoint)
+
+    # Nothing new. This happens whenever a transcript's bytes change without
+    # the conversation growing — the CLI appending a title or a summary after
+    # the hook fired — and the sweeper then enqueues it under a new digest.
+    # Without this the run builds a prompt of the whole active set around an
+    # empty log and asks a model to retire things on no evidence, once per
+    # session, forever.
+    if checkpoint and not remaining:
+        return _skip(cur, run_id, f"nothing new since turn {checkpoint}")
+
     turns, more = _window(remaining)
     scratch_items = _scratch(cur, run)
-    internal = _session(cur, run)
-    log = transcript.render(session, turns)
 
     # Only on the first pass. A session already judged worth reading must not
     # be abandoned half way through because its second window happens to be
@@ -154,10 +188,12 @@ def process(
         if reason:
             return _skip(cur, run_id, reason)
 
+    internal = _session(cur, run)
+    log = transcript.render(session, turns)
     active = retrieval.active_set(cur, scope_id=scope_id)
     prompt = extract.build_prompt(log=log, scratch=scratch_items, active=active)
-
     estimated = retrieval.estimate_tokens(prompt)
+
     spent = runs.spent_today(cur)
     if spent + estimated > runs.DAILY_INPUT_BUDGET:
         note = f"daily input budget reached ({spent} spent, this one needs about {estimated})"
@@ -168,28 +204,52 @@ def process(
         runs.unclaim(cur, run_id=run_id)
         return Outcome(run_id, "dry-run", f"{estimated} input token, {len(active)} active")
 
-    answer = extractor.run(prompt)
-    result = extract.parse(answer, known_ids={row["memory_id"] for row in active})
+    return Plan(
+        run=run,
+        scope_id=scope_id,
+        session=session,
+        turns=turns,
+        more=more,
+        records=session.records,
+        session_id=internal["session_id"],
+        active_ids={row["memory_id"] for row in active},
+        prompt=prompt,
+        estimated=estimated,
+    )
+
+
+def land(cur: psycopg.Cursor, plan: Plan, answer: str, *, extractor: extract.Extractor) -> Outcome:
+    """Everything after the model call: check the answer, file it, close the run."""
+    run, run_id = plan.run, plan.run["run_id"]
+    result = extract.parse(answer, known_ids=plan.active_ids)
 
     outcome = Outcome(run_id, "succeeded", refused=result.refused)
     filed = _file_proposals(
         cur,
         result,
-        scope_id=scope_id,
-        session=session,
+        scope_id=plan.scope_id,
+        session=plan.session,
         run=run,
         outcome=outcome,
-        session_id=internal["session_id"],
+        session_id=plan.session_id,
     )
     _link_evidence(cur, result, filed)
-    _file_retirements(
-        cur, result, session=session, outcome=outcome, session_id=internal["session_id"]
+    _file_updates(
+        cur, result, session=plan.session, run=run, outcome=outcome, session_id=plan.session_id
     )
+    _file_retirements(cur, result, outcome=outcome, session_id=plan.session_id)
 
     usage = getattr(extractor, "usage", {}) or {}
-    read_to = turns[-1].ordinal if turns else session.records
+    runs.spend(
+        cur,
+        run_id=run_id,
+        input_tokens=usage.get("input_tokens", plan.estimated),
+        output_tokens=usage.get("output_tokens"),
+    )
+    runs.record_dropped(cur, run_id=run_id, dropped=result.scratch)
+    read_to = plan.turns[-1].ordinal if plan.turns else plan.records
 
-    if more:
+    if plan.more:
         # More of this session than one call may hold. The mark moves to the end
         # of what was read and the run comes back for the rest, so the cost per
         # call stays bounded without any of the session going unread.
@@ -201,7 +261,7 @@ def process(
             note=f"{_note(outcome, result)}; read to turn {read_to}, more to come",
         )
         outcome.state = "windowed"
-        outcome.note = f"{_note(outcome, result)}; read to turn {read_to} of {session.records}"
+        outcome.note = f"{_note(outcome, result)}; read to turn {read_to} of {plan.records}"
         return outcome
 
     _clear_scratch(cur, run)
@@ -209,25 +269,42 @@ def process(
         cur,
         run_id=run_id,
         model=f"{extractor.name}/{extractor.model}",
-        input_tokens=usage.get("input_tokens", estimated),
-        output_tokens=usage.get("output_tokens"),
         note=_note(outcome, result),
-        checkpoint=session.records,
+        checkpoint=plan.records,
     )
     events.record(
         cur,
-        EventType.PROPOSAL_CREATED,
+        EventType.EXTRACTION_FILED,
         WORKER_ACTOR,
         detail={
             "extraction": str(run_id),
-            "scope_id": str(scope_id),
+            "scope_id": str(plan.scope_id),
             "proposals": outcome.proposals_filed,
+            "updates": outcome.updates_filed,
             "retirements": outcome.retirements_filed,
             "refused": len(result.refused),
         },
     )
     outcome.note = _note(outcome, result)
     return outcome
+
+
+def process(
+    cur: psycopg.Cursor,
+    run: dict[str, Any],
+    *,
+    extractor: extract.Extractor,
+    dry_run: bool = False,
+) -> Outcome:
+    """Both halves against one cursor. For a single manual run, and for tests.
+
+    run_once is what the unattended path uses, and it deliberately does not go
+    through here: the model call belongs between transactions, not inside one.
+    """
+    plan = prepare(cur, run, dry_run=dry_run)
+    if isinstance(plan, Outcome):
+        return plan
+    return land(cur, plan, extractor.run(plan.prompt), extractor=extractor)
 
 
 def _window(turns: list) -> tuple[list, bool]:
@@ -376,6 +453,14 @@ def _file_proposals(
             # any span check.
             "source_type": str(SourceType.AGENT),
             "source_reference": _reference(session, run),
+            # Kept because the prompt asks for them and review needs them: the
+            # rationale says which of the three tests the extraction thought
+            # this passed, and duplicates names the item in the old notes this
+            # may be a migration of rather than a discovery. Dropping them here
+            # means paying output tokens for fields with no reader.
+            "rationale": draft.rationale or None,
+            "duplicates": draft.duplicates or None,
+            "claimed_gate": draft.claimed_gate,
         }
         try:
             made = proposals.propose(
@@ -428,11 +513,69 @@ def _link_evidence(cur: psycopg.Cursor, result: extract.Extraction, filed: dict[
                 continue
 
 
-def _file_retirements(
+def _file_updates(
     cur: psycopg.Cursor,
     result: extract.Extraction,
     *,
     session,
+    run: dict[str, Any],
+    outcome: Outcome,
+    session_id: UUID,
+) -> None:
+    """Add a corrected version to an entity that already exists (20).
+
+    This is the operation the layer is for, and the worker had no way to say
+    it. Without it a session that refines a standing memory can only make a
+    rival under another title — which splits the knowledge — or a near
+    duplicate that hangs unresolved until somebody tells the two apart.
+
+    It lands as a candidate on the existing entity, so the correction shows up
+    in layer 2 beside the thing it corrects, and the active pointer does not
+    move until a person moves it.
+    """
+    for draft in result.updates:
+        try:
+            entity = store.get_entity(cur, draft.memory_id)
+        except MashuError as failure:
+            outcome.refused.append(f"{draft.memory_id}: {failure}")
+            continue
+        if entity["active_version"] is None:
+            outcome.refused.append(f"nothing active to correct on {entity['title']}")
+            continue
+        if store.get_version(cur, entity["active_version"])["content"].strip() == (
+            draft.content.strip()
+        ):
+            outcome.refused.append(f"unchanged: {entity['title']}")
+            continue
+
+        try:
+            proposals.propose(
+                cur,
+                actor=WORKER_ACTOR,
+                operation=ProposalOperation.UPDATE_VERSION,
+                payload={
+                    "content": draft.content,
+                    "source_type": str(SourceType.AGENT),
+                    "source_reference": _reference(session, run),
+                    "rationale": draft.reason or None,
+                },
+                target_memory=entity["memory_id"],
+                based_on_version=entity["latest_version"],
+                session_id=session_id,
+            )
+        except DuplicateProposalError:
+            outcome.refused.append(f"correction already proposed: {entity['title']}")
+            continue
+        except MashuError as failure:
+            outcome.refused.append(f"{entity['title']}: {failure}")
+            continue
+        outcome.updates_filed += 1
+
+
+def _file_retirements(
+    cur: psycopg.Cursor,
+    result: extract.Extraction,
+    *,
     outcome: Outcome,
     session_id: UUID,
 ) -> None:
@@ -483,6 +626,7 @@ def _file_retirements(
 def _note(outcome: Outcome, result: extract.Extraction) -> str:
     parts = [
         f"{outcome.proposals_filed}/{len(result.proposals)} proposals",
+        f"{outcome.updates_filed}/{len(result.updates)} updates",
         f"{outcome.retirements_filed}/{len(result.retirements)} retirements",
     ]
     if outcome.refused:
@@ -502,9 +646,17 @@ def run_once(
 ) -> list[Outcome]:
     """Work through the queue once.
 
-    One transaction per run, deliberately. A batch in one transaction would
-    make a single unreadable transcript roll back the proposals from every
-    other session in it, and the ledger would then claim they were never read.
+    Three transactions per run, and the model call in none of them. A call can
+    take ten minutes; a transaction open across it holds the locks the claim
+    took, blocks a live session writing its own scratch, and on most managed
+    databases is killed by an idle-in-transaction timeout — a death that looks
+    exactly like the model having failed. What makes the gap safe is the claim
+    itself: the run is marked running with the moment it was taken, so no other
+    worker picks it up while this one is thinking.
+
+    One run per transaction, too. A batch in one would make a single unreadable
+    transcript roll back the proposals from every other session in it, and the
+    ledger would then say they were never read.
     """
     extractor = extractor or extract.get_extractor()
     outcomes: list[Outcome] = []
@@ -518,7 +670,15 @@ def run_once(
 
         try:
             with transaction(dsn) as cur:
-                outcomes.append(process(cur, run, extractor=extractor, dry_run=dry_run))
+                plan = prepare(cur, run, dry_run=dry_run)
+            if isinstance(plan, Outcome):
+                outcomes.append(plan)
+                continue
+
+            answer = extractor.run(plan.prompt)
+
+            with transaction(dsn) as cur:
+                outcomes.append(land(cur, plan, answer, extractor=extractor))
         except Exception as failure:  # noqa: BLE001 - the ledger records anything
             with transaction(dsn) as cur:
                 runs.failed(cur, run_id=run["run_id"], error=f"{type(failure).__name__}: {failure}")

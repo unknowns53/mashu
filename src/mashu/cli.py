@@ -41,7 +41,7 @@ from mashu import (
 )
 from mashu.db import transaction
 from mashu.embed import get_embedder
-from mashu.errors import DeliveryError
+from mashu.errors import DeliveryError, DuplicateProposalError, MashuError
 from mashu.migrate import migrate
 from mashu.models import (
     Delivery,
@@ -996,7 +996,7 @@ def cmd_route(args) -> int:
             print("no routes; every transcript will be held until one exists")
             return 0
         for row in rows:
-            print(f"{row['path_prefix']}\n    -> {row['scope_name']}")
+            print(f"{row['path_prefix']}\n    -> {row['scope_name'] or '(not captured)'}")
     return 0
 
 
@@ -1024,18 +1024,26 @@ def cmd_retire(args) -> int:
             print(f"{full['title']} has no active version to retire", file=sys.stderr)
             return 1
 
-        made = proposals.propose(
-            cur,
-            actor=args.actor,
-            operation=ProposalOperation.CHANGE_STATUS,
-            payload={
-                "version_id": str(version_id),
-                "status": str(target),
-                "reason": args.reason,
-                "source_type": str(SourceType.USER),
-            },
-            target_memory=full["memory_id"],
-        )
+        try:
+            made = proposals.propose(
+                cur,
+                actor=args.actor,
+                operation=ProposalOperation.CHANGE_STATUS,
+                payload={
+                    "version_id": str(version_id),
+                    "status": str(target),
+                    "reason": args.reason,
+                    "source_type": str(SourceType.USER),
+                },
+                target_memory=full["memory_id"],
+            )
+        except DuplicateProposalError as clash:
+            # This is the intended path, not an edge case. The worker proposes
+            # a retirement, search shows it riding along with the content, the
+            # person agrees and types this — and what agreeing means is
+            # approving the proposal that is already standing, not filing a
+            # second one beside it.
+            return _agree(cur, args, full, clash)
         proposal = made["proposal"]
         if proposal["status"] == str(ProposalStatus.PENDING):
             proposals.approve(
@@ -1053,6 +1061,28 @@ def cmd_retire(args) -> int:
 # --------------------------------------------------------------------------
 # review, in one sitting
 # --------------------------------------------------------------------------
+def _agree(cur, args, entity, clash: DuplicateProposalError) -> int:
+    """Approve the standing proposal this command was agreeing with."""
+    waiting = [row for row in clash.existing if row["status"] == "pending"]
+    if not waiting:
+        why = clash.rejected[-1]["decision_reason"] if clash.rejected else "already decided"
+        print(f"{entity['title']}: this was already ruled on ({why})", file=sys.stderr)
+        return 1
+
+    proposal = waiting[-1]
+    proposals.approve(
+        cur,
+        proposal["proposal_id"],
+        reviewer=args.reviewer,
+        reason=f"agreed at the terminal: {args.reason}",
+    )
+    print(
+        f"{entity['title']}  ->  {proposal['payload'].get('status')}  "
+        f"(approved the proposal {proposal['actor']} was already holding)"
+    )
+    return 0
+
+
 def cmd_review(args) -> int:
     """Open the oldest bundle and finish with it (18.1, 30 段 C).
 
@@ -1188,12 +1218,17 @@ def _apply_review(args, items, script: str) -> int:
         verb, reason = decided.get(index, ("a" if approve_rest else "", ""))
         if not verb:
             continue
+        # The editor runs before the transaction opens. Waiting on a human
+        # inside one holds the entity's locks for as long as they take to
+        # think, and a managed database will end the transaction before they
+        # are done.
+        edited = _edit_text(args, item) if verb == "e" else None
         with transaction(args.dsn) as cur:
-            _decide(cur, args, item, verb, reason)
+            _decide(cur, args, item, verb, reason, edited=edited)
     return 0
 
 
-def _decide(cur, args, item, verb: str, reason: str) -> None:
+def _decide(cur, args, item, verb: str, reason: str, edited: str | None = None) -> None:
     proposal_id = item["proposal_id"]
     title = item["title"] or _short(proposal_id)
 
@@ -1206,19 +1241,37 @@ def _decide(cur, args, item, verb: str, reason: str) -> None:
         print(f"put off   {title}  ({reason})")
         return
     if verb == "e":
-        _edit(cur, args, item)
+        _edit(cur, args, item, edited)
         return
     proposals.approve(cur, proposal_id, reviewer=args.reviewer, reason=args.reason)
     print(f"approved  {title}")
 
 
-def _edit(cur, args, item) -> None:
+def _edit_text(args, item) -> str | None:
+    """Open the reviewer's editor on what this proposal wrote, outside any transaction."""
+    with transaction(args.dsn) as cur:
+        cur.execute(
+            "SELECT applied_version FROM proposal WHERE proposal_id = %s", (item["proposal_id"],)
+        )
+        version_id = (cur.fetchone() or {}).get("applied_version")
+        if version_id is None:
+            return None
+        original = store.get_version(cur, version_id)["content"]
+    return _open_editor(original)
+
+
+def _edit(cur, args, item, edited: str | None) -> None:
     """Approve, then record the reviewer's own wording as a version of theirs (18.1).
 
     Not an overwrite. Versions are immutable, so what an edit produces is a new
     version whose source is the user, sitting on top of what the agent proposed.
     The history then says both things: what was suggested, and what a person
     made of it.
+
+    It goes through a proposal like everything else. Section 15 makes the
+    proposal the record of why the store looks as it does, and a version
+    written straight into the store is a change with no such record — the one
+    kind of gap the audit trail cannot show as a gap.
     """
     cur.execute(
         "SELECT applied_version FROM proposal WHERE proposal_id = %s", (item["proposal_id"],)
@@ -1229,22 +1282,24 @@ def _edit(cur, args, item) -> None:
         return
 
     original = store.get_version(cur, version_id)["content"]
-    edited = _open_editor(original)
     proposals.approve(cur, item["proposal_id"], reviewer=args.reviewer, reason="edited on review")
-    if edited.strip() == original.strip():
+    if edited is None or edited.strip() == original.strip():
         print(f"approved  {item['title']}  (unchanged)")
         return
 
     entity = store.get_entity(cur, store.get_version(cur, version_id)["memory_id"])
-    store.add_version(
+    proposals.propose(
         cur,
-        memory_id=entity["memory_id"],
-        content=edited.strip(),
-        source_type=SourceType.USER,
-        source_reference="edited during review",
-        created_by=args.reviewer,
         actor=args.reviewer,
-        adopt=True,
+        operation=ProposalOperation.UPDATE_VERSION,
+        payload={
+            "content": edited.strip(),
+            "source_type": str(SourceType.USER),
+            "source_reference": "edited during review",
+        },
+        target_memory=entity["memory_id"],
+        based_on_version=entity["latest_version"],
+        allow_duplicate=True,
     )
     print(f"edited    {item['title']}")
 
@@ -1472,6 +1527,7 @@ def build_parser() -> argparse.ArgumentParser:
     ro = sub.add_parser("route", help="map a working directory onto a scope (16.3)")
     ro.add_argument("--add", metavar="PATH", help="map this directory tree")
     ro.add_argument("--scope", help="the scope name it maps to")
+    ro.add_argument("--ignore", metavar="PATH", help="map this directory to no scope, on purpose")
     ro.add_argument("--remove", metavar="PATH", help="drop the mapping for this directory")
     ro.add_argument("--actor", default="user")
     ro.set_defaults(func=cmd_route)
@@ -1500,7 +1556,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except MashuError as refusal:
+        # Every one of these means the knowledge state declined to do what was
+        # asked, and says why. A traceback would bury that under a stack the
+        # reader cannot act on.
+        print(f"{refusal}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

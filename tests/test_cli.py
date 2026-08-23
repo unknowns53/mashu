@@ -517,17 +517,20 @@ def test_the_grounds_are_readable_while_the_state_is_still_waiting(
 def test_redrafting_a_state_that_is_still_waiting_is_stopped(
     run, test_dsn, committed_scope, tmp_path
 ):
-    """Specification 15.1: the second draft is the same change proposed twice."""
-    from mashu.errors import DuplicateProposalError
+    """Specification 15.1: the second draft is the same change proposed twice.
 
+    The refusal reaches the user as its own sentence. It exists to show the
+    proposer what is already waiting, and a traceback buries that under a stack
+    they cannot act on.
+    """
     name = _scope_name(test_dsn, committed_scope)
     draft = tmp_path / "state.md"
     draft.write_text("the first reading", "utf-8")
     run("state", str(draft), "--scope", name, "--title", "current state")
 
     draft.write_text("the second reading", "utf-8")
-    with pytest.raises(DuplicateProposalError, match="already been proposed"):
-        run("state", str(draft), "--scope", name)
+    code, _ = run("state", str(draft), "--scope", name)
+    assert code == 1
 
 
 # --------------------------------------------------------------------------
@@ -563,17 +566,15 @@ def test_merging_asks_which_reading_survives_when_both_are_active(run, test_dsn,
         with transaction(test_dsn) as cur:
             proposals.approve(cur, proposal["proposal_id"], reviewer="user", reason="both stand")
 
-    from mashu.errors import MergeError
-
-    with pytest.raises(MergeError, match="name which one survives"):
-        run(
-            "merge",
-            str(source["target_memory"])[:8],
-            "--into",
-            str(target["target_memory"])[:8],
-            "--reason",
-            "the same thing",
-        )
+    code, _ = run(
+        "merge",
+        str(source["target_memory"])[:8],
+        "--into",
+        str(target["target_memory"])[:8],
+        "--reason",
+        "the same thing",
+    )
+    assert code == 1
 
     with transaction(test_dsn) as cur:
         keep = store.get_entity(cur, source["target_memory"])["active_version"]

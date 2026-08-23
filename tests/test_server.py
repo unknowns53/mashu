@@ -25,9 +25,17 @@ def test_dsn(committing_dsn):
 
 @pytest.fixture(autouse=True)
 def wired(test_dsn, monkeypatch):
-    """Point the server at the committing database, as one fresh process."""
+    """Point the server at the committing database, as one fresh process.
+
+    The session-identity variables are cleared unless a test sets them. They
+    are exported by the CLI that launches the server, so a suite run from
+    inside one would otherwise inherit the developer's own session id and every
+    test would share one session row.
+    """
     monkeypatch.setenv("MASHU_DATABASE_URL", test_dsn)
     monkeypatch.setenv(server.ACTOR_ENV_VAR, "claude")
+    for name in server.SESSION_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(server, "_session_id", None)
 
 
@@ -323,11 +331,39 @@ def test_an_agent_can_put_scratch_down_and_read_it_back(call):
 def test_scratch_does_not_reach_another_session(call, test_dsn, monkeypatch):
     call("scratch_put", content="mine alone")
 
-    # A second server process is a second logical session.
+    # A second server process with no session identity is a second session.
     monkeypatch.setattr(server, "_session_id", None)
     second = server.build_server()
     got = asyncio.run(second.call_tool("scratch_get", {})).structured_content
     assert got["items"] == []
+
+
+def test_a_server_adopts_the_cli_session_it_is_serving(call, test_dsn, monkeypatch):
+    """Otherwise the scratch an agent writes is never found again.
+
+    The worker looks scratch up by the CLI's own session id, taken from the
+    transcript. A session row holding only an agent name has nothing to match
+    on, so stage one of the capture pipeline writes into a place nothing reads
+    and nothing clears.
+    """
+    monkeypatch.setenv("MASHU_EXTERNAL_SESSION_ID", "outside-1")
+    monkeypatch.setenv("MASHU_SOURCE_CLI", "claude")
+    monkeypatch.setattr(server, "_session_id", None)
+    call("scratch_put", content="書き留めたこと")
+
+    with transaction(test_dsn) as cur:
+        cur.execute(
+            "SELECT scratch FROM agent_session "
+            "WHERE source_cli = 'claude' AND external_session_id = 'outside-1'"
+        )
+        row = cur.fetchone()
+    assert [item["content"] for item in row["scratch"]] == ["書き留めたこと"]
+
+    # A second process serving the same CLI session is the same session.
+    monkeypatch.setattr(server, "_session_id", None)
+    again = server.build_server()
+    got = asyncio.run(again.call_tool("scratch_get", {})).structured_content
+    assert [item["content"] for item in got["items"]] == ["書き留めたこと"]
 
 
 def test_the_session_start_carries_the_conditions_and_the_capture_health(call, test_dsn, scope):

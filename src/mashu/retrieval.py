@@ -34,7 +34,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import events
+from mashu import context, events
 from mashu.embed import get_embedder
 from mashu.models import EventType, MemoryType
 
@@ -127,6 +127,12 @@ class Retrieved:
     #: Candidates that matched but were not handed over, counted across the
     #: whole matching set rather than across the query window.
     dropped_unreviewed: int = 0
+    #: Conditions that apply right now (25.2). Beside the three layers rather
+    #: than a fourth one: the layers sort indefinite knowledge by its standing,
+    #: and a condition with a clock on it is outside that sorting. Included
+    #: whoever wrote it — section 25.2 separates the right to be pushed into
+    #: every session from the right to be findable, and this is the second.
+    temporary: list[dict[str, Any]] = field(default_factory=list)
 
     def memory_ids(self) -> list[UUID]:
         """Every memory handed over, for the event log (22)."""
@@ -357,6 +363,8 @@ def retrieve(
     cur.execute(_LAYER3_SQL, narrowed)
     retired = sorted(cur.fetchall(), key=lambda r: -r["similarity"])[:limit]
 
+    temporary = context.live(cur, scopes=list(hit_scopes) or None, limit=limit)
+
     result = Retrieved(
         query=query,
         scopes=list(scopes),
@@ -365,6 +373,7 @@ def retrieve(
         unreviewed=unreviewed,
         retired=retired,
         dropped_unreviewed=dropped,
+        temporary=temporary,
     )
     if record:
         events.record(

@@ -23,7 +23,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Jsonb
 
-from mashu import events, resolution, store
+from mashu import events, redact, resolution, store
 from mashu.errors import DuplicateProposalError, NotFoundError, ProposalError
 from mashu.gate import CommitDecision, GateRuling, classify
 from mashu.models import (
@@ -284,6 +284,19 @@ def propose(
     """
     operation = ProposalOperation(operation)
 
+    # Before anything else, and for every proposer including the user. What
+    # lands here is read into every session and travels outward from there into
+    # whatever those agents write, so an identifier that gets in has been
+    # published slowly rather than not at all. Review will not catch it: review
+    # reads for whether a claim is true.
+    verdict = redact.check(payload.get("title"), payload.get("content"), payload.get("directive"))
+    if not verdict.allowed:
+        raise ProposalError(
+            f"this content {verdict.reason()} and may not enter the store. "
+            f"Rewrite it without the identifier; the store is read into every "
+            f"session and carried outward from there"
+        )
+
     if operation is ProposalOperation.CHANGE_STATUS and payload.get("status") == str(
         VersionStatus.REJECTED
     ):
@@ -541,11 +554,11 @@ def defer(cur: psycopg.Cursor, proposal_id: UUID, *, reviewer: str, note: str) -
     row = cur.fetchone()
     events.record(
         cur,
-        EventType.PROPOSAL_CREATED,
+        EventType.PROPOSAL_DEFERRED,
         reviewer,
         proposal_id=proposal_id,
         memory_id=proposal["target_memory"],
-        detail={"deferred": True, "note": note},
+        detail={"note": note},
     )
     return row
 

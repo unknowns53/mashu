@@ -45,6 +45,36 @@ from mashu.models import MemoryType, ProposalOperation, SourceType, VersionStatu
 #: configuration, one entry per agent, so that the event log names which agent
 #: proposed what.
 ACTOR_ENV_VAR = "MASHU_AGENT"
+
+#: How this process learns which CLI session it belongs to. Without it the
+#: scratch an agent writes cannot be found again: the worker looks it up by
+#: (source_cli, external_session_id) from the transcript, and a session row
+#: holding only an agent name has nothing to match on. Stage one of the capture
+#: pipeline is then dead — the scratch is written, never read, never cleared,
+#: and the extraction pays the transcript-only price every time.
+#:
+#: The CLIs already export this; MASHU_EXTERNAL_SESSION_ID overrides for
+#: anything that does not.
+SESSION_ENV_VARS = (
+    "MASHU_EXTERNAL_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_SESSION_ID",
+)
+SOURCE_CLI_ENV_VAR = "MASHU_SOURCE_CLI"
+
+
+def external_session() -> tuple[str, str] | None:
+    """The CLI and session id this process is serving, if it can be known."""
+    for name in SESSION_ENV_VARS:
+        value = os.environ.get(name)
+        if value:
+            cli = os.environ.get(SOURCE_CLI_ENV_VAR) or (
+                "codex" if name == "CODEX_SESSION_ID" else "claude"
+            )
+            return cli, value
+    return None
+
+
 DEFAULT_ACTOR = "agent"
 
 _session_id: UUID | None = None
@@ -65,12 +95,32 @@ def session(cur: psycopg.Cursor) -> UUID:
     event log is where it is answered.
     """
     global _session_id
-    if _session_id is None:
+    if _session_id is not None:
+        return _session_id
+
+    outside = external_session()
+    if outside is not None:
+        # Adopt the row the worker will look for, or make it. Both sides then
+        # name the same session, so what an agent proposes live and what the
+        # extraction proposes afterwards land in one review bundle, and the
+        # scratch written here is the scratch the extraction reads.
+        cli, external_id = outside
+        cur.execute(
+            """
+            INSERT INTO agent_session (agent, source_cli, external_session_id)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (source_cli, external_session_id) WHERE external_session_id IS NOT NULL
+            DO UPDATE SET agent = EXCLUDED.agent
+            RETURNING session_id
+            """,
+            (actor(), cli, external_id),
+        )
+    else:
         cur.execute(
             "INSERT INTO agent_session (agent) VALUES (%s) RETURNING session_id",
             (actor(),),
         )
-        _session_id = cur.fetchone()["session_id"]
+    _session_id = cur.fetchone()["session_id"]
     return _session_id
 
 
@@ -205,6 +255,9 @@ def build_server() -> Any:
         retired: refuted, parked or turned down. Content is deliberately
             withheld; the reason is what you are given. Do not re-derive these,
             and if you argue against the reason, bring new grounds.
+        temporary: conditions that hold until a stated moment — a quota, an
+            outage, an arrangement for this month. Not knowledge and not
+            sorted with it; they stop applying on their own at expires_at.
         """
         with db.transaction() as cur:
             got = retrieval.retrieve(
@@ -222,6 +275,7 @@ def build_server() -> Any:
                     "active": got.active,
                     "unreviewed": got.unreviewed,
                     "retired": got.retired,
+                    "temporary": got.temporary,
                     "dropped_unreviewed": got.dropped_unreviewed,
                 }
             )
@@ -295,10 +349,11 @@ def build_server() -> Any:
         than that is a claim about how things are wearing a window, and belongs
         in memory_propose where a person can look at it.
 
-        What you write here is reachable by search. It is not pushed into other
-        sessions' openings; only what the user states directly goes there. The
-        right to write and the right to interrupt every future session are
-        deliberately not the same right.
+        What you write here comes back from memory_search, in a block beside
+        the three layers. It is not pushed into other sessions' openings; only
+        what the user states directly goes there. The right to write and the
+        right to interrupt every future session are deliberately not the same
+        right.
         """
         with db.transaction() as cur:
             try:

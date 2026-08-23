@@ -33,9 +33,14 @@ def normalise(path: str) -> str:
 
 
 def add(
-    cur: psycopg.Cursor, *, path_prefix: str, scope_id: UUID, created_by: str
+    cur: psycopg.Cursor, *, path_prefix: str, scope_id: UUID | None, created_by: str
 ) -> dict[str, Any]:
-    """Map a directory tree onto a scope, replacing any earlier mapping for it."""
+    """Map a directory tree onto a scope, replacing any earlier mapping for it.
+
+    A route to nothing is an answer too. Without one, the only reply to "this
+    directory is not worth capturing" is a held run that never clears, and a
+    health warning that is permanently on is a health warning nobody reads.
+    """
     prefix = normalise(path_prefix)
     cur.execute(
         """
@@ -59,25 +64,29 @@ def all_routes(cur: psycopg.Cursor) -> list[dict[str, Any]]:
     cur.execute(
         """
         SELECT r.route_id, r.path_prefix, r.scope_id, r.created_by, s.name AS scope_name
-        FROM scope_route r JOIN scope s ON s.scope_id = r.scope_id
+        FROM scope_route r LEFT JOIN scope s ON s.scope_id = r.scope_id
         ORDER BY length(r.path_prefix) DESC, r.path_prefix
         """
     )
     return cur.fetchall()
 
 
-def resolve(cur: psycopg.Cursor, cwd: str | None) -> UUID | None:
-    """The scope a directory maps to, or nothing.
+def resolve(cur: psycopg.Cursor, cwd: str | None) -> tuple[UUID | None, bool]:
+    """The scope a directory maps to, and whether it maps to nothing on purpose.
+
+    Three answers, not two: this scope, deliberately no scope, and no route at
+    all. Only the third is a gap for a person to fill; collapsing it with the
+    second is what turns "hold and warn" into a warning that never goes out.
 
     Matching is on whole path segments. A plain string prefix would let
     /a/mashu-old answer for the route /a/mashu, which is a different project
     with a name that happens to start the same way.
     """
     if not cwd:
-        return None
+        return None, False
     here = normalise(cwd)
     for row in all_routes(cur):
         prefix = row["path_prefix"]
         if here == prefix or here.startswith(prefix.rstrip("/") + "/"):
-            return row["scope_id"]
-    return None
+            return row["scope_id"], row["scope_id"] is None
+    return None, False

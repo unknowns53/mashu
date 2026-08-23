@@ -137,6 +137,8 @@ class EventType(StrEnum):
     CONTEXT_RECORDED = "context_recorded"
     CONTEXT_REVOKED = "context_revoked"
     PROPOSAL_CREATED = "proposal_created"
+    PROPOSAL_DEFERRED = "proposal_deferred"
+    EXTRACTION_FILED = "extraction_filed"
     PROPOSAL_COMMITTED = "proposal_committed"
     PROPOSAL_REJECTED = "proposal_rejected"
     CONTEXT_ASSEMBLED = "context_assembled"
