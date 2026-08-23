@@ -14,11 +14,13 @@ the user's decision into the store.
 from __future__ import annotations
 
 import argparse
+import json
+import pathlib
 import sys
 import textwrap
 from uuid import UUID
 
-from mashu import proposals, retrieval, store
+from mashu import importer, proposals, retrieval, store
 from mashu.db import transaction
 from mashu.embed import get_embedder
 from mashu.migrate import migrate
@@ -199,6 +201,54 @@ def cmd_backfill(args) -> int:
     return 0
 
 
+def cmd_import(args) -> int:
+    """Bring a JSON file of memories into one scope as candidates (27.1)."""
+    items = json.loads(pathlib.Path(args.file).read_text(encoding="utf-8"))
+    if isinstance(items, dict):
+        items = items.get("memories") or items.get("items") or []
+
+    with transaction(args.dsn) as cur:
+        cur.execute("SELECT scope_id FROM scope WHERE name = %s", (args.scope,))
+        row = cur.fetchone()
+        if row is None:
+            raise SystemExit(f"no scope named {args.scope!r}; the user creates scopes")
+        summary = importer.import_items(
+            cur, scope_id=row["scope_id"], items=items, actor=args.actor
+        )
+
+    print(f"{len(summary['created'])} new entity proposal(s)")
+    for row in summary["created"]:
+        print(f"  {_short(row['proposal_id'])}  {row['title']}")
+    print(f"{len(summary['attached'])} attached to an existing entity")
+    for row in summary["attached"]:
+        print(
+            f"  {_short(row['proposal_id'])}  {row['title']} -> {row['onto']}"
+            f"  ({row['similarity']})"
+        )
+    if summary["failed"]:
+        print(f"{len(summary['failed'])} could not be imported")
+        for row in summary["failed"]:
+            trouble = row.get("missing") or row.get("error")
+            print(f"  item {row['index']}  {row['title']}: {trouble}")
+    return 0
+
+
+def cmd_stocktake(args) -> int:
+    """Which scopes have been rebuilt far enough to switch over (27.1)."""
+    with transaction(args.dsn) as cur:
+        rows = importer.stocktake(cur)
+    if not rows:
+        print("no active scopes")
+        return 0
+    print(f"{'scope':<28} {'state':>6} {'pref':>6} {'decision':>9} {'pending':>8}  migrated")
+    for row in rows:
+        print(
+            f"{row['name'][:28]:<28} {row['state']:>6} {row['preference']:>6} "
+            f"{row['decision']:>9} {row['pending']:>8}  {'yes' if row['migrated'] else 'no'}"
+        )
+    return 0
+
+
 def cmd_migrate(args) -> int:
     applied = migrate(args.dsn)
     print("\n".join(f"applied: {name}" for name in applied) or "already up to date")
@@ -270,6 +320,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     b = sub.add_parser("backfill", help="embed rows that have no vector yet")
     b.set_defaults(func=cmd_backfill)
+
+    i = sub.add_parser("import", help="import a JSON file of memories into a scope")
+    i.add_argument("file")
+    i.add_argument("--scope", required=True, help="name of an existing scope")
+    i.add_argument("--actor", default="import")
+    i.set_defaults(func=cmd_import)
+
+    t = sub.add_parser("stocktake", help="how far each scope's migration has got")
+    t.set_defaults(func=cmd_stocktake)
 
     m = sub.add_parser("migrate", help="apply pending migrations")
     m.set_defaults(func=cmd_migrate)

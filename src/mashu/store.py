@@ -83,6 +83,7 @@ def create_entity(
     created_by: str,
     actor: str,
     adopt: bool,
+    source_reference: str | None = None,
     status: VersionStatus = VersionStatus.CANDIDATE,
     entity_status: EntityStatus = EntityStatus.ACTIVE,
     reason: str | None = None,
@@ -132,6 +133,7 @@ def create_entity(
         supersedes=None,
         reason=reason,
         source_type=source_type,
+        source_reference=source_reference,
         created_by=created_by,
         actor=actor,
     )
@@ -151,6 +153,7 @@ def add_version(
     actor: str,
     based_on_version: UUID | None,
     adopt: bool,
+    source_reference: str | None = None,
     status: VersionStatus = VersionStatus.CANDIDATE,
     reason: str | None = None,
 ) -> UUID:
@@ -178,6 +181,7 @@ def add_version(
         supersedes=previous_active if adopt else None,
         reason=reason,
         source_type=source_type,
+        source_reference=source_reference,
         created_by=created_by,
         actor=actor,
     )
@@ -458,6 +462,7 @@ def _insert_version(
     supersedes: UUID | None,
     reason: str | None,
     source_type: SourceType,
+    source_reference: str | None,
     created_by: str,
     actor: str,
 ) -> UUID:
@@ -465,8 +470,8 @@ def _insert_version(
         """
         INSERT INTO memory_version
             (memory_id, content, status, supersedes, reason,
-             source_type, created_by, content_embedding)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+             source_type, source_reference, created_by, content_embedding)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING version_id
         """,
         (
@@ -476,6 +481,7 @@ def _insert_version(
             supersedes,
             reason,
             str(SourceType(source_type)),
+            source_reference,
             created_by,
             embed_text(content),
         ),

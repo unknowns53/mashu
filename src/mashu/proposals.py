@@ -195,11 +195,19 @@ def propose(
     session_id: UUID | None = None,
     allow_duplicate: bool = False,
     allow_similar: bool = False,
+    hold_for_review: str | None = None,
 ) -> dict[str, Any]:
     """Record a proposed change and take it as far as the gate allows.
 
     Returns the proposal row together with the gate's ruling, so the caller can
     tell an applied change from one that is now waiting.
+
+    hold_for_review overrides an auto commit and holds the change as a
+    candidate instead, recording the given reason. Section 27.1 needs it: the
+    content being imported from the native memory files is summary prose with
+    observation and interpretation fused together, and letting the auto line
+    apply any of it would import the contamination Mashu exists to keep out.
+    It can only ever make the gate stricter.
 
     Two checks run before the gate does, and both of them stop by raising
     rather than by writing. They are not the same check. The duplicate check
@@ -242,6 +250,8 @@ def propose(
             payload = dict(payload, entity_status=str(EntityStatus.PROVISIONAL))
 
     ruling = _rule(cur, operation, payload, target_memory)
+    if hold_for_review and ruling.decision is CommitDecision.AUTO:
+        ruling = GateRuling(CommitDecision.CANDIDATE, hold_for_review)
     status = (
         ProposalStatus.AUTO_COMMITTED
         if ruling.decision is CommitDecision.AUTO
@@ -470,6 +480,7 @@ def _write_now(
             title=payload["title"],
             content=payload["content"],
             source_type=SourceType(payload["source_type"]),
+            source_reference=payload.get("source_reference"),
             created_by=proposal["actor"],
             actor=actor,
             adopt=adopt,
@@ -489,6 +500,7 @@ def _write_now(
             memory_id=proposal["target_memory"],
             content=payload["content"],
             source_type=SourceType(payload["source_type"]),
+            source_reference=payload.get("source_reference"),
             created_by=proposal["actor"],
             actor=actor,
             based_on_version=proposal["based_on_version"],
@@ -511,6 +523,7 @@ def _apply_on_approval(cur: psycopg.Cursor, proposal: dict, *, actor: str) -> No
                 memory_id=proposal["target_memory"],
                 content=payload["content"],
                 source_type=SourceType(payload["source_type"]),
+                source_reference=payload.get("source_reference"),
                 created_by=proposal["actor"],
                 actor=actor,
                 based_on_version=proposal["based_on_version"],

@@ -199,3 +199,50 @@ def test_backfill_embeds_what_was_written_without_a_vector(run, test_dsn, commit
             (version_id,),
         )
         assert cur.fetchone()["ok"]
+
+
+def test_import_places_a_file_of_memories_into_a_scope(run, test_dsn, committed_scope, tmp_path):
+    import json
+
+    with transaction(test_dsn) as cur:
+        cur.execute("SELECT name FROM scope WHERE scope_id = %s", (committed_scope,))
+        scope_name = cur.fetchone()["name"]
+
+    path = tmp_path / "memories.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "type": "observation",
+                    "title": "cli import subject",
+                    "content": "the enclosure timed out on three separate drives",
+                    "source_reference": "memory/ssd.md",
+                },
+                {"type": "fact", "title": "cli import no origin", "content": "unattributed"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    code, out = run("import", str(path), "--scope", scope_name)
+    assert code == 0
+    assert "1 new entity proposal(s)" in out
+    assert "cli import subject" in out
+    assert "source_reference" in out, "the item without an origin has to be reported"
+
+
+def test_import_refuses_a_scope_that_does_not_exist(run, tmp_path):
+    path = tmp_path / "memories.json"
+    path.write_text("[]", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        run("import", str(path), "--scope", "no such scope")
+
+
+def test_stocktake_reports_each_scope(run, test_dsn, committed_scope):
+    with transaction(test_dsn) as cur:
+        cur.execute("SELECT name FROM scope WHERE scope_id = %s", (committed_scope,))
+        scope_name = cur.fetchone()["name"]
+    code, out = run("stocktake")
+    assert code == 0
+    assert scope_name[:28] in out
+    assert "migrated" in out
