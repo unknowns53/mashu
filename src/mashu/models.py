@@ -41,6 +41,18 @@ class VersionStatus(StrEnum):
     COMPLETED = "completed"
 
 
+class Lifecycle(StrEnum):
+    """Whether a scope is ready to answer (specification 7.1).
+
+    A scope with nothing adopted is not a scope that knows nothing. Retrieval
+    cannot tell those apart, and after a migration the difference is the whole
+    story, so the scope says which it is instead of leaving it to be inferred.
+    """
+
+    SEEDING = "seeding"
+    OPERATIONAL = "operational"
+
+
 class SourceType(StrEnum):
     """Where the content came from. Folded into the version row (specification 9)."""
 
@@ -106,6 +118,8 @@ class EventType(StrEnum):
     """
 
     SCOPE_CREATED = "scope_created"
+    SCOPE_READINESS_SET = "scope_readiness_set"
+    SCOPE_PROMOTED = "scope_promoted"
     ENTITY_CREATED = "entity_created"
     ENTITY_MERGED = "entity_merged"
     VERSION_CREATED = "version_created"

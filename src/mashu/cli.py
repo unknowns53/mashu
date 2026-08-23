@@ -21,7 +21,7 @@ import sys
 import textwrap
 from uuid import UUID
 
-from mashu import bootstrap, db, importer, proposals, retrieval, server, store
+from mashu import bootstrap, db, importer, proposals, retrieval, scopes, server, store
 from mashu.db import transaction
 from mashu.embed import get_embedder
 from mashu.migrate import migrate
@@ -259,19 +259,54 @@ def cmd_import(args) -> int:
     return 0
 
 
-def cmd_stocktake(args) -> int:
-    """Which scopes have been rebuilt far enough to switch over (27.1)."""
+def cmd_scope(args) -> int:
+    """Show what each scope declared it needs, and how far it has got (7.1)."""
     with transaction(args.dsn) as cur:
-        rows = importer.stocktake(cur)
-    if not rows:
-        print("no active scopes")
-        return 0
-    print(f"{'scope':<28} {'state':>6} {'pref':>6} {'decision':>9} {'pending':>8}  migrated")
-    for row in rows:
-        print(
-            f"{row['name'][:28]:<28} {row['state']:>6} {row['preference']:>6} "
-            f"{row['decision']:>9} {row['pending']:>8}  {'yes' if row['migrated'] else 'no'}"
+        if args.require:
+            type_, requirement = args.require
+            scopes.set_requirement(
+                cur,
+                scope_id=_scope_by_name(cur, args.name),
+                type=MemoryType(type_),
+                requirement=requirement,
+                actor=args.actor,
+            )
+        if args.promote:
+            try:
+                opened = scopes.promote(
+                    cur, scope_id=_scope_by_name(cur, args.name), actor=args.actor
+                )
+            except scopes.NotReadyError as refusal:
+                print(f"not promoted: {refusal}")
+                return 1
+            print(f"{opened['name']} is now {opened['lifecycle']}\n")
+
+        for row in scopes.readiness(cur):
+            mark = "" if row["ready"] else f"  needs {', '.join(row['missing'])}"
+            print(
+                f"{row['name']:<16}{row['lifecycle']:<13}"
+                f"adopted {row['adopted']:<4}unreviewed {row['pending']:<5}{mark}"
+            )
+            declared = [t for t, r in row["manifest"].items() if r == scopes.NOT_NEEDED]
+            if declared:
+                print(f"{'':<16}declared unnecessary: {', '.join(declared)}")
+    return 0
+
+
+def cmd_preview(args) -> int:
+    """Rank one scope's candidates for a query, caps off (27.1 validation).
+
+    Deliberately not what an agent sees. Retrieval hides the unreviewed layer
+    when nothing is adopted to contrast it with, which is right for an agent
+    and hides exactly what the migration has to check.
+    """
+    with transaction(args.dsn) as cur:
+        rows = retrieval.preview(
+            cur, args.query, scope_id=_scope_by_name(cur, args.scope), limit=args.limit
         )
+        print(f"{len(rows)} candidate(s), ranked, no caps applied\n")
+        for rank, row in enumerate(rows, 1):
+            print(f"{rank:>3}. [{row['type']}] {row['title']}  ({row['similarity']:.3f})")
     return 0
 
 
@@ -401,9 +436,6 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("--actor", default="import")
     i.set_defaults(func=cmd_import)
 
-    t = sub.add_parser("stocktake", help="how far each scope's migration has got")
-    t.set_defaults(func=cmd_stocktake)
-
     m = sub.add_parser("migrate", help="apply pending migrations")
     m.set_defaults(func=cmd_migrate)
 
@@ -411,6 +443,25 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--scope", default=None, help="narrow the current state to one scope")
     n.add_argument("--actor", default="user")
     n.set_defaults(func=cmd_bootstrap)
+
+    c = sub.add_parser("scope", help="scope readiness and lifecycle")
+    c.add_argument("name", nargs="?", default=None)
+    c.add_argument("--promote", action="store_true", help="open the scope for use")
+    c.add_argument(
+        "--require",
+        nargs=2,
+        metavar=("TYPE", "REQUIREMENT"),
+        default=None,
+        help="declare a type required or not_needed for this scope",
+    )
+    c.add_argument("--actor", default="user")
+    c.set_defaults(func=cmd_scope)
+
+    w = sub.add_parser("preview", help="rank a scope's candidates, caps off (27.1)")
+    w.add_argument("query")
+    w.add_argument("--scope", required=True)
+    w.add_argument("--limit", type=int, default=retrieval.DEFAULT_LIMIT)
+    w.set_defaults(func=cmd_preview)
 
     v = sub.add_parser("serve", help="run the MCP server over stdio")
     v.add_argument("--agent", default=None, help="the identity proposals are recorded under")

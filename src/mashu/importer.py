@@ -19,7 +19,8 @@ state, not replaying a history: a scope counts as migrated once its current
 state, its active preferences and its main decisions stand up, and the rest of
 the files can be pulled across if and when they are wanted. Making the whole
 inventory a precondition makes the cost scale with the pile and the migration
-fail.
+fail. Whether a scope has got there is asked of mashu.scopes, which reads the
+same three types against what each scope declared it needs.
 """
 
 from __future__ import annotations
@@ -152,41 +153,3 @@ def _attach(cur, target, item, scope_id, actor, session_id):
 
 # --------------------------------------------------------------------------
 # stocktaking
-# --------------------------------------------------------------------------
-_STOCKTAKE_SQL = """
-SELECT s.scope_id, s.name,
-       count(*) FILTER (WHERE e.type = 'state'      AND e.active_version IS NOT NULL) AS state,
-       count(*) FILTER (WHERE e.type = 'preference' AND e.active_version IS NOT NULL) AS preference,
-       count(*) FILTER (WHERE e.type = 'decision'   AND e.active_version IS NOT NULL) AS decision,
-       count(*) FILTER (WHERE e.active_version IS NULL AND c.version_id IS NOT NULL) AS pending
-FROM scope s
-LEFT JOIN memory_entity e ON e.scope_id = s.scope_id AND e.status = 'active'
-LEFT JOIN LATERAL (
-    SELECT v.version_id
-    FROM memory_version v
-    WHERE v.memory_id = e.memory_id AND v.status = 'candidate'
-    LIMIT 1
-) c ON true
-WHERE s.status = 'active'
-GROUP BY s.scope_id, s.name
-ORDER BY s.name
-"""
-
-
-def stocktake(cur: psycopg.Cursor) -> list[dict[str, Any]]:
-    """Which scopes have enough standing up to count as migrated (27.1).
-
-    The three counts are the section's own test, and they are counted on active
-    versions rather than on entities: a scope whose current state exists only
-    as an unreviewed candidate has not been rebuilt, it has been queued.
-
-    Pending counts entities that still hold a candidate, not every entity
-    without an active version. An entity whose only version was rejected also
-    has no active version, and counting it as outstanding work would show a
-    scope as having a backlog that no amount of reviewing can clear.
-    """
-    cur.execute(_STOCKTAKE_SQL)
-    rows = cur.fetchall()
-    for row in rows:
-        row["migrated"] = bool(row["state"] and row["preference"] and row["decision"])
-    return rows

@@ -297,11 +297,23 @@ def test_import_refuses_a_scope_that_does_not_exist(run, tmp_path):
         run("import", str(path), "--scope", "no such scope")
 
 
-def test_stocktake_reports_each_scope(run, test_dsn, committed_scope):
+def test_the_scope_command_reports_readiness(run, test_dsn, committed_scope):
     with transaction(test_dsn) as cur:
         cur.execute("SELECT name FROM scope WHERE scope_id = %s", (committed_scope,))
         scope_name = cur.fetchone()["name"]
-    code, out = run("stocktake")
+
+    code, out = run("scope")
     assert code == 0
-    assert scope_name[:28] in out
-    assert "migrated" in out
+    assert scope_name[:16] in out
+    assert "seeding" in out
+
+
+def test_a_scope_will_not_be_promoted_before_it_is_ready(run, committed_scope, test_dsn):
+    with transaction(test_dsn) as cur:
+        cur.execute("SELECT name FROM scope WHERE scope_id = %s", (committed_scope,))
+        scope_name = cur.fetchone()["name"]
+
+    code, out = run("scope", scope_name, "--promote")
+    assert code == 1
+    assert "not promoted" in out
+    assert "state" in out

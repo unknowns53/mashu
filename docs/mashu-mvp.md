@@ -11,7 +11,7 @@
 - v0.7: 27.4a の実測を受けた Review 負荷対策。Review の単位をセッション束へ(18.1節)、candidate を準承認として本文まで渡す(21.1節)、Task の範囲を限定(16.2節)、proposal に由来セッションを追加(15・26節)
 - v0.8: 準承認の導入で開いた二つの穴を塞ぐ。Layer 2 の相対・絶対上限(21.1節)、Review 負荷指標を束単位へ改め未審査比率を追加、行き先を失っていた閾値を差し替え(27.3節)
 - v0.9: 却下された Proposal の後始末を dormant から分離する。version.status に rejected を追加(11・12・26節)、Layer 3 に rejected を追加(21.1節)、重複チェックの対象を却下済みへ拡大(15.1節)
-- v0.10: 実データを移植した直後に出た問題への対応。Preference の Auto Commit を User 明示のものに限定(17節)
+- v0.10: 実データを移植した直後に出た問題への対応。Preference の Auto Commit を User 明示のものに限定(17節)、Scope に lifecycle と readiness manifest を追加(7.1節)、Review 用の preview 経路を分離(27.1節)
 
 ---
 
@@ -197,6 +197,27 @@ Scope Detection と Review UI のグルーピングは Scope 台帳を前提と�
 
 Scope の作成は User のみが行う。
 Agent は既存 Scope から選択する。
+
+### 7.1 Scope の lifecycle
+
+Scope は **seeding** または **operational** のいずれかである。
+
+- **seeding**: まだ開いていない。中身はあるが、人間が採用したものが無い
+- **operational**: 使ってよい
+
+この区別を持つのは、**何も知らない Scope と、まだ開いていない Scope が外から区別できない**ためである。どちらも Retrieval は空を返す。27.1 の移植を実行した直後がまさにこの状態で、63 件の Memory を入れた 2 つの Scope が空を返した。
+
+Agent 側から見ると、この二つは行動が正反対になる。「何も知らない」なら自分で導出するのが正しい。「まだ開いていない」なら待つか人間に尋ねるのが正しく、導出すれば Review が採用しようとしているものを重複して作る。21.2節の Scope 索引は lifecycle を併せて渡す。
+
+lifecycle は Retrieval の規則を緩めない。seeding な Scope も現在と同じ挙動で、採用済みが無い以上、返すべき確定した知識が実際に無いためである。変わるのは状態が推測でなく宣言になることだけである。
+
+**readiness manifest**
+
+seeding から operational への昇格は、Scope 自身が宣言した必要項目が揃っているかで判定する。判定対象は 27.1節が挙げる三つ、State / Preference / Decision。
+
+各項目は **required** または **not_needed** を取り、既定は required。固定件数(「三つとも 1 件以上」)にしないのは、Decision が存在しない Scope にダミーの Decision を作らせるためである。不要であることの明示も、その Scope についての判断として記録に残す。
+
+昇格は User の操作である(7節: Scope の作成は User)。昇格の条件は「required な項目に採用済みの Version が存在すること」であり、**candidate は数えない**。readiness は「存在する」ことの確認ではなく「人間が採用した」ことの確認だからである。
 
 ## 8. Memory Entity
 
@@ -915,9 +936,17 @@ Harness シナリオ 1・2 はこの段階で Agent なしで検証できる。
 
 移行は履歴の再生ではなく、状態の再構築である。棚卸しの単位はログやファイルの本数ではなく **Scope** とする。
 
-各 Scope の Current State、Active な Preference、主要な Decision が立ち上がった時点で、その Scope は移行済みとみなす。残りのログは必要が生じたときの遅延移植でよい。
+各 Scope の Current State、Active な Preference、主要な Decision が立ち上がった時点で、その Scope は移行済みとみなす。判定は 7.1節の readiness manifest で行い、その Scope に存在しない種別は not_needed として明示する。残りのログは必要が生じたときの遅延移植でよい。
 
 全件処理を切替の前提条件にすると、移行コストが在庫量に比例して膨らみ、移行そのものが失敗する。
+
+Retrieval 検証の経路:
+
+本節の Retrieval 検証(正しい Memory が上位に来るか)は、Agent が使う Retrieval とは別の経路で行う。
+
+理由は、移植直後の Scope では Agent 向けの Retrieval が候補を返さないためである。21.1節の相対上限は Active が無いとき Layer 2 を空にする。これは Agent に対しては正しい——確定した知識が一件も無い文脈に未審査の本文だけを積むのは、上限が防ごうとしているものそのものである。しかし本節が確かめたいのは順位であって、順位は上限が隠す側にある。
+
+したがって上限を適用せず候補を順位付けだけする **preview** を分けて持つ。preview の結果は Agent の Context に混ぜず、Context Assembly として event_log にも記録しない。Agent が呼ぶ Retrieval 側のフラグにしないのは、フラグにすれば「上限を外して返せ」という要求が Agent から出せることになるためである。
 
 ### 27.2 Entity Resolution 閾値
 

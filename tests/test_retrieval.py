@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from mashu import proposals, retrieval, store
-from mashu.models import MemoryType, ProposalOperation, SourceType, VersionStatus
+from mashu.models import EventType, MemoryType, ProposalOperation, SourceType, VersionStatus
 
 
 @pytest.fixture
@@ -237,6 +237,39 @@ def test_a_scope_with_nothing_left_active_still_answers_from_layer_three(cur, sc
     assert got.active == []
     assert [row["memory_id"] for row in got.retired] == [memory_id]
     assert "direct SATA connection" in got.retired[0]["reason"]
+
+
+def test_preview_shows_the_ranking_the_caps_hide(cur, scope_id, author):
+    """27.1 asks whether the query finds the right memory. Retrieval cannot say.
+
+    With nothing adopted, layer 2 is emptied on purpose, so the one question a
+    freshly migrated scope has to answer is the one retrieval refuses. Preview
+    answers it, and stays out of context to do so.
+    """
+    for i in range(4):
+        author("SSD timeout cause", f"reading {i} of the enclosure timing out", adopt=False)
+
+    served = retrieval.retrieve(cur, "why does the SSD time out", actor="claude", scope_id=scope_id)
+    assert served.active == []
+    assert served.unreviewed == []
+
+    ranked = retrieval.preview(cur, "why does the SSD time out", scope_id=scope_id)
+    assert len(ranked) == 4
+    assert [row["similarity"] for row in ranked] == sorted(
+        (row["similarity"] for row in ranked), reverse=True
+    )
+
+
+def test_preview_is_not_recorded_as_context(cur, scope_id, author):
+    """Nothing was assembled, so nothing is logged as having been handed over."""
+    author("SSD timeout cause", "the enclosure bridge chip", adopt=False)
+    retrieval.preview(cur, "why does the SSD time out", scope_id=scope_id)
+
+    cur.execute(
+        "SELECT count(*) AS n FROM event_log WHERE event_type = %s",
+        (str(EventType.CONTEXT_ASSEMBLED),),
+    )
+    assert cur.fetchone()["n"] == 0
 
 
 # --------------------------------------------------------------------------

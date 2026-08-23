@@ -275,6 +275,38 @@ def retrieve(
     return result
 
 
+def preview(
+    cur: psycopg.Cursor,
+    query: str,
+    *,
+    scope_id: UUID,
+    limit: int = DEFAULT_LIMIT,
+) -> list[dict[str, Any]]:
+    """Rank a scope's candidates for a query, with none of the caps applied.
+
+    This is not context and never becomes context. Retrieval withholds the
+    unreviewed layer when there is nothing adopted to contrast it against
+    (21.1), which is right for an agent and useless for the one question 27.1
+    asks of a freshly migrated scope: does the query find the right memory.
+    Answering that needs to see the ranking the caps hide, so it is a separate
+    entry point rather than a flag on the one agents call — a flag would be a
+    way to ask retrieval to drop its guard.
+
+    Nothing is logged as context assembly, because nothing was assembled.
+    """
+    embedder = get_embedder()
+    cur.execute(
+        _LAYER2_SQL,
+        {
+            "q": _as_vector(embedder.embed_query(query)),
+            "scopes": [scope_id],
+            "types": None,
+            "limit": limit,
+        },
+    )
+    return cur.fetchall()
+
+
 def _cap_layer2(rows: list[dict], active_count: int) -> tuple[list[dict], int]:
     """Apply both caps of 21.1, keeping the closest matches.
 

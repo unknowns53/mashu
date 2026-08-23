@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from mashu import bootstrap, store
-from mashu.models import EventType, MemoryType, SourceType
+from mashu.models import EventType, Lifecycle, MemoryType, SourceType
 
 
 @pytest.fixture
@@ -41,6 +41,18 @@ def test_the_scope_index_lists_every_active_scope_with_its_summary(cur, scope_id
     index = {row["name"]: row["summary"] for row in got.scope_index}
     assert "DES thermal response" in index
     assert index["DES thermal response"] == "cloud point behaviour of the mixtures"
+
+
+def test_the_map_says_which_scopes_are_not_open_yet(cur, scope_id):
+    """An empty answer from a seeding scope must not read as "nothing is known".
+
+    That reading is what sends an agent off to derive for itself the thing a
+    review is about to adopt, which is the rederivation the whole layer exists
+    to stop.
+    """
+    got = bootstrap.session_bootstrap(cur, actor="claude")
+    entry = next(row for row in got.scope_index if row["scope_id"] == scope_id)
+    assert entry["lifecycle"] == str(Lifecycle.SEEDING)
 
 
 def test_an_archived_scope_is_not_on_the_map(cur, scope_id):
