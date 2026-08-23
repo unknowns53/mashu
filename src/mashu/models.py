@@ -115,4 +115,5 @@ class EventType(StrEnum):
     PROPOSAL_COMMITTED = "proposal_committed"
     PROPOSAL_REJECTED = "proposal_rejected"
     CONTEXT_ASSEMBLED = "context_assembled"
+    SESSION_BOOTSTRAPPED = "session_bootstrapped"
     CONFLICT_RECORDED = "conflict_recorded"

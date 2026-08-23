@@ -15,12 +15,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import sys
 import textwrap
 from uuid import UUID
 
-from mashu import importer, proposals, retrieval, store
+from mashu import bootstrap, db, importer, proposals, retrieval, server, store
 from mashu.db import transaction
 from mashu.embed import get_embedder
 from mashu.migrate import migrate
@@ -221,10 +222,7 @@ def cmd_import(args) -> int:
         items = items.get("memories") or items.get("items") or []
 
     with transaction(args.dsn) as cur:
-        cur.execute("SELECT scope_id FROM scope WHERE name = %s", (args.scope,))
-        row = cur.fetchone()
-        if row is None:
-            raise SystemExit(f"no scope named {args.scope!r}; the user creates scopes")
+        row = {"scope_id": _scope_by_name(cur, args.scope)}
         summary = importer.import_items(
             cur, scope_id=row["scope_id"], items=items, actor=args.actor
         )
@@ -262,6 +260,45 @@ def cmd_stocktake(args) -> int:
     return 0
 
 
+def cmd_bootstrap(args) -> int:
+    """Show what a session start is handed, and what it costs (21.2)."""
+    with transaction(args.dsn) as cur:
+        got = bootstrap.session_bootstrap(
+            cur,
+            actor=args.actor,
+            scopes=[_scope_by_name(cur, args.scope)] if args.scope else None,
+            record_event=False,
+        )
+
+    print(f"scope index ({len(got.scope_index)})")
+    for row in got.scope_index:
+        summary = f"  {row['summary']}" if row["summary"] else ""
+        print(f"  {str(row['scope_id'])[:8]}  {row['name']}{summary}")
+
+    for label, rows in (("preferences", got.preferences), ("current state", got.current_state)):
+        print(f"\n{label} ({len(rows)})")
+        for row in rows:
+            body = row["content"] if row["content"] is not None else "(trimmed; use memory_get)"
+            print(f"  {str(row['memory_id'])[:8]}  {row['title']}")
+            print(f"      {body}")
+
+    over = " over the ceiling" if got.tokens > bootstrap.BOOTSTRAP_TOKEN_BUDGET else ""
+    print(f"\n{got.tokens} token of {bootstrap.BOOTSTRAP_TOKEN_BUDGET}{over}")
+    if got.trimmed:
+        print(f"{len(got.trimmed)} item(s) had their content dropped to fit")
+    return 0
+
+
+def cmd_serve(args) -> int:
+    """Run the MCP server on stdin and stdout, which is how a CLI starts it."""
+    if args.dsn:
+        os.environ[db.DSN_ENV_VAR] = args.dsn
+    if args.agent:
+        os.environ[server.ACTOR_ENV_VAR] = args.agent
+    server.build_server().run()
+    return 0
+
+
 def cmd_migrate(args) -> int:
     applied = migrate(args.dsn)
     print("\n".join(f"applied: {name}" for name in applied) or "already up to date")
@@ -271,6 +308,15 @@ def cmd_migrate(args) -> int:
 # --------------------------------------------------------------------------
 # resolving abbreviated ids
 # --------------------------------------------------------------------------
+def _scope_by_name(cur, name: str) -> UUID:
+    """A scope by its name. Scopes are the user's to create, so a miss is fatal."""
+    cur.execute("SELECT scope_id FROM scope WHERE name = %s", (name,))
+    row = cur.fetchone()
+    if row is None:
+        raise SystemExit(f"no scope named {name!r}; the user creates scopes")
+    return row["scope_id"]
+
+
 def _resolve_proposal(cur, prefix: str) -> dict:
     cur.execute(
         "SELECT * FROM proposal WHERE proposal_id::text LIKE %s ORDER BY created_at",
@@ -345,6 +391,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     m = sub.add_parser("migrate", help="apply pending migrations")
     m.set_defaults(func=cmd_migrate)
+
+    n = sub.add_parser("bootstrap", help="show the fixed context a session starts with")
+    n.add_argument("--scope", default=None, help="narrow the current state to one scope")
+    n.add_argument("--actor", default="user")
+    n.set_defaults(func=cmd_bootstrap)
+
+    v = sub.add_parser("serve", help="run the MCP server over stdio")
+    v.add_argument("--agent", default=None, help="the identity proposals are recorded under")
+    v.set_defaults(func=cmd_serve)
     return parser
 
 
