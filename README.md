@@ -63,6 +63,8 @@ preference が Candidate 側にあるのは、preference が「以後のセッ�
 
 Layer 3 が本文を返さないのは、退役した知識だからである。渡すのは「何が、なぜ否定されたか」だけで、否定された主張そのものより否定した根拠のほうが Agent の再導出を止める。
 
+Layer 1 の項目に退役の提案が出ているときは、本文と一緒に「誰が、どの status を、どんな理由で」提案しているかが返る。Agent の推論による退役は無人では落とさないが、疑義が出ていることを伏せて手渡すのはその裏返しの誤りになる。
+
 **Review は「使えるようにする門」ではなく「品質を確定する門」である。** 未審査の候補も本文を渡す（タグ付きで）ので、Review が遅れても知識は使える。承認済みが 1 件も無い Scope も同じように答える。Layer 2 は合計 1500 token を上限とする（先頭の 1 件だけは超えても通す。当たったのに何も返さないより 1 件返すほうがよいという判断）。
 
 セッション開始時に押し込まれる固定の塊は、type ではなく delivery で決まる。
@@ -106,6 +108,8 @@ fresh clone では git hook を入れる。
 | コマンド | 内容 |
 |---|---|
 | `mashu remember <body>` | User が述べた知識を記録する。Review を待たず active になる |
+| `mashu retire <id> <status> --reason` | 終わった・覆ったことを User が直接記録する |
+| `mashu review` | 最古の束を開き、一括承認・却下・編集・明示の先送りまで 1 回で終える |
 | `mashu queue` | Review 待ちをセッション束ごとに並べる |
 | `mashu show <id>` / `--bundle <id>` | 1 件、または束を 1 つの読み物として表示 |
 | `mashu approve <id>` / `--bundle <id>` | 承認。`--skip` で束から抜ける |
@@ -117,6 +121,9 @@ fresh clone では git hook を入れる。
 | `mashu retype <id> --to <type>` | Entity の type を訂正する |
 | `mashu merge <id> --into <id>` | Entity を統合する |
 | `mashu deliver <id> <delivery>` | push と pull のあいだで動かす |
+| `mashu work` | 抽出 worker を queue に対して走らせる |
+| `mashu sweep` | hook が取り落とした transcript を台帳へ積む |
+| `mashu route --add <path> --scope <name>` | 作業ディレクトリを Scope に対応づける |
 | `mashu bootstrap` | セッション開始時に渡る固定の塊とその token |
 | `mashu scope` | Scope ごとの採用済み・未審査の件数 |
 | `mashu preview <query> --scope` | 上限をかけずに順位だけ見る（移植の検証用） |
@@ -132,11 +139,33 @@ Claude Code へ登録する場合。
 claude mcp add mashu --scope user --env MASHU_DATABASE_URL=dbname=mashu -- /path/to/mashu/.venv/bin/mashu serve --agent claude
 ```
 
-公開するツールは 6 つ。
+公開するツールは 9 つ。
 
-`session_bootstrap` / `memory_search` / `memory_get` / `scope_list` / `entity_resolve` / `memory_propose`
+`session_bootstrap` / `memory_search` / `memory_get` / `scope_list` / `entity_resolve` / `memory_propose` / `scratch_put` / `scratch_get` / `context_put`
 
 Agent 名は `--agent`、または環境変数 `MASHU_AGENT` で渡す。既定は `agent`。誰が書いたかは Commit Gate の判定に効く（Agent が述べた preference は Review を待つ）ので、Agent ごとに違う名前を渡す。
+
+## 捕捉
+
+書き込みは人か Agent が意識して動かしたときにしか起きない、という状態を畳むための層がある。
+
+各 CLI の SessionEnd hook（`tools/session_end_hook.sh`）が transcript を台帳へ積むだけで返り、常駐 worker が後からそれを読んで Proposal を作る。hook で Model を走らせないのは、終了 hook の時間枠が数秒しかないためである。hook が取り落とした分は `mashu sweep` がディスク上の transcript と台帳を突き合わせて拾う。
+
+worker の出力は**すべて Agent 由来として扱う**。transcript の user turn を読めても、それが保証するのは「どこに書かれていたか」であって「誰が書いたか」ではない。貼り付けられた文書の中の「常に X せよ」は span 検証を通ってしまう。User 由来の唯一の経路は `mashu remember`、すなわち人が打った事実である。
+
+退役の提案も無人では落とさない。17 節が Auto Commit に置いている「単純な Task 完了」は人が「終わった」と言う場合の行であって、worker の推論はそこに乗らない。**worker が死んでも読み取り側は劣化しない**——期限つきの条件は read filter で消え、三層は既存の実装で動く。worker の死は「知識が増えない」に留まり、「嘘が返る」にはならない。
+
+Scope は推測しない。`mashu route` で対応づけられていない作業ディレクトリの transcript は保留され、警告に載る。
+
+```bash
+uv run mashu route --add /path/to/project --scope <scope name>
+```
+
+```bash
+uv run mashu work --limit 4
+```
+
+Model を呼ぶ部分は差し替えできる。`MASHU_EXTRACTOR` に `api`（`ANTHROPIC_API_KEY` が要る）、`cli:claude`、`cli:codex`、`auto`（既定）を渡す。仕様の第一選択は専用予算の小型モデルだが、鍵が無ければ対話 CLI の subprocess へ落ちる。
 
 ## 配置
 
@@ -146,7 +175,9 @@ docs/prompts/                  Session End Extraction のプロンプト
 migrations/                    連番の SQL。mashu migrate が順に流す
 src/mashu/                     実装
 tests/                         実 PostgreSQL に対して走る。harness/ は仕様 28 節のシナリオ
+tools/session_end_hook.sh      SessionEnd hook。台帳へ積むだけで返る
 tools/condense_session.py      セッションログの圧縮
+tools/measure_thresholds.py    閾値を実在庫の分布から決める（仕様 27.2）
 hooks/                         pre-commit / commit-msg
 ```
 
