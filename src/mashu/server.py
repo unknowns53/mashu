@@ -138,6 +138,7 @@ def build_server() -> Any:
                     "current_state": got.current_state,
                     "trimmed": got.trimmed,
                     "tokens": got.tokens,
+                    "over_budget": got.over_budget,
                     "note": (
                         "Entries under trimmed had their content dropped to stay "
                         "inside the token ceiling; fetch them with memory_get."

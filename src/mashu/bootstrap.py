@@ -66,6 +66,11 @@ class Bootstrapped:
     #: pre-trim figure is not the session's cost and would not be the
     #: number 27.5 needs to re-measure the ceiling against.
     tokens: int = 0
+    #: True when trimming ran out of content to drop and the payload is still
+    #: over the ceiling. The scope index is never trimmed (21.2), so an index
+    #: that alone exceeds the budget has no way down; saying so is the least a
+    #: fixed cost can do when it stops being fixed.
+    over_budget: bool = False
 
     def memory_ids(self) -> list[UUID]:
         """Everything named in the payload, trimmed or whole."""
@@ -110,6 +115,7 @@ def session_bootstrap(
         trimmed=trimmed,
         tokens=_total_tokens(scope_index, preferences, current_state),
     )
+    result.over_budget = result.tokens > budget
 
     if record_event:
         record(
@@ -122,6 +128,7 @@ def session_bootstrap(
                 "memories": [str(m) for m in result.memory_ids()],
                 "trimmed": [str(m) for m in trimmed],
                 "tokens": result.tokens,
+                "over_budget": result.over_budget,
             },
         )
     return result

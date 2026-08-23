@@ -84,6 +84,8 @@ class Retrieved:
     active: list[dict[str, Any]] = field(default_factory=list)
     unreviewed: list[dict[str, Any]] = field(default_factory=list)
     retired: list[dict[str, Any]] = field(default_factory=list)
+    #: Candidates that matched but were not handed over, counted across the
+    #: whole matching set rather than across the query window.
     dropped_unreviewed: int = 0
 
     def memory_ids(self) -> list[UUID]:
@@ -163,6 +165,21 @@ LIMIT %(limit)s
 # not itself a reading. What the layer is for is telling the agent not to
 # re-derive something, and "a reviewer turned this down, here is why" is that
 # same instruction; the status the agent reads back keeps the two apart.
+# What the layer 2 window did not even look at. dropped_unreviewed is read as
+# "how much was held back", so counting only the rows the window happened to
+# fetch turns it into a number that shrinks as the backlog grows.
+_LAYER2_TOTAL_SQL = """
+SELECT count(*) AS n
+FROM memory_entity e
+JOIN memory_version v ON v.memory_id = e.memory_id
+WHERE e.status IN ('active', 'provisional')
+  AND v.status = 'candidate'
+  AND (e.active_version IS NULL OR e.active_version <> v.version_id)
+  AND v.content_embedding IS NOT NULL
+  AND (%(scopes)s::uuid[] IS NULL OR e.scope_id = ANY(%(scopes)s::uuid[]))
+  AND (%(types)s::text[] IS NULL OR e.type = ANY(%(types)s::text[]))
+"""
+
 _LAYER3_SQL = """
 SELECT DISTINCT ON (e.memory_id)
        e.memory_id, e.scope_id, e.type, e.title, v.version_id, v.status, v.reason,
@@ -216,10 +233,17 @@ def retrieve(
     hit_scopes = scopes or sorted({row["scope_id"] for row in active})
     narrowed = dict(params, scopes=hit_scopes or None)
 
-    cur.execute(_LAYER2_SQL, dict(narrowed, limit=max(limit, 1) * 4))
-    unreviewed, dropped = _cap_layer2(cur.fetchall(), len(active))
+    window = max(limit, 1) * 4
+    cur.execute(_LAYER2_SQL, dict(narrowed, limit=window))
+    rows = cur.fetchall()
+    unreviewed, _ = _cap_layer2(rows, len(active))
     for row in unreviewed:
         row["tag"] = UNREVIEWED_TAG
+
+    # The count comes from the whole matching set, not from the window, so a
+    # backlog larger than the window is reported at its real size.
+    cur.execute(_LAYER2_TOTAL_SQL, narrowed)
+    dropped = cur.fetchone()["n"] - len(unreviewed)
 
     cur.execute(_LAYER3_SQL, narrowed)
     retired = sorted(cur.fetchall(), key=lambda r: -r["similarity"])[:limit]

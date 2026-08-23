@@ -140,8 +140,20 @@ def test_an_unrelated_subject_gets_its_own_entity(cur, scope_id):
     assert entity["status"] == EntityStatus.ACTIVE
 
 
-def test_imported_content_is_readable_before_it_is_reviewed(cur, scope_id):
-    """Semi-approval applies to the migration as well: usable, and tagged."""
+def test_imported_content_is_not_readable_until_something_is_reviewed(cur, scope_id):
+    """Semi-approval does not reach a scope whose every memory is imported.
+
+    The name of this test used to say the opposite, which is where the drift
+    shows. v0.7 made layer 2 hand over content so that waiting for review was
+    no longer an outage; v0.8 then capped layer 2 at the size of layer 1, and
+    a freshly imported scope has no layer 1 at all. So the migration lands in
+    the one state semi-approval does not cover, and the whole import is
+    invisible until a first review gives the scope something active.
+
+    Pinned as it stands rather than as it ought to be. Which of the two rules
+    yields is a decision about 21.1, not something to settle by editing an
+    assertion.
+    """
     importer.import_items(
         cur,
         scope_id=scope_id,

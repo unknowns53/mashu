@@ -133,11 +133,32 @@ def test_the_current_state_gives_up_its_body_before_a_preference_does(cur, write
     assert pref not in got.trimmed
 
 
+def test_an_index_that_alone_exceeds_the_ceiling_says_so(cur, write):
+    """21.2 never trims the index, so past a certain ledger there is no way down.
+
+    Silently returning an over-budget payload would make the one number the
+    switchover trial is meant to re-measure a number that is quietly wrong.
+    """
+    for i in range(12):
+        store.create_scope(
+            cur,
+            name=f"a scope with a long summary {i}",
+            description="something wordy enough to matter " * 12,
+            actor="user",
+        )
+
+    got = bootstrap.session_bootstrap(cur, actor="claude", budget=200)
+    assert got.tokens > 200
+    assert got.over_budget is True
+    assert got.trimmed == [], "there was no content to trim; the index is not trimmable"
+
+
 def test_a_payload_inside_the_budget_is_left_alone(cur, write):
     write(MemoryType.PREFERENCE, "reply language", "answer in Japanese")
     got = bootstrap.session_bootstrap(cur, actor="claude")
     assert got.trimmed == []
     assert got.tokens <= bootstrap.BOOTSTRAP_TOKEN_BUDGET
+    assert got.over_budget is False
 
 
 # --------------------------------------------------------------------------
