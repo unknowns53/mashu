@@ -89,7 +89,14 @@ def enqueue(
 
 
 def claim(cur: psycopg.Cursor, *, limit: int = 1) -> list[dict[str, Any]]:
-    """Take the next runs to work on, skipping any another worker holds."""
+    """Take the next runs to work on, skipping any another worker holds.
+
+    Two orderings, and they are not the same one. The ORDER BY inside the
+    subquery decides which rows are taken; RETURNING hands them back in
+    whatever order the update happened to touch them, so the caller's order is
+    restored afterwards. Left alone, a worker that stops after the first run of
+    a batch stops on an arbitrary one.
+    """
     cur.execute(
         """
         UPDATE extraction_run SET state = 'running', attempts = attempts + 1
@@ -105,7 +112,7 @@ def claim(cur: psycopg.Cursor, *, limit: int = 1) -> list[dict[str, Any]]:
         """,
         (limit,),
     )
-    return cur.fetchall()
+    return sorted(cur.fetchall(), key=lambda row: row["seq"])
 
 
 def succeeded(

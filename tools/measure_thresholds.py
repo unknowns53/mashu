@@ -125,10 +125,13 @@ def main() -> None:
     print(f"\n  separation: highest negative {gap[0]:.3f}, lowest positive {gap[1]:.3f}")
     print(f"  -> {'separable' if gap[1] > gap[0] else 'OVERLAPPING'}")
 
-    # --- scope detection ----------------------------------------------------
+    # --- scope detection: the label method, withdrawn -----------------------
+    # Kept as the comparison. 27.2 measured it and found it does not separate;
+    # what replaced it is measured directly below, on the same queries.
     texts = [f"{s['name']}. {s['description']}" if s["description"] else s["name"] for s in scopes]
     scope_vectors = embedder.embed_documents(texts)
-    print("\nscope detection — query against each scope")
+    print("\nscope detection, old (query against each scope's label)")
+    label_right = 0
     for want, query in QUERIES:
         sims = sorted(
             (
@@ -138,9 +141,59 @@ def main() -> None:
             reverse=True,
         )
         best = sims[0]
+        label_right += best[1] == want
         mark = "hit " if best[1] == want else "MISS"
         listed = "  ".join(f"{n}={v:.3f}" for v, n in sims)
         print(f"  {mark} want={want:<12} {listed}   << {query[:26]}…")
+    print(f"  -> {label_right}/{len(QUERIES)} ranked correctly")
+
+    # --- scope detection: the held-memory method ----------------------------
+    # The query goes against the memories themselves, and the scopes the best
+    # matches live in are the answer. It asks about concentration rather than
+    # about an absolute similarity, which is the thing these embeddings can
+    # actually answer.
+    print("\nscope detection, new (query against what each scope holds)")
+    with psycopg.connect(os.environ["MASHU_DATABASE_URL"], row_factory=dict_row) as conn:
+        cur = conn.cursor()
+        for want, query in QUERIES:
+            vector = "[" + ",".join(f"{v:.6f}" for v in embedder.embed_query(query)) + "]"
+            cur.execute(
+                """
+                SELECT s.name AS scope, 1 - (v.content_embedding <=> %(q)s::vector) AS sim
+                FROM memory_entity e
+                JOIN memory_version v
+                  ON v.version_id = e.active_version AND v.memory_id = e.memory_id
+                JOIN scope s ON s.scope_id = e.scope_id
+                WHERE e.status = 'active' AND v.content_embedding IS NOT NULL
+                ORDER BY v.content_embedding <=> %(q)s::vector
+                LIMIT %(probe)s
+                """,
+                {"q": vector, "probe": PROBE},
+            )
+            hits = cur.fetchall()
+            for floor in FLOORS:
+                kept = [h for h in hits if h["sim"] >= floor]
+                counts: dict[str, int] = {}
+                for h in kept:
+                    counts[h["scope"]] = counts.get(h["scope"], 0) + 1
+                needed = max(MIN_HITS, -(-len(kept) * SHARE_NUM // SHARE_DEN))
+                got = sorted(
+                    [s for s, c in counts.items() if c >= needed],
+                    key=lambda s: -max(h["sim"] for h in kept if h["scope"] == s),
+                )
+                shape = "  ".join(f"{s}={c}" for s, c in sorted(counts.items(), key=lambda kv: -kv[1]))
+                verdict = "detect nothing" if not got else ",".join(got)
+                print(
+                    f"  floor {floor:.2f}  n={len(kept):>2}  need {needed}  "
+                    f"[{shape or 'none'}]  ->  {verdict:<16} want={want:<12} << {query[:24]}…"
+                )
+            print()
+
+
+PROBE = 25
+MIN_HITS = 2
+SHARE_NUM, SHARE_DEN = 34, 100
+FLOORS = (0.78, 0.80, 0.82, 0.84)
 
 
 def sweep(negatives, positives):

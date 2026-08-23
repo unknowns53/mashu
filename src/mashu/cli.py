@@ -270,6 +270,14 @@ def cmd_search(args) -> int:
         print(f"layer 1  active ({len(got.active)})")
         for row in got.active:
             print(f"  [{row['type']}] {row['title']}  ({row['similarity']:.3f})")
+            if row.get("proposed_status"):
+                print(
+                    _wrap(
+                        f"! {row['proposed_by']} has proposed {row['proposed_status']}: "
+                        f"{row['proposed_reason'] or 'no reason given'}",
+                        indent="      ",
+                    )
+                )
             print(_wrap(row["content"], indent="      "))
 
         print(f"\nlayer 2  unreviewed ({len(got.unreviewed)}, {got.dropped_unreviewed} dropped)")
@@ -973,9 +981,7 @@ def cmd_route(args) -> int:
     with transaction(args.dsn) as cur:
         if args.add:
             scope_id = _scope_by_name(cur, args.scope)
-            row = routing.add(
-                cur, path_prefix=args.add, scope_id=scope_id, created_by=args.actor
-            )
+            row = routing.add(cur, path_prefix=args.add, scope_id=scope_id, created_by=args.actor)
             released = runs.release(cur, cwd_prefix=row["path_prefix"])
             print(f"{row['path_prefix']}  ->  {args.scope}")
             if released:
@@ -1451,9 +1457,7 @@ def build_parser() -> argparse.ArgumentParser:
     wk = sub.add_parser("work", help="run the extraction worker over the queue (16.3)")
     wk.add_argument("--limit", type=int, default=1, help="how many runs to take this time")
     wk.add_argument("--extractor", help="api, cli:claude, cli:codex, stub, or auto")
-    wk.add_argument(
-        "--dry-run", action="store_true", help="size the input without calling a model"
-    )
+    wk.add_argument("--dry-run", action="store_true", help="size the input without calling a model")
     wk.set_defaults(func=cmd_work)
 
     sw = sub.add_parser("sweep", help="enqueue transcripts no hook claimed (16.3)")

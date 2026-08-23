@@ -74,7 +74,9 @@ def test_the_tools_of_section_six_are_exposed_and_no_others():
     """Pinned as a list, so a tool cannot appear on this surface unremarked.
 
     The six of the initial set, plus the two scratch tools v0.12 added because
-    scratch is the extraction's first input and the agent is what fills it.
+    scratch is the extraction's first input and the agent is what fills it, and
+    context_put, which is how an agent records a condition the clock will undo
+    without spending a review on it.
     """
     built = server.build_server()
     names = {tool.name for tool in asyncio.run(built.list_tools())}
@@ -87,6 +89,7 @@ def test_the_tools_of_section_six_are_exposed_and_no_others():
         "session_bootstrap",
         "scratch_put",
         "scratch_get",
+        "context_put",
     }
 
 

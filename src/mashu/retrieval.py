@@ -44,31 +44,56 @@ DEFAULT_LIMIT = 8
 #: Absolute cap on layer 2, in tokens (21.1). Provisional; 27.5 revisits it.
 LAYER2_TOKEN_BUDGET = 1500
 
-#: Cosine similarity a scope has to reach to be counted as detected.
-#: Similarity scales differ by model, so this is per model and provisional in
-#: the same way the entity resolution threshold is: 27.2 measures both.
-#: Deliberately above everything this mechanism produces, which is to say scope
-#: detection is off (27.2, tools/measure_thresholds.py). Measured against the
-#: real ledger, every query scored between 0.72 and 0.81 against every scope,
-#: and the ranking was wrong on four of seven queries: a query about
-#: delegation ranked two unrelated scopes above the one that holds the
-#: delegation rules, and a query about the weather scored 0.759, inside the
-#: range the real matches occupy.
+#: What scope detection needs, now that it works on held memories rather than
+#: on labels (27.2, 30 段 D).
 #:
-#: Matching a query against a scope's name and one-line description does not
-#: work here. Tuning the number would only make it fire wrongly, so it stays
-#: high on purpose and detect_scopes returns nothing, which the caller already
-#: reads as "search everything" — the safe direction. The repair is to detect a
-#: scope from the memories it holds rather than from its label, and that is a
-#: design change, not a constant.
+#: The old mechanism matched the query against each scope's name and one-line
+#: description, and the measurement in 27.2 found it does not work: against the
+#: real ledger every query scored between 0.72 and 0.81 against every scope, and
+#: the ranking was wrong on four of seven queries — a question about delegation
+#: ranked two unrelated scopes above the one holding the delegation rules, and a
+#: question about the weather scored 0.759, inside the range the real matches
+#: occupy. That is a mechanism failing, not a constant needing a nudge: a scope
+#: name is three words, and three words do not carry what a scope is about.
+#:
+#: What does carry it is what the scope holds. So the query is run against the
+#: memories themselves — the same index layer 1 already ranks well with — and
+#: the scopes those best matches live in are the answer. It becomes a question
+#: about relative order, which the embeddings answer, instead of a question
+#: about an absolute similarity, which they do not.
+#:
+#: The floor stays, in a much smaller role: a query matching nothing anywhere
+#: must not "detect" the scope holding the least unrelated memory. It earns its
+#: place — at 0.78 the weather question concentrates 8 of its 10 hits in one
+#: scope and gets confidently narrowed to it.
+#:
+#: Measured over the same seven queries and the same ledger 27.2 used, at the
+#: floor below: four narrowed to the right scope alone, two detected nothing
+#: and so searched everything, one came back with two scopes of three. **No
+#: query was narrowed to a single wrong scope**, which is the failure that
+#: hides an answer outright and the one the old mechanism made four times out
+#: of seven. A tighter floor (0.84) detects nothing on six of seven; a looser
+#: one (0.78) starts narrowing questions that match nothing.
+#:
+#: One of the two that detect nothing is a query about the scope holding two
+#: memories: concentration cannot be shown by a scope with almost nothing in
+#: it. That is the mechanism declining rather than failing — the caller reads
+#: an empty answer as "search everything", which is where that query needed to
+#: go anyway.
+SCOPE_PROBE = 25
+SCOPE_MIN_HITS = 2
+SCOPE_SHARE = 0.34
 SCOPE_MATCH_THRESHOLDS = {
-    "intfloat/multilingual-e5-large": 0.85,
+    "intfloat/multilingual-e5-large": 0.82,
     "hashing": 0.50,
 }
-SCOPE_MATCH_FALLBACK = 0.80
+SCOPE_MATCH_FALLBACK = 0.78
 SCOPE_THRESHOLD_ENV_VAR = "MASHU_SCOPE_THRESHOLD"
 
 UNREVIEWED_TAG = "unreviewed"
+
+#: What is added to a layer 1 row somebody has proposed retiring (21.1, 30 段 B).
+RETIREMENT_PROPOSED_TAG = "retirement_proposed"
 
 _CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿ｦ-ﾟ]")
 
@@ -111,31 +136,51 @@ class Retrieved:
 # --------------------------------------------------------------------------
 # scope detection
 # --------------------------------------------------------------------------
+_SCOPE_PROBE_SQL = """
+SELECT e.scope_id, 1 - (v.content_embedding <=> %(q)s::vector) AS similarity
+FROM memory_entity e
+JOIN memory_version v ON v.version_id = e.active_version AND v.memory_id = e.memory_id
+WHERE e.status = 'active'
+  AND v.content_embedding IS NOT NULL
+ORDER BY v.content_embedding <=> %(q)s::vector
+LIMIT %(probe)s
+"""
+
+
 def detect_scopes(cur: psycopg.Cursor, query_vector: str) -> list[UUID]:
-    """Which scopes in the ledger the query is about (21).
+    """Which scopes the query is about, judged by what they hold (21, 27.2).
 
-    The ledger carries its own embeddings (migration 0006) rather than being
-    re-encoded per query. It changes about as often as the user adds a scope,
-    so encoding it on every search was the same work repeated indefinitely.
+    The probe is the top few dozen active memories across the whole ledger. A
+    scope is detected when a real share of those best matches live in it: that
+    is a claim about concentration, which survives every similarity in the set
+    sitting inside a tenth of each other, and it is the only thing the
+    measurement showed these embeddings can actually support.
 
-    Returning an empty list means no scope stood out, and the caller searches
-    everything. Guessing one scope and being wrong hides the answer completely,
-    which is worse than a wider search.
+    Returning nothing means no scope stood out, and the caller searches
+    everything. That stays the safe direction and stays the default: guessing
+    one scope and being wrong hides the answer completely, while a wider search
+    only costs ranking.
     """
     floor = float(
         os.environ.get(SCOPE_THRESHOLD_ENV_VAR)
         or SCOPE_MATCH_THRESHOLDS.get(get_embedder().name, SCOPE_MATCH_FALLBACK)
     )
-    cur.execute(
-        """
-        SELECT scope_id, 1 - (name_embedding <=> %(q)s::vector) AS similarity
-        FROM scope
-        WHERE status = 'active' AND name_embedding IS NOT NULL
-        ORDER BY name_embedding <=> %(q)s::vector
-        """,
-        {"q": query_vector},
-    )
-    return [row["scope_id"] for row in cur.fetchall() if row["similarity"] >= floor]
+    cur.execute(_SCOPE_PROBE_SQL, {"q": query_vector, "probe": SCOPE_PROBE})
+    hits = [row for row in cur.fetchall() if row["similarity"] >= floor]
+    if len(hits) < SCOPE_MIN_HITS:
+        return []
+
+    counts: dict[UUID, int] = {}
+    best: dict[UUID, float] = {}
+    for row in hits:
+        counts[row["scope_id"]] = counts.get(row["scope_id"], 0) + 1
+        best[row["scope_id"]] = max(best.get(row["scope_id"], 0.0), row["similarity"])
+
+    needed = max(SCOPE_MIN_HITS, math.ceil(len(hits) * SCOPE_SHARE))
+    detected = [scope for scope, count in counts.items() if count >= needed]
+    # Ordered by how well the scope's own best memory answered, so a caller
+    # that takes only the first takes the strongest rather than an arbitrary one.
+    return sorted(detected, key=lambda s: -best[s])
 
 
 # --------------------------------------------------------------------------
@@ -169,11 +214,30 @@ def active_set(cur: psycopg.Cursor, *, scope_id: UUID | None = None) -> list[dic
     return cur.fetchall()
 
 
+# The annotation on layer 1 is section 30 段 B's third case. An agent-inferred
+# retirement does not take effect on its own — nobody would notice a wrong one,
+# because what is gone does not appear in searches to be argued with. But
+# handing back a memory somebody has proposed retiring as though nothing were
+# in question is the other half of the same mistake, so the proposal rides
+# along with the content and the reader decides.
 _LAYER1_SQL = """
 SELECT e.memory_id, e.scope_id, e.type, e.title, v.version_id, v.content,
-       1 - (v.content_embedding <=> %(q)s::vector) AS similarity
+       1 - (v.content_embedding <=> %(q)s::vector) AS similarity,
+       r.proposed_status, r.proposed_reason, r.proposed_by
 FROM memory_entity e
 JOIN memory_version v ON v.version_id = e.active_version AND v.memory_id = e.memory_id
+LEFT JOIN LATERAL (
+    SELECT p.payload ->> 'status' AS proposed_status,
+           p.payload ->> 'reason' AS proposed_reason,
+           p.actor                AS proposed_by
+    FROM proposal p
+    WHERE p.target_memory = e.memory_id
+      AND p.status = 'pending'
+      AND p.operation = 'change_status'
+      AND p.payload ->> 'status' IN ('disproven', 'dormant', 'completed')
+    ORDER BY p.seq DESC
+    LIMIT 1
+) r ON TRUE
 WHERE e.status = 'active'
   AND v.content_embedding IS NOT NULL
   AND (%(scopes)s::uuid[] IS NULL OR e.scope_id = ANY(%(scopes)s::uuid[]))
@@ -262,6 +326,9 @@ def retrieve(
 
     cur.execute(_LAYER1_SQL, params)
     active = cur.fetchall()
+    for row in active:
+        if row.get("proposed_status"):
+            row["tag"] = RETIREMENT_PROPOSED_TAG
 
     # Layers 2 and 3 stay inside the scopes layer 1 actually hit. Returning a
     # whole scope's retired memories would let layer 3 crowd the context out

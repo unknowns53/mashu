@@ -37,7 +37,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import bootstrap, db, proposals, resolution, retrieval, scratch, store
+from mashu import bootstrap, context, db, proposals, resolution, retrieval, scratch, store
 from mashu.errors import DuplicateProposalError, MashuError
 from mashu.models import MemoryType, ProposalOperation, SourceType, VersionStatus
 
@@ -195,7 +195,10 @@ def build_server() -> Any:
     ) -> dict[str, Any]:
         """Search the knowledge state. Answers in three layers.
 
-        active: current knowledge, usable as it stands.
+        active: current knowledge, usable as it stands. A row carrying
+            proposed_status has a pending proposal to retire it: still current,
+            but somebody has argued it is finished or wrong, and the reason is
+            on the row. Weigh it; do not treat it as already gone.
         unreviewed: written but not yet confirmed by a human. Usable, but do
             not make a definite claim on it alone, and do not propose the same
             thing again.
@@ -276,6 +279,49 @@ def build_server() -> Any:
                 cur, session_id=session(cur), content=content, kind=kind, source_turn=source_turn
             )
             return _plain({"ok": True, "item": item})
+
+    @server.tool()
+    def context_put(
+        content: str, expires_at: str, kind: str = "fact", scope: str | None = None
+    ) -> dict[str, Any]:
+        """Record something that is true only until a stated moment (25.2).
+
+        For conditions rather than knowledge: a quota that resets, a machine
+        that is down until Friday, a model available this month. These stop
+        applying on their own, so they cost no review and need no retirement —
+        the clock does it, with nothing in the way that could be down.
+
+        expires_at is an ISO timestamp and may be at most two weeks out. Longer
+        than that is a claim about how things are wearing a window, and belongs
+        in memory_propose where a person can look at it.
+
+        What you write here is reachable by search. It is not pushed into other
+        sessions' openings; only what the user states directly goes there. The
+        right to write and the right to interrupt every future session are
+        deliberately not the same right.
+        """
+        with db.transaction() as cur:
+            try:
+                moment = datetime.fromisoformat(expires_at)
+            except ValueError:
+                return {
+                    "ok": False,
+                    "error": f"'{expires_at}' is not an ISO timestamp",
+                }
+            if moment.tzinfo is None:
+                moment = moment.astimezone()
+            row = context.put(
+                cur,
+                content=content,
+                expires_at=moment,
+                kind=kind,
+                source_type=SourceType.AGENT,
+                created_by=actor(),
+                actor=actor(),
+                scope_id=UUID(scope) if scope else None,
+                source_reference=f"session {session(cur)}",
+            )
+            return _plain({"ok": True, "context": row})
 
     @server.tool()
     def scratch_get() -> dict[str, Any]:
