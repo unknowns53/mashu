@@ -134,8 +134,12 @@ JSON で出力する。前置きも後書きも付けない。
 
 `commit_gate` は仕様 17 節に従う。
 
-- `auto`: preference、User が明示した変更、単純な task 完了
-- `candidate`: fact、interpretation、hypothesis、state、decision
+- `auto`: User が明示した変更（type を問わない）、単純な task 完了
+- `candidate`: それ以外すべて。fact、interpretation、hypothesis、state、decision、そして **preference**
+
+v0.10 まで preference は type だけで `auto` に落ちていた。抽出の出力は `source_type: agent` なので、
+その規則のままだと **Agent が読んだ内容を、以後のセッションで従う指示として無審査で書ける経路**になる。
+安全にするのは type ではなく出どころのほうで、User が述べた preference は上の行に該当する。
 
 ### 注意
 
