@@ -21,7 +21,7 @@ import sys
 import textwrap
 from uuid import UUID
 
-from mashu import bootstrap, db, importer, proposals, retrieval, server, store
+from mashu import bootstrap, db, importer, proposals, resolution, retrieval, server, store
 from mashu.db import transaction
 from mashu.embed import get_embedder
 from mashu.errors import DeliveryError
@@ -507,6 +507,58 @@ def cmd_active(args) -> int:
     return 0
 
 
+def cmd_remember(args) -> int:
+    """Record something the user states, which lands straight away (16, 17).
+
+    Section 16 names this trigger — the user says to remember something — and
+    section 17 puts it on the auto commit line whatever its type, because the
+    source is what makes it safe. Nothing here reached the command line before,
+    so the one path that does not need a review was the one with no way in.
+
+    An existing entity with a close enough title stops this rather than being
+    written alongside. Which of the two it is — a second memory or a new
+    version of the first — is a judgement, and the layer does not make it.
+    """
+    content = pathlib.Path(args.file).read_text(encoding="utf-8") if args.file else args.content
+    content = (content or "").strip()
+    if not content:
+        raise SystemExit("nothing to remember; pass content or --file")
+
+    with transaction(args.dsn) as cur:
+        try:
+            result = proposals.propose(
+                cur,
+                actor=args.actor,
+                operation=ProposalOperation.CREATE,
+                payload={
+                    "scope_id": str(_scope_by_name(cur, args.scope)),
+                    "type": str(MemoryType(args.type)),
+                    "title": args.title,
+                    "content": content,
+                    "directive": args.directive,
+                    "source_type": str(SourceType.USER),
+                },
+                allow_similar=args.anyway,
+            )
+        except resolution.SimilarEntityError as clash:
+            listed = "\n".join(
+                f"  {_short(row['memory_id'])}  {row['title']}  ({row['similarity']:.3f})"
+                for row in clash.candidates
+            )
+            raise SystemExit(
+                f"{clash}\n{listed}\n"
+                f"add a version to one of those, or pass --anyway to record this beside them"
+            ) from clash
+
+        proposal = result["proposal"]
+        entity = store.get_entity(cur, proposal["target_memory"])
+        landed = entity["active_version"] is not None
+
+    print(f"{_short(entity['memory_id'])}  [{entity['type']}] {args.title}")
+    print(f"  {'active' if landed else proposal['status']}  ({result['ruling'].reason})")
+    return 0
+
+
 def cmd_retype(args) -> int:
     """Correct what kind of thing an entity is (8).
 
@@ -808,6 +860,21 @@ def build_parser() -> argparse.ArgumentParser:
     ac.add_argument("--json", action="store_true", help="the form the extraction prompt takes")
     ac.add_argument("--full", action="store_true", help="print each body as well as its title")
     ac.set_defaults(func=cmd_active)
+
+    rm = sub.add_parser("remember", help="record something the user states (16, 17)")
+    rm.add_argument("content", nargs="?", help="the body; omit when using --file")
+    rm.add_argument("--file", help="read the body from a file instead")
+    rm.add_argument("--scope", required=True, help="name of an existing scope")
+    rm.add_argument("--type", required=True, choices=[str(t) for t in MemoryType])
+    rm.add_argument("--title", required=True)
+    rm.add_argument("--directive", help="the short standing form, if it is pushed later (21.2)")
+    rm.add_argument("--actor", default="user")
+    rm.add_argument(
+        "--anyway",
+        action="store_true",
+        help="record it even though a similar entity exists (20)",
+    )
+    rm.set_defaults(func=cmd_remember)
 
     rt = sub.add_parser("retype", help="correct what kind of thing an entity is (8)")
     rt.add_argument("memory")
