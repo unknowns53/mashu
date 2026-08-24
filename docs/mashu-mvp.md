@@ -1,4 +1,4 @@
-# Mashu — Shared Agent Memory Layer / MVP 実装仕様書 v0.12
+# Mashu — Shared Agent Memory Layer / MVP 実装仕様書 v0.13
 
 改訂履歴:
 
@@ -14,6 +14,7 @@
 - v0.10: 実データを移植した直後に出た問題への対応。Preference の Auto Commit を User 明示のものに限定(17節)、Scope に lifecycle と readiness manifest を追加(7.1節)、Review 用の preview 経路を分離(27.1節)、Bootstrap の対象を type でなく delivery で決める(21.2節)、version に directive を追加(9・26節)
 - v0.12: 誰も面倒を見ない一週間を成立させる。寿命の三分(13.1節)、Temporary Context の新設(25.2節)、Scratch の実体化(25.1節)、捕捉パイプラインの仕様化(16.3節)、Review の随意化(17節)、開発計画を依存の鎖で引き直し(30節)。撤回: Queue の義務性、未審査比率 50% の反証条件(27.3節)、手動 Conflict 記録(23節)、27.4b の全文ラベリング
 - v0.11: 手動運用に入る前に、Review が構造的に必須になっている経路を断つ。Layer 2 の相対上限を撤回し、守っていたものを強制から観測へ移す(21.1・27.3節)。前提が消えた lifecycle と readiness manifest を撤回(7.1節)。Entity の type を訂正する操作を追加(8・15節)
+- v0.13: 未審査の知識と、動く知識が読めなくなっていた経路を断つ。Scope Detection の probe を「層が渡せるもの」全体へ広げ、票を最上位からの距離で減衰させる(27.2節)。保留中の更新の注記を実装し、Bootstrap にも載せる(21.1節)。title を訂正する操作を追加(8・15・17節)。admission control を採用時にも掛け、拒否の文面が実行できる道を指すようにする(21.2節)。26節の役割を「現在のスキーマの写し」から「起点と、その後の索引」へ改める
 
 ---
 
@@ -258,6 +259,20 @@ type の変更が軽い操作でないことは変わらない。type は 17節�
 
 **変えないもの**: Entity の同一性。retype は概念が同じままその分類を訂正する操作であり、別概念になったのなら新しい Entity を作って Merge する(20.2節)。
 
+**title の訂正(v0.13)**
+
+title を変える操作を持つ。retype と同じ理由で不変だった。操作が無かっただけである。
+
+実害が出たのは type = state である。14節が Scope ごとに一つ持たせる Current State は、**内容が動くことを前提にした唯一の型**であり、作業が進むたびに本文が書き換わる。ところが title は最初の Version が書いた時点で凍る。結果として、本文を最新に直した Entity が、**セッション開始時に押し込まれる行の一行目で、自分が既に離れた状態を名乗り続けた**（実例: 出荷済みシナリオを更新した後も、title は「次は南太平洋海戦」のままだった）。
+
+古い一行が出るという以上の害がある。title は Entity Resolution が突き合わせる対象であり(20節)、Layer 3 が順位づけに使う対象でもある(21.1節)。実態を説明しない title は、その Entity を**見つけにくくし、重複を作りやすくする**。
+
+- Agent が提案する retitle は Human Review Required とする(17節)。retype と同じ理由に加えて固有の理由がある。title を書き換えられる Agent は、ある Entity を「それが重複している相手」から遠ざけることができ、Resolution の突き合わせが本来捕まえるはずの衝突を見なくなる
+- Version は動かさない。内容についての判断ではない
+- title_embedding を同時に書き直す。古いベクトルを残すと、**もう名乗っていない名前でしか見つからない** Entity になり、これは終わらせようとしている失敗を移動させただけになる
+
+**変えないもの**: Entity の同一性。retype と同じく、別概念になったのなら新しい Entity を作って Merge する(20.2節)。
+
 ## 9. Memory Version
 
 Memory Version は不変履歴。
@@ -395,7 +410,7 @@ Open Question は references で表現できないため、summary 内の自由�
 
 - proposal_id
 - actor
-- operation(create / update_version / change_status / restore / merge / retype)
+- operation(create / update_version / change_status / restore / merge / retype / retitle)
 - target_memory
 - based_on_version(楽観ロック用。24節)
 - session_id(由来セッション。Review の束ね単位。18.1節)
@@ -587,6 +602,7 @@ v0.10 での変更: Preference を type だけで Auto Commit する規則を廃
 - Entity 作成(類似度が閾値超過)
 - Entity Merge
 - Entity の type 訂正(8節)
+- Entity の title 訂正(8節)
 - Conflict 解決
 
 Entity 作成が Review 対象になるのは、類似度が閾値を超えているにもかかわらず Agent が新規作成を選んだ場合に限る(20節)。閾値未満の新規作成は Review を経ない。
@@ -754,7 +770,11 @@ Layer 3 で content を渡さないのは、退役した知識だからである
 
 Temporary Context(25.2節)は**第四層にしない**。三層は indefinite な知識の認識論的な立場の分類であり、当面の作業条件はその分類の外にある。三層と並ぶ独立ブロックとして返す。
 
-Layer 1 の項目には、**保留中の変更が存在する場合の注記**を添える。その Entity に pending の update_version / change_status Proposal があれば「更新候補あり」「退役候補あり(理由)」を付ける。スキーマ変更なしに Retrieval 時の join で導ける。実装は退役側(pending の change_status で status が disproven / dormant / completed のもの)から入っており、提案者・提案 status・理由を行に載せて `retirement_proposed` のタグを立てる。
+Layer 1 の項目には、**保留中の変更が存在する場合の注記**を添える。その Entity に pending の update_version / change_status Proposal があれば「更新候補あり」「退役候補あり(理由)」を付ける。スキーマ変更なしに Retrieval 時の join で導ける。
+
+退役側は pending の change_status(status が disproven / dormant / completed のもの)を拾い、提案者・提案 status・理由を行に載せて `retirement_proposed` のタグを立てる。更新側は pending の update_version を拾い、提案者と滞留日数を載せて `update_proposed` のタグを立てる。**渡すのは採用済みの本文のままである。**新しいほうの本文は未審査であり、それを渡す層は Layer 2 のほうだからである。
+
+**更新側の注記は Session Bootstrap にも載せる(v0.13)。**むしろそちらが本命である。押し込まれるのは採用済みの読みであり、Current State は時間の単位で古くなるのに Review は日の単位で回る。**新しい読みが書かれていることを最も知る必要があるのは、何も尋ねないうちに古いほうを渡されるセッション**だからである。
 
 古い Active が返ること自体は防げなくても、**新しい候補の存在を知らずに古い Active を読む**ことは防げる。これは 16.1節の「Agent 推論による退役」を無人で落とさないという判断(30節)と対になっている。落とさない代わりに、見えるようにする。
 
@@ -879,6 +899,10 @@ Token 上限:
 Bootstrap は毎セッション必ず消費する固定費であり、上限は 2000 token とする。
 
 **上限は削って守るのではなく、超える変更を拒んで守る。** startup_required への昇格時に pack の合計を計算し、超えるなら昇格を拒否する。削って守ると、落ちるのはまさにそのセッションに伝えるはずだった常設の規則であり、固定費が黙って配達をやめたことに誰も気づかない。拒否であれば、その時点でまだ差し戻す相手がいる。
+
+**拒否は昇格時だけでなく、採用時にも掛かる(v0.13)。**押し込まれている Memory が上限を破るのは、昇格によってではなく**育つことによって**である。したがって検査は delivery の設定ではなく active_version の切替に置く。
+
+このとき拒否の文面は、**実行できる道だけを挙げなければならない。**directive を書けるのは採用済みの Version に対してだけであり(User 限定であることとは別の制約)、採用を拒まれている候補にはそもそも書き込めない。「directive を付けろ」と勧めても、勧められた側にその操作は無い。短形を持たない候補に対しては「**短形を載せて提案し直せ**」が唯一の道であり、文面はそちらを指す。
 
 削る処理は残すが、これは admission control が乗っていない経路(User 明示変更など)の受け皿である。削る場合は Scope 索引を全件残し、scope_required、次いで startup_required の順に本文を落とす。地図さえ残れば Agent は `memory_get` で取りに行けるが、地図を削ると取りに行く先が分からなくなるためである。
 
@@ -1085,7 +1109,7 @@ CREATE TABLE proposal (
     proposal_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     actor            TEXT NOT NULL,
     operation        TEXT NOT NULL,
-        -- create / update_version / change_status / restore / merge / retype
+        -- create / update_version / change_status / restore / merge / retype / retitle
     target_memory    UUID REFERENCES memory_entity(memory_id),
     based_on_version UUID REFERENCES memory_version(version_id),
     session_id       UUID REFERENCES agent_session(session_id),
@@ -1176,9 +1200,25 @@ CREATE TABLE agent_session (
     source_cli          TEXT,
     external_session_id TEXT,
     transcript_digest   TEXT,
-    checkpoint          TEXT
+    -- v0.12: どのディレクトリで働いていたか。scratch を place と時刻で引き直す
+    -- ための鍵で、id は compaction で回るため鍵にならない(16.3節)
+    cwd                 TEXT
 );
 ```
+
+**この節が持つ範囲(v0.13)**
+
+上の DDL は**起点のスキーマ**であり、その後の変更は migration が正本である。DDL を二重に持てば必ず片方が古くなり、実際にそうなった。`agent_session.checkpoint` は 0013 で足して 0018 で落とした列だが、ここには残っていた。**節の役割を「現在のスキーマの写し」から「起点と、そこから何が足されたかの索引」へ改める。**
+
+起点の後に足したテーブル:
+
+| テーブル | 節 | 何のためか |
+|---|---|---|
+| `scope_route` | 16.3 | 作業ディレクトリと Scope の対応。捕捉が transcript をどの Scope へ入れるかを決める |
+| `extraction_charge` | 16.3 | 抽出 1 回あたりの入出力 token。日次予算と一晩の費用がここから出る |
+| `incident` | 27.5 | 事故を原因つきで数える。切替試験の反証条件が読む |
+
+列の追加・削除も同様に migration が正本である。`extraction_run.checkpoint`(0014)は、上で落とした `agent_session.checkpoint` を置き換えたものである。
 
 補足:
 
