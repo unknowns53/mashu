@@ -15,7 +15,9 @@ different words, which is section 27.2's deliberately confusable case.
 # reflowing them would change the thing being measured.
 
 import itertools
+import math
 
+from mashu import retrieval
 from mashu.db import transaction
 from mashu.embed import get_embedder
 
@@ -63,14 +65,36 @@ POSITIVE = [
     ),
 ]
 
+#: The scope each query should be narrowed to, or "-" for a query about a
+#: subject the ledger holds nothing on. Those are not filler: narrowing a
+#: question with no answer to some scope is the failure that looks like an
+#: answer, so they are scored alongside the rest.
+#:
+#: "a|b" is a query the ledger answers from either scope. Landing in the second
+#: one is reported as hit* and counted apart, because relabelling a query after
+#: seeing where it landed is how a fixture stops being able to fail.
 QUERIES = [
-    ("作業の規律", "測定を始める前に何を決めておくべきか"),
+    # Two right answers. The ledger holds this discipline as a general rule in
+    # 作業の規律 and as the enrai instance 難易度測定前に行動分岐を明文化する,
+    # which is the closer wording of the two and wins.
+    ("作業の規律|enrai", "測定を始める前に何を決めておくべきか"),
     ("作業の規律", "サブエージェントに仕事を任せるときの作法"),
+    ("作業の規律", "報告に検証の証拠をどう添えるか"),
     ("enrai", "空母戦のレバーはどの probe で測るのが正しいか"),
     ("enrai", "難易度を上げるときに敵をどう作るべきか"),
+    ("enrai", "航空隊の消耗をどう扱うか"),
     ("mashu", "未審査の知識をエージェントにどう渡すか"),
-    ("作業の規律", "今日の天気はどうか"),
-    ("enrai", "PNIPAM の曇点測定の昇温速度"),
+    ("mashu", "layer 2 の上限はどう決まっているか"),
+    ("mashu", "捕捉が滞ったときに何を見るか"),
+    ("utsushimi", "独白で鍵になる物証を先に出さない"),
+    ("utsushimi", "連関盤の証言はどう設計するか"),
+    ("utsushimi", "足音の床材はどう判定するか"),
+    ("utsushimi", "初見の解き手で何を測るか"),
+    ("-", "今日の天気はどうか"),
+    ("-", "PNIPAM の曇点測定の昇温速度"),
+    ("-", "確定申告の提出期限はいつか"),
+    ("-", "GROMACS の NVT 平衡化は何 ns 回すべきか"),
+    ("-", "駅前のラーメン屋でおすすめはどこか"),
 ]
 
 
@@ -84,8 +108,6 @@ def main(dsn: str | None = None) -> None:
             "JOIN scope s ON s.scope_id = e.scope_id WHERE e.status = 'active' ORDER BY s.name"
         )
         rows = cur.fetchall()
-        cur.execute("SELECT name, description FROM scope WHERE status = 'active'")
-        scopes = cur.fetchall()
 
     by_scope: dict[str, list[str]] = {}
     for row in rows:
@@ -120,88 +142,103 @@ def main(dsn: str | None = None) -> None:
     print(f"\n  separation: highest negative {gap[0]:.3f}, lowest positive {gap[1]:.3f}")
     print(f"  -> {'separable' if gap[1] > gap[0] else 'OVERLAPPING'}")
 
-    # --- scope detection: the label method, withdrawn -----------------------
-    # Kept as the comparison. 27.2 measured it and found it does not separate;
-    # what replaced it is measured directly below, on the same queries.
-    texts = [f"{s['name']}. {s['description']}" if s["description"] else s["name"] for s in scopes]
-    scope_vectors = embedder.embed_documents(texts)
-    print("\nscope detection, old (query against each scope's label)")
-    label_right = 0
-    for want, query in QUERIES:
-        sims = sorted(
-            (
-                (cosine(embedder.embed_query(query), scope_vectors[i]), scopes[i]["name"])
-                for i in range(len(scopes))
-            ),
-            reverse=True,
+    # --- scope detection: the mechanism that ships ------------------------
+    # Measured by calling detect_scopes itself rather than by reimplementing
+    # it here. A measurement that keeps its own copy of the rule stops
+    # measuring the system the first time one of the two is edited, and the
+    # drift this command exists to catch is exactly that kind.
+    print("\nscope detection (retrieval.detect_scopes, as shipped)")
+    anisotropy(dsn)
+    with transaction(dsn) as cur:
+        cur.execute("SELECT scope_id, name FROM scope")
+        names = {r["scope_id"]: r["name"] for r in cur.fetchall()}
+        cur.execute(retrieval._SCOPE_SIZE_SQL)
+        sizes = {names[r["scope_id"]]: r["held"] for r in cur.fetchall()}
+        total = sum(sizes.values())
+        print(
+            "  在庫(採用済み + 未審査): "
+            + "  ".join(f"{k}={v}" for k, v in sizes.items())
+            + f"  合計 {total}"
         )
-        best = sims[0]
-        label_right += best[1] == want
-        mark = "hit " if best[1] == want else "MISS"
-        listed = "  ".join(f"{n}={v:.3f}" for v, n in sims)
-        print(f"  {mark} want={want:<12} {listed}   << {query[:26]}…")
-    print(f"  -> {label_right}/{len(QUERIES)} ranked correctly")
+        print(
+            f"  検出できる Scope の上限: 在庫の {1 / retrieval.SCOPE_LIFT:.0%} まで "
+            f"(lift {retrieval.SCOPE_LIFT}); 最大の Scope はいま "
+            f"{max(sizes.values()) / total:.0%}\n"
+        )
 
-    # --- scope detection: the held-memory method ----------------------------
-    # The query goes against the memories themselves, and the scopes the best
-    # matches live in are the answer. It asks about concentration rather than
-    # about an absolute similarity, which is the thing these embeddings can
-    # actually answer.
-    print("\nscope detection, new (query against what each scope holds)")
+        tally = {"hit": 0, "hit*": 0, "miss": 0, "wrong": 0, "ok": 0}
+        for want, query in QUERIES:
+            vector = retrieval._as_vector(embedder.embed_query(query))
+            reading = retrieval.detect_scopes(cur, vector)
+            got = [names[s] for s in reading.detected]
+            accepted = want.split("|")
+            if want == "-":
+                verdict = "ok" if not got else "wrong"
+            elif not got:
+                verdict = "miss"
+            elif got == accepted[:1]:
+                verdict = "hit"
+            elif len(got) == 1 and got[0] in accepted:
+                verdict = "hit*"
+            else:
+                verdict = "wrong"
+            tally[verdict] += 1
+            probed = ",".join(names[s] for s in reading.probed) or "-"
+            print(
+                f"  {verdict:<5} want={want:<16} got={','.join(got) or '-':<12} "
+                f"probed={probed:<30} << {query[:24]}"
+            )
+
+        print(
+            f"\n  {tally['hit'] + tally['hit*']} 正しい Scope へ絞り込み"
+            f"(うち別解へ {tally['hit*']})、{tally['miss']} 辞退して全体を検索、"
+            f"{tally['wrong']} 誤った絞り込み、"
+            f"{tally['ok']}/{sum(1 for w, _ in QUERIES if w == '-')} 無関係を退けた"
+        )
+        print("  誤った絞り込みが答えを丸ごと隠す唯一の失敗で、辞退は順位が薄まるだけ。")
+
+
+def anisotropy(dsn: str | None) -> None:
+    """How much of every similarity is a direction all the vectors share.
+
+    This is why an absolute cutoff on similarity keeps needing to be re-tuned
+    and keeps drifting anyway. If the mean of the stored vectors is nearly a
+    unit vector itself, then almost all of each unit vector is that common
+    direction, unrelated texts already sit high, and the meaning lives in a
+    residue narrower than the cutoff has to be placed inside.
+    """
+    import random
+
     with transaction(dsn) as cur:
         cur.execute(
-            "SELECT s.name AS scope, count(*) AS held FROM memory_entity e "
-            "JOIN scope s ON s.scope_id = e.scope_id "
-            "WHERE e.status = 'active' AND e.active_version IS NOT NULL GROUP BY s.name"
+            "SELECT v.content_embedding::text AS vec FROM memory_entity e "
+            "JOIN memory_version v ON v.memory_id = e.memory_id "
+            f"WHERE v.content_embedding IS NOT NULL AND ({retrieval._HANDED_OVER})"
         )
-        sizes = {r["scope"]: r["held"] for r in cur.fetchall()}
-        total = sum(sizes.values())
-        print("  在庫: " + "  ".join(f"{k}={v}" for k, v in sizes.items()) + f"  合計 {total}\n")
-        for want, query in QUERIES:
-            vector = "[" + ",".join(f"{v:.6f}" for v in embedder.embed_query(query)) + "]"
-            cur.execute(
-                """
-                SELECT s.name AS scope, 1 - (v.content_embedding <=> %(q)s::vector) AS sim
-                FROM memory_entity e
-                JOIN memory_version v
-                  ON v.version_id = e.active_version AND v.memory_id = e.memory_id
-                JOIN scope s ON s.scope_id = e.scope_id
-                WHERE e.status = 'active' AND v.content_embedding IS NOT NULL
-                ORDER BY v.content_embedding <=> %(q)s::vector
-                LIMIT %(probe)s
-                """,
-                {"q": vector, "probe": PROBE},
-            )
-            hits = cur.fetchall()
-            for floor in FLOORS:
-                kept = [h for h in hits if h["sim"] >= floor]
-                counts: dict[str, int] = {}
-                for h in kept:
-                    counts[h["scope"]] = counts.get(h["scope"], 0) + 1
-                got = []
-                lifts = {}
-                for s, c in counts.items():
-                    expected = sizes[s] / total
-                    lifts[s] = (c / len(kept)) / expected if expected and kept else 0.0
-                    if c >= MIN_HITS and lifts[s] >= LIFT:
-                        got.append(s)
-                got.sort(key=lambda s: -max(h["sim"] for h in kept if h["scope"] == s))
-                shape = "  ".join(
-                    f"{s}={c}(x{lifts[s]:.2f})"
-                    for s, c in sorted(counts.items(), key=lambda kv: -kv[1])
-                )
-                verdict = "detect nothing" if not got else ",".join(got)
-                print(
-                    f"  floor {floor:.2f}  n={len(kept):>2}  "
-                    f"[{shape or 'none'}]  ->  {verdict:<16} want={want:<12} << {query[:24]}…"
-                )
-            print()
-
-
-PROBE = 25
-MIN_HITS = 2
-LIFT = 1.2
-FLOORS = (0.78, 0.80, 0.82, 0.84)
+        vectors = [[float(x) for x in r["vec"].strip("[]").split(",")] for r in cur.fetchall()]
+    if len(vectors) < 2:
+        return
+    dim = len(vectors[0])
+    centre = [sum(v[i] for v in vectors) / len(vectors) for i in range(dim)]
+    norm = math.sqrt(sum(x * x for x in centre))
+    random.seed(0)
+    pairs = [
+        cosine(vectors[i], vectors[j])
+        for i, j in (
+            (random.randrange(len(vectors)), random.randrange(len(vectors))) for _ in range(2000)
+        )
+        if i != j
+    ]
+    mean = sum(pairs) / len(pairs)
+    sd = math.sqrt(sum((p - mean) ** 2 for p in pairs) / len(pairs))
+    print(
+        f"  埋め込みの共通成分: 平均ベクトルのノルム {norm:.3f} "
+        f"(1.0 なら全部同一、0.0 なら共通成分なし)"
+    )
+    print(
+        f"  無関係な文書どうしの cosine: 平均 {mean:+.3f}  sd {sd:.3f} "
+        f"— 意味はこの幅の中にしか乗らない"
+    )
 
 
 def sweep(negatives, positives):
