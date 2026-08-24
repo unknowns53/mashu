@@ -164,3 +164,38 @@ def test_the_threshold_can_be_set_from_the_environment(cur, monkeypatch):
     """27.2 measures it per model; until then it has to be movable."""
     monkeypatch.setenv(resolution.THRESHOLD_ENV_VAR, "0.99")
     assert resolution.threshold() == 0.99
+
+
+def test_a_look_alike_is_found_across_the_scope(cur, scope_id, author):
+    """20 keeps one concept from answering twice; review is where a person can see it."""
+    author("送風の設定は測定から決める", "推測で置いた値は下流へ渡さない")
+    twin, _ = store.create_entity(
+        cur,
+        scope_id=scope_id,
+        type=MemoryType.DECISION,
+        title="送風の設定は測定から決める",
+        content="別の言い方で同じことを言っている",
+        source_type=SourceType.AGENT,
+        created_by="claude",
+        actor="claude",
+        adopt=False,
+    )
+
+    found = resolution.look_alikes(cur, scope_id=scope_id, memory_ids=[twin])
+    assert twin in found, "an identical title in the same scope has to come back"
+    assert found[twin][0]["title"] == "送風の設定は測定から決める"
+    assert found[twin][0]["similarity"] > resolution.LOOK_ALIKE_FLOOR
+
+
+def test_nothing_comes_back_for_a_memory_standing_on_its_own(cur, scope_id, author):
+    """A note in the margin that appears on every item is not a note, it is noise."""
+    author("SSD failure analysis")
+    author("cloud point ramp rate")
+    alone, _ = author("まったく関係のない話題、たとえば昼食の献立", "今日は蕎麦だった")
+    assert resolution.look_alikes(cur, scope_id=scope_id, memory_ids=[alone]) == {}
+
+
+def test_a_memory_is_never_its_own_look_alike(cur, scope_id, author):
+    memory_id, _ = author("ひとつしかない題名")
+    found = resolution.look_alikes(cur, scope_id=scope_id, memory_ids=[memory_id], floor=-1.0)
+    assert memory_id not in [row["memory_id"] for row in found.get(memory_id, [])]

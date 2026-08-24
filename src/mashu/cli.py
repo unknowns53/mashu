@@ -229,6 +229,26 @@ def _standing_of(row) -> str:
     return _STANDING.get(row["latest_status"], "not adopted: nothing of it is standing")
 
 
+def _look_alike_text(near: list[dict]) -> str:
+    """What else in the scope already says something close to this (20).
+
+    Written next to the grounds because the two answer the reader's two
+    standing questions about a proposal: what it is built on, and whether the
+    store already holds it.
+    """
+    if not near:
+        return ""
+    many = "one other" if len(near) == 1 else f"{len(near)} others"
+    lines = [f"\n  looks like {many} in this scope. one concept, one entity (20):"]
+    for row in near:
+        close = "the same title" if row["same_title"] else f"{row['similarity']:.2f}"
+        lines.append(f"    {close:>14}  [{row['type']}] {_clip(row['title'], 50)}")
+        lines.append(
+            f"          {_standing_of(row)}   ·   mashu inspect {_short(row['memory_id'])}"
+        )
+    return "\n".join(lines)
+
+
 def _print_grounds(cur, version_id) -> None:
     text = _grounds_text(cur, version_id)
     if text:
@@ -1829,8 +1849,29 @@ def _open(args, summary, place: int, total: int) -> tuple[str, str]:
         items = _undecided(bundle, args) if bundle else []
         if not items:
             return "next", ""
-        pages = [_item_text(cur, item, n, len(items)) for n, item in enumerate(items, 1)]
+        near = _look_alikes(cur, items)
+        pages = [
+            _item_text(cur, item, n, len(items), near.get(item["target_memory"], []))
+            for n, item in enumerate(items, 1)
+        ]
     return _bundle_sitting(args, bundle, items, pages, place, total)
+
+
+def _look_alikes(cur, items) -> dict:
+    """The bundle's look-alikes, asked for once per scope rather than per item."""
+    wanted = [item["target_memory"] for item in items if item["target_memory"]]
+    if not wanted:
+        return {}
+    cur.execute(
+        "SELECT memory_id, scope_id FROM memory_entity WHERE memory_id = ANY(%s)", (wanted,)
+    )
+    by_scope: dict = {}
+    for row in cur.fetchall():
+        by_scope.setdefault(row["scope_id"], []).append(row["memory_id"])
+    found: dict = {}
+    for scope_id, memory_ids in by_scope.items():
+        found.update(resolution.look_alikes(cur, scope_id=scope_id, memory_ids=memory_ids))
+    return found
 
 
 def _whole(args, summary, verb: str = "a", reason: str = "") -> str:
@@ -2114,7 +2155,7 @@ def _contents(bundle, items, place: int, total: int, done: dict, at: int) -> str
     return "\n".join(lines)
 
 
-def _item_text(cur, item, number: int, of: int) -> str:
+def _item_text(cur, item, number: int, of: int, near: list[dict] = ()) -> str:
     """One proposal as a page of its own, beside what it would displace (18.1)."""
     label = f" {number} of {of} "
     across = _across()
@@ -2129,6 +2170,9 @@ def _item_text(cur, item, number: int, of: int) -> str:
         lines.append(_wrap(f"(put off earlier: {item['review_note']})"))
         lines.append("")
     lines.append(_diff_text(cur, item))
+    resembling = _look_alike_text(list(near))
+    if resembling:
+        lines.append(resembling)
     lines.append("─" * across)
     return "\n".join(lines)
 

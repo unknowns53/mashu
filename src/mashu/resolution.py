@@ -115,3 +115,105 @@ def needs_similar_review(
 ) -> list[dict[str, Any]]:
     """The candidates that would make a new entity provisional, if any."""
     return find_similar(cur, scope_id=scope_id, title=title)
+
+
+#: Centred cosine above which two titles in one scope are worth putting in
+#: front of a reviewer side by side.
+#:
+#: This is not the creation threshold and cannot share its number. Raw cosine
+#: on this embedding is anisotropic — unrelated titles in the real store sit
+#: around 0.82 and the nearest raw neighbour of an unrelated proposal reached
+#: 0.898 — so a raw floor either shows everything or nothing. Subtracting the
+#: store's mean title vector before comparing separates it: over the 42
+#: proposals waiting when this was measured, 0.45 gave 6 of them a neighbour,
+#: at most two each, and every pair it surfaced read as genuinely adjacent.
+#: Identical titles do not go through this at all: equality is not a
+#: measurement, and the four such pairs in the store came from one source being
+#: ingested twice, which is the case this most needs to catch.
+LOOK_ALIKE_FLOOR = 0.45
+
+#: How many to show. This is a note in the margin of a decision about one
+#: proposal, not a search result.
+LOOK_ALIKE_LIMIT = 3
+
+_LOOK_ALIKE_SQL = """
+WITH mu AS (
+    SELECT avg(title_embedding) AS m
+    FROM memory_entity
+    WHERE status IN ('active', 'provisional') AND title_embedding IS NOT NULL
+),
+pool AS (
+    SELECT e.memory_id, e.title, e.type, e.title_embedding,
+           e.status AS entity_status,
+           v.status AS version_status,
+           l.status AS latest_status
+    FROM memory_entity e
+    LEFT JOIN memory_version v ON v.version_id = e.active_version
+    LEFT JOIN memory_version l ON l.version_id = e.latest_version
+    WHERE e.scope_id = %(scope_id)s
+      AND e.status IN ('active', 'provisional')
+      AND e.title_embedding IS NOT NULL
+)
+SELECT a.memory_id AS of_memory, b.memory_id, b.title, b.type,
+       b.entity_status, b.version_status, b.latest_status,
+       b.title = a.title AS same_title,
+       CASE WHEN b.title = a.title THEN 1.0
+            ELSE 1 - ((a.title_embedding - mu.m) <=> (b.title_embedding - mu.m))
+       END AS similarity
+FROM pool a
+JOIN pool b ON b.memory_id <> a.memory_id
+CROSS JOIN mu
+WHERE a.memory_id = ANY(%(ids)s)
+  AND (b.title = a.title
+       OR 1 - ((a.title_embedding - mu.m) <=> (b.title_embedding - mu.m)) >= %(floor)s)
+ORDER BY a.memory_id, similarity DESC
+"""
+
+
+def look_alikes(
+    cur: psycopg.Cursor,
+    *,
+    scope_id: UUID,
+    memory_ids: list[UUID],
+    floor: float | None = None,
+    limit: int = LOOK_ALIKE_LIMIT,
+) -> dict[UUID, list[dict[str, Any]]]:
+    """What else in the scope already says something close to this (20).
+
+    Section 20 keeps entity creation out of the automatic path because one
+    concept answering under two entities is the failure this store exists to
+    prevent. The check runs when a proposal is written, and by review time its
+    result is gone: the reader is shown a proposal on its own and has to
+    remember two hundred others to notice it is the same claim again.
+
+    The mean title vector is subtracted before comparing. Without that the
+    numbers are unusable — see LOOK_ALIKE_FLOOR — and with it the same
+    arithmetic runs in the database, so nothing here has to hold the store in
+    memory to answer.
+
+    Answers for many memories at once because a review sitting asks about a
+    whole bundle, and the mean is over the store rather than the scope so that
+    a scope holding three memories still gets a usable one.
+    """
+    if not memory_ids:
+        return {}
+    cur.execute(
+        _LOOK_ALIKE_SQL,
+        {
+            "scope_id": scope_id,
+            "ids": list(memory_ids),
+            "floor": LOOK_ALIKE_FLOOR if floor is None else floor,
+        },
+    )
+    out: dict[UUID, list[dict[str, Any]]] = {}
+    for row in cur.fetchall():
+        # An identical title is equality and not a measurement, so it is kept
+        # whatever the arithmetic says. Everything else has to be a number: a
+        # store too small to estimate a mean from can centre a vector onto the
+        # origin, and the cosine of that is not a low score but no score.
+        if not row["same_title"] and row["similarity"] != row["similarity"]:
+            continue
+        near = out.setdefault(row["of_memory"], [])
+        if len(near) < limit:
+            near.append(row)
+    return out

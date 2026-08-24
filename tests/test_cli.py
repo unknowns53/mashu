@@ -1343,3 +1343,36 @@ def test_a_refusal_from_the_store_leaves_the_reader_where_they_were(
     assert code == 0
     assert "なにかの理由で通せない" in out
     assert set(_statuses(test_dsn, session_id).values()) == {"approved"}
+
+
+def test_the_page_says_when_the_store_already_holds_something_like_this(
+    test_dsn, sitting, committed_scope
+):
+    """Noticing a repeat across 200 items is not something a reader should have to do."""
+    with transaction(test_dsn) as cur:
+        store.create_entity(
+            cur,
+            scope_id=committed_scope,
+            type=MemoryType.OBSERVATION,
+            title="同じことを二度言う題名",
+            content="先にこちらが入っていた",
+            source_type=SourceType.AGENT,
+            created_by="claude",
+            actor="claude",
+            adopt=True,
+        )
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    _propose(
+        test_dsn,
+        committed_scope,
+        "同じことを二度言う題名",
+        "あとから同じものが来た",
+        session_id=session_id,
+    )
+
+    code, out = sitting(["enter", "q"], (), "--bundle", str(session_id)[:8])
+    assert code == 0
+    assert "looks like one other in this scope" in out
+    assert "the same title" in out
+    # and it is not decided for the reader: 20 keeps that out of the automatic path
+    assert _statuses(test_dsn, session_id) == {"同じことを二度言う題名": "pending"}
