@@ -17,7 +17,9 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import select
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -69,6 +71,11 @@ from mashu.models import (
 WIDTH = 88
 
 
+def _across() -> int:
+    """The width to lay text out at: the terminal's, but never wider than reads well."""
+    return min(WIDTH, _width())
+
+
 def _wrap(text: str, indent: str = "    ") -> str:
     """Wrap for reading, keeping the line breaks the writer put in.
 
@@ -84,7 +91,9 @@ def _wrap(text: str, indent: str = "    ") -> str:
             continue
         hang = indent + "  " if line.lstrip().startswith(("-", "*", "•")) else indent
         out.append(
-            textwrap.fill(line.strip(), width=WIDTH, initial_indent=indent, subsequent_indent=hang)
+            textwrap.fill(
+                line.strip(), width=_across(), initial_indent=indent, subsequent_indent=hang
+            )
         )
     return "\n".join(out)
 
@@ -1550,7 +1559,7 @@ def cmd_review(args) -> int:
 
     if args.batch is not None or not sys.stdin.isatty():
         return _one_shot(args, bundles[0])
-    return _sitting(args, [b["session_id"] for b in bundles])
+    return _sitting(args)
 
 
 def _wanted(cur, waiting: list[dict], args) -> list[dict]:
@@ -1599,7 +1608,7 @@ _TOKENS = {
     "\x1b": "left",
     "\x03": "q",
     "\x04": "q",
-    " ": "down",
+    " ": "space",
 }
 
 
@@ -1671,57 +1680,193 @@ def _screen(text: str) -> None:
 # --------------------------------------------------------------------------
 # a sitting
 # --------------------------------------------------------------------------
-_LIST_KEYS = "  ↑↓ move   ⏎ open it   a approve all of them   s put the bundle off   q leave"
+_SHELF_KEYS = "  ↑↓ move   ⏎ open   a approve it all unread   s put it off   q leave"
+_LIST_KEYS = (
+    "  ↑↓ move   ⏎ open   a approve the rest   s put the bundle off\n  ← the bundles   q leave"
+)
 _ITEM_KEYS = (
-    "  y approve   r turn down   e edit   s put off\n"
-    "  ↑↓ move without deciding   ← the list   a approve the rest   q leave"
+    "  y approve   r turn down   e edit   s put off   a approve the rest\n"
+    "  space read on   b top   ↑↓ another item   ← the list   q leave"
 )
 
 _WORD = {"a": "approved", "r": "declined", "s": "put off", "e": "edited"}
 _MARK = {"approved": "✓", "declined": "✗", "put off": "·", "edited": "✎"}
 
 
-def _sitting(args, queue: list) -> int:
-    """Bundle after bundle, each re-read as it comes up so a long sitting stays current."""
-    total = len(queue)
-    for place, session_id in enumerate(queue, 1):
-        with transaction(args.dsn) as cur:
-            bundle = next(
-                (b for b in proposals.session_queue(cur) if b["session_id"] == session_id), None
-            )
-            if bundle is None:
+def _sitting(args) -> int:
+    """The bundles waiting, chosen from a list and worked one at a time.
+
+    Which bundle comes first is an accident of when its session ended, so a
+    sitting that opens on the oldest can open on the largest, and the reader
+    who has ten minutes has no way to spend them on something smaller. The
+    list is the way out: everything waiting, its size and its age beside it,
+    and any of it opened in one keystroke.
+
+    With one bundle waiting there is nothing to choose between, so that one
+    opens straight away.
+    """
+    shelf = _shelf(args)
+    at, note = 0, ""
+    reading = len(shelf) == 1
+
+    while True:
+        if not shelf:
+            if note:
+                print(note)
+            print("\nnothing else waiting")
+            return 0
+        at = min(at, len(shelf) - 1)
+
+        if not reading:
+            _screen(_bundles(shelf, at, note))
+            key = _getkey()
+            if key == "q":
+                return 0
+            if key in ("down", "j"):
+                at = min(len(shelf) - 1, at + 1)
                 continue
-            items = _undecided(bundle, args)
-            if not items:
+            if key in ("up", "k"):
+                at = max(0, at - 1)
                 continue
-            pages = [_item_text(cur, item, n, len(items)) for n, item in enumerate(items, 1)]
-        if _bundle_sitting(args, bundle, items, pages, place, total) == "leave":
+            if key == "a":
+                note = _whole(args, shelf[at])
+                shelf = _shelf(args)
+                continue
+            if key == "s":
+                reason = _typed("  why put the whole bundle off? ")
+                if reason is None:
+                    continue
+                note = _whole(args, shelf[at], verb="s", reason=reason)
+                shelf = _shelf(args)
+                continue
+            if key not in ("enter", "right", "l"):
+                continue
+
+        reading = False
+        here = shelf[at]["session_id"]
+        outcome, note = _open(args, shelf[at], at + 1, len(shelf))
+        if outcome == "leave":
+            print(note)
             print("\nleft. what was decided is kept; 'mashu review' opens on the rest")
             return 0
-    print("\nnothing else waiting")
-    return 0
+
+        shelf = _shelf(args)
+        if outcome == "next":
+            # Move past the bundle just worked, unless finishing it took the
+            # bundle off the list, in which case this place already holds the
+            # next one.
+            where = next((i for i, b in enumerate(shelf) if b["session_id"] == here), None)
+            at = where + 1 if where is not None else at
 
 
-def _bundle_sitting(args, bundle, items, pages, place, total) -> str:
-    """One bundle, from its list of titles down to its last item. 'next' or 'leave'."""
+def _shelf(args) -> list[dict]:
+    """Everything still waiting, as it stands now rather than as it stood at the start."""
+    with transaction(args.dsn) as cur:
+        waiting = proposals.session_queue(cur)
+        return [b for b in _wanted(cur, waiting, args) if _undecided(b, args)]
+
+
+def _bundles(shelf: list[dict], at: int, note: str) -> str:
+    """Everything waiting, so a reader with ten minutes can spend them on ten minutes."""
+    total = sum(len(_pending(b)) for b in shelf)
+    width = _width()
+    rows = []
+    for number, bundle in enumerate(shelf):
+        items = _pending(bundle)
+        scope = next((i["scope_name"] for i in items if i["scope_name"]), "-")
+        first = items[0]["title"] if items else ""
+        row = _clip(
+            f" {number + 1:>3}  {_pad(scope, 14)} {len(items):>3} to decide  "
+            f"{bundle['days_pending']:>2} day(s)   {first or ''}",
+            width - 1,
+        )
+        rows.append(f"\x1b[1m▸{row[1:]}\x1b[0m" if number == at else row)
+
+    shown, above, below = _shown(rows, at, reserve=7 + (2 if note else 0))
+    lines = [f"{len(shelf)} bundle(s) waiting, {total} to decide\n"]
+    lines += [line for line in (above, *shown, below) if line]
+    if note:
+        lines.append(note)
+    lines.append("\n" + _SHELF_KEYS)
+    return "\n".join(lines)
+
+
+def _pending(bundle: dict) -> list[dict]:
+    """A bundle's items as the list screen counts them: what is not put off."""
+    return [i for i in bundle["proposals"] if not i["deferred_at"]] or bundle["proposals"]
+
+
+def _open(args, summary, place: int, total: int) -> tuple[str, str]:
+    """Read one bundle in, fresh, and hand it to the reader."""
+    with transaction(args.dsn) as cur:
+        bundle = next(
+            (b for b in proposals.session_queue(cur) if b["session_id"] == summary["session_id"]),
+            None,
+        )
+        items = _undecided(bundle, args) if bundle else []
+        if not items:
+            return "next", ""
+        pages = [_item_text(cur, item, n, len(items)) for n, item in enumerate(items, 1)]
+    return _bundle_sitting(args, bundle, items, pages, place, total)
+
+
+def _whole(args, summary, verb: str = "a", reason: str = "") -> str:
+    """A bundle decided from the list, without opening it."""
+    with transaction(args.dsn) as cur:
+        bundle = next(
+            (b for b in proposals.session_queue(cur) if b["session_id"] == summary["session_id"]),
+            None,
+        )
+        items = _undecided(bundle, args) if bundle else []
+    if not items:
+        return ""
+    done: dict[int, str] = {}
+    _rest(args, items, done, verb=verb, reason=reason)
+    return _tally(bundle, done, len(items))
+
+
+def _bundle_sitting(args, bundle, items, pages, place, total) -> tuple[str, str]:
+    """One bundle, from its list of titles down to its last item.
+
+    Returns where to go next — leave, the next bundle, or back up to the list of
+    bundles — and what this one came to, which the caller shows on a screen that
+    survives the repaint.
+    """
     done: dict[int, str] = {}
     at = 0
     reading = False
+    scroll = 0
+    more = 0
 
     while True:
         if reading:
-            _screen(pages[at] + _standing(done, at) + "\n" + _ITEM_KEYS)
+            page, more = _paged(pages[at], scroll)
+            _screen(page + _standing(done, at) + "\n" + _ITEM_KEYS)
         else:
             _screen(_contents(bundle, items, place, total, done, at))
         key = _getkey()
 
+        if key == "space":
+            # Read on where a proposal is longer than the screen, and step to
+            # the next one where it is not: the same key, and in both cases it
+            # means carry on.
+            if reading and more:
+                scroll = more
+                continue
+            key = "down"
+        if key == "b" and reading:
+            scroll = 0
+            continue
+
         if key == "q":
-            return "leave"
+            return "leave", _tally(bundle, done, len(items))
         if key in ("down", "j"):
             at = min(len(items) - 1, at + 1)
+            scroll = 0
             continue
         if key in ("up", "k"):
             at = max(0, at - 1)
+            scroll = 0
             continue
         if key == "a":
             _rest(args, items, done)
@@ -1729,6 +1874,8 @@ def _bundle_sitting(args, bundle, items, pages, place, total) -> str:
         if not reading:
             if key in ("enter", "right", "l"):
                 reading = True
+            elif key == "left":
+                return "up", _tally(bundle, done, len(items))
             elif key == "s":
                 reason = _typed("  why put the whole bundle off? ")
                 if reason is None:
@@ -1760,9 +1907,9 @@ def _bundle_sitting(args, bundle, items, pages, place, total) -> str:
         if at + 1 >= len(items):
             break
         at += 1
+        scroll = 0
 
-    print(_tally(bundle, done, len(items)))
-    return "next"
+    return "next", _tally(bundle, done, len(items))
 
 
 def _rest(args, items, done, verb: str = "a", reason: str = "") -> None:
@@ -1790,6 +1937,67 @@ def _standing(done: dict, at: int) -> str:
     return f"\n  ({done[at]} in this sitting)" if at in done else ""
 
 
+def _width() -> int:
+    """How wide the terminal is, not how wide the writing was laid out to be."""
+    return max(40, shutil.get_terminal_size((WIDTH, 24)).columns)
+
+
+def _room(reserve: int) -> int:
+    """How many lines are left for a list or a page once the fixed parts have theirs.
+
+    A screen that overruns the terminal is a screen the reader has to scroll
+    back through to see its own heading, and on a short console that is every
+    screen. So nothing is printed that does not fit: what will not fit is said
+    as a count instead.
+    """
+    return max(4, shutil.get_terminal_size((WIDTH, 24)).lines - reserve)
+
+
+def _rows(text: str, width: int) -> int:
+    """How many terminal lines one written line takes once it wraps."""
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    return max(1, -(-_cells(plain) // width))
+
+
+def _shown(rows: list[str], at: int, reserve: int) -> tuple[list[str], str, str]:
+    """The part of a list that fits, kept around wherever the cursor is."""
+    room = _room(reserve)
+    if len(rows) <= room:
+        return rows, "", ""
+    room -= 2  # the two lines that say what is not being shown
+    top = max(0, min(at - room // 2, len(rows) - room))
+    above = f"  ↑ {top} more" if top else ""
+    below = f"  ↓ {len(rows) - top - room} more" if top + room < len(rows) else ""
+    return rows[top : top + room], above, below
+
+
+def _paged(text: str, offset: int) -> tuple[str, int]:
+    """As much of one proposal as fits, and where the next screenful would start.
+
+    The first lines are held on screen whatever the offset: what is being
+    decided about should not scroll away from the deciding.
+    """
+    width = _width()
+    lines = text.splitlines()
+    head, body = lines[:3], lines[3:]
+    # what the page costs besides its body: the heading, the line that says
+    # whether it was already decided, a blank, and the two lines of keys
+    room = _room(sum(_rows(line, width) for line in head) + 5)
+    shown, used = [], 0
+    for line in body[offset:]:
+        cost = _rows(line, width)
+        if used + cost > room:
+            break
+        shown.append(line)
+        used += cost
+    left = len(body) - offset - len(shown)
+    if left <= 0:
+        return "\n".join(head + shown), 0
+    return "\n".join(head + shown + [f"  … {left} more line(s), space to go on"]), (
+        offset + len(shown)
+    )
+
+
 def _cells(text: str) -> int:
     """How wide this is on a terminal, counting the double-width characters as two."""
     return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
@@ -1808,6 +2016,12 @@ def _clip(text: str, cells: int) -> str:
     return "".join(out) + "…"
 
 
+def _pad(text: str, cells: int) -> str:
+    """Fill a column out to a width, counting cells so a Japanese name lines up too."""
+    clipped = _clip(text, cells)
+    return clipped + " " * max(0, cells - _cells(clipped))
+
+
 def _contents(bundle, items, place: int, total: int, done: dict, at: int) -> str:
     """The bundle as a list of its titles: what it takes to pass it unread."""
     name = _short(bundle["session_id"]) if bundle["session_id"] else "none"
@@ -1817,14 +2031,20 @@ def _contents(bundle, items, place: int, total: int, done: dict, at: int) -> str
         f"waiting {bundle['days_pending']} day(s)    "
         f"bundle {place} of {total}\n"
     ]
+    width = _width()
+    rows = []
     for number, item in enumerate(items):
         mark = _MARK.get(done.get(number), " ")
         title = item["title"] or _short(item["proposal_id"])
-        row = (
+        row = _clip(
             f" {mark} {number + 1:>3}  {item['operation']:<15} "
-            f"{item['memory_type'] or '-':<14} {_clip(title, 44)}"
+            f"{item['memory_type'] or '-':<14} {title}",
+            width - 1,
         )
-        lines.append(f"\x1b[1m▸{row[1:]}\x1b[0m" if number == at else f" {row[1:]}")
+        rows.append(f"\x1b[1m▸{row[1:]}\x1b[0m" if number == at else f" {row[1:]}")
+
+    shown, above, below = _shown(rows, at, reserve=8)
+    lines += [line for line in (above, *shown, below) if line]
     lines.append("\n" + _LIST_KEYS)
     return "\n".join(lines)
 
@@ -1832,8 +2052,9 @@ def _contents(bundle, items, place: int, total: int, done: dict, at: int) -> str
 def _item_text(cur, item, number: int, of: int) -> str:
     """One proposal as a page of its own, beside what it would displace (18.1)."""
     label = f" {number} of {of} "
+    across = _across()
     lines = [
-        "─" * 4 + label + "─" * max(4, WIDTH - 4 - _cells(label)),
+        "─" * 4 + label + "─" * max(4, across - 4 - _cells(label)),
         f"{item['operation']}  {item['memory_type'] or '-'}  "
         f"[{item['scope_name'] or '-'}]  {_short(item['proposal_id'])}",
         f"{item['title'] or ''}",
@@ -1843,7 +2064,7 @@ def _item_text(cur, item, number: int, of: int) -> str:
         lines.append(_wrap(f"(put off earlier: {item['review_note']})"))
         lines.append("")
     lines.append(_diff_text(cur, item))
-    lines.append("─" * WIDTH)
+    lines.append("─" * across)
     return "\n".join(lines)
 
 

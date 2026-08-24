@@ -1241,15 +1241,52 @@ def test_all_widens_the_bundles_and_not_only_the_items_inside_them(test_dsn, run
     assert session_id in [b["session_id"] for b in widened]
 
 
-def test_one_sitting_carries_on_into_the_next_bundle(test_dsn, sitting, committed_scope):
-    """36 bundles waiting is 36 invocations if a sitting ends with the first one."""
-    first = _session(test_dsn, f"sit-{uuid.uuid4()}")
-    second = _session(test_dsn, f"sit-{uuid.uuid4()}")
-    _propose(test_dsn, committed_scope, "前の束", "本文", session_id=first)
-    _propose(test_dsn, committed_scope, "後の束", "本文", session_id=second)
+def _place(test_dsn, session_id) -> int:
+    """Where a bundle sits in the list a sitting opens on."""
+    with transaction(test_dsn) as cur:
+        shelf = cli._wanted(
+            cur, proposals.session_queue(cur), SimpleNamespace(bundle=None, all=False)
+        )
+    return [b["session_id"] for b in shelf].index(session_id)
 
-    # approve the first bundle from its contents, then land on a second one
-    code, out = sitting(["a", "q"])
+
+def test_the_list_of_bundles_lets_a_heavy_one_be_passed_over(test_dsn, sitting, committed_scope):
+    """Which bundle is oldest is an accident; the reader's ten minutes are not."""
+    heavy = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    light = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    for title in ("重い 1", "重い 2", "重い 3"):
+        _propose(test_dsn, committed_scope, title, f"{title}の本文", session_id=heavy)
+    _propose(test_dsn, committed_scope, "軽い 1", "本文", session_id=light)
+
+    keys = ["down"] * _place(test_dsn, light) + ["enter", "a", "q"]
+    code, _ = sitting(keys)
     assert code == 0
-    assert out.count("bundle ") >= 2
-    assert "1 approved" in out
+
+    assert _statuses(test_dsn, light) == {"軽い 1": "approved"}
+    assert set(_statuses(test_dsn, heavy).values()) == {"pending"}
+
+
+def test_finishing_a_bundle_comes_back_to_the_list_with_what_it_came_to(
+    test_dsn, sitting, committed_scope
+):
+    """A tally the next screen wipes is a tally nobody reads, so the list carries it."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    _propose(test_dsn, committed_scope, "片付ける分", "本文", session_id=session_id)
+
+    keys = ["down"] * _place(test_dsn, session_id) + ["enter", "a", "q"]
+    code, out = sitting(keys)
+    assert code == 0
+    assert _statuses(test_dsn, session_id) == {"片付ける分": "approved"}
+    assert "1 approved" in out.rsplit("bundle(s) waiting", 1)[-1]
+
+
+def test_a_whole_bundle_can_be_approved_without_opening_it(test_dsn, sitting, committed_scope):
+    """18.1 expects passing the bundle to be the common case, so it costs one key."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    for title in ("まとめて 1", "まとめて 2"):
+        _propose(test_dsn, committed_scope, title, f"{title}の本文", session_id=session_id)
+
+    keys = ["down"] * _place(test_dsn, session_id) + ["a", "q"]
+    code, _ = sitting(keys)
+    assert code == 0
+    assert set(_statuses(test_dsn, session_id).values()) == {"approved"}
