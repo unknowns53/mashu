@@ -268,11 +268,23 @@ def record_dropped(cur: psycopg.Cursor, *, run_id: UUID, dropped: list[Any]) -> 
     The scratch is cleared once extraction succeeds, so unless what was passed
     over is written down here, that claim is not true of the implementation and
     the falsification condition cannot be checked.
+
+    Appended, for the same reason spend accumulates. A long session is read in
+    windows and lands once per window, so an overwrite kept only the last
+    window's passed-over items and erased every window before it. The condition
+    this column exists for would then be checked against a record that is
+    quietly short, which is worse than not keeping one: a falsifier reading it
+    would see fewer misses than there were and conclude the extraction is
+    keeping up.
     """
     if not dropped:
         return
     cur.execute(
-        "UPDATE extraction_run SET dropped = %s WHERE run_id = %s",
+        """
+        UPDATE extraction_run
+        SET dropped = coalesce(dropped, '[]'::jsonb) || %s::jsonb
+        WHERE run_id = %s
+        """,
         (Jsonb(dropped), run_id),
     )
 

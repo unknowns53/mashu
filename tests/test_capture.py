@@ -809,6 +809,27 @@ def test_what_the_extraction_passed_over_is_written_down(cur, tmp_path, queued, 
     assert cur.fetchone()["dropped"][0]["summary"] == "その場の作業状態"
 
 
+def test_what_earlier_windows_passed_over_survives_the_later_ones(cur, tmp_path, queued):
+    """A long session lands once per window, so this column is written repeatedly.
+
+    An overwrite kept only the last window and erased the rest. The falsifier
+    that reads it would then see fewer misses than there were, and read a short
+    record as an extraction that is keeping up.
+    """
+    run = queued(write_claude(tmp_path))
+
+    def land(summary):
+        runs.record_dropped(cur, run_id=run["run_id"], dropped=[{"summary": summary}])
+
+    land("窓 1 で見送ったもの")
+    land("窓 2 で見送ったもの")
+    land("窓 3 で見送ったもの")
+
+    cur.execute("SELECT dropped FROM extraction_run WHERE run_id = %s", (run["run_id"],))
+    kept = [row["summary"] for row in cur.fetchone()["dropped"]]
+    assert kept == ["窓 1 で見送ったもの", "窓 2 で見送ったもの", "窓 3 で見送ったもの"]
+
+
 def test_a_directory_routed_to_no_scope_is_skipped_not_held(cur, tmp_path, queued):
     routing.add(cur, path_prefix="/work/proj", scope_id=None, created_by="user")
     got = worker.process(
