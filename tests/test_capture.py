@@ -67,16 +67,16 @@ def queued(cur, tmp_path):
     return _queued
 
 
-def answer(proposals_=(), retirements=(), confirmations=()):
-    return json.dumps(
-        {
-            "proposals": list(proposals_),
-            "retirements": list(retirements),
-            "confirmations": list(confirmations),
-            "scratch": [],
-        },
-        ensure_ascii=False,
-    )
+def answer(proposals_=(), retirements=(), confirmations=(), state=None):
+    payload = {
+        "proposals": list(proposals_),
+        "retirements": list(retirements),
+        "confirmations": list(confirmations),
+        "scratch": [],
+    }
+    if state is not None:
+        payload["state"] = state
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def a_proposal(**over):
@@ -1653,3 +1653,80 @@ def test_a_task_cannot_be_confirmed_for_later(cur, tmp_path, queued, route):
     assert outcome.confirmations_filed == 0
     assert any("cannot be confirmed for later" in line for line in outcome.refused)
     assert memory_id in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+# --------------------------------------------------------------------------
+# the scope's current state (14, 30.1)
+# --------------------------------------------------------------------------
+def test_the_worker_writes_the_state_the_compartment_was_waiting_for(cur, tmp_path, queued, route):
+    """The shape was designed a version ago and nothing was assigned to fill it.
+
+    Section 14 defines one Version-managed document per scope and 21.2 can push
+    it without a search. The real store held one standing state across eight
+    scopes and 226 adopted memories, because the extraction listed `state` as
+    one of eight types and put the editing duty nowhere.
+    """
+    said = answer(
+        state={"content": "いま採用している版は 3 系。署名まわりは保留。", "evidence": []}
+    )
+    outcome = worker.process(
+        cur, queued(write_claude(tmp_path)), extractor=extract.StubExtractor(said)
+    )
+    assert outcome.state_filed is True
+
+    cur.execute(
+        "SELECT memory_id FROM memory_entity WHERE scope_id = %s AND type = 'state'", (route,)
+    )
+    made = cur.fetchone()
+    assert made is not None
+    entity = store.get_entity(cur, made["memory_id"])
+    assert entity["active_version"] is None, "17 puts state on the candidate line"
+
+
+def test_a_second_state_replaces_the_first_rather_than_standing_beside_it(
+    cur, tmp_path, queued, route
+):
+    """This is the one output that does not grow the store when it lands."""
+    memory_id, _ = store.create_entity(
+        cur,
+        scope_id=route,
+        type=MemoryType.STATE,
+        title="この Scope の現在の状態",
+        content="古い姿。",
+        source_type=SourceType.AGENT,
+        created_by="mashu-worker",
+        actor="mashu-worker",
+        adopt=True,
+    )
+    said = answer(state={"content": "新しい姿。署名は通った。", "evidence": []})
+    outcome = worker.process(
+        cur, queued(write_claude(tmp_path)), extractor=extract.StubExtractor(said)
+    )
+    assert outcome.state_filed is True
+
+    cur.execute(
+        "SELECT count(*) AS n FROM memory_entity WHERE scope_id = %s AND type = 'state'", (route,)
+    )
+    assert cur.fetchone()["n"] == 1, "one scope, one state"
+    entity = store.get_entity(cur, memory_id)
+    assert entity["latest_version"] != entity["active_version"], "the new reading waits for review"
+
+
+def test_a_state_over_the_cap_is_refused_rather_than_trimmed():
+    """Cutting the tail produces a summary that reads whole and is not."""
+    over = {"content": "あ" * (extract.STATE_TOKEN_CAP + 200), "evidence": []}
+    got = extract.parse(answer(state=over))
+    assert got.state is None
+    assert "over a cap" in got.refused[0]
+
+
+def test_no_state_in_the_answer_changes_nothing(cur, tmp_path, queued, route):
+    """Not every session moves the current state, and saying so is not required."""
+    outcome = worker.process(
+        cur, queued(write_claude(tmp_path)), extractor=extract.StubExtractor(answer())
+    )
+    assert outcome.state_filed is False
+    cur.execute(
+        "SELECT count(*) AS n FROM memory_entity WHERE scope_id = %s AND type = 'state'", (route,)
+    )
+    assert cur.fetchone()["n"] == 0

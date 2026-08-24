@@ -136,6 +136,7 @@ shell の alias にしない理由は、alias は対話シェルにしか効か�
 | `mashu deliver <id> <delivery>` | push と pull の間で切り替える |
 | `mashu bootstrap` | セッション開始時に渡す内容と token を表示 |
 | `mashu stale` | 点検期日の来た知識と、採用済みの重複を順に見て、キー 1 打で決める |
+| `mashu guard` | 行為の直前に読ませるものを留める・外す・引く |
 | `mashu incident --cause <cause> --note <note>` | 事故を原因つきで記録。無引数で集計を表示 |
 
 ### Review の進め方
@@ -300,6 +301,41 @@ Agent の確認は Proposal を通らない。version も status も動かず、
 **見送ったものは立ったまま残る。**「見たけれど残す」の記録は持たないので、次も出てくる。それでいい。まだ真であることと、いつまでも真であることは別だから。
 
 `--list` で一覧だけ印字する。端末が無いところでも同じ。
+
+### 行為の前に読ませる
+
+蔵にあって引かれなかった知識は、無い知識と変わらない。実際にそれで事故が起きた——委譲先を選ぶ場面で、正しい規則が採用済みで層1 に類似度 0.847 で返る状態だったのに、常設指示ファイルの既定値だけで決めて誤った宛先へ投げた。`session_bootstrap` は正常に発火していて、Scope 索引にはその語も入っていた。**文脈にあることと、判断の前にあることは違う。**
+
+`mashu guard` は採用済みの Memory を行為の種類に留める。
+
+```bash
+mashu guard delegate --pin 1916b14c
+```
+
+留めたあと、その行為の名前で引くと中身が出て、**終了コード 2 で返る**。
+
+```bash
+mashu guard delegate
+```
+
+`tools/pretooluse_guard.py` を PreToolUse フックに入れると、委譲系のツールが走る直前にこれが呼ばれ、**呼び出しが一度拒否されて**留めた内容が返る。読んだうえで同じ判断をするなら、もう一度呼べば通る。
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Task|mcp__codex-async__codex_start",
+        "hooks": [{"type": "command", "command": "/path/to/mashu/tools/pretooluse_guard.py"}]
+      }
+    ]
+  }
+}
+```
+
+発火は 1 セッションにつき行為ごとに一度。毎回出る門は読まれない門になる。発火はすべて event_log に残るので、頻度が適切かは後から数えられる。
+
+蔵に届かないときは通す。**接続できないことは、いま下そうとしている判断についての証拠ではない。**
 
 ### Review を通さずに書く
 

@@ -51,7 +51,7 @@ from mashu import (
 )
 from mashu.db import transaction
 from mashu.errors import DuplicateProposalError, MashuError
-from mashu.models import EventType, ProposalOperation, SourceType
+from mashu.models import EventType, MemoryType, ProposalOperation, SourceType
 
 #: A session with fewer real user turns than this, nothing in its scratch,
 #: nothing that reads as an instruction to remember, and less than
@@ -185,6 +185,7 @@ class Outcome:
     updates_filed: int = 0
     retirements_filed: int = 0
     confirmations_filed: int = 0
+    state_filed: bool = False
     refused: list[str] = field(default_factory=list)
 
     def line(self) -> str:
@@ -192,6 +193,7 @@ class Outcome:
             f"{self.proposals_filed} new, {self.updates_filed} update(s), "
             f"{self.retirements_filed} retirement(s), "
             f"{self.confirmations_filed} confirmed"
+            f"{', state rewritten' if self.state_filed else ''}"
         )
         return f"{str(self.run_id)[:8]}  {self.state:<9} {counts}  {self.note}".rstrip()
 
@@ -339,6 +341,7 @@ def land(cur: psycopg.Cursor, plan: Plan, answer: str, *, extractor: extract.Ext
     )
     _file_retirements(cur, result, outcome=outcome, session_id=plan.session_id)
     _file_confirmations(cur, result, outcome=outcome)
+    _file_state(cur, result, scope_id=plan.scope_id, outcome=outcome, session_id=plan.session_id)
 
     usage = getattr(extractor, "usage", {}) or {}
     runs.spend(
@@ -956,6 +959,85 @@ def _file_retirements(
             outcome.refused.append(f"{entity['title']}: {failure}")
             continue
         outcome.retirements_filed += 1
+
+
+def _file_state(
+    cur: psycopg.Cursor,
+    result: extract.Extraction,
+    *,
+    scope_id: UUID,
+    outcome: Outcome,
+    session_id: UUID,
+) -> None:
+    """Rewrite the scope's current state, as a proposal like any other (14, 30.1).
+
+    The one output of this module that replaces rather than accumulates. A
+    scope holds one state, so this adds a Version to the entity already there
+    instead of putting a rival beside it, and the store's size does not move
+    when it lands.
+
+    It goes to review because 17 puts state on the candidate line, and that is
+    left alone: what this fixes is that nothing was writing the document, not
+    that a person was in the way. Review is measurably keeping up.
+
+    Nothing is created when the scope has no state yet and the model gave no
+    title, and nothing is written when two exist — that is a merge somebody has
+    to decide, and guessing which one to extend would make the split worse.
+    """
+    draft = result.state
+    if draft is None:
+        return
+    cur.execute(
+        "SELECT memory_id, title, latest_version FROM memory_entity "
+        "WHERE scope_id = %s AND type = 'state' AND status <> 'merged'",
+        (scope_id,),
+    )
+    existing = cur.fetchall()
+    if len(existing) > 1:
+        outcome.refused.append(f"{len(existing)} current states in this scope; merge them first")
+        return
+
+    payload = {
+        "content": draft.content,
+        "source_type": str(SourceType.AGENT),
+        "evidence": [str(m) for m in draft.evidence],
+    }
+    try:
+        if existing:
+            target = existing[0]
+            proposals.propose(
+                cur,
+                actor=WORKER_ACTOR,
+                operation=ProposalOperation.UPDATE_VERSION,
+                payload=payload,
+                target_memory=target["memory_id"],
+                based_on_version=target["latest_version"],
+                session_id=session_id,
+            )
+        else:
+            proposals.propose(
+                cur,
+                actor=WORKER_ACTOR,
+                operation=ProposalOperation.CREATE,
+                payload=dict(
+                    payload,
+                    scope_id=str(scope_id),
+                    type=str(MemoryType.STATE),
+                    title=_STATE_TITLE,
+                ),
+                session_id=session_id,
+                allow_similar=True,
+            )
+    except MashuError as failure:
+        outcome.refused.append(f"state: {failure}")
+        return
+    outcome.state_filed = True
+
+
+#: What a scope's state is called when the worker is the one creating it.
+#: Fixed rather than invented per scope: there is one of these per scope and
+#: it is found by type, so a title that varies is a title nobody can predict.
+_STATE_TITLE = "この Scope の現在の状態"
 
 
 def _file_confirmations(

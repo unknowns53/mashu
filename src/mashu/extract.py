@@ -33,6 +33,7 @@ from uuid import UUID
 from mashu import runs
 from mashu.errors import MashuError
 from mashu.models import MemoryType
+from mashu.retrieval import estimate_tokens
 
 #: Bumped when the prompt or the parsing changes in a way that would make the
 #: same transcript worth reading again. It is part of the ledger's unique key,
@@ -154,6 +155,38 @@ class ConfirmationDraft:
     reason: str
 
 
+#: What a scope's current state may cost, in tokens (14, 30.1).
+#:
+#: A refusal and not a trim. The lesson behind the opening's ceiling was that a
+#: fixed cost paid by every session becomes a function of how much is held, and
+#: the reason a state can escape it is that a state is one document rewritten
+#: rather than a set appended to. That only holds while somebody is made to
+#: choose what stays, which is what a cap is for. Trimming would make the
+#: choice silently and badly.
+STATE_TOKEN_CAP = 700
+
+
+@dataclass
+class StateDraft:
+    """What the scope looks like now, as one document to put in place of the old.
+
+    The compartment this fills was designed a version ago and stayed empty.
+    Section 14 defines a current state as one Version-managed document per
+    scope, 21.2 can push it without a search, and the store held one standing
+    state across eight scopes and two hundred and twenty-six adopted memories.
+    Nothing was wrong with the shape. Nothing was assigned to write it.
+
+    So this is not another kind of Memory. It is the one output here that
+    replaces instead of accumulating, and the volume it takes is volume the
+    individual proposals do not.
+    """
+
+    content: str
+    #: Memory ids the summary rests on. Section 14 lets a state say only what
+    #: its references already say, and without the edges nobody can check that.
+    evidence: list[UUID] = field(default_factory=list)
+
+
 @dataclass
 class RetirementDraft:
     memory_id: UUID
@@ -170,6 +203,7 @@ class Extraction:
     updates: list[UpdateDraft] = field(default_factory=list)
     retirements: list[RetirementDraft] = field(default_factory=list)
     confirmations: list[ConfirmationDraft] = field(default_factory=list)
+    state: StateDraft | None = None
     scratch: list[dict[str, Any]] = field(default_factory=list)
     #: Items the check refused, with the reason. Kept rather than dropped: a
     #: model whose output is quietly discarded looks like a model with nothing
@@ -353,7 +387,37 @@ def parse(raw: str, *, known_ids: set[UUID] | None = None) -> Extraction:
         except ExtractionError as failure:
             out.refused.append(f"confirmation {index}: {failure}")
 
+    if payload.get("state"):
+        try:
+            out.state = _state(payload["state"], known_ids)
+        except ExtractionError as failure:
+            out.refused.append(f"state: {failure}")
+
     return out
+
+
+def _state(item: Any, known_ids: set[UUID] | None) -> StateDraft:
+    """The scope's state as one document, refused rather than trimmed if over.
+
+    Over the cap is a judgement the writer has to make and not one to make for
+    them. Cutting the tail of a summary produces a summary that reads whole and
+    is not, which is worse than being told to choose.
+    """
+    if not isinstance(item, dict):
+        raise ExtractionError("state has to be an object with content")
+    content = _text(item, "content")
+    cost = estimate_tokens(content)
+    if cost > STATE_TOKEN_CAP:
+        raise ExtractionError(f"{cost} token over a cap of {STATE_TOKEN_CAP}; say less")
+    evidence = []
+    for value in _list(item.get("evidence")):
+        try:
+            memory_id = _as_uuid(value)
+        except ExtractionError:
+            continue
+        if known_ids is None or memory_id in known_ids:
+            evidence.append(memory_id)
+    return StateDraft(content=content, evidence=evidence)
 
 
 def _confirmation(item: dict[str, Any], known_ids: set[UUID] | None) -> ConfirmationDraft:
