@@ -350,6 +350,90 @@ def test_scope_detection_reads_what_a_scope_holds_not_what_it_is_called(cur):
     assert "ramp rate" in _titles(got.active)
 
 
+def test_a_scope_holding_only_candidates_is_reachable_without_being_named(cur):
+    """The withdrawal of v0.11, reaching the path that decides where to look.
+
+    A scope whose every memory is still a candidate holds nothing adopted, so
+    it cannot appear in the probe if the probe reads adopted versions only, and
+    it cannot appear among layer 1's rows either. Confining layers 2 and 3 to
+    layer 1's scopes then put review back in front of use: on the real ledger
+    one scope of four was in this state and none of its 37 memories could be
+    retrieved by any query. So the probe reads what the layers hand over, and
+    the fallback stands on the probe rather than on layer 1.
+
+    The scope is deliberately not handed in. Passing scope_id is what the
+    existing coverage does, and it is the one route that never had the problem.
+    """
+    adopted = store.create_scope(cur, name="scope one", actor="user")
+    unreviewed = store.create_scope(cur, name="scope two", actor="user")
+    store.create_entity(
+        cur,
+        scope_id=adopted,
+        type=MemoryType.FACT,
+        title="timeout length",
+        content="the timeout is nine seconds",
+        source_type=SourceType.AGENT,
+        created_by="claude",
+        actor="claude",
+        adopt=True,
+    )
+    for i in range(3):
+        store.create_entity(
+            cur,
+            scope_id=unreviewed,
+            type=MemoryType.FACT,
+            title=f"ramp note {i}",
+            content=f"the ramp is half a degree per minute on run {i}",
+            source_type=SourceType.AGENT,
+            created_by="claude",
+            actor="claude",
+            adopt=False,
+        )
+
+    got = retrieval.retrieve(cur, "the ramp is half a degree per minute", actor="claude")
+    assert got.active == []
+    assert _titles(got.unreviewed)
+    assert all(title.startswith("ramp note") for title in _titles(got.unreviewed))
+    assert unreviewed in got.narrowed_to
+
+
+def test_the_probe_reads_candidates_as_well_as_adopted_versions(cur):
+    """Detection is about what a scope holds, and it holds its candidates too."""
+    from mashu.embed import get_embedder
+
+    quiet = store.create_scope(cur, name="scope one", actor="user")
+    busy = store.create_scope(cur, name="scope two", actor="user")
+    store.create_entity(
+        cur,
+        scope_id=quiet,
+        type=MemoryType.FACT,
+        title="timeout length",
+        content="the timeout is nine seconds",
+        source_type=SourceType.AGENT,
+        created_by="claude",
+        actor="claude",
+        adopt=True,
+    )
+    for i in range(3):
+        store.create_entity(
+            cur,
+            scope_id=busy,
+            type=MemoryType.FACT,
+            title=f"ramp note {i}",
+            content=f"the ramp is half a degree per minute on run {i}",
+            source_type=SourceType.AGENT,
+            created_by="claude",
+            actor="claude",
+            adopt=False,
+        )
+
+    vector = retrieval._as_vector(
+        get_embedder().embed_query("the ramp is half a degree per minute")
+    )
+    reading = retrieval.detect_scopes(cur, vector)
+    assert busy in reading.probed
+
+
 def test_an_undetectable_query_searches_everything_rather_than_guessing(cur, scope_id, author):
     """A wrong single guess hides the answer; a wide search only dilutes it."""
     author("ramp rate", "the ramp is half a degree per minute")
@@ -358,13 +442,15 @@ def test_an_undetectable_query_searches_everything_rather_than_guessing(cur, sco
     assert _titles(got.active) == ["ramp rate"]
 
 
-def test_a_scope_too_small_to_concentrate_declines_rather_than_guesses(cur):
-    """A scope holding almost nothing cannot show concentration, and says so.
+def test_the_only_scope_in_the_ledger_is_never_narrowed_to(cur):
+    """A scope that is the whole store answers no better than its size predicts.
 
-    This is the mechanism declining, not failing. An empty answer means "search
-    everything", which is where a query about a nearly empty scope needed to go
-    in any case. Guessing it instead would narrow layer 1 onto one or two
-    memories and hide the rest of the ledger.
+    Concentration is lift, so a scope holding everything cannot clear it however
+    well it matches, and detection declines. This is the mechanism working: an
+    empty answer means "search everything", which is where a query against a
+    one-scope ledger was going anyway. The ceiling this expresses is 1 / lift —
+    a scope past 83% of the ledger stops being detectable, and narrowing to a
+    scope that large buys nothing.
     """
     small = store.create_scope(cur, name="scope one", actor="user")
     store.create_entity(

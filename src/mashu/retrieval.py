@@ -44,59 +44,72 @@ DEFAULT_LIMIT = 8
 #: Absolute cap on layer 2, in tokens (21.1). Provisional; 27.5 revisits it.
 LAYER2_TOKEN_BUDGET = 1500
 
-#: What scope detection needs, now that it works on held memories rather than
-#: on labels (27.2, 30 段 D).
+#: What scope detection reads, and how it weighs what it reads (27.2, 30 段 D).
 #:
-#: The old mechanism matched the query against each scope's name and one-line
-#: description, and the measurement in 27.2 found it does not work: against the
-#: real ledger every query scored between 0.72 and 0.81 against every scope, and
-#: the ranking was wrong on four of seven queries — a question about delegation
-#: ranked two unrelated scopes above the one holding the delegation rules, and a
-#: question about the weather scored 0.759, inside the range the real matches
-#: occupy. That is a mechanism failing, not a constant needing a nudge: a scope
-#: name is three words, and three words do not carry what a scope is about.
+#: Two decisions, taken from measurement, and they answer different questions.
 #:
-#: What does carry it is what the scope holds. So the query is run against the
-#: memories themselves — the same index layer 1 already ranks well with — and
-#: the scopes those best matches live in are the answer. It becomes a question
-#: about relative order, which the embeddings answer, instead of a question
-#: about an absolute similarity, which they do not.
+#: **What is probed.** The probe covers everything the layers can hand over, so
+#: adopted versions and unreviewed candidates alike. Probing only what has been
+#: adopted puts back, one floor down, the rule v0.11 withdrew: a scope holding
+#: nothing adopted is then invisible to detection, invisible to layer 1, and
+#: therefore absent from the scopes layers 2 and 3 are confined to — its
+#: candidates cannot be reached by any query at all. Measured on the real
+#: ledger, one scope of four was in exactly that state and none of its 37
+#: memories could be retrieved. Review confirms quality; it does not grant use,
+#: and that has to hold in the reading path as well as in the cap.
 #:
-#: The floor stays, in a much smaller role: a query matching nothing anywhere
-#: must not "detect" the scope holding the least unrelated memory. It earns its
-#: place — at 0.78 the weather question concentrates 8 of its 10 hits in one
-#: scope and gets confidently narrowed to it.
+#: **How the probe votes.** A hit's vote decays with how far it sits below the
+#: best hit. A flat floor with one vote per hit counts rank 25 as loudly as
+#: rank 1, which loses whenever a scope holds a lot of near-miss material: the
+#: query about a monologue giving away a key exhibit put its two best matches
+#: in the right scope and then lost to thirteen mid-range matches from another.
 #:
-#: Measured over the same seven queries and the same ledger 27.2 used, at the
-#: floor and lift below: four narrowed to the right scope alone, three detected
-#: nothing and so searched everything. **No query was narrowed to a wrong
-#: scope**, which is the failure that hides an answer outright and the one the
-#: old mechanism made four times out of seven. A tighter floor (0.84) detects
-#: nothing on six of seven; a looser one (0.78) starts narrowing questions that
-#: match nothing — the weather question concentrates 8 of its 10 hits in one
-#: scope at x1.49.
+#: The floor that used to select the votes is now a gate on the best hit alone,
+#: which is the one question an absolute similarity can answer here — did this
+#: query match anything at all. It still earns its place: three of five queries
+#: about subjects the ledger has nothing on are turned away by it.
 #:
-#: Two of the three that decline are right to. One asks about the scope holding
-#: two memories, which cannot show concentration however well it matches. The
-#: other is about a subject the ledger has nothing on: its hits split x0.99 /
-#: x1.08, which is what "no scope answers this better than its size predicts"
-#: looks like. The share-based version this replaced narrowed that one to two
-#: scopes.
-#: Concentration is measured as lift, not as a raw share: what fraction of the
-#: best matches a scope holds, divided by what fraction of the store it holds.
+#: Why an absolute floor cannot do more than that: the embeddings are strongly
+#: anisotropic. The mean of the 242 stored vectors has norm 0.904, so nine
+#: tenths of every unit vector is a direction they all share, and unrelated
+#: documents sit at cosine 0.815 with a spread of 0.032. Every similarity this
+#: model reports is therefore that shared component plus a small residue, and a
+#: cutoff placed inside the residue moves as the ledger grows. It did: the
+#: values 27.2 measured no longer separate the same queries.
 #:
+#: Concentration is measured as lift — the share of the decayed weight a scope
+#: takes, divided by the share of the ledger it holds — and not as a raw share.
 #: A raw share has no size invariance, and capture makes that fatal rather than
-#: theoretical — routes point at the directories actually worked in, so one
-#: scope grows to hold most of the ledger and then wins every query by mass. A
-#: ratio asks the only question worth asking: does this scope answer better
+#: theoretical: routes point at the directories actually worked in, so one
+#: scope grows to hold most of the ledger and then wins every query by mass.
+#: A ratio asks the only question worth asking: does this scope answer better
 #: than its size would predict?
 #:
-#: It degrades the right way at the extreme. A scope holding almost everything
-#: can hardly ever clear the ratio, so it is never "detected" — and narrowing
-#: to a scope that is nearly the whole store buys nothing anyway.
+#: SCOPE_SHARE is what decides, and SCOPE_LIFT is the guard beside it. Requiring
+#: three fifths of the weight means at most one scope is ever detected, which is
+#: the shape the measurement supports; a query genuinely spanning two scopes is
+#: better served by the wide search than by a narrowing that keeps one of them.
+#:
+#: SCOPE_LIFT stays at the value 27.2 measured. It sets the size a scope can
+#: reach before it becomes undetectable — 1 / SCOPE_LIFT of the ledger, so 83%
+#: here — and that ceiling is the mechanism degrading in the right direction:
+#: narrowing to a scope that is nearly the whole store buys nothing. Raising it
+#: to 2.0 scores marginally better on the current queries and moves the ceiling
+#: to 50%, which the largest scope is already within sight of at 42%.
+#:
+#: Measured over 18 queries against the real ledger: 10 narrowed to a right
+#: scope alone — one of them to the second of two, since the ledger holds that
+#: discipline both as a general rule and as a project's instance of it — 3
+#: declined and so searched everything, 5 of 5 queries about subjects the
+#: ledger has nothing on were turned away, and none was narrowed to a wrong
+#: scope. The mechanism this replaces got 5 right and 7 wrong on the same
+#: queries. `mashu admin thresholds` runs the measurement.
 SCOPE_PROBE = 25
-SCOPE_MIN_HITS = 2
 SCOPE_LIFT = 1.2
+SCOPE_SHARE = 0.6
+#: How fast a vote decays below the best hit, in cosine units. Calibrated on
+#: multilingual-e5-large, where the whole probe spans about 0.03.
+SCOPE_DECAY = 0.008
 SCOPE_MATCH_THRESHOLDS = {
     "intfloat/multilingual-e5-large": 0.82,
     "hashing": 0.50,
@@ -156,70 +169,103 @@ class Retrieved:
 # --------------------------------------------------------------------------
 # scope detection
 # --------------------------------------------------------------------------
-_SCOPE_SIZE_SQL = """
+# The set the probe reads: layer 1's rows and layer 2's rows together, which is
+# everything a query can be answered with. The two halves are the WHERE clauses
+# of _LAYER1_SQL and _LAYER2_SQL, held in one place so they cannot drift apart
+# from what the layers actually hand over.
+_HANDED_OVER = """
+    (e.status = 'active' AND v.version_id = e.active_version)
+ OR (e.status IN ('active', 'provisional') AND v.status = 'candidate'
+     AND (e.active_version IS NULL OR e.active_version <> v.version_id))
+"""
+
+_SCOPE_SIZE_SQL = f"""
 SELECT e.scope_id, count(*) AS held
 FROM memory_entity e
-WHERE e.status = 'active' AND e.active_version IS NOT NULL
+JOIN memory_version v ON v.memory_id = e.memory_id
+WHERE ({_HANDED_OVER})
 GROUP BY e.scope_id
 """
 
-_SCOPE_PROBE_SQL = """
+_SCOPE_PROBE_SQL = f"""
 SELECT e.scope_id, 1 - (v.content_embedding <=> %(q)s::vector) AS similarity
 FROM memory_entity e
-JOIN memory_version v ON v.version_id = e.active_version AND v.memory_id = e.memory_id
-WHERE e.status = 'active'
-  AND v.content_embedding IS NOT NULL
+JOIN memory_version v ON v.memory_id = e.memory_id
+WHERE v.content_embedding IS NOT NULL
+  AND ({_HANDED_OVER})
 ORDER BY v.content_embedding <=> %(q)s::vector
 LIMIT %(probe)s
 """
 
 
-def detect_scopes(cur: psycopg.Cursor, query_vector: str) -> list[UUID]:
+@dataclass
+class ScopeReading:
+    """What the probe saw, in the two forms the caller needs.
+
+    Detection is a claim; the probe is an observation. They are returned apart
+    because a query that detects nothing has still been told where its best
+    matches live, and layers 2 and 3 need somewhere to stand that is not "the
+    scopes layer 1 happened to hit" — that set can never contain a scope whose
+    every memory is still a candidate.
+    """
+
+    #: Scopes concentrated enough to narrow to. At most one, by SCOPE_SHARE.
+    detected: list[UUID]
+    #: Scopes the gated probe hits live in, best match first. Empty when the
+    #: query matched nothing anywhere.
+    probed: list[UUID]
+
+
+def detect_scopes(cur: psycopg.Cursor, query_vector: str) -> ScopeReading:
     """Which scopes the query is about, judged by what they hold (21, 27.2).
 
-    The probe is the top few dozen active memories across the whole ledger. A
-    scope is detected when a real share of those best matches live in it: that
-    is a claim about concentration, which survives every similarity in the set
-    sitting inside a tenth of each other, and it is the only thing the
-    measurement showed these embeddings can actually support.
+    The probe is the best few dozen memories across the whole ledger, adopted
+    and unreviewed alike. A scope is detected when it takes most of that
+    probe's weight and takes more of it than its size predicts: a claim about
+    concentration, which survives every similarity in the set sitting inside a
+    tenth of each other, and the only thing the measurement showed these
+    embeddings can support.
 
-    Returning nothing means no scope stood out, and the caller searches
-    everything. That stays the safe direction and stays the default: guessing
-    one scope and being wrong hides the answer completely, while a wider search
-    only costs ranking.
+    Returning nothing detected means no scope stood out, and the caller
+    searches everything. That stays the safe direction and stays the default:
+    guessing one scope and being wrong hides the answer completely, while a
+    wider search only costs ranking.
     """
-    floor = float(
+    gate = float(
         os.environ.get(SCOPE_THRESHOLD_ENV_VAR)
         or SCOPE_MATCH_THRESHOLDS.get(get_embedder().name, SCOPE_MATCH_FALLBACK)
     )
     cur.execute(_SCOPE_PROBE_SQL, {"q": query_vector, "probe": SCOPE_PROBE})
-    hits = [row for row in cur.fetchall() if row["similarity"] >= floor]
-    if len(hits) < SCOPE_MIN_HITS:
-        return []
+    hits = cur.fetchall()
+    if not hits or hits[0]["similarity"] < gate:
+        return ScopeReading(detected=[], probed=[])
+
+    best_overall = hits[0]["similarity"]
+    weight: dict[UUID, float] = {}
+    best: dict[UUID, float] = {}
+    for row in hits:
+        scope, similarity = row["scope_id"], row["similarity"]
+        weight[scope] = weight.get(scope, 0.0) + math.exp(
+            -(best_overall - similarity) / SCOPE_DECAY
+        )
+        best[scope] = max(best.get(scope, 0.0), similarity)
+    probed = sorted(weight, key=lambda s: -best[s])
 
     cur.execute(_SCOPE_SIZE_SQL)
     held = {row["scope_id"]: row["held"] for row in cur.fetchall()}
     total = sum(held.values())
-    if not total:
-        return []
-
-    counts: dict[UUID, int] = {}
-    best: dict[UUID, float] = {}
-    for row in hits:
-        counts[row["scope_id"]] = counts.get(row["scope_id"], 0) + 1
-        best[row["scope_id"]] = max(best.get(row["scope_id"], 0.0), row["similarity"])
+    mass = sum(weight.values())
+    if not total or not mass:
+        return ScopeReading(detected=[], probed=probed)
 
     detected = []
-    for scope, count in counts.items():
-        if count < SCOPE_MIN_HITS:
-            continue
+    for scope, own in weight.items():
+        share = own / mass
         expected = held.get(scope, 0) / total
-        if expected and (count / len(hits)) / expected >= SCOPE_LIFT:
+        if share >= SCOPE_SHARE and expected and share / expected >= SCOPE_LIFT:
             detected.append(scope)
 
-    # Ordered by how well the scope's own best memory answered, so a caller
-    # that takes only the first takes the strongest rather than an arbitrary one.
-    return sorted(detected, key=lambda s: -best[s])
+    return ScopeReading(detected=detected, probed=probed)
 
 
 # --------------------------------------------------------------------------
@@ -355,7 +401,11 @@ def retrieve(
     q = _as_vector(embedder.embed_query(query))
     type_filter = [str(MemoryType(t)) for t in types] if types else None
 
-    scopes = [scope_id] if scope_id is not None else detect_scopes(cur, q)
+    if scope_id is not None:
+        reading = ScopeReading(detected=[scope_id], probed=[scope_id])
+    else:
+        reading = detect_scopes(cur, q)
+    scopes = reading.detected
     params = {
         "q": q,
         "scopes": scopes or None,
@@ -369,17 +419,24 @@ def retrieve(
         if row.get("proposed_status"):
             row["tag"] = RETIREMENT_PROPOSED_TAG
 
-    # Layers 2 and 3 stay inside the scopes layer 1 actually hit. Returning a
+    # Layers 2 and 3 stay inside the scopes the query landed in. Returning a
     # whole scope's retired memories would let layer 3 crowd the context out
     # (21.1, MVP default).
     #
-    # With nothing to narrow by the narrowing does not happen, exactly as when
-    # scope detection comes up empty: an empty scope list means the whole
-    # ledger here, not nothing. Reading it as nothing would silence layer 3 in
-    # the one case where it is the entire answer, which is a scope whose every
-    # memory has been retired. Scenario 1 is that case on day 10, and it only
-    # passed because it hands the scope in.
-    hit_scopes = scopes or sorted({row["scope_id"] for row in active})
+    # When detection declines, that set is where the probe's best matches live
+    # rather than where layer 1's rows live. The two differ in exactly the case
+    # that matters: layer 1 reads adopted versions only, so a scope holding
+    # nothing but candidates can never appear among its rows, and confining
+    # layer 2 to them would hide that scope's candidates from every query — the
+    # rule v0.11 withdrew, reappearing as a side effect of the narrowing.
+    #
+    # Layer 1's scopes remain the last resort, for a query that matched nothing
+    # anywhere and so has no probe to stand on. With nothing to narrow by the
+    # narrowing does not happen: an empty scope list means the whole ledger
+    # here, not nothing. Reading it as nothing would silence layer 3 in the one
+    # case where it is the entire answer, which is a scope whose every memory
+    # has been retired. Scenario 1 is that case on day 10.
+    hit_scopes = scopes or reading.probed or sorted({row["scope_id"] for row in active})
     narrowed = dict(params, scopes=hit_scopes or None)
 
     cur.execute(_LAYER2_SQL, dict(narrowed, limit=LAYER2_ROW_WINDOW))
