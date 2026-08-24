@@ -1049,22 +1049,35 @@ def test_a_repeated_turn_is_paid_for_once(tmp_path):
     assert "別の話" in out
 
 
-def test_a_repeat_is_folded_against_the_session_not_the_window(tmp_path):
+def test_a_repeat_folds_against_what_an_earlier_window_carried(tmp_path):
     """The saving lives across windows, and so must the fold.
 
     Repeats are scattered over an evening rather than bunched, so a fold that
     resets at each window catches almost nothing — measured on a real
-    transcript it was 3% against 47%. The price is that a window may carry a
-    place-holder whose body was in an earlier window; that body was read by the
-    same pipeline, for the same session, into the same scope.
+    transcript it was 3% against 47%.
     """
     long = ("同じ長い報告文 " * 20).strip()
     turns = [_claude(long), *[_claude(f"{n} 番目") for n in range(6)], _claude(long)]
     session = transcript.read(write_claude(tmp_path, turns))
 
-    later = transcript.render(session, session.turns[-1:])
+    later = transcript.render(session, session.turns[-1:], sent=session.sent(1))
     assert long not in later
     assert "## assistant (再掲: " in later
+
+
+def test_a_place_holder_never_stands_for_a_body_nobody_read(tmp_path):
+    """The correctness of folding across windows is that the window really did
+    carry the body. A reading that selects turns here and there carries nothing
+    in particular, so the same fold would leave the extraction a reference to
+    text no call ever saw — and the mark then moves past it for good.
+    """
+    long = ("同じ長い報告文 " * 20).strip()
+    turns = [_claude(long), *[_claude(f"{n} 番目") for n in range(6)], _claude(long)]
+    session = transcript.read(write_claude(tmp_path, turns))
+
+    excerpt = transcript.render(session, session.turns[-1:])
+    assert long in excerpt
+    assert "## assistant (再掲: " not in excerpt
 
 
 def test_a_short_repeat_is_printed_in_full(tmp_path):
@@ -1198,7 +1211,7 @@ def test_a_session_that_flagged_nothing_is_read_from_its_transcript(cur, tmp_pat
 
     assert "11 番目の長い話" in stub.prompts[0]
     assert "00 番目の長い話" in stub.prompts[0]
-    assert "read around" not in outcome.note
+    assert "flag(s)" not in outcome.note
 
 
 def test_a_session_that_flagged_something_is_read_around_its_flags(cur, tmp_path, queued, route):
@@ -1215,7 +1228,7 @@ def test_a_session_that_flagged_something_is_read_around_its_flags(cur, tmp_path
 
     assert "30 番目の長い話" in stub.prompts[0]
     assert "05 番目の長い話" not in stub.prompts[0]
-    assert "read around" in outcome.note
+    assert "around 1 flag(s)" in outcome.note
 
 
 def test_a_marker_alone_does_not_licence_reading_a_fraction(cur, tmp_path, queued, route):
@@ -1261,7 +1274,10 @@ def test_the_ledger_says_which_reading_ran(cur, tmp_path, queued, route):
     )
     detail = cur.fetchone()["detail"]
     assert detail["reading"] == "scratch"
-    assert detail["turns_read"] < detail["turns_unread"]
+    assert detail["turns_sent"] < detail["turns_eligible"]
+    assert detail["turns_dropped"] == detail["turns_eligible"] - detail["turns_sent"]
+    assert detail["scratch_found_by"] == "id"
+    assert detail["final"] is True
 
 
 def test_a_budget_deferral_waits_for_the_budget_and_not_for_a_clock(
@@ -1305,7 +1321,7 @@ def test_scratch_survives_the_session_id_being_rotated(cur, tmp_path, queued, ro
     outcome = worker.process(cur, queued(write_claude(tmp_path, turns)), extractor=stub)
 
     assert "圧縮前に書き留めたこと" in stub.prompts[0]
-    assert "read around" in outcome.note
+    assert "around 1 flag(s)" in outcome.note
 
     cur.execute(
         "SELECT scratch FROM agent_session "
@@ -1334,3 +1350,151 @@ def test_notes_from_another_stretch_of_the_same_directory_are_left_alone(
     assert "先週の話" not in stub.prompts[0]
     cur.execute("SELECT scratch FROM agent_session WHERE external_session_id = 'last-week'")
     assert cur.fetchone()["scratch"] is not None
+
+
+# --------------------------------------------------------------------------
+# what the two readings may assume of each other
+# --------------------------------------------------------------------------
+def test_the_body_behind_a_place_holder_reaches_the_model(cur, tmp_path, queued, route):
+    """Folding is only sound against turns a call actually carried.
+
+    A long text at the start of the evening and again beside a flag: folded
+    against the file, the flagged copy becomes a reference and the original
+    sits in a stretch this reading never opens. The extraction then holds a
+    pointer to text nobody read, and the mark moves past it for good.
+    """
+    long = ("同じ長い報告文 " * 20).strip()
+    turns = [_timed(long, 0)]
+    turns += [_timed(f"{n:02d} 番目の長い話 " + "本文 " * 30, n) for n in range(1, 20)]
+    turns.append(_timed(long, 20))
+    _put_scratch(cur, [_flag(20)])
+
+    stub = extract.StubExtractor(answer())
+    outcome = worker.process(cur, queued(write_claude(tmp_path, turns)), extractor=stub)
+
+    assert "around 1 flag(s)" in outcome.note
+    assert long in stub.prompts[0]
+
+
+def test_a_partly_dated_transcript_still_reads_its_neighbours(cur, tmp_path, queued, route):
+    """The clock places the anchor; the span is cut on the turns.
+
+    A transcript where nothing is dated falls back to reading the log. One
+    where a single turn happens to be dated is the dangerous case: anchored
+    there and cut on the dated turns alone, it reads that one turn and throws
+    the evening away.
+    """
+    turns = [_claude(f"{n:02d} 番目の長い話 " + "本文 " * 30) for n in range(9)]
+    turns[4] = _timed("04 番目の長い話 " + "本文 " * 30, 4)
+    _put_scratch(cur, [_flag(4)])
+
+    stub = extract.StubExtractor(answer())
+    worker.process(cur, queued(write_claude(tmp_path, turns)), extractor=stub)
+
+    assert "02 番目の長い話" in stub.prompts[0]
+    assert "05 番目の長い話" in stub.prompts[0]
+
+
+def test_notes_of_unclear_ownership_do_not_licence_a_partial_read(cur, tmp_path, queued, route):
+    """Two sessions in one directory at once, and no way to tell whose these are.
+
+    Reading everything is wrong only in cost. Reading a fraction on somebody
+    else's flags is wrong in what it keeps, and the rest of this session goes
+    behind the mark for good.
+    """
+    turns = [_timed(f"{n:02d} 番目の長い話 " + "本文 " * 30, n) for n in range(40)]
+    for name in ("session-a", "session-b"):
+        cur.execute(
+            "INSERT INTO agent_session (agent, source_cli, external_session_id, cwd, scratch) "
+            "VALUES ('claude', 'claude', %s, '/work/proj', %s)",
+            (name, json.dumps([_flag(20, f"{name} の note")], ensure_ascii=False)),
+        )
+    stub = extract.StubExtractor(answer())
+    outcome = worker.process(cur, queued(write_claude(tmp_path, turns)), extractor=stub)
+
+    assert "05 番目の長い話" in stub.prompts[0]
+    assert "scratch owner unclear" in outcome.note
+    cur.execute("SELECT scratch FROM agent_session WHERE external_session_id = 'session-a'")
+    assert cur.fetchone()["scratch"] is not None
+
+
+def test_a_session_that_registered_and_wrote_nothing_is_read_in_full(cur, tmp_path, queued, route):
+    """Only the server records a directory, so a row with one is a session that
+    was here and flagged nothing — not an id that went stale."""
+    turns = [_timed(f"{n:02d} 番目の長い話 " + "本文 " * 30, n) for n in range(40)]
+    cur.execute(
+        "INSERT INTO agent_session (agent, source_cli, external_session_id, cwd) "
+        "VALUES ('claude', 'claude', 's-1', '/work/proj')"
+    )
+    cur.execute(
+        "INSERT INTO agent_session (agent, source_cli, external_session_id, cwd, scratch) "
+        "VALUES ('claude', 'claude', 'somebody-else', '/work/proj', %s)",
+        (json.dumps([_flag(20)], ensure_ascii=False),),
+    )
+    stub = extract.StubExtractor(answer())
+    worker.process(cur, queued(write_claude(tmp_path, turns)), extractor=stub)
+
+    assert "05 番目の長い話" in stub.prompts[0]
+
+
+def test_a_note_written_while_the_model_was_thinking_is_not_thrown_away(
+    cur, tmp_path, queued, route
+):
+    """The model call sits between two transactions on purpose (a transaction
+    held across it blocks the session writing its own scratch), so a note can
+    arrive after the snapshot. Emptying the row would lose it unread — the one
+    thing the scratch exists to make impossible.
+    """
+    turns = [_timed(f"{n:02d} 番目の長い話 " + "本文 " * 30, n) for n in range(40)]
+    _put_scratch(cur, [dict(_flag(20), item_id="read-by-this-run")])
+
+    plan = worker.prepare(cur, queued(write_claude(tmp_path, turns)))
+    cur.execute(
+        "UPDATE agent_session SET scratch = scratch || %s::jsonb WHERE external_session_id = 's-1'",
+        (json.dumps([dict(_flag(30, "考えている間に書かれた"), item_id="arrived-later")]),),
+    )
+    worker.land(cur, plan, answer(), extractor=extract.StubExtractor(answer()))
+
+    cur.execute("SELECT scratch FROM agent_session WHERE external_session_id = 's-1'")
+    left = cur.fetchone()["scratch"]
+    assert [item["item_id"] for item in left] == ["arrived-later"]
+
+
+def test_yesterdays_windows_are_not_charged_to_today(cur, tmp_path, queued, route):
+    """A run's total is cumulative and a day's is not.
+
+    Summing the run's column for runs claimed today made a session windowed
+    across midnight pay yesterday's bill again every morning, so one that had
+    spent most of an allowance could never afford another window and deferred
+    itself forever while reporting a budget that was full.
+    """
+    run = queued(write_claude(tmp_path))
+    runs.spend(cur, run_id=run["run_id"], input_tokens=390_000)
+    cur.execute("UPDATE extraction_charge SET charged_at = now() - interval '1 day'")
+    cur.execute("UPDATE extraction_run SET claimed_at = now() WHERE run_id = %s", (run["run_id"],))
+
+    assert runs.spent_today(cur) == 0
+    cur.execute("SELECT input_tokens FROM extraction_run WHERE run_id = %s", (run["run_id"],))
+    assert cur.fetchone()["input_tokens"] == 390_000
+
+
+def test_every_window_leaves_its_own_audit_line(cur, tmp_path, queued, route, monkeypatch):
+    """An event written only at the end keeps the last window's numbers and
+    reports them as the session's. With no threshold to fall back on, the
+    record is the whole of the judgement."""
+    monkeypatch.setattr(worker, "MAX_INPUT_TOKENS", 400)
+    turns = [_timed(f"{n:02d} 番目の長い話 " + "本文 " * 30, n) for n in range(12)]
+    queued(write_claude(tmp_path, turns))
+    for _ in range(4):
+        claimed = runs.claim(cur, limit=1)
+        if not claimed:
+            break
+        worker.process(cur, claimed[0], extractor=extract.StubExtractor(answer()))
+
+    cur.execute(
+        "SELECT detail FROM event_log WHERE event_type = 'extraction_filed' ORDER BY created_at"
+    )
+    lines = [row["detail"] for row in cur.fetchall()]
+    assert len(lines) > 1
+    assert [line["final"] for line in lines] == [False] * (len(lines) - 1) + [True]
+    assert all(line["turns_dropped"] == 0 for line in lines)

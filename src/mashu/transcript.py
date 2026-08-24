@@ -20,13 +20,15 @@ place-holder that keeps its position, its role and a few characters of what it
 was, which leaves the order and the frequency intact and pays for the body
 once.
 
-Folding is decided over the whole session rather than over the window being
-sent, and that is the only place this costs anything. A window may show a
-place-holder whose body was in an earlier window, which this call did not read.
-It is a small price for a large one: folded per window the saving was 3%,
-because the repeats are scattered across the evening rather than bunched, and
-folded per session it is 47%. What the later call loses is text the same
-pipeline already read, from the same session, into the same scope.
+Folding is decided against what has actually been sent to a model, not against
+what is earlier in the file, and the difference is the whole correctness of it.
+Sequential windows may fold across each other, because window one really did
+carry the bodies window two refers back to, and that is where the saving lives:
+folded inside one window it was 3%, because the repeats are scattered across an
+evening rather than bunched, and folded across the windows of a session it is
+47%. A reading that skips about the file may not, because the first occurrence
+of a text may sit in a stretch no call ever saw — a place-holder standing for a
+body nobody read is worse than the duplicate it saved.
 
 And it grows. A session that is extracted twice would pay for its first half
 again, every time, so every turn carries the ordinal of the record it came from
@@ -84,23 +86,18 @@ class Session:
     title: str | None = None
     records: int = 0
     turns: list[Turn] = field(default_factory=list)
-    _blocks: dict[int, str] | None = field(default=None, repr=False, compare=False)
 
-    def blocks(self) -> dict[int, str]:
-        """The rendered block for every turn, by ordinal, repeats folded.
+    def sent(self, checkpoint: int | None) -> list[str]:
+        """The texts of the turns an earlier call carried, for folding against.
 
-        Built over the whole session and then looked up, so a window shows a
-        turn in full only if nothing earlier in the session already said it —
-        including the parts read by an earlier call. Cached because both the
-        caller that prices a window and the one that renders it need the same
-        answer, and rebuilding it per window would make the fold depend on
-        where the window happened to start.
+        Only meaningful for a reading that took its windows from the front:
+        those cover every turn up to the mark, so a repeat after it really was
+        shown. A reading that selected turns here and there covers nothing in
+        particular, and the caller passes nothing.
         """
-        if self._blocks is None:
-            self._blocks = dict(
-                zip((t.ordinal for t in self.turns), chunks(self.turns), strict=True)
-            )
-        return self._blocks
+        if not checkpoint:
+            return []
+        return [turn.text for turn in self.turns if turn.ordinal <= checkpoint]
 
     def since(self, checkpoint: int | None) -> list[Turn]:
         """The turns that arrived after the last successful extraction."""
@@ -324,9 +321,15 @@ def around(turns: list[Turn], moments: list[datetime], *, before: int, after: in
     makes reading a fraction of a session defensible: the fraction is the one
     the session itself pointed at.
 
-    Returns nothing when the transcript carries no clock, which is the case
-    that has to fall back to reading the log rather than quietly reading a
-    tenth of it.
+    The clock places the anchor and nothing else. The span around it is cut on
+    the turns themselves, including the ones the CLI gave no timestamp: a
+    transcript where every turn is undated falls back to reading the log, but
+    one where a single turn happens to be dated would otherwise anchor there
+    and drop every neighbour it has — the worst of the two, arrived at by the
+    partial case rather than the missing one.
+
+    Returns nothing when the transcript carries no clock at all, which is the
+    case that has to fall back rather than quietly read a tenth of it.
     """
     placed = [(turn.at, index) for index, turn in enumerate(turns) if turn.at is not None]
     if not placed or not moments:
@@ -337,23 +340,25 @@ def around(turns: list[Turn], moments: list[datetime], *, before: int, after: in
     for moment in moments:
         # The last turn at or before the moment: a note is written after the
         # thing it is about, so the span that matters is mostly behind it.
-        at = bisect_right(clock, moment) - 1
-        if at < 0:
-            at = 0
-        low = max(0, at - before + 1)
-        high = min(len(placed) - 1, at + after)
-        keep.update(index for _, index in placed[low : high + 1])
+        found = bisect_right(clock, moment) - 1
+        at = placed[found][1] if found >= 0 else 0
+        keep.update(range(max(0, at - before + 1), min(len(turns), at + after + 1)))
     return [turns[index] for index in sorted(keep)]
 
 
-def chunks(turns: list[Turn]) -> list[str]:
+def chunks(turns: list[Turn], *, sent: list[str] | None = None) -> list[str]:
     """One rendered block per turn, with repeats folded to a place-holder.
 
+    sent is what an earlier call already carried; a text in it may be folded
+    here because the body has been seen. Everything else folds only against
+    what precedes it inside this selection, which is what stops a place-holder
+    from standing for a body no call ever read.
+
     Reading forwards, so the first occurrence of a text is decided by what
-    precedes it and nothing later can change an earlier block. Session.blocks
-    is what callers want; this is the pass it is built from.
+    precedes it and nothing later can change an earlier block. A prefix of
+    these turns therefore yields a prefix of these blocks.
     """
-    seen: set[str] = set()
+    seen: set[str] = set(sent or ())
     out: list[str] = []
     for turn in turns:
         if len(turn.text) >= FOLD_MIN_CHARS and turn.text in seen:
@@ -364,10 +369,11 @@ def chunks(turns: list[Turn]) -> list[str]:
     return out
 
 
-def render(session: Session, turns: list[Turn] | None = None) -> str:
+def render(
+    session: Session, turns: list[Turn] | None = None, *, sent: list[str] | None = None
+) -> str:
     """The condensed log the extraction reads."""
     turns = session.turns if turns is None else turns
-    blocks = session.blocks()
     header = [
         f"# session {session.external_id or session.path.stem}",
         "",
@@ -375,6 +381,6 @@ def render(session: Session, turns: list[Turn] | None = None) -> str:
         f"- title: {session.title or '(none recorded)'}",
         f"- turns kept: {len(turns)}",
         "- このセッションで既に出た内容は「(再掲: …)」に畳んである。順序と回数はそのまま。",
-        "- 畳まれた本文がこの抜粋の外にあることもある。その場合も既に読まれている。",
+        "- 畳まれた本文が前の窓にあることもある。その窓はこの抽出が既に読んでいる。",
     ]
-    return "\n".join(header) + "\n" + "\n".join(blocks[t.ordinal] for t in turns) + "\n"
+    return "\n".join(header) + "\n" + "\n".join(chunks(turns, sent=sent)) + "\n"

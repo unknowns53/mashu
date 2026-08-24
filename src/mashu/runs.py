@@ -256,12 +256,20 @@ def spend(
     input_tokens: int,
     output_tokens: int | None = None,
 ) -> None:
-    """Add one model call's cost to the run, as it happens.
+    """Add one model call's cost, to the run and to the moment it happened.
 
-    Recorded per call, not per run. A session read in a dozen windows would
-    otherwise contribute nothing to the day's total until the last one landed,
-    so the budget could not bind on the one workload it exists to bound.
+    Both, because they answer different questions. The run's total is what a
+    session cost; the charge row is what a day cost, and summing the first to
+    answer the second is how a windowed run came to pay yesterday's bill again
+    every morning (0021).
     """
+    cur.execute(
+        """
+        INSERT INTO extraction_charge (run_id, input_tokens, output_tokens)
+        VALUES (%s, %s, %s)
+        """,
+        (run_id, input_tokens, output_tokens),
+    )
     cur.execute(
         """
         UPDATE extraction_run
@@ -301,6 +309,16 @@ def record_dropped(cur: psycopg.Cursor, *, run_id: UUID, dropped: list[Any]) -> 
     )
 
 
+def set_reading(cur: psycopg.Cursor, *, run_id: UUID, reading: str) -> None:
+    """Which reading this run is using, kept between passes.
+
+    Not a statistic. The next window is allowed to fold a repeat against what an
+    earlier one carried only if the earlier one took its turns from the front,
+    so the next pass has to be able to find out what the last one did.
+    """
+    cur.execute("UPDATE extraction_run SET reading = %s WHERE run_id = %s", (reading, run_id))
+
+
 def advance(cur: psycopg.Cursor, *, run_id: UUID, checkpoint: int) -> None:
     """Move the mark without finishing the run (16.3).
 
@@ -333,15 +351,17 @@ def checkpoint_for(cur: psycopg.Cursor, *, source_cli: str, external_session_id:
 def spent_today(cur: psycopg.Cursor) -> int:
     """Input tokens capture has already spent since midnight (16.3).
 
-    Counted from when a run was claimed, not from when it finished. A run still
-    working through its windows has already spent what it has spent, and a
-    budget that only sees finished work is blind for exactly as long as the
-    expensive runs take.
+    Summed over calls, each stamped when it was made. A run still working
+    through its windows has therefore already contributed what it has already
+    spent, without contributing it a second time tomorrow: the run's own total
+    is cumulative, so a session windowed across midnight used to have every
+    earlier day's spending counted again as today's, and one that had spent
+    most of an allowance could never afford another window again (0021).
     """
     cur.execute(
         """
-        SELECT coalesce(sum(input_tokens), 0) AS spent FROM extraction_run
-        WHERE coalesce(completed_at, claimed_at, created_at) >= date_trunc('day', now())
+        SELECT coalesce(sum(input_tokens), 0) AS spent FROM extraction_charge
+        WHERE charged_at >= date_trunc('day', now())
         """
     )
     return int(cur.fetchone()["spent"])

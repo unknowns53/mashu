@@ -28,6 +28,7 @@ stops the run and says so.
 
 from __future__ import annotations
 
+import json
 import pathlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -145,10 +146,12 @@ class Plan:
     active_ids: set[UUID]
     prompt: str
     estimated: int
-    #: Which of the two readings this is, and how much of what was unread it
-    #: covered. Recorded rather than judged: whether reading a fraction costs
-    #: recall is a question for 27.4, and it cannot be asked of runs that did
-    #: not say which they were.
+    #: Which of the two readings this is, how many turns it sends, and how many
+    #: were on offer. Recorded rather than judged: whether reading a fraction
+    #: costs recall is a question for 27.4, and it cannot be asked of runs that
+    #: did not say which they were. unread is the count this pass could have
+    #: taken, not the count it left behind — what it leaves behind is only
+    #: settled when the run stops coming back.
     mode: str = "log"
     covered: int = 0
     unread: int = 0
@@ -157,6 +160,17 @@ class Plan:
     #: and a place match means it did and the fallback carried the run.
     scratch_from: list = field(default_factory=list)
     found_by: str = "none"
+    #: The items this call actually read. Only these are cleared on success:
+    #: the model call happens between transactions, so a note put down while it
+    #: was thinking has not been read by anybody, and emptying the row would
+    #: throw it away unseen.
+    scratch_read: list = field(default_factory=list)
+    #: What an earlier window already carried, for folding against. Empty
+    #: unless every earlier pass took its turns from the front.
+    sent: list = field(default_factory=list)
+    #: How many of the turns on offer carried a clock. A transcript where only
+    #: a few do is the case that reads a sliver and calls it a session.
+    timed: int = 0
 
 
 @dataclass
@@ -216,7 +230,10 @@ def prepare(cur: psycopg.Cursor, run: dict[str, Any], *, dry_run: bool = False) 
         return _skip(cur, run_id, f"nothing new since turn {checkpoint}")
 
     scratch_items, scratch_from, found_by = _scratch(cur, run, session)
-    turns, more, mode = _reading(session, remaining, scratch_items)
+    # Only a reading that took its windows from the front covers everything up
+    # to the mark, so only that one may fold a repeat against what it carried.
+    sent = session.sent(checkpoint) if run.get("reading") != "scratch" else []
+    turns, more, mode = _reading(session, remaining, scratch_items, sent)
 
     # Only on the first pass. A session already judged worth reading must not
     # be abandoned half way through because its second window happens to be
@@ -227,7 +244,8 @@ def prepare(cur: psycopg.Cursor, run: dict[str, Any], *, dry_run: bool = False) 
             return _skip(cur, run_id, reason)
 
     internal = _session(cur, run)
-    log = transcript.render(session, turns)
+    runs.set_reading(cur, run_id=run_id, reading=mode)
+    log = transcript.render(session, turns, sent=sent)
     active = retrieval.active_set(cur, scope_id=scope_id)
     prompt = extract.build_prompt(log=log, scratch=scratch_items, active=active)
     estimated = retrieval.estimate_tokens(prompt)
@@ -263,6 +281,9 @@ def prepare(cur: psycopg.Cursor, run: dict[str, Any], *, dry_run: bool = False) 
         unread=len(remaining),
         scratch_from=scratch_from,
         found_by=found_by,
+        scratch_read=scratch_items,
+        sent=sent,
+        timed=sum(1 for turn in remaining if turn.at is not None),
     )
 
 
@@ -308,11 +329,12 @@ def land(cur: psycopg.Cursor, plan: Plan, answer: str, *, extractor: extract.Ext
             until_hours=0,
             note=f"{_note(outcome, result, plan)}; read to turn {read_to}, more to come",
         )
+        _record_pass(cur, plan, outcome, result, final=False)
         outcome.state = "windowed"
         outcome.note = f"{_note(outcome, result, plan)}; read to turn {read_to} of {plan.records}"
         return outcome
 
-    _clear_scratch(cur, plan.scratch_from)
+    _clear_scratch(cur, plan.scratch_from, plan.scratch_read)
     runs.succeeded(
         cur,
         run_id=run_id,
@@ -320,25 +342,54 @@ def land(cur: psycopg.Cursor, plan: Plan, answer: str, *, extractor: extract.Ext
         note=_note(outcome, result, plan),
         checkpoint=plan.records,
     )
+    _record_pass(cur, plan, outcome, result, final=True)
+    outcome.note = _note(outcome, result, plan)
+    return outcome
+
+
+def _record_pass(
+    cur: psycopg.Cursor,
+    plan: Plan,
+    outcome: Outcome,
+    result: extract.Extraction,
+    *,
+    final: bool,
+) -> None:
+    """What this pass filed and what it read, once per model call.
+
+    Once per call rather than once per run, because a run is several calls and
+    an event written only at the end keeps the last window's numbers and
+    reports them as the session's. The policy here is to set no threshold and
+    judge from the record instead (16.3), which puts the whole weight of that
+    decision on the record being right.
+
+    turns_dropped is the number this reading will never come back for, and it
+    is only ever non-zero on the last pass of a selective one: a window that
+    has more to come is not dropping what it did not take, and a reading from
+    the front comes back for all of it.
+    """
+    dropped = plan.unread - plan.covered if final and plan.mode == "scratch" else 0
     events.record(
         cur,
         EventType.EXTRACTION_FILED,
         WORKER_ACTOR,
         detail={
-            "extraction": str(run_id),
+            "extraction": str(plan.run["run_id"]),
             "scope_id": str(plan.scope_id),
             "proposals": outcome.proposals_filed,
             "updates": outcome.updates_filed,
             "retirements": outcome.retirements_filed,
             "refused": len(result.refused),
+            "final": final,
             "reading": plan.mode,
-            "turns_read": plan.covered,
-            "turns_unread": plan.unread,
+            "turns_sent": plan.covered,
+            "turns_eligible": plan.unread,
+            "turns_dropped": dropped,
+            "turns_timed": plan.timed,
+            "scratch_items": len(plan.scratch_read),
             "scratch_found_by": plan.found_by,
         },
     )
-    outcome.note = _note(outcome, result, plan)
-    return outcome
 
 
 def process(
@@ -359,7 +410,9 @@ def process(
     return land(cur, plan, extractor.run(plan.prompt), extractor=extractor)
 
 
-def _reading(session, turns: list, scratch_items: list[dict[str, Any]]) -> tuple[list, bool, str]:
+def _reading(
+    session, turns: list, scratch_items: list[dict[str, Any]], sent: list[str] | None = None
+) -> tuple[list, bool, str]:
     """Which turns this call reads, and under which of the two contracts (16.3).
 
     Section 16.3 named scratch the first input and the log the fallback, and
@@ -382,9 +435,13 @@ def _reading(session, turns: list, scratch_items: list[dict[str, Any]]) -> tuple
     """
     marked = _flagged(turns, scratch_items)
     if marked:
-        chosen, more = _window(session, marked)
+        # Nothing carried across: a selection that skips about the file may hold
+        # the second copy of a text whose first copy is in a stretch no call
+        # ever saw, and a place-holder standing for a body nobody read is worse
+        # than the duplicate it saved.
+        chosen, more = _window(marked, sent=None)
         return chosen, more, "scratch"
-    return (*_window(session, turns), "log")
+    return (*_window(turns, sent=sent), "log")
 
 
 def _flagged(turns: list, scratch_items: list[dict[str, Any]]) -> list:
@@ -425,7 +482,7 @@ def _moment(raw: Any) -> datetime | None:
     return moment if moment.tzinfo else moment.astimezone()
 
 
-def _window(session, turns: list) -> tuple[list, bool]:
+def _window(turns: list, *, sent: list[str] | None = None) -> tuple[list, bool]:
     """As many turns from the front as one call may hold, and whether more remain.
 
     From the front, not the back. Reading only the tail would be cheaper and
@@ -437,10 +494,9 @@ def _window(session, turns: list) -> tuple[list, bool]:
     budget with text nobody sends and split the session into twice the calls.
     """
     budget = MAX_INPUT_TOKENS
-    blocks = session.blocks()
     taken: list = []
-    for turn in turns:
-        cost = retrieval.estimate_tokens(blocks[turn.ordinal])
+    for turn, block in zip(turns, transcript.chunks(turns, sent=sent), strict=True):
+        cost = retrieval.estimate_tokens(block)
         if taken and budget - cost < 0:
             return taken, True
         budget -= cost
@@ -533,15 +589,20 @@ def _scratch(cur: psycopg.Cursor, run: dict[str, Any], session) -> tuple[list, l
     session in silence.
     """
     cur.execute(
-        "SELECT session_id, scratch FROM agent_session "
+        "SELECT session_id, scratch, cwd FROM agent_session "
         "WHERE source_cli = %s AND external_session_id = %s",
         (run["source_cli"], run["external_session_id"]),
     )
     row = cur.fetchone()
     if row and row["scratch"]:
         return row["scratch"], [row["session_id"]], "id"
+    if row and row["cwd"]:
+        # The server was here under this id and the session put nothing down.
+        # Only a row it opened carries a directory; the one this worker makes
+        # for its own bookkeeping does not, which is what tells them apart.
+        return [], [], "none"
 
-    cwd = run.get("cwd") or session.cwd
+    cwd = _place(run.get("cwd") or session.cwd)
     moments = [turn.at for turn in session.turns if turn.at]
     if not cwd or not moments:
         return [], [], "none"
@@ -549,11 +610,10 @@ def _scratch(cur: psycopg.Cursor, run: dict[str, Any], session) -> tuple[list, l
 
     cur.execute(
         "SELECT session_id, scratch FROM agent_session "
-        "WHERE cwd = %s AND coalesce(jsonb_array_length(scratch), 0) > 0",
-        (cwd,),
+        "WHERE cwd = %s AND source_cli = %s AND coalesce(jsonb_array_length(scratch), 0) > 0",
+        (cwd, run["source_cli"]),
     )
-    items: list = []
-    sources: list = []
+    contributors = []
     for other in cur.fetchall():
         within = [
             item
@@ -561,23 +621,62 @@ def _scratch(cur: psycopg.Cursor, run: dict[str, Any], session) -> tuple[list, l
             if (at := _moment(item.get("created_at"))) is not None and first <= at <= last
         ]
         if within:
-            items += within
-            sources.append(other["session_id"])
-    return items, sources, ("place" if items else "none")
+            contributors.append((other["session_id"], within))
+
+    if not contributors:
+        return [], [], "none"
+    if len(contributors) > 1:
+        # Two sessions worked here at once and there is no way to tell whose
+        # notes these are. Reading everything is the wrong answer only in cost;
+        # reading a fraction on somebody else's flags is wrong in what it keeps,
+        # and it throws the rest of this session away for good.
+        return [], [], "ambiguous"
+    session_id, items = contributors[0]
+    return items, [session_id], "place"
 
 
-def _clear_scratch(cur: psycopg.Cursor, session_ids: list) -> None:
+def _clear_scratch(cur: psycopg.Cursor, session_ids: list, read: list) -> None:
     """Only after the extraction succeeded (25.1); the retry needs its input.
 
-    Clears the rows the notes actually came from rather than the row this
-    transcript's id names, because after a compaction those are not the same
-    row and clearing the wrong one leaves the notes to be read again forever.
+    The rows the notes actually came from, because after a compaction that is
+    not the row this transcript's id names, and clearing the wrong one leaves
+    the notes to be read again every night.
+
+    And only the items that were read. The model call happens between
+    transactions — deliberately, because a transaction held open across it
+    blocks the very session that is writing — so a note put down while it was
+    thinking arrived after the snapshot and has been read by nobody. Emptying
+    the row would throw it away unseen, which is the one thing the scratch is
+    supposed to make impossible.
     """
     if not session_ids:
         return
-    cur.execute(
-        "UPDATE agent_session SET scratch = NULL WHERE session_id = ANY(%s)", (session_ids,)
-    )
+    consumed = {_item_key(item) for item in read}
+    for session_id in session_ids:
+        cur.execute(
+            "SELECT scratch FROM agent_session WHERE session_id = %s FOR UPDATE", (session_id,)
+        )
+        row = cur.fetchone()
+        left = [
+            item for item in (row or {}).get("scratch") or [] if _item_key(item) not in consumed
+        ]
+        cur.execute(
+            "UPDATE agent_session SET scratch = %s::jsonb WHERE session_id = %s",
+            (json.dumps(left, ensure_ascii=False) if left else None, session_id),
+        )
+
+
+def _item_key(item: dict[str, Any]) -> str:
+    """What identifies one scratch item. The id when there is one, the whole of
+    it when there is not, so an item written before ids existed is still
+    matched rather than silently kept or silently dropped."""
+    return str(item.get("item_id") or json.dumps(item, sort_keys=True, ensure_ascii=False))
+
+
+def _place(cwd: str | None) -> str | None:
+    """One spelling of a directory. A trailing slash or a symlink is the same
+    place and would otherwise be a different key."""
+    return str(pathlib.Path(cwd).resolve()) if cwd else None
 
 
 # --------------------------------------------------------------------------
@@ -851,7 +950,9 @@ def _stale_rejection(clash: DuplicateProposalError) -> dict[str, Any] | None:
 def _note(outcome: Outcome, result: extract.Extraction, plan: Plan | None = None) -> str:
     parts = []
     if plan is not None and plan.mode == "scratch":
-        parts.append(f"read around {plan.covered} of {plan.unread} flagged turn(s)")
+        parts.append(f"read {plan.covered} turn(s) around {len(plan.scratch_read)} flag(s)")
+    if plan is not None and plan.found_by == "ambiguous":
+        parts.append("scratch owner unclear, read in full")
     parts += [
         f"{outcome.proposals_filed}/{len(result.proposals)} proposals",
         f"{outcome.updates_filed}/{len(result.updates)} updates",
