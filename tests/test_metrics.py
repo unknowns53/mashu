@@ -305,3 +305,67 @@ def test_what_is_no_longer_standing_is_not_swept_again(cur, scope_id):
     )
 
     assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def test_something_read_and_left_standing_stops_coming_back_for_a_while(cur, scope_id):
+    """Without this the only key that dismisses anything is a retirement.
+
+    A screen whose only way to say "not this one" is to retire it collects
+    retirements that were meant as dismissals, and a later session is handed
+    those as readings of the knowledge.
+    """
+    from datetime import datetime, timedelta
+
+    memory_id = _standing(cur, scope_id, type=MemoryType.TASK, title="まだ続いている作業")
+    assert memory_id in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+    store.confirm_standing(
+        cur,
+        memory_id=memory_id,
+        version_id=store.get_entity(cur, memory_id)["active_version"],
+        until=datetime.now().astimezone() + timedelta(days=30),
+        actor="user",
+    )
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def test_a_confirmation_that_has_run_out_puts_it_back(cur, scope_id):
+    from datetime import datetime, timedelta
+
+    memory_id = _standing(cur, scope_id, type=MemoryType.TASK, title="また見る時期の来た作業")
+    store.confirm_standing(
+        cur,
+        memory_id=memory_id,
+        version_id=store.get_entity(cur, memory_id)["active_version"],
+        until=datetime.now().astimezone() - timedelta(days=1),
+        actor="user",
+    )
+    assert memory_id in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def test_rewriting_the_memory_ends_the_confirmation(cur, scope_id):
+    """What was confirmed is the text that was read, not the entity for ever."""
+    from datetime import datetime, timedelta
+
+    memory_id = _standing(cur, scope_id, type=MemoryType.TASK, title="書き直される作業")
+    store.confirm_standing(
+        cur,
+        memory_id=memory_id,
+        version_id=store.get_entity(cur, memory_id)["active_version"],
+        until=datetime.now().astimezone() + timedelta(days=30),
+        actor="user",
+    )
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+    store.add_version(
+        cur,
+        memory_id=memory_id,
+        content="事情が変わって、別のことをする作業になった。",
+        source_type=SourceType.USER,
+        created_by="user",
+        actor="user",
+        based_on_version=store.get_entity(cur, memory_id)["latest_version"],
+        adopt=True,
+    )
+
+    assert memory_id in [row["memory_id"] for row in metrics.rot_prone(cur)]

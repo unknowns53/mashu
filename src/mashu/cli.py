@@ -1369,13 +1369,16 @@ def _print_stale(found: list[dict]) -> None:
 #: status and the reason and never the content — so the reason typed here is
 #: the whole of what a later reader gets. Both are absorbing (12): the way back
 #: is to write the thing again as a new version, not to undo this.
-_SWEEP_LIST_KEYS = "  ↑↓ move   ⏎ open it   c it is done   d not in use   x it was wrong   q leave"
+_SWEEP_LIST_KEYS = (
+    "  ↑↓ move   ⏎ open it   s still true, ask later   "
+    "c it is done   d shelve it   x it was wrong   q leave"
+)
 _SWEEP_ITEM_KEYS = (
-    "  c it is done, and worth finding as a record    ↑↓ another one   ← the list\n"
-    "  d not in use now, and might be again           space read on    b top\n"
-    "  x it was wrong; do not derive it again         q leave\n"
-    "  d and x withhold the content and are one way. "
-    "what you leave alone keeps standing"
+    "  s still true — ask about it again later        ↑↓ another one   ← the list\n"
+    "  c it is done, and worth finding as a record    space read on    b top\n"
+    "  d shelve it: stop answering, keep the title    q leave\n"
+    "  x it was wrong; do not derive it again\n"
+    "  c keeps answering. d and x withhold the content and cannot be undone"
 )
 
 _RETIRING = {
@@ -1389,7 +1392,19 @@ _RETIRING = {
         "what makes it wrong? (this is handed back so nobody derives it again) ",
     ),
 }
-_SWEPT = {"completed": "retired", "dormant": "set aside", "disproven": "disproven"}
+_SWEPT = {"completed": "retired", "dormant": "shelved", "disproven": "disproven"}
+
+#: How long before a memory left standing comes up again, when nobody says.
+#: Long enough that a sweep is not the same list next week, short enough that a
+#: task finished in the meantime does not sit there for a season.
+ASK_AGAIN_DEFAULT = "30d"
+
+_SWEEP_MARK = {
+    "retired": "✓",
+    "shelved": "·",
+    "disproven": "✗",
+    "left standing": "→",
+}
 
 
 def _sweep(args, found: list[dict]) -> int:
@@ -1407,7 +1422,7 @@ def _sweep(args, found: list[dict]) -> int:
         else:
             _screen(_stale_list(found, at, done) + _said(note))
         key = _getkey()
-        if key not in _RETIRING:
+        if key not in _RETIRING and key != "s":
             note = ""
 
         if key in ("space", "pagedown", "right") and reading:
@@ -1443,10 +1458,13 @@ def _sweep(args, found: list[dict]) -> int:
         if reading and key in ("left", "l"):
             reading = False
             continue
-        if key not in _RETIRING:
+        if key not in _RETIRING and key != "s":
             continue
 
-        note = _retire_one(args, found[at], done, at, key)
+        if key == "s":
+            note = _leave_standing(args, found[at], done, at)
+        else:
+            note = _retire_one(args, found[at], done, at, key)
         if note or at + 1 >= len(found):
             continue
         at += 1
@@ -1454,6 +1472,36 @@ def _sweep(args, found: list[dict]) -> int:
 
     print(_swept(done, len(found)))
     return 0
+
+
+def _leave_standing(args, row, done: dict, number: int) -> str:
+    """Say this is still true, and when to be asked about it again.
+
+    The key the sweep was missing. Without it the only way to stop something
+    coming back is to retire it, and a screen whose only dismissal is a
+    retirement collects retirements that were meant as dismissals — which is
+    the reading a later session then gets handed.
+
+    Nothing about the knowledge changes. What is recorded is that a person read
+    it on a day and left it standing, which is a fact about the reading.
+    """
+    if number in done:
+        return f"  already {done[number]} in this sitting"
+    answer = _typed(f"  ask again when? (blank for {ASK_AGAIN_DEFAULT}) ") or ASK_AGAIN_DEFAULT
+    try:
+        until = _when(answer)
+    except SystemExit as unreadable:
+        return f"  {unreadable}"
+    with transaction(args.dsn) as cur:
+        store.confirm_standing(
+            cur,
+            memory_id=row["memory_id"],
+            version_id=row["version_id"],
+            until=until,
+            actor=args.actor,
+        )
+    done[number] = "left standing"
+    return ""
 
 
 def _retire_one(args, row, done: dict, number: int, key: str) -> str:
@@ -1494,7 +1542,7 @@ def _stale_list(found: list[dict], at: int, done: dict) -> str:
     width = _width()
     rows = []
     for number, row in enumerate(found):
-        mark = "✓" if number in done else " "
+        mark = _SWEEP_MARK.get(done.get(number), " ")
         line = _clip(
             f" {mark} {number + 1:>3}  {_pad(row['scope_name'], 12)} "
             f"{row['type']:<12} {row['title']}",
@@ -1533,13 +1581,13 @@ def _stale_page(row: dict, number: int, of: int) -> str:
 def _swept(done: dict, count: int) -> str:
     """What the sweep came to."""
     if not done:
-        return f"\nnothing retired; all {count} keep standing"
+        return f"\nnothing decided; all {count} keep standing"
     parts = []
-    for word in ("retired", "set aside", "disproven"):
+    for word in ("retired", "shelved", "disproven", "left standing"):
         many = sum(1 for value in done.values() if value == word)
         if many:
             parts.append(f"{many} {word}")
-    return "\n" + ", ".join(parts) + f"; {count - len(done)} left standing"
+    return "\n" + ", ".join(parts) + f"; {count - len(done)} not looked at"
 
 
 def _span(seconds: float | None) -> str:

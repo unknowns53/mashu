@@ -171,6 +171,7 @@ class EventType(StrEnum):
     TRIAL_CLOSED = "trial_closed"
     VERSION_CREATED = "version_created"
     STATUS_CHANGED = "status_changed"
+    STILL_STANDS = "still_stands"
     ACTIVE_SWITCHED = "active_switched"
     EVIDENCE_RECORDED = "evidence_recorded"
     CONTEXT_RECORDED = "context_recorded"

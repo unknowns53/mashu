@@ -493,17 +493,36 @@ def rot_prone(cur: psycopg.Cursor) -> list[dict[str, Any]]:
     cur.execute(
         """
         SELECT e.memory_id, e.title, e.type, e.delivery, s.name AS scope_name,
-               v.directive, v.content,
+               v.version_id, v.directive, v.content,
                EXTRACT(DAY FROM now() - v.created_at)::int AS days
         FROM memory_entity e
         JOIN memory_version v ON v.version_id = e.active_version
         JOIN scope s ON s.scope_id = e.scope_id
+        LEFT JOIN LATERAL (
+            -- The last time a person read this one and said it still holds.
+            -- Matched on the version they read rather than on when they read
+            -- it, so rewriting the memory ends the confirmation. Times would
+            -- not do: now() is frozen for a transaction, so a confirmation and
+            -- a rewrite written in one carry the same timestamp.
+            -- Ordered by event_id for the same reason.
+            SELECT (l.detail ->> 'until')::timestamptz AS ask_again
+            FROM event_log l
+            WHERE l.memory_id = e.memory_id
+              AND l.event_type = 'still_stands'
+              AND l.version_id = e.active_version
+            ORDER BY l.event_id DESC
+            LIMIT 1
+        ) c ON TRUE
         WHERE e.status = 'active'
           -- A completion keeps the active pointer, so standing has to be read
           -- off the version and not off the pointer alone. Without this a task
           -- retired today is on the list again tomorrow and the sweep never
           -- finishes, which is the one thing a sweep has to do.
           AND v.status = 'candidate'
+          -- and neither does one a person has already read and left standing,
+          -- until the day they asked to be asked again. The confirmation is
+          -- about the text they read, so rewriting the memory ends it.
+          AND (c.ask_again IS NULL OR c.ask_again <= now())
         ORDER BY s.name, e.type, e.title
         """
     )

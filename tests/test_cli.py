@@ -1560,7 +1560,7 @@ def test_what_the_sweep_is_walked_past_keeps_standing(test_dsn, sweeping, commit
     keys = ["down"] * _place_in_sweep(test_dsn, memory_id) + ["enter", "down", "q"]
     code, out = sweeping(keys)
     assert code == 0
-    assert "nothing retired" in out or "left standing" in out
+    assert "nothing decided" in out or "not looked at" in out
 
     with transaction(test_dsn) as cur:
         assert store.get_entity(cur, memory_id)["active_version"] is not None
