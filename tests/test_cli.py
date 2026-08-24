@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -1117,3 +1118,138 @@ def test_a_scope_made_without_a_description_says_what_that_costs(test_dsn, run):
     code, out = run("scope", "--add", f"名無し {uuid.uuid4()}")
     assert code == 0
     assert "scope detection has only the name" in out
+
+
+# --------------------------------------------------------------------------
+# the sitting, driven one keystroke at a time (18.1)
+# --------------------------------------------------------------------------
+class _Terminal:
+    """A stand-in for the reader: a keystroke each time one is asked for."""
+
+    def __init__(self, keys):
+        self.keys = list(keys)
+
+    def isatty(self):
+        return True
+
+    def key(self):
+        return self.keys.pop(0) if self.keys else "q"
+
+
+@pytest.fixture
+def sitting(test_dsn, monkeypatch, capsys):
+    """Run 'mashu review' as if a person were pressing keys at it."""
+
+    def _sit(keys, typed=(), *argv):
+        terminal = _Terminal(keys)
+        answers = list(typed)
+        monkeypatch.setattr(cli.sys, "stdin", terminal)
+        monkeypatch.setattr(cli, "_getkey", terminal.key)
+        monkeypatch.setattr("builtins.input", lambda *_: answers.pop(0) if answers else "")
+        code = cli.main(["--dsn", test_dsn, "review", *argv])
+        return code, capsys.readouterr().out
+
+    return _sit
+
+
+def _statuses(test_dsn, session_id) -> dict[str, str]:
+    with transaction(test_dsn) as cur:
+        cur.execute(
+            "SELECT status, payload ->> 'title' AS title FROM proposal "
+            "WHERE session_id = %s ORDER BY seq",
+            (session_id,),
+        )
+        return {row["title"]: row["status"] for row in cur.fetchall()}
+
+
+def test_a_sitting_decides_one_item_per_keystroke(test_dsn, sitting, committed_scope):
+    """The cost 18.1 measured is context switches; the cost left over was typing."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    for title in ("一つ目", "二つ目", "三つ目"):
+        _propose(test_dsn, committed_scope, title, f"{title}の本文", session_id=session_id)
+
+    # open the list, approve the first, turn the second down, approve the rest
+    code, out = sitting(["enter", "y", "r", "a"], ["根拠が薄い"], "--bundle", str(session_id)[:8])
+    assert code == 0
+
+    assert _statuses(test_dsn, session_id) == {
+        "一つ目": "approved",
+        "二つ目": "declined",
+        "三つ目": "approved",
+    }
+    assert "1 approved, 1 declined" in out or "2 approved, 1 declined" in out
+
+
+def test_the_arrows_move_through_a_bundle_without_deciding_anything(
+    test_dsn, sitting, committed_scope
+):
+    """Reading is not deciding. Nothing is settled until a key that settles it."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    for title in ("見るだけ 1", "見るだけ 2"):
+        _propose(test_dsn, committed_scope, title, f"{title}の本文", session_id=session_id)
+
+    code, _ = sitting(
+        ["down", "enter", "down", "up", "left", "q"], (), "--bundle", str(session_id)[:8]
+    )
+    assert code == 0
+    assert set(_statuses(test_dsn, session_id).values()) == {"pending"}
+
+
+def test_leaving_in_the_middle_keeps_what_was_already_decided(test_dsn, sitting, committed_scope):
+    """One transaction per item is what makes a half-finished sitting worth having."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    for title in ("決める分", "残す分"):
+        _propose(test_dsn, committed_scope, title, f"{title}の本文", session_id=session_id)
+
+    code, out = sitting(["enter", "y", "q"], (), "--bundle", str(session_id)[:8])
+    assert code == 0
+    assert _statuses(test_dsn, session_id) == {"決める分": "approved", "残す分": "pending"}
+    assert "'mashu review' opens on the rest" in out
+
+
+def test_a_reason_left_empty_cancels_the_decision_instead_of_making_it(
+    test_dsn, sitting, committed_scope
+):
+    """18.1 makes the reason mandatory, so no reason has to mean no decision."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    _propose(test_dsn, committed_scope, "思い直す分", "本文", session_id=session_id)
+
+    code, out = sitting(["enter", "r", "q"], [""], "--bundle", str(session_id)[:8])
+    assert code == 0
+    assert _statuses(test_dsn, session_id) == {"思い直す分": "pending"}
+    assert "never mind" in out
+
+
+def test_all_widens_the_bundles_and_not_only_the_items_inside_them(test_dsn, run, committed_scope):
+    """The advice to pass --all was showing the same nothing to whoever took it.
+
+    A bundle whose every item is put off has deferred == count, so the filter
+    that keeps settled bundles out of the queue was keeping this one out too,
+    and the only flag that could have brought it back only widened the items
+    within a bundle already chosen.
+    """
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    _propose(test_dsn, committed_scope, "先送りした分", "本文", session_id=session_id)
+    run("review", "--bundle", str(session_id)[:8], "--batch", "s 1 あとで")
+
+    with transaction(test_dsn) as cur:
+        waiting = proposals.session_queue(cur)
+        plain = cli._wanted(cur, waiting, SimpleNamespace(bundle=None, all=False))
+        widened = cli._wanted(cur, waiting, SimpleNamespace(bundle=None, all=True))
+
+    assert session_id not in [b["session_id"] for b in plain]
+    assert session_id in [b["session_id"] for b in widened]
+
+
+def test_one_sitting_carries_on_into_the_next_bundle(test_dsn, sitting, committed_scope):
+    """36 bundles waiting is 36 invocations if a sitting ends with the first one."""
+    first = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    second = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    _propose(test_dsn, committed_scope, "前の束", "本文", session_id=first)
+    _propose(test_dsn, committed_scope, "後の束", "本文", session_id=second)
+
+    # approve the first bundle from its contents, then land on a second one
+    code, out = sitting(["a", "q"])
+    assert code == 0
+    assert out.count("bundle ") >= 2
+    assert "1 approved" in out

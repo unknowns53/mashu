@@ -17,11 +17,20 @@ import argparse
 import json
 import os
 import pathlib
+import select
 import subprocess
 import sys
 import tempfile
 import textwrap
+import unicodedata
 from uuid import UUID
+
+try:  # the review reads single keystrokes, which needs a posix terminal
+    import termios
+    import tty
+except ImportError:  # pragma: no cover - no such terminal here
+    termios = None
+    tty = None
 
 from mashu import (
     bootstrap,
@@ -167,19 +176,28 @@ def cmd_show(args) -> int:
     return 0
 
 
-def _print_grounds(cur, version_id) -> None:
-    """List what a version says it rests on (14, 19).
+def _grounds_text(cur, version_id) -> str:
+    """What a version says it rests on (14, 19).
 
     A summary that may say only what its references say cannot be reviewed
     without them in front of the reader.
     """
     grounds = store.evidence_for(cur, version_id)
     if not grounds:
-        return
-    print(f"\nresting on ({len(grounds)}):")
+        return ""
+    lines = [f"\nresting on ({len(grounds)}):"]
     for row in grounds:
         standing = row["version_status"] or "nothing adopted yet"
-        print(f"    {_short(row['memory_id'])}  [{row['type']}] {row['title']}  ({standing})")
+        lines.append(
+            f"    {_short(row['memory_id'])}  [{row['type']}] {row['title']}  ({standing})"
+        )
+    return "\n".join(lines)
+
+
+def _print_grounds(cur, version_id) -> None:
+    text = _grounds_text(cur, version_id)
+    if text:
+        print(text)
 
 
 def _show_bundle(cur, prefix: str) -> int:
@@ -1502,45 +1520,350 @@ def _agree(cur, args, entity, clash: DuplicateProposalError) -> int:
 
 
 def cmd_review(args) -> int:
-    """Open the oldest bundle and finish with it (18.1, 30 段 C).
+    """Work through what is waiting, at the pace it is read (18.1, 30 段 C).
 
-    Review is optional now, and that is exactly why one sitting has to be
-    enough. A pass that ends with items in the same state they started in is a
-    pass that will not happen twice, so every item leaves here decided:
-    approved, turned down with a reason, edited, or put off with a reason.
+    Section 18.1 settled the unit: a session bundle, its context built once,
+    passed wholesale with the exceptions taken out by hand. What it did not
+    settle is the motion, and the motion is where the cost turned out to sit.
+    Printing a bundle whole and then asking for one line of decisions makes the
+    reader hold twenty items and their numbers in mind while composing a
+    command about text that has already scrolled off. The unit was right and
+    the handling was wrong, and a review that is optional does not survive
+    handling that is unpleasant.
 
-    The diff is part of it. Approving a replacement without seeing what it
-    replaces is not review, and section 18.1 asked for the comparison that the
-    bundle display never had.
+    So a bundle arrives as a list of its titles that the arrow keys move
+    through, one keystroke decides an item, and the reader who wants to pass
+    the whole bundle unread — which 18.1 expects to be the common case — presses
+    one key for that too. Every decision commits as it is made, so stopping in
+    the middle keeps everything already decided.
     """
     with transaction(args.dsn) as cur:
         waiting = proposals.session_queue(cur)
-        if args.bundle:
-            wanted = None if args.bundle == "none" else _resolve_session(cur, args.bundle)
-            bundles = [b for b in waiting if b["session_id"] == wanted]
+        bundles = _wanted(cur, waiting, args)
+
+    if not bundles:
+        if waiting:
+            print(f"nothing new; {len(waiting)} bundle(s) are put off. --all to see them")
         else:
-            bundles = [b for b in waiting if b["deferred"] < b["count"]]
-        if not bundles:
-            if waiting:
-                print(f"nothing new; {len(waiting)} bundle(s) are put off. --all to see them")
-            else:
-                print("nothing waiting for review")
-            return 0
-        bundle = bundles[0]
-        items = [i for i in bundle["proposals"] if args.all or not i["deferred_at"]]
+            print("nothing waiting for review")
+        return 0
+
+    if args.batch is not None or not sys.stdin.isatty():
+        return _one_shot(args, bundles[0])
+    return _sitting(args, [b["session_id"] for b in bundles])
+
+
+def _wanted(cur, waiting: list[dict], args) -> list[dict]:
+    """The bundles this run is about: one named, or every one with something new.
+
+    --all has to widen the bundles as well as the items inside them. A bundle
+    whose every item was put off has deferred == count, so the ordinary filter
+    drops it, and a reader following the advice to pass --all would have been
+    shown the same nothing again.
+    """
+    if args.bundle:
+        wanted = None if args.bundle == "none" else _resolve_session(cur, args.bundle)
+        return [b for b in waiting if b["session_id"] == wanted]
+    if args.all:
+        return list(waiting)
+    return [b for b in waiting if b["deferred"] < b["count"]]
+
+
+def _undecided(bundle: dict, args) -> list[dict]:
+    """A bundle's items, minus what was already put off unless --all asks for it."""
+    return [i for i in bundle["proposals"] if args.all or not i["deferred_at"]]
+
+
+def _one_shot(args, bundle: dict) -> int:
+    """The bundle printed whole and decided by one script, for pipes and tests."""
+    with transaction(args.dsn) as cur:
+        items = _undecided(bundle, args)
         _print_review(cur, bundle, items)
+    if args.batch is None:
+        print("\nnot a terminal; pass --batch to decide non-interactively")
+        return 0
+    return _apply_review(args, items, args.batch)
 
-    script = args.batch
-    if script is None:
-        if not sys.stdin.isatty():
-            print("\nnot a terminal; pass --batch to decide non-interactively")
+
+# --------------------------------------------------------------------------
+# reading one key at a time
+# --------------------------------------------------------------------------
+_TOKENS = {
+    "\x1b[A": "up",
+    "\x1b[B": "down",
+    "\x1b[C": "right",
+    "\x1b[D": "left",
+    "\r": "enter",
+    "\n": "enter",
+    "\x7f": "left",
+    "\x1b": "left",
+    "\x03": "q",
+    "\x04": "q",
+    " ": "down",
+}
+
+
+def _getkey() -> str:
+    """One keystroke, without waiting for a return.
+
+    A review that costs a whole typed line per decision is a review that does
+    not happen. Terminals hand arrow keys over as escape sequences, so the
+    escape has to be read and then looked at again: on its own it means go
+    back, and followed by a bracket it is an arrow.
+
+    Where there is no terminal to put into this mode, a typed line stands in
+    for a keystroke, and everything above still works — one key more.
+    """
+    if termios is None or not sys.stdin.isatty():
+        try:
+            typed = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return "q"
+        return _TOKENS.get(typed, typed[:1].lower() or "enter")
+
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        key = _byte(fd)
+        # Read the descriptor rather than sys.stdin. A text stream keeps its own
+        # buffer, so the bracket and the letter of an arrow sequence can already
+        # be inside Python while select still reports the descriptor as empty,
+        # and every arrow key then arrives as three unrelated keystrokes.
+        if key == "\x1b" and select.select([fd], [], [], 0.05)[0]:
+            key += _byte(fd)
+            if key.endswith("[") and select.select([fd], [], [], 0.05)[0]:
+                key += _byte(fd)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+    return _TOKENS.get(key, key.lower())
+
+
+def _byte(fd: int) -> str:
+    """One byte off the terminal, with the end of input read as leaving."""
+    try:
+        raw = os.read(fd, 1)
+    except OSError:
+        return "\x04"
+    return raw.decode("utf-8", "replace") if raw else "\x04"
+
+
+def _typed(prompt: str) -> str | None:
+    """A line, for the reasons 18.1 makes mandatory. Nothing typed cancels the decision."""
+    try:
+        answer = input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    if not answer:
+        print("  never mind")
+        return None
+    return answer
+
+
+def _screen(text: str) -> None:
+    """Repaint. The page the reader is deciding about should be the whole view."""
+    if sys.stdout.isatty():
+        sys.stdout.write("\x1b[H\x1b[2J")
+    print(text)
+
+
+# --------------------------------------------------------------------------
+# a sitting
+# --------------------------------------------------------------------------
+_LIST_KEYS = "  ↑↓ move   ⏎ open it   a approve all of them   s put the bundle off   q leave"
+_ITEM_KEYS = (
+    "  y approve   r turn down   e edit   s put off\n"
+    "  ↑↓ move without deciding   ← the list   a approve the rest   q leave"
+)
+
+_WORD = {"a": "approved", "r": "declined", "s": "put off", "e": "edited"}
+_MARK = {"approved": "✓", "declined": "✗", "put off": "·", "edited": "✎"}
+
+
+def _sitting(args, queue: list) -> int:
+    """Bundle after bundle, each re-read as it comes up so a long sitting stays current."""
+    total = len(queue)
+    for place, session_id in enumerate(queue, 1):
+        with transaction(args.dsn) as cur:
+            bundle = next(
+                (b for b in proposals.session_queue(cur) if b["session_id"] == session_id), None
+            )
+            if bundle is None:
+                continue
+            items = _undecided(bundle, args)
+            if not items:
+                continue
+            pages = [_item_text(cur, item, n, len(items)) for n, item in enumerate(items, 1)]
+        if _bundle_sitting(args, bundle, items, pages, place, total) == "leave":
+            print("\nleft. what was decided is kept; 'mashu review' opens on the rest")
             return 0
-        print(_REVIEW_HELP)
-        script = input("review> ").strip()
-
-    return _apply_review(args, items, script)
+    print("\nnothing else waiting")
+    return 0
 
 
+def _bundle_sitting(args, bundle, items, pages, place, total) -> str:
+    """One bundle, from its list of titles down to its last item. 'next' or 'leave'."""
+    done: dict[int, str] = {}
+    at = 0
+    reading = False
+
+    while True:
+        if reading:
+            _screen(pages[at] + _standing(done, at) + "\n" + _ITEM_KEYS)
+        else:
+            _screen(_contents(bundle, items, place, total, done, at))
+        key = _getkey()
+
+        if key == "q":
+            return "leave"
+        if key in ("down", "j"):
+            at = min(len(items) - 1, at + 1)
+            continue
+        if key in ("up", "k"):
+            at = max(0, at - 1)
+            continue
+        if key == "a":
+            _rest(args, items, done)
+            break
+        if not reading:
+            if key in ("enter", "right", "l"):
+                reading = True
+            elif key == "s":
+                reason = _typed("  why put the whole bundle off? ")
+                if reason is None:
+                    continue
+                _rest(args, items, done, verb="s", reason=reason)
+                break
+            continue
+
+        if key in ("left", "l"):
+            reading = False
+            continue
+        if key in ("y", "enter"):
+            _settle(args, items[at], done, at, "a")
+        elif key in ("r", "n"):
+            reason = _typed("  why turn it down? ")
+            if reason is None:
+                continue
+            _settle(args, items[at], done, at, "r", reason)
+        elif key == "s":
+            reason = _typed("  why put it off? ")
+            if reason is None:
+                continue
+            _settle(args, items[at], done, at, "s", reason)
+        elif key == "e":
+            _settle(args, items[at], done, at, "e")
+        else:
+            continue
+
+        if at + 1 >= len(items):
+            break
+        at += 1
+
+    print(_tally(bundle, done, len(items)))
+    return "next"
+
+
+def _rest(args, items, done, verb: str = "a", reason: str = "") -> None:
+    """Everything in the bundle not decided yet, decided the same way."""
+    for number, item in enumerate(items):
+        if number not in done:
+            _settle(args, item, done, number, verb, reason)
+
+
+def _settle(args, item, done, number: int, verb: str, reason: str = "") -> None:
+    """Carry one decision into the store, in a transaction of its own.
+
+    One transaction per item is what lets a reader stop anywhere: what is
+    behind them is committed, and a sitting does not have to be finished to
+    have been worth starting.
+    """
+    edited = _edit_text(args, item) if verb == "e" else None
+    with transaction(args.dsn) as cur:
+        _decide(cur, args, item, verb, reason, edited=edited)
+    done[number] = _WORD[verb]
+
+
+def _standing(done: dict, at: int) -> str:
+    """Whether this item was already decided in this sitting, said on the page itself."""
+    return f"\n  ({done[at]} in this sitting)" if at in done else ""
+
+
+def _cells(text: str) -> int:
+    """How wide this is on a terminal, counting the double-width characters as two."""
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
+def _clip(text: str, cells: int) -> str:
+    """Cut a title to fit, measuring in cells rather than in characters."""
+    if _cells(text) <= cells:
+        return text
+    out, used = [], 0
+    for ch in text:
+        used += 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+        if used > cells - 1:
+            break
+        out.append(ch)
+    return "".join(out) + "…"
+
+
+def _contents(bundle, items, place: int, total: int, done: dict, at: int) -> str:
+    """The bundle as a list of its titles: what it takes to pass it unread."""
+    name = _short(bundle["session_id"]) if bundle["session_id"] else "none"
+    scope = (items[0]["scope_name"] or "-") if items else "-"
+    lines = [
+        f"{scope}  bundle {name}  {len(items)} to decide, "
+        f"waiting {bundle['days_pending']} day(s)    "
+        f"bundle {place} of {total}\n"
+    ]
+    for number, item in enumerate(items):
+        mark = _MARK.get(done.get(number), " ")
+        title = item["title"] or _short(item["proposal_id"])
+        row = (
+            f" {mark} {number + 1:>3}  {item['operation']:<15} "
+            f"{item['memory_type'] or '-':<14} {_clip(title, 44)}"
+        )
+        lines.append(f"\x1b[1m▸{row[1:]}\x1b[0m" if number == at else f" {row[1:]}")
+    lines.append("\n" + _LIST_KEYS)
+    return "\n".join(lines)
+
+
+def _item_text(cur, item, number: int, of: int) -> str:
+    """One proposal as a page of its own, beside what it would displace (18.1)."""
+    label = f" {number} of {of} "
+    lines = [
+        "─" * 4 + label + "─" * max(4, WIDTH - 4 - _cells(label)),
+        f"{item['operation']}  {item['memory_type'] or '-'}  "
+        f"[{item['scope_name'] or '-'}]  {_short(item['proposal_id'])}",
+        f"{item['title'] or ''}",
+        "",
+    ]
+    if item["review_note"]:
+        lines.append(_wrap(f"(put off earlier: {item['review_note']})"))
+        lines.append("")
+    lines.append(_diff_text(cur, item))
+    lines.append("─" * WIDTH)
+    return "\n".join(lines)
+
+
+def _tally(bundle, done: dict, count: int) -> str:
+    """What the bundle came to, said once, so the next one starts on a clean line."""
+    name = _short(bundle["session_id"]) if bundle["session_id"] else "none"
+    parts = []
+    for word in ("approved", "declined", "edited", "put off"):
+        many = sum(1 for value in done.values() if value == word)
+        if many:
+            parts.append(f"{many} {word}")
+    left = count - len(done)
+    if left:
+        parts.append(f"{left} left undecided")
+    return f"\nbundle {name}: " + ", ".join(parts or ["nothing decided"])
+
+
+# --------------------------------------------------------------------------
+# the whole bundle at once
+# --------------------------------------------------------------------------
 _REVIEW_HELP = """
   all                 approve everything still undecided here
   r N reason          turn item N down, with the reason
@@ -1575,32 +1898,40 @@ def _print_review(cur, bundle, items) -> None:
 
 
 def _print_diff(cur, item) -> None:
+    print(_diff_text(cur, item))
+
+
+def _diff_text(cur, item) -> str:
     """What this proposal says, beside what it would displace (18.1)."""
     cur.execute(
         "SELECT applied_version FROM proposal WHERE proposal_id = %s", (item["proposal_id"],)
     )
     version_id = (cur.fetchone() or {}).get("applied_version")
     if version_id is None:
-        print(_wrap("(nothing written yet; this proposal changes nothing until approved)"))
+        lines = [_wrap("(nothing written yet; this proposal changes nothing until approved)")]
         for key, value in (item["payload"] or {}).items():
             if key in ("reason", "status"):
-                print(_wrap(f"{key}: {value}"))
-        return
+                lines.append(_wrap(f"{key}: {value}"))
+        return "\n".join(lines)
 
     version = store.get_version(cur, version_id)
     entity = store.get_entity(cur, version["memory_id"])
+    lines = []
     if version["directive"]:
-        print(_wrap(version["directive"], indent="  > "))
-        print()
-    print(_wrap(version["content"]))
-    _print_grounds(cur, version_id)
+        lines.append(_wrap(version["directive"], indent="  > "))
+        lines.append("")
+    lines.append(_wrap(version["content"]))
+    grounds = _grounds_text(cur, version_id)
+    if grounds:
+        lines.append(grounds)
 
     current = entity["active_version"]
     if current and current != version_id:
-        print("\n     replacing what is active now:")
-        print(_wrap(store.get_version(cur, current)["content"], indent="   | "))
+        lines.append("\n     replacing what is active now:")
+        lines.append(_wrap(store.get_version(cur, current)["content"], indent="   | "))
     elif current is None:
-        print("\n     (new; nothing is active on this entity yet)")
+        lines.append("\n     (new; nothing is active on this entity yet)")
+    return "\n".join(lines)
 
 
 def _apply_review(args, items, script: str) -> int:
