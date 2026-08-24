@@ -97,6 +97,14 @@ uv run mashu admin migrate
 ./hooks/install.sh
 ```
 
+どこからでも `mashu` と打てるようにするには、PATH の通ったところへ symlink を張る。console script のシバンは venv の python を絶対パスで指しているので、これで動く。CLI は作業ディレクトリを一切見ない（`os.getcwd()` を読むのは MCP server の scope routing だけ）から、どこから叩いても結果は同じになる。
+
+```bash
+ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
+```
+
+`~/.local/bin` が PATH に無ければ、通っているディレクトリなら何でもよい。shell の alias にしない理由は、alias は対話シェルにしか効かず、スクリプトや launchd から呼べないためである。
+
 ## 使う
 
 | コマンド | 内容 |
