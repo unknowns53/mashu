@@ -9,6 +9,7 @@ does not claim to be the user, and it does not read the same transcript twice.
 from __future__ import annotations
 
 import json
+import math
 import sys
 import types
 
@@ -424,6 +425,26 @@ def test_the_daily_budget_defers_rather_than_dropping_and_keeps_the_attempt(
     cur.execute("SELECT state, attempts FROM extraction_run WHERE run_id = %s", (run["run_id"],))
     row = cur.fetchone()
     assert (row["state"], row["attempts"]) == ("retrying", 0)
+
+
+def test_the_daily_budget_does_not_bind_an_extractor_billed_somewhere_else(
+    cur, tmp_path, queued, route, monkeypatch
+):
+    monkeypatch.setattr(runs, "DAILY_INPUT_BUDGET", 1)
+    stub = extract.StubExtractor(answer())
+    stub.budget = math.inf
+
+    got = worker.process(cur, queued(write_claude(tmp_path)), extractor=stub)
+    assert got.state == "succeeded"
+
+    # The run is still charged, so lifting the cap does not blind the ledger.
+    assert runs.spent_today(cur) > 0
+
+
+def test_which_cli_extraction_runs_through_decides_whether_the_ceiling_applies():
+    assert extract.CLIExtractor("codex").budget == math.inf
+    assert extract.CLIExtractor("claude").budget == runs.DAILY_INPUT_BUDGET
+    assert extract.APIExtractor().budget == runs.DAILY_INPUT_BUDGET
 
 
 def test_a_transcript_that_left_disk_is_recorded_as_skipped_not_retried_forever(

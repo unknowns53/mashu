@@ -196,7 +196,13 @@ class Outcome:
 # --------------------------------------------------------------------------
 # one run
 # --------------------------------------------------------------------------
-def prepare(cur: psycopg.Cursor, run: dict[str, Any], *, dry_run: bool = False) -> Plan | Outcome:
+def prepare(
+    cur: psycopg.Cursor,
+    run: dict[str, Any],
+    *,
+    dry_run: bool = False,
+    budget: float | None = None,
+) -> Plan | Outcome:
     """Everything before the model call. Returns an Outcome when it stops here."""
     run_id = run["run_id"]
 
@@ -255,8 +261,13 @@ def prepare(cur: psycopg.Cursor, run: dict[str, Any], *, dry_run: bool = False) 
     prompt = extract.build_prompt(log=log, scratch=scratch_items, active=active)
     estimated = retrieval.estimate_tokens(prompt)
 
+    # An infinite ceiling means the extractor answering this run is not
+    # spending anything the day has to ration, so there is nothing to defer
+    # for. What was read is still charged below, so the ledger keeps saying
+    # how much was read.
+    ceiling = runs.DAILY_INPUT_BUDGET if budget is None else budget
     spent = runs.spent_today(cur)
-    if spent + estimated > runs.DAILY_INPUT_BUDGET:
+    if spent + estimated > ceiling:
         note = f"daily input budget reached ({spent} spent, this one needs about {estimated})"
         runs.defer(cur, run_id=run_id, note=note)
         return Outcome(run_id, "deferred", note)
@@ -397,6 +408,11 @@ def _record_pass(
     )
 
 
+def _budget(extractor: extract.Extractor) -> float:
+    """The ceiling this extractor answers to. Absent means the ledger's."""
+    return getattr(extractor, "budget", None) or float(runs.DAILY_INPUT_BUDGET)
+
+
 def process(
     cur: psycopg.Cursor,
     run: dict[str, Any],
@@ -409,7 +425,7 @@ def process(
     run_once is what the unattended path uses, and it deliberately does not go
     through here: the model call belongs between transactions, not inside one.
     """
-    plan = prepare(cur, run, dry_run=dry_run)
+    plan = prepare(cur, run, dry_run=dry_run, budget=_budget(extractor))
     if isinstance(plan, Outcome):
         return plan
     return land(cur, plan, extractor.run(plan.prompt), extractor=extractor)
@@ -1004,7 +1020,7 @@ def run_once(
 
         try:
             with transaction(dsn) as cur:
-                plan = prepare(cur, run, dry_run=dry_run)
+                plan = prepare(cur, run, dry_run=dry_run, budget=_budget(extractor))
             if isinstance(plan, Outcome):
                 outcomes.append(plan)
                 continue

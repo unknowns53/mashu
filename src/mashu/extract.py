@@ -21,6 +21,7 @@ that could nominate its own gate would be writing the rules it is filed under.
 from __future__ import annotations
 
 import json
+import math
 import os
 import pathlib
 import re
@@ -30,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import UUID
 
+from mashu import runs
 from mashu.errors import MashuError
 from mashu.models import MemoryType
 
@@ -398,6 +400,14 @@ class Extractor(Protocol):
 
     name: str
     model: str
+    #: What one day of extraction may read through this extractor, infinite
+    #: when nothing is competing for it. The ceiling in 16.3 bounds extraction
+    #: against the allowance the conversations are also spending; an extractor
+    #: billed somewhere else is not spending that allowance, and capping it
+    #: only means the backlog drains slower for no saving. The ledger still
+    #: records what every run read either way, so the measurement survives the
+    #: cap being lifted.
+    budget: float
 
     def run(self, prompt: str) -> str: ...
 
@@ -434,6 +444,11 @@ class CLIExtractor:
             model or os.environ.get(MODEL_ENV_VAR) or DEFAULT_CLI_MODELS.get(cli, DEFAULT_MODEL)
         )
         self.timeout = timeout
+        # claude is the CLI these conversations run in, so extraction through
+        # it eats the allowance they need and the ceiling applies. codex is a
+        # different account; the same reasoning that lets it be first choice is
+        # what makes the ceiling meaningless for it.
+        self.budget = math.inf if cli == "codex" else float(runs.DAILY_INPUT_BUDGET)
 
     def command(self, out: pathlib.Path | None = None) -> list[str]:
         if self.cli == "claude":
@@ -532,6 +547,7 @@ class APIExtractor:
         self.model = model or os.environ.get(MODEL_ENV_VAR) or DEFAULT_MODEL
         self.max_tokens = max_tokens
         self.usage: dict[str, int] = {}
+        self.budget = float(runs.DAILY_INPUT_BUDGET)
 
     def available(self) -> bool:
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -582,6 +598,7 @@ class StubExtractor:
         self.model = "stub"
         self.answer = answer
         self.prompts: list[str] = []
+        self.budget = float(runs.DAILY_INPUT_BUDGET)
 
     def available(self) -> bool:
         return True
