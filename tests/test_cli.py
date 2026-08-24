@@ -1423,11 +1423,13 @@ def test_page_down_reads_on_within_one_proposal(test_dsn, sitting, committed_sco
 
     code, out = sitting(["enter", "pagedown", "q"], (), "--bundle", str(session_id)[:8])
     assert code == 0
-    screens = out.split("space read on")
-    assert "… " in screens[0] and "more line(s)" in screens[0], "the page has to be truncated"
-    assert "行 000 の本文" in screens[0]
-    assert "行 000 の本文" not in screens[1], "page down has to move the page"
-    assert "の本文" in screens[1], "and has to keep showing the same proposal"
+    # one key line per painted screen, so this splits the run into its screens.
+    # The first is the bundle's list of titles; the item pages follow it.
+    first, second = out.split("? help")[1:3]
+    assert "more line(s), space to go on" in first, "the page has to be truncated"
+    assert "行 000 の本文" in first
+    assert "行 000 の本文" not in second, "page down has to move the page"
+    assert "の本文" in second, "and has to keep showing the same proposal"
     assert _statuses(test_dsn, session_id) == {"長い本文の項目": "pending"}
 
 

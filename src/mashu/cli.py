@@ -1370,16 +1370,30 @@ def _print_stale(found: list[dict]) -> None:
 #: the whole of what a later reader gets. Both are absorbing (12): the way back
 #: is to write the thing again as a new version, not to undo this.
 _SWEEP_LIST_KEYS = (
-    "  ↑↓ move   ⏎ open it   s still true, ask later   "
-    "c it is done   d shelve it   x it was wrong   q leave"
+    "  ↑↓ move   ⏎ open   s still true   c done   d shelve   x wrong   ? help   q leave"
 )
-_SWEEP_ITEM_KEYS = (
-    "  s still true — ask about it again later        ↑↓ another one   ← the list\n"
-    "  c it is done, and worth finding as a record    space read on    b top\n"
-    "  d shelve it: stop answering, keep the title    q leave\n"
-    "  x it was wrong; do not derive it again\n"
-    "  c keeps answering. d and x withhold the content and cannot be undone"
-)
+_SWEEP_ITEM_KEYS = "  s still true   c done   d shelve   x wrong   ← list   ? help   q leave"
+
+#: What the four keys above actually do, for the one keystroke that asks.
+#: Not on the page: a hint block long enough to explain itself is a hint block
+#: competing with the thing being read.
+_SWEEP_HELP = """
+  s  still true. Records that you read it and when to ask again (30 days by
+     default). Nothing about the knowledge changes.
+
+  c  it is done. Keeps answering searches, with its finish and the reason
+     shown, because a finished task read as unfinished is what this store
+     exists to stop.
+
+  d  shelve it. Stops answering. Only the title, the status and your reason
+     come back after this, never the content.
+
+  x  it was wrong. The same, and the reason is handed back so nobody derives
+     it again.
+
+  d and x cannot be undone: the way back is to write the thing again.
+  What you walk past keeps standing, and comes up next time.
+"""
 
 _RETIRING = {
     "c": (str(VersionStatus.COMPLETED), None),
@@ -1417,11 +1431,15 @@ def _sweep(args, found: list[dict]) -> int:
 
     while True:
         if reading:
-            page, more = _paged(_stale_page(found[at], at + 1, len(found)), scroll)
-            _screen(page + _standing(done, at) + _said(note) + "\n" + _SWEEP_ITEM_KEYS)
+            under = _trailer(_standing(done, at), note, _SWEEP_ITEM_KEYS)
+            page, more = _paged(_stale_page(found[at], at + 1, len(found)), scroll, trailer=under)
+            _screen(page + "\n" + under)
         else:
-            _screen(_stale_list(found, at, done) + _said(note))
+            _screen(_stale_list(found, at, done, note))
         key = _getkey()
+        if key == "?":
+            _help(_SWEEP_HELP)
+            continue
         if key not in _RETIRING and key != "s":
             note = ""
 
@@ -1537,7 +1555,7 @@ def _retire_one(args, row, done: dict, number: int, key: str) -> str:
     return ""
 
 
-def _stale_list(found: list[dict], at: int, done: dict) -> str:
+def _stale_list(found: list[dict], at: int, done: dict, note: str = "") -> str:
     """Everything standing that has a shelf life, one line each."""
     width = _width()
     rows = []
@@ -1549,13 +1567,8 @@ def _stale_list(found: list[dict], at: int, done: dict) -> str:
             width - 1,
         )
         rows.append(f"\x1b[1m▸{line[1:]}\x1b[0m" if number == at else line)
-    shown, above, below = _shown(rows, at, reserve=8)
-    lines = [
-        f"{len(found)} standing memory(s) name their own end. what is left alone keeps standing\n"
-    ]
-    lines += [line for line in (above, *shown, below) if line]
-    lines.append("\n" + _SWEEP_LIST_KEYS)
-    return "\n".join(lines)
+    head = f"{len(found)} standing memory(s) name their own end. what is left alone keeps standing"
+    return _list_screen(head, rows, at, _trailer(_SWEEP_LIST_KEYS, note))
 
 
 def _stale_page(row: dict, number: int, of: int) -> str:
@@ -2030,14 +2043,30 @@ def _screen(text: str) -> None:
 # --------------------------------------------------------------------------
 # a sitting
 # --------------------------------------------------------------------------
-_SHELF_KEYS = "  ↑↓ move   ⏎ open   a approve it all unread   s put it off   q leave"
-_LIST_KEYS = (
-    "  ↑↓ move   ⏎ open   a approve the rest   s put the bundle off\n  ← the bundles   q leave"
-)
-_ITEM_KEYS = (
-    "  y approve   r turn down   e edit   s put off   a approve the rest\n"
-    "  space read on   b top   ↑↓ another item   ← the list   q leave"
-)
+_SHELF_KEYS = "  ↑↓ move   ⏎ open   a approve it all   s put it off   ? help   q leave"
+_LIST_KEYS = "  ↑↓ move   ⏎ open   a approve the rest   s put off   ← bundles   ? help   q leave"
+_ITEM_KEYS = "  y approve   r turn down   e edit   s put off   a rest   ← list   ? help   q leave"
+
+#: What the review's keys do, for the one keystroke that asks.
+_REVIEW_HELP_SCREEN = """
+  y  approve, and move to the next one. ⏎ does the same.
+
+  r  turn it down, with a reason. The proposal is decided either way, so this
+     is a record and does not get taken back.
+
+  e  open the text in an editor, then approve your wording as a version of
+     yours on top of what was proposed. Both stay in the history.
+
+  s  put it off, saying why. It stops leading the queue until --all asks for it.
+
+  a  approve everything left in this bundle.
+
+  space  read on where a proposal is longer than the screen, and step to the
+         next one where it is not. b goes back to the top of the page.
+
+  Every decision is written as it is made, so leaving with q keeps what is
+  behind you and the next 'mashu review' opens on the rest.
+"""
 
 _WORD = {"a": "approved", "r": "declined", "s": "put off", "e": "edited"}
 _MARK = {"approved": "✓", "declined": "✗", "put off": "·", "edited": "✎"}
@@ -2132,13 +2161,8 @@ def _bundles(shelf: list[dict], at: int, note: str) -> str:
         )
         rows.append(f"\x1b[1m▸{row[1:]}\x1b[0m" if number == at else row)
 
-    shown, above, below = _shown(rows, at, reserve=7 + (2 if note else 0))
-    lines = [f"{len(shelf)} bundle(s) waiting, {total} to decide\n"]
-    lines += [line for line in (above, *shown, below) if line]
-    if note:
-        lines.append(note)
-    lines.append("\n" + _SHELF_KEYS)
-    return "\n".join(lines)
+    head = f"{len(shelf)} bundle(s) waiting, {total} to decide"
+    return _list_screen(head, rows, at, _trailer(_SHELF_KEYS, note))
 
 
 def _pending(bundle: dict) -> list[dict]:
@@ -2193,7 +2217,7 @@ def _whole(args, summary, verb: str = "a", reason: str = "") -> str:
         return ""
     done: dict[int, str] = {}
     refused = _rest(args, items, done, verb=verb, reason=reason)
-    return _tally(bundle, done, len(items)) + _said(refused)
+    return _trailer(_tally(bundle, done, len(items)), refused)
 
 
 def _bundle_sitting(args, bundle, items, pages, place, total) -> tuple[str, str]:
@@ -2213,11 +2237,15 @@ def _bundle_sitting(args, bundle, items, pages, place, total) -> tuple[str, str]
 
     while True:
         if reading:
-            page, more = _paged(pages[at], scroll, said=note)
-            _screen(page + _standing(done, at) + _said(note) + "\n" + _ITEM_KEYS)
+            under = _trailer(_standing(done, at), note, _ITEM_KEYS)
+            page, more = _paged(pages[at], scroll, trailer=under)
+            _screen(page + "\n" + under)
         else:
-            _screen(_contents(bundle, items, place, total, done, at) + _said(note))
+            _screen(_contents(bundle, items, place, total, done, at, note))
         key = _getkey()
+        if key == "?":
+            _help(_REVIEW_HELP_SCREEN)
+            continue
         if key not in ("y", "enter", "r", "n", "s", "e", "a"):
             note = ""
 
@@ -2350,14 +2378,40 @@ def _settle(args, item, done, number: int, verb: str, reason: str = "") -> str:
     return ""
 
 
-def _said(note: str) -> str:
-    """A refusal, under the screen it belongs to rather than in place of it."""
-    return f"\n{note}" if note else ""
+_HELP_KEYS = "  space read on   any other key goes back"
+
+
+def _help(text: str) -> None:
+    """Paint an explanation and wait, so the screens themselves can stay short.
+
+    What each key does belongs one keystroke away, not under every page. A hint
+    block long enough to explain itself is a hint block competing with the
+    thing being read — and it has to fit the screen like everything else, so it
+    is paged the same way.
+    """
+    offset = 0
+    while True:
+        # three lines are pinned above the body, so one of them says what this is
+        page, more = _paged(f"  what each key does\n\n\n{text.strip()}", offset, _HELP_KEYS)
+        _screen(page + "\n" + _HELP_KEYS)
+        if _getkey() != "space" or not more:
+            return
+        offset = more
+
+
+def _trailer(*parts: str) -> str:
+    """Everything printed under a page or a list, as one measurable block.
+
+    One string, because what follows the screen has to be measured before the
+    screen is built and printed after it, and two ways of assembling it is one
+    way too many.
+    """
+    return "\n".join(part for part in parts if part)
 
 
 def _standing(done: dict, at: int) -> str:
     """Whether this item was already decided in this sitting, said on the page itself."""
-    return f"\n  ({done[at]} in this sitting)" if at in done else ""
+    return f"  ({done[at]} in this sitting)" if at in done else ""
 
 
 def _width() -> int:
@@ -2365,15 +2419,35 @@ def _width() -> int:
     return max(40, shutil.get_terminal_size((WIDTH, 24)).columns)
 
 
-def _room(reserve: int) -> int:
+def _room(*fixed: str) -> int:
     """How many lines are left for a list or a page once the fixed parts have theirs.
 
     A screen that overruns the terminal is a screen the reader has to scroll
     back through to see its own heading, and on a short console that is every
     screen. So nothing is printed that does not fit: what will not fit is said
     as a count instead.
+
+    The fixed parts are handed in and measured rather than counted into a
+    number here. A number is right until somebody adds a line to a heading or a
+    key list, and then it is wrong everywhere that number was used and nothing
+    says so — which is how a five line key list came to be reserved four.
+
+    The one line taken off the end is the newline print() adds after a screen.
     """
-    return max(4, shutil.get_terminal_size((WIDTH, 24)).lines - reserve)
+    used = sum(_rows_of(text) for text in fixed)
+    return max(0, shutil.get_terminal_size((WIDTH, 24)).lines - used - 1)
+
+
+def _rows_of(text: str) -> int:
+    """How many terminal lines a printed block takes.
+
+    Split on the newline rather than by splitlines, which drops a trailing
+    empty line: "a\n" prints two lines and splitlines calls it one. Every block
+    here that ends in a blank line was being counted one short, and the screen
+    ran one row past the bottom.
+    """
+    width = _width()
+    return sum(_rows(line, width) for line in text.split("\n"))
 
 
 def _rows(text: str, width: int) -> int:
@@ -2382,47 +2456,67 @@ def _rows(text: str, width: int) -> int:
     return max(1, -(-_cells(plain) // width))
 
 
-def _shown(rows: list[str], at: int, reserve: int) -> tuple[list[str], str, str]:
-    """The part of a list that fits, kept around wherever the cursor is."""
-    room = _room(reserve)
+def _list_screen(head: str, rows: list[str], at: int, keys: str) -> str:
+    """A heading, as much of a list as fits under it, and the keys.
+
+    Composed and measured in one place, against the same string. Measuring the
+    parts separately and assembling them separately is how a heading that ends
+    in a newline came to cost two lines and be counted as one, and every list
+    ran one line past the bottom of the screen.
+    """
+    around = f"{head}\n\n\n{keys}"
+    shown, above, below = _fit(rows, at, _room(around))
+    body = [line for line in (above, *shown, below) if line]
+    return f"{head}\n\n" + "\n".join(body) + f"\n\n{keys}"
+
+
+def _fit(rows: list[str], at: int, room: int) -> tuple[list[str], str, str]:
+    """The part of a list that fits in the room given, kept around the cursor."""
     if len(rows) <= room:
         return rows, "", ""
-    room -= 2  # the two lines that say what is not being shown
+    room = max(1, room - 2)  # the two lines that say what is not being shown
     top = max(0, min(at - room // 2, len(rows) - room))
     above = f"  ↑ {top} more" if top else ""
     below = f"  ↓ {len(rows) - top - room} more" if top + room < len(rows) else ""
     return rows[top : top + room], above, below
 
 
-def _paged(text: str, offset: int, said: str = "") -> tuple[str, int]:
+def _paged(text: str, offset: int, trailer: str = "") -> tuple[str, int]:
     """As much of one proposal as fits, and where the next screenful would start.
 
     The first lines are held on screen whatever the offset: what is being
     decided about should not scroll away from the deciding.
+
+    Filled twice on purpose. The line that says how much is left is itself a
+    line, so a page filled to the brim and then told it is not the whole thing
+    comes out one row past the bottom of the screen. The first fill answers
+    whether that line is needed; the second makes room for it.
     """
-    width = _width()
     lines = text.splitlines()
     head, body = lines[:3], lines[3:]
-    # what the page costs besides its body: the heading, the line that says
-    # whether it was already decided, a blank, and the two lines of keys
-    room = _room(
-        sum(_rows(line, width) for line in head)
-        + 5
-        + sum(_rows(line, width) for line in said.splitlines())
-    )
-    shown, used = [], 0
-    for line in body[offset:]:
+    room = _room("\n".join(head), trailer)
+
+    shown = _fill(body[offset:], room)
+    if offset + len(shown) >= len(body):
+        return "\n".join(head + shown), 0
+
+    shown = _fill(body[offset:], room - 1)
+    left = len(body) - offset - len(shown)
+    marker = f"  … {left} more line(s), space to go on"
+    return "\n".join(head + shown + [marker]), offset + len(shown)
+
+
+def _fill(lines: list[str], room: int) -> list[str]:
+    """As many of these as fit in the rows given, counting the ones that wrap."""
+    width = _width()
+    out, used = [], 0
+    for line in lines:
         cost = _rows(line, width)
         if used + cost > room:
             break
-        shown.append(line)
+        out.append(line)
         used += cost
-    left = len(body) - offset - len(shown)
-    if left <= 0:
-        return "\n".join(head + shown), 0
-    return "\n".join(head + shown + [f"  … {left} more line(s), space to go on"]), (
-        offset + len(shown)
-    )
+    return out
 
 
 def _cells(text: str) -> int:
@@ -2449,15 +2543,15 @@ def _pad(text: str, cells: int) -> str:
     return clipped + " " * max(0, cells - _cells(clipped))
 
 
-def _contents(bundle, items, place: int, total: int, done: dict, at: int) -> str:
+def _contents(bundle, items, place: int, total: int, done: dict, at: int, note: str = "") -> str:
     """The bundle as a list of its titles: what it takes to pass it unread."""
     name = _short(bundle["session_id"]) if bundle["session_id"] else "none"
     scope = (items[0]["scope_name"] or "-") if items else "-"
-    lines = [
+    head = (
         f"{scope}  bundle {name}  {len(items)} to decide, "
         f"waiting {bundle['days_pending']} day(s)    "
-        f"bundle {place} of {total}\n"
-    ]
+        f"bundle {place} of {total}"
+    )
     width = _width()
     rows = []
     for number, item in enumerate(items):
@@ -2470,10 +2564,7 @@ def _contents(bundle, items, place: int, total: int, done: dict, at: int) -> str
         )
         rows.append(f"\x1b[1m▸{row[1:]}\x1b[0m" if number == at else f" {row[1:]}")
 
-    shown, above, below = _shown(rows, at, reserve=8)
-    lines += [line for line in (above, *shown, below) if line]
-    lines.append("\n" + _LIST_KEYS)
-    return "\n".join(lines)
+    return _list_screen(head, rows, at, _trailer(_LIST_KEYS, note))
 
 
 def _item_text(cur, item, number: int, of: int, near: list[dict] = ()) -> str:
