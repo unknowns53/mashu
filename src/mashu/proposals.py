@@ -729,9 +729,17 @@ def _apply_on_approval(cur: psycopg.Cursor, proposal: dict, *, actor: str) -> No
         return
 
     if operation is ProposalOperation.CHANGE_STATUS:
+        # Through _as_uuid, because an id that has been through JSONB comes
+        # back a string. set_status decides whether to clear the active pointer
+        # by comparing this against the entity's, and a UUID never equals a
+        # string: the version went dormant while the entity went on pointing at
+        # it, so a retirement approved here retired nothing and said so in the
+        # affirmative. That is section 1's "a disproven hypothesis is reused",
+        # produced by the operation built to prevent it, and it is the path
+        # every unattended retirement takes (30 段 B holds them all for review).
         store.set_status(
             cur,
-            version_id=payload["version_id"],
+            version_id=_as_uuid(payload["version_id"]),
             target=VersionStatus(payload["status"]),
             actor=actor,
             reason=payload["reason"],
@@ -742,7 +750,7 @@ def _apply_on_approval(cur: psycopg.Cursor, proposal: dict, *, actor: str) -> No
         store.set_active(
             cur,
             memory_id=proposal["target_memory"],
-            version_id=payload["version_id"],
+            version_id=_as_uuid(payload["version_id"]),
             actor=actor,
             reason=payload.get("reason"),
         )
@@ -759,13 +767,14 @@ def _apply_on_approval(cur: psycopg.Cursor, proposal: dict, *, actor: str) -> No
         return
 
     if operation is ProposalOperation.MERGE:
+        keep_active = payload.get("keep_active")
         store.merge_entities(
             cur,
             source=proposal["target_memory"],
-            target=payload["into"],
+            target=_as_uuid(payload["into"]),
             actor=actor,
             reason=payload["reason"],
-            keep_active=payload.get("keep_active"),
+            keep_active=_as_uuid(keep_active) if keep_active else None,
         )
         return
 

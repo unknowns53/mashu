@@ -576,3 +576,37 @@ def test_an_unrelated_title_in_the_same_scope_is_not_a_duplicate(cur, scope_id):
         allow_similar=True,
     )
     assert result["proposal"]["status"] == "pending"
+
+
+def test_a_retirement_approved_at_review_takes_the_pointer_off(cur, scope_id):
+    """The pointer has to move, not just the status (10, 16.1, 30 段 B).
+
+    Retiring a version and leaving the entity pointing at it produces exactly
+    the failure section 1 names: the memory stays current truth while its own
+    row says it was withdrawn. This is the path every unattended retirement
+    takes, because the worker holds all of them for review, so a break here is
+    silent and permanent — the retirement reports success and retires nothing.
+    """
+    seed = _propose_create(cur, scope_id)["proposal"]
+    version_id = seed["applied_version"]
+    proposals.approve(cur, seed["proposal_id"], reviewer="user")
+    assert store.get_entity(cur, seed["target_memory"])["active_version"] == version_id
+
+    filed = proposals.propose(
+        cur,
+        actor="mashu-worker",
+        operation=ProposalOperation.CHANGE_STATUS,
+        target_memory=seed["target_memory"],
+        payload={
+            # A string, as it will be after a round trip through JSONB. The
+            # comparison inside set_status is against a UUID.
+            "version_id": str(version_id),
+            "status": str(VersionStatus.DORMANT),
+            "reason": "the run it described was replaced",
+        },
+        allow_duplicate=True,
+    )
+    proposals.approve(cur, filed["proposal"]["proposal_id"], reviewer="user")
+
+    assert store.get_version(cur, version_id)["status"] == VersionStatus.DORMANT
+    assert store.get_entity(cur, seed["target_memory"])["active_version"] is None
