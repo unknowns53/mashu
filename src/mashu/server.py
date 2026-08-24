@@ -216,9 +216,13 @@ def build_server() -> Any:
         not save it anywhere, and stop using it past valid_until.
 
         capture says whether automatic capture is still working. If it is not
-        ok, tell the user in one line — nothing new is reaching the store from
-        the sessions it names, and during a stretch where nobody is checking,
-        you are the only reader that arrives.
+        ok, tell the user in one line, because nothing new is reaching the
+        store from the sessions it names, and during a stretch where nobody is
+        checking, you are the only reader that arrives.
+
+        review says what is waiting for the user to decide. Same reasoning,
+        other queue: a proposal the gate held for a person is not retrievable
+        and nothing else will move it. If it is not ok, say so in one line too.
 
         Then keep scratch_put in hand for the rest of the session. Nothing
         written here becomes knowledge on its own; what it does is tell the
@@ -248,6 +252,7 @@ def build_server() -> Any:
                     "scoped": got.scoped,
                     "temporary": got.temporary,
                     "capture": got.health,
+                    "review": got.review,
                     "trimmed": got.trimmed,
                     "tokens": got.tokens,
                     "over_budget": got.over_budget,

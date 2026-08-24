@@ -975,6 +975,8 @@ def cmd_status(args) -> int:
     print(f"  decided        {lat['decided']} in {lat['bundles']} bundle(s)")
     print(f"  bundles/day    {lat['bundles_per_day']}")
     print(f"  time to decide {_span(lat['median_s'])} median, {_span(lat['p90_s'])} p90")
+    if got.review.get("warning"):
+        print(_wrap(got.review["warning"], indent="  ! "))
 
     print("\nunreviewed share (27.3; measured on the store, not on what retrieval returned)")
     for row in got.unreviewed:

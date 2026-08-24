@@ -610,3 +610,38 @@ def test_a_retirement_approved_at_review_takes_the_pointer_off(cur, scope_id):
 
     assert store.get_version(cur, version_id)["status"] == VersionStatus.DORMANT
     assert store.get_entity(cur, seed["target_memory"])["active_version"] is None
+
+
+def test_a_candidate_waiting_does_not_raise_the_review_warning(cur, scope_id):
+    _propose_create(cur, scope_id)
+    got = proposals.backlog(cur)
+    assert (got["waiting"], got["blocking"], got["ok"]) == (1, 0, True)
+    assert got["warning"] is None
+
+
+def test_a_proposal_held_for_a_person_raises_it_at_once(cur, scope_id):
+    _propose_create(cur, scope_id)
+    _propose_create(cur, scope_id, allow_duplicate=True, allow_similar=True)
+    got = proposals.backlog(cur)
+    assert got["blocking"] == 1
+    assert got["ok"] is False
+    assert "nothing else will move them" in got["warning"]
+
+
+def test_an_old_candidate_raises_it_even_with_nothing_held(cur, scope_id):
+    made = _propose_create(cur, scope_id)["proposal"]
+    cur.execute(
+        "UPDATE proposal SET created_at = now() - make_interval(days => %s) WHERE proposal_id = %s",
+        (proposals.REVIEW_STALE_DAYS + 2, made["proposal_id"]),
+    )
+    got = proposals.backlog(cur)
+    assert got["blocking"] == 0
+    assert got["ok"] is False
+    assert "has waited" in got["warning"]
+
+
+def test_deciding_takes_it_back_off_the_warning(cur, scope_id):
+    made = _propose_create(cur, scope_id)
+    proposals.approve(cur, made["proposal"]["proposal_id"], reviewer="user")
+    got = proposals.backlog(cur)
+    assert (got["waiting"], got["oldest_days"], got["ok"]) == (0, None, True)

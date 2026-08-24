@@ -207,6 +207,61 @@ def session_queue(cur: psycopg.Cursor) -> list[dict]:
     return out
 
 
+#: How long a proposal may wait before the next session is told about it.
+#: Not a service level: a week is roughly when the session that produced a
+#: proposal has stopped being the one that could still judge it cheaply.
+REVIEW_STALE_DAYS = 7
+
+
+def backlog(cur: psycopg.Cursor) -> dict[str, Any]:
+    """What is waiting for a person, for a session start to carry.
+
+    Section 16.3 put capture health here on the reasoning that during a
+    stretch nobody attends, the next session is the only reader guaranteed to
+    arrive. The review queue has the same shape and no such reader: a proposal
+    the gate sent to a person is not retrievable and nothing else will move it,
+    so it waits until someone happens to look. This is the same warning applied
+    to the other queue.
+
+    Candidates are counted but do not raise the warning on their own. They are
+    already retrievable, tagged unreviewed (21.1), so leaving them costs
+    precision rather than access.
+    """
+    cur.execute(
+        """
+        SELECT
+          count(*) AS waiting,
+          count(*) FILTER (WHERE blocked.proposal_id IS NOT NULL) AS blocking,
+          EXTRACT(EPOCH FROM now() - min(p.created_at)) / 86400 AS oldest_days
+        FROM proposal p
+        LEFT JOIN LATERAL (
+            SELECT e.proposal_id FROM event_log e
+            WHERE e.proposal_id = p.proposal_id
+              AND e.detail->>'gate' = 'human_review'
+            LIMIT 1
+        ) blocked ON true
+        WHERE p.status = 'pending' AND p.deferred_at IS NULL
+        """
+    )
+    row = dict(cur.fetchone())
+    oldest = row["oldest_days"]
+    row["oldest_days"] = round(float(oldest), 1) if oldest is not None else None
+    row["ok"] = not row["blocking"] and (oldest is None or float(oldest) < REVIEW_STALE_DAYS)
+    row["warning"] = None if row["ok"] else _review_warning(row)
+    return row
+
+
+def _review_warning(row: dict[str, Any]) -> str:
+    parts = []
+    if row["blocking"]:
+        parts.append(
+            f"{row['blocking']} proposal(s) are held for a person and nothing else will move them"
+        )
+    if row["oldest_days"] is not None and row["oldest_days"] >= REVIEW_STALE_DAYS:
+        parts.append(f"the oldest of {row['waiting']} has waited {row['oldest_days']} day(s)")
+    return "review is behind: " + "; ".join(parts) + ". 'mashu review' takes a bundle at a time."
+
+
 _ORPHAN_SQL = """
 SELECT e.memory_id, e.title, e.type, v.version_id, v.created_by, v.created_at,
        EXTRACT(DAY FROM now() - v.created_at)::int AS days_pending

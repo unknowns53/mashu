@@ -39,6 +39,9 @@ class Status:
 
     capture: dict[str, Any] = field(default_factory=dict)
     queue: dict[str, Any] = field(default_factory=dict)
+    #: The same queue as a warning rather than as a count, so the line the CLI
+    #: prints and the line a session start carries come from one place.
+    review: dict[str, Any] = field(default_factory=dict)
     latency: dict[str, Any] = field(default_factory=dict)
     unreviewed: list[dict[str, Any]] = field(default_factory=list)
     tag_share: dict[str, Any] = field(default_factory=dict)
@@ -50,11 +53,12 @@ class Status:
 
 def collect(cur: psycopg.Cursor, *, window_days: int = WINDOW_DAYS) -> Status:
     """Read every indicator that has a source, and name the ones that do not."""
-    from mashu import runs
+    from mashu import proposals, runs
 
     return Status(
         capture=runs.health(cur),
         queue=_queue(cur),
+        review=proposals.backlog(cur),
         latency=_latency(cur, window_days),
         unreviewed=_unreviewed_share(cur),
         tag_share=_tag_share(cur, window_days),

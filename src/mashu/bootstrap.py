@@ -30,7 +30,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import context, runs
+from mashu import context, proposals, runs
 from mashu.events import record
 from mashu.models import Delivery, EventType
 from mashu.retrieval import estimate_tokens
@@ -106,6 +106,10 @@ class Bootstrapped:
     #: during a week nobody attends, the next session is the only reader
     #: guaranteed to arrive.
     health: dict[str, Any] = field(default_factory=dict)
+    #: What is waiting for a person to decide. Beside health rather than in it:
+    #: capture failing means nothing new arrives, review being behind means
+    #: what arrived is less certain than it could be. Two different repairs.
+    review: dict[str, Any] = field(default_factory=dict)
     #: Memory IDs whose content was dropped to stay inside the budget. They are
     #: still listed, by title, so memory_get can fetch what was cut.
     trimmed: list[UUID] = field(default_factory=list)
@@ -172,6 +176,7 @@ def session_bootstrap(
         scoped=scoped,
         temporary=temporary,
         health=runs.health(cur),
+        review=proposals.backlog(cur),
         trimmed=trimmed,
         tokens=_total_tokens(scope_index, startup, scoped),
     )
@@ -191,6 +196,7 @@ def session_bootstrap(
                 "over_budget": result.over_budget,
                 "temporary": [str(row["context_id"]) for row in temporary],
                 "capture_ok": result.health.get("ok"),
+                "review_ok": result.review.get("ok"),
             },
         )
     return result
