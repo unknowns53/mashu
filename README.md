@@ -32,8 +32,10 @@ Version の status は 6 種類ある。
 | `superseded` | 新しい Version に置き換わった |
 | `disproven` | 誤りだと判明した |
 | `dormant` | 現在は使わないが、将来再評価できる |
-| `rejected` | Proposal が却下された。Proposal からは指定できない status |
+| `rejected` | Review が通さなかった。Agent からは提案できない status |
 | `completed` | Task が終わった |
+
+上は **Version の status** である。Proposal 自身の status は `pending` / `approved` / `declined` / `auto_committed` で、別の語彙を使う。**Version の `rejected` は「その内容は通らなかった」という知識の側の読み**で Layer 3 から返り、**Proposal の `declined` は「その提案は決着した」という手続きの記録**で Review の列に出る。v0.13 まで後者も `rejected` を名乗っており、どちらの表を見ているか分からないと意味が定まらなかった。
 
 ## 書き込み
 

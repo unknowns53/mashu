@@ -777,7 +777,7 @@ def _file_proposals(
                 cur,
                 actor=WORKER_ACTOR,
                 operation=ProposalOperation.CREATE,
-                payload=dict(payload, previously_rejected=earlier),
+                payload=dict(payload, previously_declined=earlier),
                 session_id=session_id,
                 allow_similar=True,
                 allow_duplicate=True,
@@ -937,7 +937,7 @@ def _file_retirements(
                 cur,
                 actor=WORKER_ACTOR,
                 operation=ProposalOperation.CHANGE_STATUS,
-                payload=dict(payload, previously_rejected=earlier),
+                payload=dict(payload, previously_declined=earlier),
                 target_memory=draft.memory_id,
                 session_id=session_id,
                 allow_duplicate=True,
@@ -958,7 +958,7 @@ def _stale_rejection(clash: DuplicateProposalError) -> dict[str, Any] | None:
     """
     if any(row["status"] == "pending" for row in clash.existing):
         return None
-    turned_down = clash.rejected
+    turned_down = clash.declined
     if not turned_down:
         return None
 

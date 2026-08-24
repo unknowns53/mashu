@@ -105,7 +105,7 @@ class ProposalStatus(StrEnum):
 
     PENDING = "pending"
     APPROVED = "approved"
-    REJECTED = "rejected"
+    DECLINED = "declined"
     AUTO_COMMITTED = "auto_committed"
 
 
@@ -179,7 +179,7 @@ class EventType(StrEnum):
     PROPOSAL_DEFERRED = "proposal_deferred"
     EXTRACTION_FILED = "extraction_filed"
     PROPOSAL_COMMITTED = "proposal_committed"
-    PROPOSAL_REJECTED = "proposal_rejected"
+    PROPOSAL_DECLINED = "proposal_declined"
     CONTEXT_ASSEMBLED = "context_assembled"
     SESSION_BOOTSTRAPPED = "session_bootstrapped"
     CONFLICT_RECORDED = "conflict_recorded"

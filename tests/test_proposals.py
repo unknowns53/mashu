@@ -87,7 +87,7 @@ def test_rejecting_marks_the_candidate_rejected_rather_than_deleting_it(cur, sco
     pid = result["proposal"]["proposal_id"]
 
     decided = proposals.reject(cur, pid, reviewer="user", reason="this was the old harness")
-    assert decided["status"] == ProposalStatus.REJECTED
+    assert decided["status"] == ProposalStatus.DECLINED
     assert decided["decision_reason"]
 
     version = store.get_version(cur, decided["applied_version"])
@@ -272,7 +272,7 @@ def test_a_proposal_already_turned_down_comes_back_with_the_reason(cur, scope_id
     with pytest.raises(DuplicateProposalError) as caught:
         _propose_create(cur, scope_id)
 
-    turned_down = caught.value.rejected
+    turned_down = caught.value.declined
     assert [row["proposal_id"] for row in turned_down] == [seed["proposal_id"]]
     assert turned_down[0]["decision_reason"] == "the harness moved to the new fixture in week 2"
     assert "week 2" in str(caught.value)
@@ -544,7 +544,7 @@ def test_a_rejected_idea_worded_differently_still_comes_back_with_its_reason(cur
             allow_similar=True,
         )
 
-    turned_down = caught.value.rejected
+    turned_down = caught.value.declined
     assert len(turned_down) == 1
     assert turned_down[0]["decision_reason"] == "the bridge chip is fine; the enclosure loses power"
 

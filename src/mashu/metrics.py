@@ -232,8 +232,10 @@ def _corrections(cur: psycopg.Cursor, window_days: int) -> dict[str, Any]:
         """
         SELECT
           (SELECT count(*) FROM event_log
-            WHERE event_type = 'proposal_rejected'
-              AND created_at > now() - make_interval(days => %(d)s)) AS rejected,
+            WHERE event_type IN ('proposal_declined', 'proposal_rejected')
+              -- the second name is what this event was called before 0023;
+              -- event_log is append only, so the old rows keep it
+              AND created_at > now() - make_interval(days => %(d)s)) AS declined,
           (SELECT count(*) FROM event_log
             WHERE event_type = 'status_changed' AND actor = 'user'
               AND detail ->> 'to' IN ('disproven', 'dormant', 'completed')
@@ -245,7 +247,7 @@ def _corrections(cur: psycopg.Cursor, window_days: int) -> dict[str, Any]:
         {"d": window_days},
     )
     row = dict(cur.fetchone())
-    undone = row["rejected"] + row["retired_by_hand"]
+    undone = row["declined"] + row["retired_by_hand"]
     row["per_100_retrievals"] = (
         round(100 * undone / row["retrievals"], 1) if row["retrievals"] else None
     )
@@ -396,7 +398,7 @@ def retirement_eval(cur: psycopg.Cursor, *, sample: int = 0) -> dict[str, Any]:
         ]
         (recovered if same_session else missed).append(marker)
 
-    decided = [row for row in output if row["status"] in ("approved", "rejected")]
+    decided = [row for row in output if row["status"] in ("approved", "declined")]
     approved = [row for row in decided if row["status"] == "approved"]
     return {
         "markers": len(markers),
