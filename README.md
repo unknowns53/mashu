@@ -112,7 +112,7 @@ uv run mashu admin migrate
 | `mashu scope --add <name> --about <line>` | Scope を作成。`--route` で対応づけも実行 |
 | `mashu route --add <path> --scope <name>` | 作業ディレクトリを Scope に対応づける |
 | `mashu route --ignore <path>` | そのディレクトリを捕捉対象から外す |
-| `mashu directive <id> <short>` | 渡す短形を書く |
+| `mashu directive <id> <short>` | 渡す短形を書く。本文を省くと今の分量と上限を出して一行で聞く |
 | `mashu deliver <id> <delivery>` | push と pull の間で切り替える |
 | `mashu bootstrap` | セッション開始時に渡す内容と token を表示 |
 | `mashu incident --cause <cause> --note <note>` | 事故を原因つきで記録。無引数で集計を表示 |
@@ -171,6 +171,10 @@ mashu review --bundle <id>        その束だけ
 **一度決めたものは決め直せない。**Proposal の status は記録であってスイッチではないので、却下したものをその場で承認し直すことはできない。内容のほうを残したくなったら `mashu remember` で自分の名義に書く。断られても sitting は続くから、その場で読んで次へ進める。
 
 先送りした項目は次の `review` に出てこない。`--all` で戻る。
+
+`e` が開くエディタは `MASHU_EDITOR`、`VISUAL`、`EDITOR` の順に見て、どれも無ければ `nano`、`micro`、`vi` のうち入っているものを使う。開く前に、どれを開くか・どのキーで保存して抜けるかを 1 行出す。
+
+2000 token の上限に当たったときは `mashu directive <id>` を本文なしで実行すると、今の内容と分量、上限を出したうえで短形を一行で聞く。エディタは開かない。
 
 端末が無いところ（パイプ、スクリプト、テスト）では束を一気に印字して `--batch` の文字列で決める。
 

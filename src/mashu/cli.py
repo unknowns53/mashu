@@ -1368,15 +1368,18 @@ def cmd_directive(args) -> int:
     carry two or three rules out of dozens, and the way to add one to an
     existing memory was to file a revision whose body had not changed.
     """
-    if not args.clear and not args.text:
-        raise SystemExit("give the short form, or --clear to take it off")
+    text = args.text
+    if not args.clear and not text:
+        text = _ask_directive(args)
+        if text is None:
+            return 1
     try:
         with transaction(args.dsn) as cur:
             entity = _resolve_entity(cur, args.memory)
             changed = store.set_directive(
                 cur,
                 memory_id=entity["memory_id"],
-                directive=None if args.clear else args.text,
+                directive=None if args.clear else text,
                 actor=args.actor,
             )
     except DeliveryError as refusal:
@@ -1388,6 +1391,42 @@ def cmd_directive(args) -> int:
     else:
         print(_wrap(changed["directive"], indent="  > "))
     return 0
+
+
+def _ask_directive(args) -> str | None:
+    """Take the short form as a typed line rather than as a shell argument (21.2).
+
+    The refusal that sends a person here says to shorten something, and until
+    now the only ways to do that were to quote a paragraph of Japanese onto a
+    command line or to be dropped into whatever editor the environment
+    happened to name. Neither is a way to write one sentence.
+
+    What it costs and what the ceiling is are printed beside the prompt,
+    because being told to shorten something without being told by how much is
+    not an instruction.
+    """
+    if not sys.stdin.isatty():
+        print("give the short form, or --clear to take it off", file=sys.stderr)
+        return None
+    with transaction(args.dsn) as cur:
+        entity = store.get_entity(cur, _resolve_entity(cur, args.memory)["memory_id"])
+        version = store.get_version(cur, entity["active_version"] or entity["latest_version"])
+        scope = entity["scope_id"] if entity["delivery"] == str(Delivery.SCOPE_REQUIRED) else None
+        _, cost = bootstrap.would_fit(
+            cur, memory_id=entity["memory_id"], content=version["content"], scope_id=scope
+        )
+    print(f"\n{entity['title']}\n")
+    if version["directive"]:
+        print(_wrap(version["directive"], indent="  > "))
+    else:
+        print(_wrap(version["content"]))
+    print(
+        f"\n  a session opening carrying this whole would come to {cost} token, "
+        f"against a ceiling of {bootstrap.BOOTSTRAP_TOKEN_BUDGET}."
+    )
+    print("  write the short form it should carry instead, on one line.\n")
+    short = _typed("> ")
+    return short
 
 
 def cmd_serve(args) -> int:
@@ -1645,6 +1684,10 @@ _TOKENS = {
     "\x1b[B": "down",
     "\x1b[C": "right",
     "\x1b[D": "left",
+    "\x1b[5~": "pageup",
+    "\x1b[6~": "pagedown",
+    "\x1b[H": "home",
+    "\x1b[F": "end",
     "\r": "enter",
     "\n": "enter",
     "\x7f": "left",
@@ -1684,11 +1727,31 @@ def _getkey() -> str:
         # and every arrow key then arrives as three unrelated keystrokes.
         if key == "\x1b" and select.select([fd], [], [], 0.05)[0]:
             key += _byte(fd)
-            if key.endswith("[") and select.select([fd], [], [], 0.05)[0]:
-                key += _byte(fd)
+            if key.endswith("["):
+                key += _csi(fd)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
     return _TOKENS.get(key, key.lower())
+
+
+def _csi(fd: int) -> str:
+    """The rest of an escape sequence, up to and including the byte that ends it.
+
+    Arrows end after one byte and page keys do not: Page Down is ESC [ 6 ~, so
+    stopping at the first byte leaves a tilde in the buffer, and the terminal
+    delivers one unknown key followed by another. Both are ignored, and a key
+    pressed twice with nothing happening reads as a key that does nothing.
+
+    The rule is the one the terminal follows: digits and semicolons are
+    parameters, and anything from @ to ~ ends the sequence.
+    """
+    out = ""
+    while select.select([fd], [], [], 0.05)[0]:
+        byte = _byte(fd)
+        out += byte
+        if "@" <= byte <= "~":
+            break
+    return out
 
 
 def _byte(fd: int) -> str:
@@ -1901,6 +1964,7 @@ def _bundle_sitting(args, bundle, items, pages, place, total) -> tuple[str, str]
     reading = False
     scroll = 0
     more = 0
+    back: list[int] = []
     note = ""
 
     while True:
@@ -1913,27 +1977,40 @@ def _bundle_sitting(args, bundle, items, pages, place, total) -> tuple[str, str]
         if key not in ("y", "enter", "r", "n", "s", "e", "a"):
             note = ""
 
-        if key == "space":
-            # Read on where a proposal is longer than the screen, and step to
-            # the next one where it is not: the same key, and in both cases it
-            # means carry on.
-            if reading and more:
+        if key in ("space", "pagedown", "right") and reading:
+            # Read on where a proposal is longer than the screen. Space also
+            # steps to the next proposal where it is not, because in both cases
+            # it means carry on; the page keys stay on the page they name.
+            if more:
+                back.append(scroll)
                 scroll = more
                 continue
+            if key != "space":
+                continue
+        if key == "space":
             key = "down"
-        if key == "b" and reading:
-            scroll = 0
+        if reading and key in ("pageup", "b"):
+            scroll = back.pop() if back else 0
+            continue
+        if reading and key == "home":
+            back, scroll = [], 0
+            continue
+        if not reading and key in ("pagedown", "pageup"):
+            key = "down" if key == "pagedown" else "up"
+        if key in ("home", "end"):
+            at = 0 if key == "home" else len(items) - 1
+            back, scroll = [], 0
             continue
 
         if key == "q":
             return "leave", _tally(bundle, done, len(items))
         if key in ("down", "j"):
             at = min(len(items) - 1, at + 1)
-            scroll = 0
+            back, scroll = [], 0
             continue
         if key in ("up", "k"):
             at = max(0, at - 1)
-            scroll = 0
+            back, scroll = [], 0
             continue
         if key == "a":
             note = _rest(args, items, done)
@@ -1983,7 +2060,7 @@ def _bundle_sitting(args, bundle, items, pages, place, total) -> tuple[str, str]
         if at + 1 >= len(items):
             break
         at += 1
-        scroll = 0
+        back, scroll = [], 0
 
     return "next", _tally(bundle, done, len(items))
 
@@ -2383,8 +2460,35 @@ def _edit(cur, args, item, edited: str | None) -> None:
     print(f"edited    {item['title']}")
 
 
-def _open_editor(text: str) -> str:
-    editor = os.environ.get("MASHU_EDITOR") or os.environ.get("EDITOR") or "vi"
+#: How to get out of the editors this is likely to reach for. vi is last
+#: because someone who has not chosen an editor has not chosen vi, and being
+#: put inside it with no way out is where an edit stops being possible.
+_EDITORS = (
+    ("nano", "^O saves, ^X leaves"),
+    ("micro", "^S saves, ^Q leaves"),
+    ("vi", "press i to type, then Esc and :wq to save and leave"),
+)
+
+
+def _editor() -> tuple[str, str]:
+    """The editor to open, and how to get back out of it."""
+    chosen = os.environ.get("MASHU_EDITOR") or os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if chosen:
+        head = pathlib.Path(chosen.split()[0]).name
+        return chosen, dict(_EDITORS).get(head, "")
+    for name, way in _EDITORS:
+        if shutil.which(name):
+            return name, way
+    return "vi", dict(_EDITORS)["vi"]
+
+
+def _open_editor(text: str, about: str = "") -> str:
+    """Hand the text to an editor, having said which one and how to leave it."""
+    editor, way = _editor()
+    if about:
+        print(f"\n  {about}")
+    print(f"  opening {editor}" + (f" — {way}" if way else ""))
+    print("  set MASHU_EDITOR to use another one")
     with tempfile.NamedTemporaryFile("w+", suffix=".md", delete=False, encoding="utf-8") as handle:
         handle.write(text)
         path = handle.name

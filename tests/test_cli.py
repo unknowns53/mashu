@@ -1376,3 +1376,124 @@ def test_the_page_says_when_the_store_already_holds_something_like_this(
     assert "the same title" in out
     # and it is not decided for the reader: 20 keeps that out of the automatic path
     assert _statuses(test_dsn, session_id) == {"同じことを二度言う題名": "pending"}
+
+
+def test_an_escape_sequence_is_read_to_its_end(monkeypatch):
+    """A key read as two unknown keys is a key that silently does nothing.
+
+    Arrows end after one byte and page keys do not — Page Down is ESC [ 6 ~ —
+    so stopping at the first byte left a tilde behind and delivered two
+    unrecognised keystrokes instead of one recognised one.
+    """
+    for sequence, expected in (
+        ("\x1b[6~", "pagedown"),
+        ("\x1b[5~", "pageup"),
+        ("\x1b[B", "down"),
+        ("\x1b[1;5B", "\x1b[1;5b"),
+    ):
+        pending = list(sequence)
+
+        monkeypatch.setattr(cli, "_byte", lambda _fd, left=pending: left.pop(0))
+        monkeypatch.setattr(
+            cli.select,
+            "select",
+            lambda *_a, left=pending: ([1], [], []) if left else ([], [], []),
+        )
+        monkeypatch.setattr(
+            cli.sys, "stdin", SimpleNamespace(isatty=lambda: True, fileno=lambda: 0)
+        )
+        monkeypatch.setattr(cli.termios, "tcgetattr", lambda _fd: None)
+        monkeypatch.setattr(cli.termios, "tcsetattr", lambda *_a: None)
+        monkeypatch.setattr(cli.tty, "setcbreak", lambda _fd: None)
+
+        assert cli._getkey() == expected
+        assert not pending, f"{sequence!r} left bytes behind for the next keystroke"
+
+
+def test_page_down_reads_on_within_one_proposal(test_dsn, sitting, committed_scope):
+    """The whole point of the marker is that some key takes you past it."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    _propose(
+        test_dsn,
+        committed_scope,
+        "長い本文の項目",
+        "\n".join(f"行 {n:03d} の本文" for n in range(200)),
+        session_id=session_id,
+    )
+
+    code, out = sitting(["enter", "pagedown", "q"], (), "--bundle", str(session_id)[:8])
+    assert code == 0
+    screens = out.split("space read on")
+    assert "… " in screens[0] and "more line(s)" in screens[0], "the page has to be truncated"
+    assert "行 000 の本文" in screens[0]
+    assert "行 000 の本文" not in screens[1], "page down has to move the page"
+    assert "の本文" in screens[1], "and has to keep showing the same proposal"
+    assert _statuses(test_dsn, session_id) == {"長い本文の項目": "pending"}
+
+
+def test_the_short_form_can_be_typed_at_a_prompt(test_dsn, monkeypatch, capsys, committed_scope):
+    """Being told to shorten something is not an instruction without a way to do it.
+
+    The refusal that sends a person here says to shorten a directive. Until the
+    prompt existed the ways to do that were to quote a paragraph of Japanese
+    onto a command line, or to be dropped into whatever editor the environment
+    happened to name, which for an unset EDITOR is vi.
+    """
+    with transaction(test_dsn) as cur:
+        memory_id, _ = store.create_entity(
+            cur,
+            scope_id=committed_scope,
+            type=MemoryType.PREFERENCE,
+            title=f"短くしたい規律 {uuid.uuid4()}",
+            content="とても長い本文が続く。" * 20,
+            source_type=SourceType.USER,
+            created_by="user",
+            actor="user",
+            adopt=True,
+        )
+
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda *_: "短い規律だけを一行で")
+    code = cli.main(["--dsn", test_dsn, "directive", str(memory_id)[:8]])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "against a ceiling of" in out, "shorten it by how much has to be on the screen"
+    with transaction(test_dsn) as cur:
+        entity = store.get_entity(cur, memory_id)
+        assert (
+            store.get_version(cur, entity["active_version"])["directive"] == "短い規律だけを一行で"
+        )
+
+
+def test_without_a_terminal_the_short_form_is_still_an_argument(test_dsn, run, committed_scope):
+    with transaction(test_dsn) as cur:
+        memory_id, _ = store.create_entity(
+            cur,
+            scope_id=committed_scope,
+            type=MemoryType.PREFERENCE,
+            title=f"引数で書く規律 {uuid.uuid4()}",
+            content="本文",
+            source_type=SourceType.USER,
+            created_by="user",
+            actor="user",
+            adopt=True,
+        )
+    code, _ = run("directive", str(memory_id)[:8], "一行で書いた短形")
+    assert code == 0
+
+
+def test_the_editor_is_one_a_person_can_get_out_of(monkeypatch):
+    """Someone who has not chosen an editor has not chosen vi."""
+    monkeypatch.delenv("MASHU_EDITOR", raising=False)
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.setattr(
+        cli.shutil, "which", lambda name: "/usr/bin/nano" if name == "nano" else None
+    )
+    assert cli._editor() == ("nano", "^O saves, ^X leaves")
+
+    monkeypatch.setenv("MASHU_EDITOR", "/opt/homebrew/bin/micro")
+    editor, way = cli._editor()
+    assert editor == "/opt/homebrew/bin/micro"
+    assert "^Q" in way, "and it still says how to leave the one that was chosen"
