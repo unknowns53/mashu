@@ -1089,6 +1089,8 @@ def cmd_status(args) -> int:
         f"  succeeded {health['succeeded']}   waiting {health['waiting']}   "
         f"failed {health['failed']}   held {health['held']}   skipped {health['skipped']}"
     )
+    swept = health.get("swept_hours_ago")
+    print(f"  last sweep     {'never' if swept is None else f'{swept}h ago'}")
     if health.get("warning"):
         print(_wrap(health["warning"], indent="  ! "))
 

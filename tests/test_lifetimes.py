@@ -374,23 +374,26 @@ def test_the_sweep_walks_from_where_it_got_to_rather_than_a_fixed_window(committ
     os.utime(old, (long_ago, long_ago))
     roots = {"claude": str(root)}
 
-    with transaction(committing_dsn) as cur:
-        cur.execute("DELETE FROM sweep_watermark WHERE source_cli = 'claude'")
+    # This one commits, so it cleans up whatever happens. A test that leaves a
+    # queued run behind poisons every later test that claims the oldest one.
+    try:
+        with transaction(committing_dsn) as cur:
+            cur.execute("DELETE FROM sweep_watermark WHERE source_cli = 'claude'")
 
-    # With no mark, the fixed reach decides, and a file this old is past it.
-    assert worker.sweep(committing_dsn, roots=roots, since_days=7) == []
+        # With no mark, the fixed reach decides, and a file this old is past it.
+        assert worker.sweep(committing_dsn, roots=roots, since_days=7) == []
 
-    # The sweep still leaves a mark, because a quiet sweep is evidence too.
-    with transaction(committing_dsn) as cur:
-        assert runs.swept_to(cur, "claude") is not None
-        cur.execute(
-            "UPDATE sweep_watermark SET swept_to = now() - make_interval(days => 120) "
-            "WHERE source_cli = 'claude'"
-        )
+        # The sweep still leaves a mark, because a quiet sweep is evidence too.
+        with transaction(committing_dsn) as cur:
+            assert runs.swept_to(cur, "claude") is not None
+            cur.execute(
+                "UPDATE sweep_watermark SET swept_to = now() - make_interval(days => 120) "
+                "WHERE source_cli = 'claude'"
+            )
 
-    found = worker.sweep(committing_dsn, roots=roots, since_days=7)
-    assert [row["external_session_id"] for row in found] == ["long-ago"]
-
-    with transaction(committing_dsn) as cur:
-        cur.execute("DELETE FROM extraction_run WHERE external_session_id = 'long-ago'")
-        cur.execute("DELETE FROM sweep_watermark WHERE source_cli = 'claude'")
+        found = worker.sweep(committing_dsn, roots=roots, since_days=7)
+        assert [row["external_session_id"] for row in found] == ["long-ago"]
+    finally:
+        with transaction(committing_dsn) as cur:
+            cur.execute("DELETE FROM extraction_run WHERE external_session_id = 'long-ago'")
+            cur.execute("DELETE FROM sweep_watermark WHERE source_cli = 'claude'")

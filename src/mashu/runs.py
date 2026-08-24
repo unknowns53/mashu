@@ -498,6 +498,15 @@ def _warning(row: dict[str, Any]) -> str:
         parts.append(
             f"{row['held']} transcript(s) are held because their working directory maps to no scope"
         )
+    quiet = row.get("swept_hours_ago")
+    if quiet is not None and quiet >= SWEEP_SILENT_HOURS:
+        # The one line that is not about rows. Everything above counts what
+        # arrived; this counts whether anything is still looking, which is the
+        # only reading that survives both the hook and the sweeper stopping.
+        parts.append(
+            f"the sweeper has not run for {quiet}h, so transcripts nothing "
+            "enqueued are not being found either"
+        )
     return (
         "capture is not keeping up: "
         + "; ".join(parts)
