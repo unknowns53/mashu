@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import uuid
 
+import psycopg.types.json
+
 from mashu import metrics, proposals, store
 from mashu.models import Delivery, MemoryType, ProposalOperation, SourceType
 
@@ -137,3 +139,98 @@ def test_the_short_form_is_screened_too_because_it_is_what_gets_pushed(cur, scop
     )
     row = next(r for r in metrics.self_dating(cur) if r["memory_id"] == memory_id)
     assert row["matched_in"] == "directive"
+
+
+# --------------------------------------------------------------------------
+# 27.4b 改: does the unattended worker find what a person retires
+# --------------------------------------------------------------------------
+def _ended_session(cur, *, external_id, extracted):
+    cur.execute(
+        """
+        INSERT INTO agent_session (agent, source_cli, external_session_id,
+                                   started_at, ended_at)
+        VALUES ('claude', 'claude', %s, now() - interval '2 hour',
+                now() - interval '1 hour')
+        RETURNING session_id
+        """,
+        (external_id,),
+    )
+    session_id = cur.fetchone()["session_id"]
+    if extracted:
+        cur.execute(
+            """
+            INSERT INTO extraction_run (source_cli, external_session_id,
+                                        transcript_digest, extractor_version, state)
+            VALUES ('claude', %s, %s, 'v1', 'succeeded')
+            """,
+            (external_id, str(uuid.uuid4())),
+        )
+    return session_id
+
+
+def _marker(cur, scope_id, session_id):
+    """A retirement a person stated, timed inside the session's window."""
+    memory_id, version_id = _seed(cur, scope_id, adopt=True)
+    cur.execute(
+        """
+        INSERT INTO proposal (actor, operation, target_memory, payload, status,
+                              reviewer, decided_at, decision_reason, created_at)
+        VALUES ('user', 'change_status', %s, %s, 'approved',
+                'user', now() - interval '80 minute', 'stated at the terminal',
+                now() - interval '90 minute')
+        """,
+        (
+            memory_id,
+            psycopg.types.json.Jsonb(
+                {"version_id": str(version_id), "status": "completed", "reason": "終わった"}
+            ),
+        ),
+    )
+    return memory_id
+
+
+def test_a_marker_in_a_log_nobody_read_is_not_counted_as_missed(cur, scope_id):
+    """Otherwise "the worker looked and did not find it" is reported for a
+    transcript the worker has never opened, and recall reads as failure for
+    work that has not happened."""
+    session_id = _ended_session(cur, external_id=str(uuid.uuid4()), extracted=False)
+    _marker(cur, scope_id, session_id)
+
+    got = metrics.retirement_eval(cur)
+    assert got["missed"] == 0
+    assert got["unread"] >= 1
+    assert got["recall"] is None
+
+
+def test_a_marker_the_extraction_did_not_recover_is_a_miss(cur, scope_id):
+    """With the log actually read, a marker that came back empty is recall."""
+    external = str(uuid.uuid4())
+    session_id = _ended_session(cur, external_id=external, extracted=True)
+    _marker(cur, scope_id, session_id)
+
+    got = metrics.retirement_eval(cur)
+    assert got["missed"] >= 1
+    assert got["recall"] == 0.0
+
+
+def test_the_worker_getting_there_first_counts_as_recovered(cur, scope_id):
+    """The extraction of the same session proposed the same retirement."""
+    external = str(uuid.uuid4())
+    session_id = _ended_session(cur, external_id=external, extracted=True)
+    memory_id = _marker(cur, scope_id, session_id)
+    cur.execute(
+        """
+        INSERT INTO proposal (actor, operation, target_memory, session_id, payload, status)
+        VALUES (%s, 'change_status', %s, %s, %s, 'pending')
+        """,
+        (
+            metrics.WORKER_ACTOR,
+            memory_id,
+            session_id,
+            psycopg.types.json.Jsonb({"status": "completed", "reason": "見つけた"}),
+        ),
+    )
+
+    got = metrics.retirement_eval(cur)
+    assert got["recovered"] >= 1
+    assert got["recall"] == 1.0

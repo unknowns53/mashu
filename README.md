@@ -123,6 +123,7 @@ fresh clone では git hook を入れる。
 | `mashu directive <id> <short>` | 押し込むときに渡る短形を書く |
 | `mashu deliver <id> <delivery>` | push と pull のあいだで動かす |
 | `mashu bootstrap` | セッション開始時に渡る固定の塊とその token |
+| `mashu incident --cause <c> --note` | 事故を原因つきで記録する。無引数で集計を読む（27.5） |
 
 機械が打つ 3 つ。名前はこのリポジトリの外——MCP 設定と launch agent——との約束なので上に残してある。
 
@@ -149,6 +150,8 @@ fresh clone では git hook を入れる。
 | `mashu admin enqueue` | transcript を抽出のために台帳へ積む |
 | `mashu admin runs` | 捕捉台帳の生の行（`status` の元） |
 | `mashu admin stale` | 自分で期限を名乗っている Active を洗い出す（25.2 の移行） |
+| `mashu admin thresholds` | 類似度の分布を実在庫から測り直す（27.2） |
+| `mashu admin eval-retire` | worker の退役洗い出しを marker と突き合わせる（27.4b） |
 | `mashu admin migrate` | 未適用の migration を流す |
 
 ## Agent から使う
@@ -210,7 +213,6 @@ tests/                         実 PostgreSQL に対して走る。harness/ は�
 tools/session_end_hook.sh      SessionEnd hook。台帳へ積むだけで返る
 tools/launchd/                 常駐ユニット。install.sh は置くだけで読み込まない
 tools/condense_session.py      セッションログの圧縮
-tools/measure_thresholds.py    閾値を実在庫の分布から決める（仕様 27.2）
 hooks/                         pre-commit / commit-msg
 ```
 

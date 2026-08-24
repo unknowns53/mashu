@@ -1222,7 +1222,7 @@ preview を Agent 側のフラグにしないのは、フラグにすれば「�
 
 紛らわしい Entity 名(SSD障害解析 / SSDデバッグ / 外付けSSD問題)を意図的に登録し、採用した埋め込みモデルでの類似度スコア分布を実測して閾値を決定する。
 
-**実測(2026-08-24、multilingual-e5-large、`tools/measure_thresholds.py`)**
+**実測(2026-08-24、multilingual-e5-large、`mashu admin thresholds`)**
 
 合成した名前ではなく、移植済みの実在 Entity を負例に使った。同一 Scope 内の全ペア 1046 組はいずれも別概念であり、実在タイトルの言い換え 10 組を正例とした。
 

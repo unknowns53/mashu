@@ -303,6 +303,141 @@ def self_dating(cur: psycopg.Cursor) -> list[dict[str, Any]]:
     return found
 
 
+#: The worker's identity on anything it files. Its proposals are the output
+#: side of the comparison; everything a person filed is the answer side.
+WORKER_ACTOR = "mashu-worker"
+
+
+def retirement_eval(cur: psycopg.Cursor, *, sample: int = 0) -> dict[str, Any]:
+    """Whether the unattended worker finds the retirements a person would (27.4b 改).
+
+    v0.6 asked the user to read a whole session and write the answers down
+    before the extractor ran. The ordering was right — deciding the answer after
+    seeing the output makes the output the answer — but the price was a person
+    reading 38,000 token to produce a handful of labels, on a system with one
+    user, and that price is itself an argument for skipping retirement review.
+
+    So ordinary use produces the answers instead. When a person says something
+    is finished, that is a marker, and it is fixed before the night's extraction
+    reads the log, so nothing about it can be pulled towards the output. Recall
+    is how many markers came back. Precision is what happened to the extra
+    proposals when somebody looked at them.
+
+    A marker is tied to a session by the clock, and only to one that has both
+    ended and been extracted. Two things go wrong without those conditions, and
+    both push the number towards looking like failure.
+
+    A session still running swallows every retirement typed at the terminal
+    while it is open, including ones about work from days ago. And a session
+    the extractor has not read yet scores every marker in it as missed, which
+    reports "the worker looked and did not find this" for a log the worker has
+    never opened. Anything not scorable is counted apart and said out loud: a
+    recall of zero and no evidence print as the same figure and mean opposite
+    things.
+    """
+    cur.execute(
+        """
+        SELECT p.proposal_id, p.target_memory, p.created_at,
+               p.payload ->> 'status' AS status,
+               e.title, sess.session_id, sess.external_session_id, sess.extracted
+        FROM proposal p
+        JOIN memory_entity e ON e.memory_id = p.target_memory
+        LEFT JOIN LATERAL (
+            SELECT a.session_id, a.external_session_id,
+                   EXISTS (
+                       SELECT 1 FROM extraction_run r
+                       WHERE r.source_cli = a.source_cli
+                         AND r.external_session_id = a.external_session_id
+                         AND r.state = 'succeeded'
+                   ) AS extracted
+            FROM agent_session a
+            WHERE a.started_at <= p.created_at
+              AND a.ended_at IS NOT NULL
+              AND a.ended_at >= p.created_at
+            ORDER BY a.started_at DESC
+            LIMIT 1
+        ) sess ON TRUE
+        WHERE p.operation = 'change_status' AND p.actor <> %s
+        ORDER BY p.created_at
+        """,
+        (WORKER_ACTOR,),
+    )
+    markers = [dict(row) for row in cur.fetchall()]
+
+    cur.execute(
+        """
+        SELECT p.target_memory, p.session_id, p.status
+        FROM proposal p
+        WHERE p.operation = 'change_status' AND p.actor = %s
+        """,
+        (WORKER_ACTOR,),
+    )
+    output = [dict(row) for row in cur.fetchall()]
+    by_memory: dict[Any, list[dict[str, Any]]] = {}
+    for row in output:
+        by_memory.setdefault(row["target_memory"], []).append(row)
+
+    recovered, missed, unattributed, unread = [], [], [], []
+    for marker in markers:
+        if marker["session_id"] is None:
+            unattributed.append(marker)
+            continue
+        if not marker["extracted"]:
+            unread.append(marker)
+            continue
+        same_session = [
+            row
+            for row in by_memory.get(marker["target_memory"], [])
+            if row["session_id"] == marker["session_id"]
+        ]
+        (recovered if same_session else missed).append(marker)
+
+    decided = [row for row in output if row["status"] in ("approved", "rejected")]
+    approved = [row for row in decided if row["status"] == "approved"]
+    return {
+        "markers": len(markers),
+        "recovered": len(recovered),
+        "missed": len(missed),
+        "unattributed": len(unattributed),
+        "unread": len(unread),
+        "missed_titles": [m["title"] for m in missed],
+        "proposed": len(output),
+        "decided": len(decided),
+        "approved": len(approved),
+        "pending": len(output) - len(decided),
+        "precision": len(approved) / len(decided) if decided else None,
+        "recall": len(recovered) / (len(recovered) + len(missed))
+        if (recovered or missed)
+        else None,
+        "sample": _still_true_sample(cur, sample) if sample else [],
+    }
+
+
+def _still_true_sample(cur: psycopg.Cursor, size: int) -> list[dict[str, Any]]:
+    """A handful of adopted memories to read and confirm are still true (27.4b step 4).
+
+    Recall measured against markers can only find retirements somebody already
+    noticed. What it cannot see is the ones nobody said out loud, and those are
+    the dangerous kind: a memory that quietly stopped being true goes on being
+    handed over as current, and nothing in the queue ever mentions it.
+
+    Drawing the sample is mechanical. Reading it is not, and this does not
+    pretend to: it returns rows for a person to judge.
+    """
+    cur.execute(
+        """
+        SELECT e.memory_id, e.title, e.type, s.name AS scope_name
+        FROM memory_entity e
+        JOIN scope s ON s.scope_id = e.scope_id
+        WHERE e.status = 'active' AND e.active_version IS NOT NULL
+        ORDER BY random()
+        LIMIT %s
+        """,
+        (size,),
+    )
+    return cur.fetchall()
+
+
 def pushed_total(cur: psycopg.Cursor) -> int:
     """How many memories are pushed at all, of either kind."""
     cur.execute(

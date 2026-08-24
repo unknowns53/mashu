@@ -29,6 +29,7 @@ from mashu import (
     db,
     extract,
     importer,
+    incidents,
     metrics,
     proposals,
     resolution,
@@ -37,15 +38,18 @@ from mashu import (
     runs,
     server,
     store,
+    thresholds,
     transcript,
     worker,
 )
 from mashu.db import transaction
 from mashu.embed import get_embedder
 from mashu.errors import DeliveryError, DuplicateProposalError, MashuError
+from mashu.incidents import LEADS_TO
 from mashu.migrate import migrate
 from mashu.models import (
     Delivery,
+    IncidentCause,
     MemoryType,
     ProposalOperation,
     ProposalStatus,
@@ -1021,6 +1025,122 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_thresholds(args) -> int:
+    """Measure the similarity distributions rather than guessing them (27.2).
+
+    Kept runnable rather than run once. The scope detection floor sits about
+    0.04 above the median unrelated pair, and that margin is a property of the
+    embedding model and of what the store happens to hold — both of which move.
+    A number measured once and never again is a guess with a date on it.
+    """
+    thresholds.main(args.dsn)
+    return 0
+
+
+def cmd_eval_retire(args) -> int:
+    """Does the unattended worker find what a person would retire (27.4b 改, 段 D).
+
+    Reads a rate only where there is something to read it from. With no markers
+    yet, "0% recall" and "no evidence" print as the same number and mean
+    opposite things, so this says which one it is.
+    """
+    with transaction(args.dsn) as cur:
+        got = metrics.retirement_eval(cur, sample=args.sample)
+
+    print("markers (what a person said was finished, before the night's extraction ran)")
+    print(f"  {got['markers']} marker(s) in all")
+    if got["unattributed"]:
+        print(f"    {got['unattributed']} fell outside any finished session")
+    if got["unread"]:
+        print(f"    {got['unread']} are in sessions the extractor has not read yet")
+    if got["recall"] is None:
+        print("  recall: no evidence yet — no marker sits in a session that was extracted")
+    else:
+        print(
+            f"  recall: {got['recall']:.0%}  ({got['recovered']} recovered, {got['missed']} missed)"
+        )
+        for title in got["missed_titles"]:
+            print(_wrap(title, indent="    missed: "))
+
+    print("\nthe worker's own retirement proposals")
+    print(f"  {got['proposed']} filed, {got['decided']} decided, {got['pending']} still waiting")
+    if got["precision"] is None:
+        print("  precision: no evidence yet — none of them has been decided")
+    else:
+        print(f"  precision: {got['precision']:.0%}  ({got['approved']} of {got['decided']} kept)")
+
+    if got["sample"]:
+        print(f"\nstill true? a sample of {len(got['sample'])} adopted memories to read")
+        print(
+            _wrap(
+                "Recall above only finds retirements somebody noticed. What it cannot "
+                "see is the ones nobody said out loud, and those go on being handed "
+                "over as current with nothing in the queue to mention them.",
+                indent="  ",
+            )
+        )
+        print()
+        for row in got["sample"]:
+            print(f"  {_short(row['memory_id'])}  [{row['scope_name']}]  {row['type']}")
+            print(_wrap(row["title"], indent="      "))
+    return 0
+
+
+def cmd_incident(args) -> int:
+    """Record an accident, or read the tally back (27.5, 30 段 D).
+
+    27.5 will not have the switchover judged by feel, so what is kept is
+    occurrences and the cause of each. The cause carries the value: each one
+    sends you somewhere different, and a count without it says only that
+    something went wrong.
+
+    Nothing infers an accident. Deciding one happened means knowing what the
+    session should have known, which is not a thing the system can see from the
+    inside, so this is written by hand and the only help it gives is refusing a
+    record with no account of what happened.
+    """
+    with transaction(args.dsn) as cur:
+        if not args.cause:
+            rows = incidents.listed(cur, since_days=args.days)
+            counts = incidents.tally(cur, since_days=args.days)
+            if not rows:
+                window = f" in the last {args.days} day(s)" if args.days else ""
+                print(f"no accidents recorded{window}")
+                return 0
+            for row in counts:
+                cause = IncidentCause(row["cause"])
+                print(f"{row['kind']:<8}{row['cause']:<11}{row['n']:>3}   -> {LEADS_TO[cause]}")
+            print()
+            for row in rows:
+                named = f"  [{row['scope_name']}]" if row["scope_name"] else ""
+                print(
+                    f"  {row['occurred_at']:%Y-%m-%d}  {row['kind']}/{row['cause']}{named}"
+                    f"{'  ' + _short(row['memory_id']) if row['memory_id'] else ''}"
+                )
+                print(_wrap(row["note"], indent="      "))
+                if row["title"]:
+                    print(_wrap(row["title"], indent="      | "))
+                print()
+            return 0
+
+        cause = IncidentCause(args.cause)
+        kind = next(k for k, causes in incidents.CAUSES.items() if cause in causes)
+        entity = _resolve_entity(cur, args.memory) if args.memory else None
+        made = incidents.record(
+            cur,
+            kind=kind,
+            cause=cause,
+            note=args.note,
+            recorded_by=args.actor,
+            memory_id=entity["memory_id"] if entity else None,
+            scope_id=_scope_by_name(cur, args.scope) if args.scope else None,
+            occurred_at=args.on,
+        )
+        print(f"{made['kind']}/{made['cause']}  {_short(made['incident_id'])}")
+        print(_wrap(f"leads to: {LEADS_TO[cause]}", indent="  "))
+    return 0
+
+
 def cmd_stale(args) -> int:
     """Adopted rules that name a moment in themselves (25.2 移行, 30 段 C).
 
@@ -1725,6 +1845,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     b = adm.add_parser("backfill", help="embed rows that have no vector yet")
     b.set_defaults(func=cmd_backfill)
+
+    ic = sub.add_parser("incident", help="record an accident, or read the tally (27.5)")
+    ic.add_argument(
+        "--cause",
+        choices=[str(c) for causes in incidents.CAUSES.values() for c in causes],
+        help="omit to read the tally instead of writing a record",
+    )
+    ic.add_argument("--note", help="what happened; required when recording")
+    ic.add_argument("--memory", help="the memory it was about, if there is one")
+    ic.add_argument("--scope", help="the scope it happened in")
+    ic.add_argument("--on", metavar="WHEN", help="when it happened, if not now")
+    ic.add_argument("--days", type=int, default=None, help="how far back to read")
+    ic.add_argument("--actor", default="user")
+    ic.set_defaults(func=cmd_incident)
+
+    th = adm.add_parser("thresholds", help="measure the similarity distributions (27.2)")
+    th.set_defaults(func=cmd_thresholds)
+
+    er = adm.add_parser("eval-retire", help="does the worker find what a person retires (27.4b)")
+    er.add_argument(
+        "--sample",
+        type=int,
+        default=0,
+        metavar="N",
+        help="also draw N adopted memories to read and confirm are still true",
+    )
+    er.set_defaults(func=cmd_eval_retire)
 
     sl = adm.add_parser("stale", help="adopted rules that name a moment in themselves (25.2)")
     sl.set_defaults(func=cmd_stale)

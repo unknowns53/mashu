@@ -15,13 +15,9 @@ different words, which is section 27.2's deliberately confusable case.
 # reflowing them would change the thing being measured.
 
 import itertools
-import os
 
-import psycopg
-from psycopg.rows import dict_row
-
-os.environ.setdefault("MASHU_DATABASE_URL", "dbname=mashu")
-from mashu.embed import get_embedder  # noqa: E402
+from mashu.db import transaction
+from mashu.embed import get_embedder
 
 # Same concept, different words. The left side is a title that is in the store.
 POSITIVE = [
@@ -78,12 +74,11 @@ QUERIES = [
 ]
 
 
-def main() -> None:
+def main(dsn: str | None = None) -> None:
     embedder = get_embedder()
     print(f"model: {embedder.name}\n")
 
-    with psycopg.connect(os.environ["MASHU_DATABASE_URL"], row_factory=dict_row) as conn:
-        cur = conn.cursor()
+    with transaction(dsn) as cur:
         cur.execute(
             "SELECT s.name AS scope, e.title FROM memory_entity e "
             "JOIN scope s ON s.scope_id = e.scope_id WHERE e.status = 'active' ORDER BY s.name"
@@ -153,8 +148,7 @@ def main() -> None:
     # about an absolute similarity, which is the thing these embeddings can
     # actually answer.
     print("\nscope detection, new (query against what each scope holds)")
-    with psycopg.connect(os.environ["MASHU_DATABASE_URL"], row_factory=dict_row) as conn:
-        cur = conn.cursor()
+    with transaction(dsn) as cur:
         cur.execute(
             "SELECT s.name AS scope, count(*) AS held FROM memory_entity e "
             "JOIN scope s ON s.scope_id = e.scope_id "
@@ -239,7 +233,3 @@ def report(rows):
         f"    min {values[0]:.3f}  median {q(0.5):.3f}  p95 {q(0.95):.3f} "
         f" p99 {q(0.99):.3f}  max {values[-1]:.3f}"
     )
-
-
-if __name__ == "__main__":
-    main()
