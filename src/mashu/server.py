@@ -224,6 +224,12 @@ def build_server() -> Any:
         other queue: a proposal the gate held for a person is not retrievable
         and nothing else will move it. If it is not ok, say so in one line too.
 
+        upkeep says how much of what is already held is due to be checked
+        again. Third queue, same one line if it is not ok. What is due is not
+        wrong — it is what nobody has looked at for longer than its kind is
+        left alone for, and the store goes on handing it to every session that
+        asks until somebody does.
+
         Then keep scratch_put in hand for the rest of the session. Nothing
         written here becomes knowledge on its own; what it does is tell the
         extraction where to look. Flag a session and it is read around your
@@ -253,6 +259,7 @@ def build_server() -> Any:
                     "temporary": got.temporary,
                     "capture": got.health,
                     "review": got.review,
+                    "upkeep": got.upkeep,
                     "trimmed": got.trimmed,
                     "tokens": got.tokens,
                     "over_budget": got.over_budget,

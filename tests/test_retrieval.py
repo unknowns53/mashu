@@ -537,3 +537,67 @@ def test_the_active_set_is_not_logged_as_context(cur, scope_id, author):
         (str(EventType.CONTEXT_ASSEMBLED),),
     )
     assert cur.fetchone()["n"] == 0
+
+
+def test_a_completed_version_still_active_says_so(cur, scope_id, author):
+    """A completion keeps the pointer, so layer 1 has to carry the completion too.
+
+    'this was done' is worth finding, which is why store keeps the active
+    pointer on a completed version. What it must not do is arrive looking like
+    work still outstanding: the store held the completion, said so in the
+    version's own reason, and handed the reader the opposite.
+    """
+    memory_id, version_id = author(
+        "台帳化フックが未実装",
+        "セッション終了時に抽出を起こす入口が無い。",
+        type=MemoryType.TASK,
+    )
+    store.set_status(
+        cur,
+        version_id=version_id,
+        target=VersionStatus.COMPLETED,
+        actor="user",
+        reason="launchd 経由で実際に抽出が成功した",
+    )
+
+    got = retrieval.retrieve(cur, "台帳化フックが未実装", actor="claude", record=False)
+    row = next(r for r in got.active if r["memory_id"] == memory_id)
+    assert row["tag"] == retrieval.FINISHED_TAG
+    assert row["version_status"] == str(VersionStatus.COMPLETED)
+    assert "launchd" in row["version_reason"]
+
+
+def test_an_ordinary_active_row_carries_no_such_mark(cur, scope_id, author):
+    """A mark on everything is a mark on nothing."""
+    memory_id, _ = author("送風の設定は測定から決める", "推測で置いた値は下流へ渡さない。")
+    got = retrieval.retrieve(cur, "送風の設定は測定から決める", actor="claude", record=False)
+    row = next(r for r in got.active if r["memory_id"] == memory_id)
+    assert row.get("tag") is None
+
+
+def test_being_finished_outranks_being_proposed_for_retirement(cur, scope_id, author):
+    """A version that already carries a retirement is not a question anyone is asking."""
+    memory_id, version_id = author("もう片付いた作業", "本文はここにある。", type=MemoryType.TASK)
+    proposals.propose(
+        cur,
+        actor="claude",
+        operation=ProposalOperation.CHANGE_STATUS,
+        payload={
+            "version_id": str(version_id),
+            "status": str(VersionStatus.DORMANT),
+            "reason": "しばらく触らない",
+            "source_type": str(SourceType.AGENT),
+        },
+        target_memory=memory_id,
+    )
+    store.set_status(
+        cur,
+        version_id=version_id,
+        target=VersionStatus.COMPLETED,
+        actor="user",
+        reason="終わった",
+    )
+
+    got = retrieval.retrieve(cur, "もう片付いた作業", actor="claude", record=False)
+    row = next(r for r in got.active if r["memory_id"] == memory_id)
+    assert row["tag"] == retrieval.FINISHED_TAG

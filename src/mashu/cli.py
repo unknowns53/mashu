@@ -17,11 +17,23 @@ import argparse
 import json
 import os
 import pathlib
+import re
+import select
+import shutil
 import subprocess
 import sys
 import tempfile
 import textwrap
+import unicodedata
+from types import SimpleNamespace
 from uuid import UUID
+
+try:  # the review reads single keystrokes, which needs a posix terminal
+    import termios
+    import tty
+except ImportError:  # pragma: no cover - no such terminal here
+    termios = None
+    tty = None
 
 from mashu import (
     bootstrap,
@@ -49,6 +61,7 @@ from mashu.incidents import LEADS_TO
 from mashu.migrate import migrate
 from mashu.models import (
     Delivery,
+    EntityStatus,
     IncidentCause,
     MemoryType,
     ProposalOperation,
@@ -58,6 +71,11 @@ from mashu.models import (
 )
 
 WIDTH = 88
+
+
+def _across() -> int:
+    """The width to lay text out at: the terminal's, but never wider than reads well."""
+    return min(WIDTH, _width())
 
 
 def _wrap(text: str, indent: str = "    ") -> str:
@@ -75,7 +93,9 @@ def _wrap(text: str, indent: str = "    ") -> str:
             continue
         hang = indent + "  " if line.lstrip().startswith(("-", "*", "•")) else indent
         out.append(
-            textwrap.fill(line.strip(), width=WIDTH, initial_indent=indent, subsequent_indent=hang)
+            textwrap.fill(
+                line.strip(), width=_across(), initial_indent=indent, subsequent_indent=hang
+            )
         )
     return "\n".join(out)
 
@@ -167,19 +187,73 @@ def cmd_show(args) -> int:
     return 0
 
 
-def _print_grounds(cur, version_id) -> None:
-    """List what a version says it rests on (14, 19).
+def _grounds_text(cur, version_id) -> str:
+    """What a version says it rests on (14, 19).
 
     A summary that may say only what its references say cannot be reviewed
     without them in front of the reader.
     """
     grounds = store.evidence_for(cur, version_id)
     if not grounds:
-        return
-    print(f"\nresting on ({len(grounds)}):")
+        return ""
+    many = "memory" if len(grounds) == 1 else "memories"
+    lines = [
+        f"\n  built on {len(grounds)} other {many}. deciding this one does not decide them (19):"
+    ]
     for row in grounds:
-        standing = row["version_status"] or "nothing adopted yet"
-        print(f"    {_short(row['memory_id'])}  [{row['type']}] {row['title']}  ({standing})")
+        lines.append(f"    [{row['type']}] {row['title']}")
+        lines.append(f"      {_standing_of(row)}   ·   mashu inspect {_short(row['memory_id'])}")
+    return "\n".join(lines)
+
+
+#: What a ground's standing means for the reader deciding on top of it. The
+#: status names are the store's vocabulary and say nothing on their own to
+#: someone who is being asked a question about this proposal, not about that one.
+_STANDING = {
+    str(VersionStatus.CANDIDATE): "not adopted yet: its own review has not happened",
+    str(VersionStatus.DISPROVEN): "disproven: what this is built on was found to be wrong",
+    str(VersionStatus.COMPLETED): "completed: what this is built on is finished",
+    str(VersionStatus.DORMANT): "set aside: out of use, and open to being taken up again",
+    str(VersionStatus.REJECTED): "turned down at review",
+    str(VersionStatus.SUPERSEDED): "replaced by a newer reading",
+}
+
+
+def _standing_of(row) -> str:
+    """Where a ground stands, said as what it means rather than as a status name."""
+    if row["entity_status"] == str(EntityStatus.MERGED):
+        return "folded into another memory"
+    if row["version_status"] is not None:
+        if row["entity_status"] == str(EntityStatus.PROVISIONAL):
+            return "adopted, but the entity is provisional and stays out of layer 1"
+        return "adopted: standing knowledge"
+    return _STANDING.get(row["latest_status"], "not adopted: nothing of it is standing")
+
+
+def _look_alike_text(near: list[dict]) -> str:
+    """What else in the scope already says something close to this (20).
+
+    Written next to the grounds because the two answer the reader's two
+    standing questions about a proposal: what it is built on, and whether the
+    store already holds it.
+    """
+    if not near:
+        return ""
+    many = "one other" if len(near) == 1 else f"{len(near)} others"
+    lines = [f"\n  looks like {many} in this scope. one concept, one entity (20):"]
+    for row in near:
+        close = "the same title" if row["same_title"] else f"{row['similarity']:.2f}"
+        lines.append(f"    {close:>14}  [{row['type']}] {_clip(row['title'], 50)}")
+        lines.append(
+            f"          {_standing_of(row)}   ·   mashu inspect {_short(row['memory_id'])}"
+        )
+    return "\n".join(lines)
+
+
+def _print_grounds(cur, version_id) -> None:
+    text = _grounds_text(cur, version_id)
+    if text:
+        print(text)
 
 
 def _show_bundle(cur, prefix: str) -> int:
@@ -901,11 +975,8 @@ def cmd_evidence(args) -> int:
         grounds = store.evidence_for(cur, reading) if reading else []
         print(f"rests on ({len(grounds)}, read from the {which} version)")
         for ground in grounds:
-            standing = ground["version_status"] or "nothing adopted yet"
-            print(
-                f"  {_short(ground['memory_id'])}  [{ground['type']}] "
-                f"{ground['title']}  ({standing})"
-            )
+            print(f"  {_short(ground['memory_id'])}  [{ground['type']}] {ground['title']}")
+            print(f"    {_standing_of(ground)}")
 
         dependants = store.resting_on(cur, entity["memory_id"])
         print(f"\nsupports ({len(dependants)})")
@@ -923,6 +994,8 @@ def _pending_note(row) -> str | None:
     is pushed is the adopted reading and a Current State goes out of date in
     hours while a review takes days.
     """
+    if row.get("version_status") and row["version_status"] != str(VersionStatus.CANDIDATE):
+        return f"! this is {row['version_status']}: {row['version_reason'] or 'no reason recorded'}"
     if row.get("proposed_status"):
         return (
             f"! {row['proposed_by']} has proposed {row['proposed_status']}: "
@@ -962,6 +1035,10 @@ def cmd_bootstrap(args) -> int:
             if note:
                 print(_wrap(note, indent="      "))
             print(f"      {body}")
+
+    for name, part in (("capture", got.health), ("review", got.review), ("upkeep", got.upkeep)):
+        if part.get("warning"):
+            print(_wrap(part["warning"], indent=f"\n! {name}: "))
 
     over = " over the ceiling" if got.over_budget else ""
     print(f"\n{got.tokens} token of {bootstrap.BOOTSTRAP_TOKEN_BUDGET}{over}")
@@ -1024,11 +1101,20 @@ def cmd_status(args) -> int:
     if got.review.get("warning"):
         print(_wrap(got.review["warning"], indent="  ! "))
 
+    up = got.upkeep
+    print("\nupkeep (13.1, 30 段 B)")
+    print(f"  due to check   {up['due']} standing memory(s)")
+    print(f"  oldest overdue {up['oldest_days']} day(s)")
+    print(f"  look-alikes    {len(got.look_alikes)} pair(s) among what is adopted")
+    if up.get("warning"):
+        print(_wrap(up["warning"], indent="  ! "))
+
     print("\nunreviewed share (27.3; measured on the store, not on what retrieval returned)")
     for row in got.unreviewed:
+        retired = f", {row['retired']} decided and not adopted" if row["retired"] else ""
         print(
             f"  {row['name']:<14}{row['share']:>5.0%}   "
-            f"({row['unreviewed']} of {row['held']} never decided)"
+            f"({row['unreviewed']} of {row['held']} never decided{retired})"
         )
 
     tag = got.tag_share
@@ -1064,7 +1150,7 @@ def cmd_status(args) -> int:
         pushed = sum(1 for row in got.self_dating if row["delivery"] != str(Delivery.PULL_ONLY))
         print(
             f"  {len(got.self_dating)} rule(s) name a moment in themselves"
-            f"{f', {pushed} of them pushed' if pushed else ''} — 'mashu admin stale'"
+            f"{f', {pushed} of them pushed' if pushed else ''} — 'mashu stale'"
         )
 
     print("\nnot measured here")
@@ -1238,42 +1324,518 @@ def cmd_incident(args) -> int:
 
 
 def cmd_stale(args) -> int:
-    """Adopted rules that name a moment in themselves (25.2 移行, 30 段 C).
+    """Sweep what stands and has a shelf life (13.1, 25.2 移行, 30 段 B).
 
-    A window written down in the years before there was anywhere to put one.
-    Section 25.2 gives two ways out and does not choose between them: move it to
-    a temporary context that expires by the clock, or rewrite it without the
-    date so what is left is indefinite and true. Which one applies is a reading
-    of the content, so nothing here decides.
+    Section 13.1 puts only the indefinite kind of knowledge into Memory, and
+    what arrives from a transcript does not carry that division: the worker
+    reads a session in which a task was open and files the task, true of that
+    session and of nothing after it. Nothing expires on its own, so the kinds
+    that name their own end have to be walked.
 
-    A screen, not a verdict, and the match is printed so waving off a wrong one
-    costs a glance. Some of these are rules *about* shelf life rather than rules
-    *with* one, and no pattern tells those apart.
+    Read like the review, because it is the same work on the other side: a list
+    to move through, the whole memory when one is opened, one key to retire it.
+    Nothing is a verdict here. What is left alone stays standing, and there is
+    no record of having looked, so a memory waved off comes back next time —
+    which is right, because it is still true only until it is not.
     """
     with transaction(args.dsn) as cur:
-        found = metrics.self_dating(cur)
-        if not found:
-            print("nothing adopted names a moment in itself")
-            return 0
-        print(f"{len(found)} adopted rule(s) name a moment in themselves\n")
-        for row in found:
-            pushed = "" if row["delivery"] == str(Delivery.PULL_ONLY) else f"  [{row['delivery']}]"
-            print(
-                f"  {_short(row['memory_id'])}  {row['matched']!r} in {row['matched_in']}"
-                f"  [{row['scope_name']}]{pushed}"
-            )
-            print(_wrap(row["title"], indent="      "))
-            print()
-        print(
-            _wrap(
-                "each is either a window — 'mashu retire <id> dormant --reason', then "
-                "'mashu remember --until <when> --kind fact|preference' — or a rule that "
-                "reads as dated and is not, in which case rewrite it without the date. "
-                "The screen does not tell them apart.",
-                indent="  ",
-            )
-        )
+        found = metrics.rot_prone(cur)
+        pairs = resolution.adopted_pairs(cur)
+    if args.list or not sys.stdin.isatty():
+        _print_stale(found)
+        _print_pairs(pairs)
+        return 0
+    if found:
+        _sweep(args, found)
+    if pairs:
+        _pair_sweep(args, pairs)
+    elif not found:
+        print("nothing standing is due, and nothing adopted reads like anything else")
     return 0
+
+
+def _print_pairs(pairs: list[dict]) -> None:
+    """The look-alikes at once, for pipes and for reading without deciding."""
+    if not pairs:
+        return
+    print(f"\n{len(pairs)} pair(s) among what is adopted read as one concept\n")
+    for pair in pairs:
+        print(f"  [{pair['scope_name']}]  {_alike(pair)}")
+        for side in ("left", "right"):
+            print(f"    {_short(pair[side]['memory_id'])}  {pair[side]['title']}")
+        print()
+
+
+def _alike(pair: dict) -> str:
+    """How alike, said as the thing measured rather than as a number alone."""
+    return "the same title" if pair["same_title"] else f"{pair['similarity']:.2f} alike"
+
+
+def _print_stale(found: list[dict]) -> None:
+    """The whole list at once, for pipes and for reading without deciding."""
+    if not found:
+        print("nothing standing is due to be checked")
+        return
+    print(f"{len(found)} standing memory(s) are due to be checked\n")
+    for row in found:
+        pushed = "" if row["delivery"] == str(Delivery.PULL_ONLY) else f"  [{row['delivery']}]"
+        print(f"  {_short(row['memory_id'])}  {row['type']}  [{row['scope_name']}]{pushed}")
+        print(_wrap(row["title"], indent="      "))
+        print(_wrap(row["why"], indent="      · "))
+        print()
+    print(
+        _wrap(
+            "completed keeps answering, with its finish shown, because a finished task "
+            "read as unfinished is the thing this store exists to stop. dormant and "
+            "disproven stop answering: layer 3 carries the title, the status and the "
+            "reason, never the content, so the reason is the whole of what a later "
+            "reader gets. Both are one way — coming back means writing it again. "
+            "Something that only reads as dated is neither; rewrite it without the date.",
+            indent="  ",
+        )
+    )
+
+
+#: The three retirements, said as what each one does to the memory afterwards
+#: rather than by the name of the status it writes.
+#:
+#: They are not three shades of the same thing. completed keeps the active
+#: pointer, so the memory stays in layer 1 with its finished mark: section 1
+#: names "a finished task treated as unfinished" as a problem to solve, and the
+#: way to solve it is to keep answering with the finish visible. dormant and
+#: disproven take the pointer off, and layer 3 then carries the title, the
+#: status and the reason and never the content — so the reason typed here is
+#: the whole of what a later reader gets. Both are absorbing (12): the way back
+#: is to write the thing again as a new version, not to undo this.
+_SWEEP_LIST_KEYS = (
+    "  ↑↓ move   ⏎ open   s still true   c done   d shelve   x wrong   ? help   q leave"
+)
+_SWEEP_ITEM_KEYS = "  s still true   c done   d shelve   x wrong   ← list   ? help   q leave"
+
+#: What the four keys above actually do, for the one keystroke that asks.
+#: Not on the page: a hint block long enough to explain itself is a hint block
+#: competing with the thing being read.
+_SWEEP_HELP = """
+  s  still true. Records that you read it and when to ask again (30 days by
+     default). Nothing about the knowledge changes.
+
+  c  it is done. Keeps answering searches, with its finish and the reason
+     shown, because a finished task read as unfinished is what this store
+     exists to stop.
+
+  d  shelve it. Stops answering. Only the title, the status and your reason
+     come back after this, never the content.
+
+  x  it was wrong. The same, and the reason is handed back so nobody derives
+     it again.
+
+  d and x cannot be undone: the way back is to write the thing again.
+  What you walk past keeps standing, and comes up next time.
+"""
+
+_RETIRING = {
+    "c": (str(VersionStatus.COMPLETED), None),
+    "d": (
+        str(VersionStatus.DORMANT),
+        "why set it aside? (this is all a later reader gets) ",
+    ),
+    "x": (
+        str(VersionStatus.DISPROVEN),
+        "what makes it wrong? (this is handed back so nobody derives it again) ",
+    ),
+}
+_SWEPT = {"completed": "retired", "dormant": "shelved", "disproven": "disproven"}
+
+#: How long before a memory left standing comes up again, when nobody says.
+#: Long enough that a sweep is not the same list next week, short enough that a
+#: task finished in the meantime does not sit there for a season.
+ASK_AGAIN_DEFAULT = "30d"
+
+_SWEEP_MARK = {
+    "retired": "✓",
+    "shelved": "·",
+    "disproven": "✗",
+    "left standing": "→",
+}
+
+
+def _sweep(args, found: list[dict]) -> int:
+    """The rot-prone list, walked at reading pace, retired a key at a time."""
+    done: dict[int, str] = {}
+    at, scroll, more = 0, 0, 0
+    reading = False
+    back: list[int] = []
+    note = ""
+
+    while True:
+        if reading:
+            under = _trailer(_standing(done, at), note, _SWEEP_ITEM_KEYS)
+            page, more = _paged(_stale_page(found[at], at + 1, len(found)), scroll, trailer=under)
+            _screen(page + "\n" + under)
+        else:
+            _screen(_stale_list(found, at, done, note))
+        key = _getkey()
+        if key == "?":
+            _help(_SWEEP_HELP)
+            continue
+        if key not in _RETIRING and key != "s":
+            note = ""
+
+        if key in ("space", "pagedown", "right") and reading:
+            if more:
+                back.append(scroll)
+                scroll = more
+                continue
+            if key != "space":
+                continue
+        if key == "space":
+            key = "down"
+        if reading and key in ("pageup", "b"):
+            scroll = back.pop() if back else 0
+            continue
+
+        if key == "q":
+            break
+        if key in ("down", "j", "pagedown"):
+            at = min(len(found) - 1, at + 1)
+            back, scroll = [], 0
+            continue
+        if key in ("up", "k", "pageup"):
+            at = max(0, at - 1)
+            back, scroll = [], 0
+            continue
+        if key in ("home", "end"):
+            at = 0 if key == "home" else len(found) - 1
+            back, scroll = [], 0
+            continue
+        if not reading and key in ("enter", "right", "l"):
+            reading = True
+            continue
+        if reading and key in ("left", "l"):
+            reading = False
+            continue
+        if key not in _RETIRING and key != "s":
+            continue
+
+        if key == "s":
+            note = _leave_standing(args, found[at], done, at)
+        else:
+            note = _retire_one(args, found[at], done, at, key)
+        if note or at + 1 >= len(found):
+            continue
+        at += 1
+        back, scroll = [], 0
+
+    print(_swept(done, len(found)))
+    return 0
+
+
+def _leave_standing(args, row, done: dict, number: int) -> str:
+    """Say this is still true, and when to be asked about it again.
+
+    The key the sweep was missing. Without it the only way to stop something
+    coming back is to retire it, and a screen whose only dismissal is a
+    retirement collects retirements that were meant as dismissals — which is
+    the reading a later session then gets handed.
+
+    Nothing about the knowledge changes. What is recorded is that a person read
+    it on a day and left it standing, which is a fact about the reading.
+    """
+    if number in done:
+        return f"  already {done[number]} in this sitting"
+    answer = _typed(f"  ask again when? (blank for {ASK_AGAIN_DEFAULT}) ") or ASK_AGAIN_DEFAULT
+    try:
+        until = _when(answer)
+    except SystemExit as unreadable:
+        return f"  {unreadable}"
+    with transaction(args.dsn) as cur:
+        store.confirm_standing(
+            cur,
+            memory_id=row["memory_id"],
+            version_id=row["version_id"],
+            until=until,
+            actor=args.actor,
+        )
+    done[number] = "left standing"
+    return ""
+
+
+def _retire_one(args, row, done: dict, number: int, key: str) -> str:
+    """Retire one, through the same path the typed command takes.
+
+    Whatever the store refuses it refuses one memory, not the sitting: the
+    sweep is worth starting only if stopping in the middle keeps what is
+    behind.
+    """
+    if number in done:
+        return f"  already {done[number]}. retiring is a record and does not get taken back"
+    status, ask = _RETIRING[key]
+    if ask is None:
+        reason = "swept at the terminal: this is finished"
+    else:
+        reason = _typed("  " + ask)
+        if reason is None:
+            return ""
+    asked = SimpleNamespace(
+        dsn=args.dsn,
+        memory_id=str(row["memory_id"]),
+        status=status,
+        reason=reason,
+        actor=args.actor,
+        reviewer=args.actor,
+    )
+    try:
+        code, said = _retire_now(asked)
+    except MashuError as refusal:
+        return f"  {refusal}"
+    if code:
+        return f"  {said}"
+    done[number] = _SWEPT[status]
+    return ""
+
+
+#: The look-alike pass, which asks a different question from the one above.
+#:
+#: Nothing here is about shelf life. Two memories that read as one concept are
+#: the failure section 20 exists to prevent, and both of them answer as current
+#: with nothing in the state marking them as rivals, so the split never surfaces
+#: on its own. The check runs when a proposal is written and is spent by review
+#: time; what got through is adopted and never measured again.
+#:
+#: Two answers and they are not degrees of each other. Folding says these were
+#: always one thing, and one of the two entities stops existing as a separate
+#: row. Telling apart says they are two, and is recorded for the same reason a
+#: confirmation is: a pair nobody records a decision about scores the same next
+#: time and comes back for ever, which teaches its reader to skip the screen.
+_PAIR_LIST_KEYS = "  ↑↓ move   ⏎ open   1/2 fold   k two things   ? help   q leave"
+_PAIR_ITEM_KEYS = (
+    "  1 keep the first   2 keep the second   k two things   ← list   ? help   q leave"
+)
+
+_PAIR_HELP = """
+  1  keep the first, and fold the second into it. One entity from here on,
+     carrying the first one's reading. The folded row stays in the log,
+     marked merged and pointing at what it became, because past context
+     assemblies recorded its id and deleting it would break those.
+
+  2  the same the other way round.
+
+  k  they are two things. Nothing changes, and the pair stops being offered.
+     Without this the screen has no way of ever being finished: two memories
+     that read alike go on reading alike however many times you look.
+
+  Folding asks for a reason first. It is the one key here that cannot be
+  undone by pressing another one.
+"""
+
+_PAIR_MARK = {"folded": "✓", "told apart": "·"}
+
+
+def _pair_sweep(args, pairs: list[dict]) -> int:
+    """The look-alike pairs, walked the same way the shelf-life list is."""
+    done: dict[int, str] = {}
+    at, scroll, more = 0, 0, 0
+    reading = False
+    back: list[int] = []
+    note = ""
+
+    while True:
+        if reading:
+            under = _trailer(_standing(done, at), note, _PAIR_ITEM_KEYS)
+            page, more = _paged(_pair_page(pairs[at], at + 1, len(pairs)), scroll, trailer=under)
+            _screen(page + "\n" + under)
+        else:
+            _screen(_pair_list(pairs, at, done, note))
+        key = _getkey()
+        if key == "?":
+            _help(_PAIR_HELP)
+            continue
+        if key not in ("1", "2", "k"):
+            note = ""
+
+        if key in ("space", "pagedown", "right") and reading:
+            if more:
+                back.append(scroll)
+                scroll = more
+                continue
+            if key != "space":
+                continue
+        if key == "space":
+            key = "down"
+        if reading and key in ("pageup", "b"):
+            scroll = back.pop() if back else 0
+            continue
+
+        if key == "q":
+            break
+        if key in ("down", "j", "pagedown"):
+            at = min(len(pairs) - 1, at + 1)
+            back, scroll = [], 0
+            continue
+        # k is the answer here and not the vim-style up it is on the other
+        # list. Sharing a key between moving and deciding is fine while every
+        # decision is a retirement asking for a reason first, and is not fine
+        # when one of them writes a record on a single press.
+        if key in ("up", "pageup"):
+            at = max(0, at - 1)
+            back, scroll = [], 0
+            continue
+        if key in ("home", "end"):
+            at = 0 if key == "home" else len(pairs) - 1
+            back, scroll = [], 0
+            continue
+        if not reading and key in ("enter", "right", "l"):
+            reading = True
+            continue
+        if reading and key in ("left", "l"):
+            reading = False
+            continue
+        if key not in ("1", "2", "k"):
+            continue
+
+        note = _settle_pair(args, pairs[at], done, at, key)
+        if note or at + 1 >= len(pairs):
+            continue
+        at += 1
+        back, scroll = [], 0
+
+    print(_paired(done, len(pairs)))
+    return 0
+
+
+def _settle_pair(args, pair: dict, done: dict, number: int, key: str) -> str:
+    """Fold one side into the other, or record that they are two things."""
+    if number in done:
+        return f"  already {done[number]} in this sitting"
+    if key == "k":
+        with transaction(args.dsn) as cur:
+            store.tell_apart(
+                cur,
+                memory_id=pair["left"]["memory_id"],
+                other=pair["right"]["memory_id"],
+                actor=args.actor,
+            )
+        done[number] = "told apart"
+        return ""
+
+    keep, drop = (pair["left"], pair["right"]) if key == "1" else (pair["right"], pair["left"])
+    reason = _typed("  why are these one thing? ")
+    if not reason:
+        return "  a fold needs a reason. it is the one key here that cannot be undone"
+    try:
+        with transaction(args.dsn) as cur:
+            store.merge_entities(
+                cur,
+                source=drop["memory_id"],
+                target=keep["memory_id"],
+                actor=args.actor,
+                reason=reason,
+                keep_active=keep["version_id"],
+            )
+    except MashuError as refusal:
+        return f"  {refusal}"
+    done[number] = "folded"
+    return ""
+
+
+def _pair_list(pairs: list[dict], at: int, done: dict, note: str = "") -> str:
+    """Every look-alike pair, one line each, the closer ones first."""
+    width = _width()
+    rows = []
+    for number, pair in enumerate(pairs):
+        mark = _PAIR_MARK.get(done.get(number), " ")
+        line = _clip(
+            f" {mark} {number + 1:>3}  {_pad(pair['scope_name'], 12)} "
+            f"{_pad(_alike(pair), 14)} {pair['left']['title']}",
+            width - 1,
+        )
+        rows.append(f"\x1b[1m▸{line[1:]}\x1b[0m" if number == at else line)
+    head = f"{len(pairs)} adopted pair(s) read as one concept. one concept, one entity"
+    return _list_screen(head, rows, at, _trailer(_PAIR_LIST_KEYS, note))
+
+
+def _pair_page(pair: dict, number: int, of: int) -> str:
+    """Both memories of a pair, whole, one above the other."""
+    label = f" {number} of {of} "
+    across = _across()
+    lines = [
+        "─" * 4 + label + "─" * max(4, across - 4 - _cells(label)),
+        f"[{pair['scope_name']}]  {_alike(pair)}",
+        "",
+    ]
+    for mark, side in (("1", "left"), ("2", "right")):
+        row = pair[side]
+        lines += [
+            f"{mark}  {row['type']}  {_short(row['memory_id'])}",
+            _wrap(row["title"], indent="   "),
+            _wrap(row["content"], indent="   "),
+            "",
+        ]
+    lines.append("─" * across)
+    return "\n".join(lines)
+
+
+def _paired(done: dict, count: int) -> str:
+    """What the pair pass came to, said in what was decided."""
+    folded = sum(1 for word in done.values() if word == "folded")
+    apart = sum(1 for word in done.values() if word == "told apart")
+    left = count - len(done)
+    parts = []
+    if folded:
+        parts.append(f"{folded} folded")
+    if apart:
+        parts.append(f"{apart} told apart")
+    if left:
+        parts.append(f"{left} left as they were, and offered again next time")
+    return "  " + ", ".join(parts) if parts else "  nothing decided"
+
+
+def _stale_list(found: list[dict], at: int, done: dict, note: str = "") -> str:
+    """Everything standing that has a shelf life, one line each."""
+    width = _width()
+    rows = []
+    for number, row in enumerate(found):
+        mark = _SWEEP_MARK.get(done.get(number), " ")
+        line = _clip(
+            f" {mark} {number + 1:>3}  {_pad(row['scope_name'], 12)} "
+            f"{row['type']:<12} {row['title']}",
+            width - 1,
+        )
+        rows.append(f"\x1b[1m▸{line[1:]}\x1b[0m" if number == at else line)
+    head = f"{len(found)} standing memory(s) name their own end. what is left alone keeps standing"
+    return _list_screen(head, rows, at, _trailer(_SWEEP_LIST_KEYS, note))
+
+
+def _stale_page(row: dict, number: int, of: int) -> str:
+    """One standing memory, whole, with the reading that put it on the list."""
+    label = f" {number} of {of} "
+    across = _across()
+    pushed = "" if row["delivery"] == str(Delivery.PULL_ONLY) else f"  [{row['delivery']}]"
+    return "\n".join(
+        [
+            "─" * 4 + label + "─" * max(4, across - 4 - _cells(label)),
+            f"{row['type']}  [{row['scope_name']}]{pushed}  {_short(row['memory_id'])}  "
+            f"written {row['days']} day(s) ago",
+            row["title"],
+            "",
+            _wrap(f"on the list because {row['why']}", indent="  · "),
+            "",
+            _wrap(row["content"]),
+            "─" * across,
+        ]
+    )
+
+
+def _swept(done: dict, count: int) -> str:
+    """What the sweep came to."""
+    if not done:
+        return f"\nnothing decided; all {count} keep standing"
+    parts = []
+    for word in ("retired", "shelved", "disproven", "left standing"):
+        many = sum(1 for value in done.values() if value == word)
+        if many:
+            parts.append(f"{many} {word}")
+    return "\n" + ", ".join(parts) + f"; {count - len(done)} not looked at"
 
 
 def _span(seconds: float | None) -> str:
@@ -1298,15 +1860,18 @@ def cmd_directive(args) -> int:
     carry two or three rules out of dozens, and the way to add one to an
     existing memory was to file a revision whose body had not changed.
     """
-    if not args.clear and not args.text:
-        raise SystemExit("give the short form, or --clear to take it off")
+    text = args.text
+    if not args.clear and not text:
+        text = _ask_directive(args)
+        if text is None:
+            return 1
     try:
         with transaction(args.dsn) as cur:
             entity = _resolve_entity(cur, args.memory)
             changed = store.set_directive(
                 cur,
                 memory_id=entity["memory_id"],
-                directive=None if args.clear else args.text,
+                directive=None if args.clear else text,
                 actor=args.actor,
             )
     except DeliveryError as refusal:
@@ -1318,6 +1883,42 @@ def cmd_directive(args) -> int:
     else:
         print(_wrap(changed["directive"], indent="  > "))
     return 0
+
+
+def _ask_directive(args) -> str | None:
+    """Take the short form as a typed line rather than as a shell argument (21.2).
+
+    The refusal that sends a person here says to shorten something, and until
+    now the only ways to do that were to quote a paragraph of Japanese onto a
+    command line or to be dropped into whatever editor the environment
+    happened to name. Neither is a way to write one sentence.
+
+    What it costs and what the ceiling is are printed beside the prompt,
+    because being told to shorten something without being told by how much is
+    not an instruction.
+    """
+    if not sys.stdin.isatty():
+        print("give the short form, or --clear to take it off", file=sys.stderr)
+        return None
+    with transaction(args.dsn) as cur:
+        entity = store.get_entity(cur, _resolve_entity(cur, args.memory)["memory_id"])
+        version = store.get_version(cur, entity["active_version"] or entity["latest_version"])
+        scope = entity["scope_id"] if entity["delivery"] == str(Delivery.SCOPE_REQUIRED) else None
+        _, cost = bootstrap.would_fit(
+            cur, memory_id=entity["memory_id"], content=version["content"], scope_id=scope
+        )
+    print(f"\n{entity['title']}\n")
+    if version["directive"]:
+        print(_wrap(version["directive"], indent="  > "))
+    else:
+        print(_wrap(version["content"]))
+    print(
+        f"\n  a session opening carrying this whole would come to {cost} token, "
+        f"against a ceiling of {bootstrap.BOOTSTRAP_TOKEN_BUDGET}."
+    )
+    print("  write the short form it should carry instead, on one line.\n")
+    short = _typed("> ")
+    return short
 
 
 def cmd_serve(args) -> int:
@@ -1422,7 +2023,18 @@ def cmd_route(args) -> int:
 # retirement
 # --------------------------------------------------------------------------
 def cmd_retire(args) -> int:
-    """Retire what a person says is finished or wrong (16.1, 30 段 B).
+    """Retire what a person says is finished or wrong (16.1, 30 段 B)."""
+    code, said = _retire_now(args)
+    print(said, file=sys.stderr if code else sys.stdout)
+    return code
+
+
+def _retire_now(args) -> tuple[int, str]:
+    """Do it, and hand back what to say about it rather than printing it.
+
+    The sweep calls this too and paints its own screens, so a refusal written
+    straight to stderr is a refusal the next repaint wipes. What went wrong has
+    to be a value before it can be shown in the place it belongs.
 
     Section 16.1 has always named the user's own statement as a trigger for
     retirement, and there was no way for a person to make one: retiring
@@ -1439,8 +2051,7 @@ def cmd_retire(args) -> int:
         full = store.get_entity(cur, entity["memory_id"])
         version_id = full["active_version"]
         if version_id is None:
-            print(f"{full['title']} has no active version to retire", file=sys.stderr)
-            return 1
+            return 1, f"{full['title']} has no active version to retire"
 
         try:
             made = proposals.propose(
@@ -1470,77 +2081,804 @@ def cmd_retire(args) -> int:
                 reviewer=args.reviewer,
                 reason=f"stated at the terminal: {args.reason}",
             )
-            print(f"{full['title']}  ->  {target}  (reviewed here: {made['ruling'].reason})")
-        else:
-            print(f"{full['title']}  ->  {target}")
-    return 0
+            return 0, f"{full['title']}  ->  {target}  (reviewed here: {made['ruling'].reason})"
+        return 0, f"{full['title']}  ->  {target}"
 
 
-# --------------------------------------------------------------------------
-# review, in one sitting
-# --------------------------------------------------------------------------
-def _agree(cur, args, entity, clash: DuplicateProposalError) -> int:
-    """Approve the standing proposal this command was agreeing with."""
+def _agree(cur, args, entity, clash: DuplicateProposalError) -> tuple[int, str]:
+    """Settle a retirement somebody has already put a proposal behind.
+
+    Pending, and this command is agreeing with it: approve that one rather than
+    filing a second beside it.
+
+    All decided, and the duplicate check (15.1) is looking at a proposal an
+    agent filed and a person turned down. That decision was about the agent's
+    proposal, not about whether the thing is finished today, and a person at
+    the terminal saying it is finished is a trigger in its own right (16.1). So
+    it goes through, over the earlier decision, and the log carries both.
+    """
     waiting = [row for row in clash.existing if row["status"] == "pending"]
-    if not waiting:
-        why = clash.declined[-1]["decision_reason"] if clash.declined else "already decided"
-        print(f"{entity['title']}: this was already ruled on ({why})", file=sys.stderr)
-        return 1
+    if waiting:
+        proposal = waiting[-1]
+        proposals.approve(
+            cur,
+            proposal["proposal_id"],
+            reviewer=args.reviewer,
+            reason=f"agreed at the terminal: {args.reason}",
+        )
+        return 0, (
+            f"{entity['title']}  ->  {proposal['payload'].get('status')}  "
+            f"(approved the proposal {proposal['actor']} was already holding)"
+        )
 
-    proposal = waiting[-1]
-    proposals.approve(
+    earlier = clash.declined[-1] if clash.declined else None
+    made = proposals.propose(
         cur,
-        proposal["proposal_id"],
-        reviewer=args.reviewer,
-        reason=f"agreed at the terminal: {args.reason}",
+        actor=args.actor,
+        operation=ProposalOperation.CHANGE_STATUS,
+        payload={
+            "version_id": str(entity["active_version"]),
+            "status": args.status,
+            "reason": args.reason,
+            "source_type": str(SourceType.USER),
+        },
+        target_memory=entity["memory_id"],
+        allow_duplicate=True,
     )
-    print(
-        f"{entity['title']}  ->  {proposal['payload'].get('status')}  "
-        f"(approved the proposal {proposal['actor']} was already holding)"
-    )
-    return 0
+    proposal = made["proposal"]
+    if proposal["status"] == str(ProposalStatus.PENDING):
+        proposals.approve(
+            cur,
+            proposal["proposal_id"],
+            reviewer=args.reviewer,
+            reason=f"stated at the terminal: {args.reason}",
+        )
+    said = f"{entity['title']}  ->  {args.status}"
+    if earlier:
+        why = earlier["decision_reason"] or "no reason recorded"
+        said += f"  (over a turn-down of {earlier['actor']}'s proposal: {why})"
+    return 0, said
 
 
 def cmd_review(args) -> int:
-    """Open the oldest bundle and finish with it (18.1, 30 段 C).
+    """Work through what is waiting, at the pace it is read (18.1, 30 段 C).
 
-    Review is optional now, and that is exactly why one sitting has to be
-    enough. A pass that ends with items in the same state they started in is a
-    pass that will not happen twice, so every item leaves here decided:
-    approved, turned down with a reason, edited, or put off with a reason.
+    Section 18.1 settled the unit: a session bundle, its context built once,
+    passed wholesale with the exceptions taken out by hand. What it did not
+    settle is the motion, and the motion is where the cost turned out to sit.
+    Printing a bundle whole and then asking for one line of decisions makes the
+    reader hold twenty items and their numbers in mind while composing a
+    command about text that has already scrolled off. The unit was right and
+    the handling was wrong, and a review that is optional does not survive
+    handling that is unpleasant.
 
-    The diff is part of it. Approving a replacement without seeing what it
-    replaces is not review, and section 18.1 asked for the comparison that the
-    bundle display never had.
+    So a bundle arrives as a list of its titles that the arrow keys move
+    through, one keystroke decides an item, and the reader who wants to pass
+    the whole bundle unread — which 18.1 expects to be the common case — presses
+    one key for that too. Every decision commits as it is made, so stopping in
+    the middle keeps everything already decided.
     """
     with transaction(args.dsn) as cur:
         waiting = proposals.session_queue(cur)
-        if args.bundle:
-            wanted = None if args.bundle == "none" else _resolve_session(cur, args.bundle)
-            bundles = [b for b in waiting if b["session_id"] == wanted]
+        bundles = _wanted(cur, waiting, args)
+
+    if not bundles:
+        if waiting:
+            print(f"nothing new; {len(waiting)} bundle(s) are put off. --all to see them")
         else:
-            bundles = [b for b in waiting if b["deferred"] < b["count"]]
-        if not bundles:
-            if waiting:
-                print(f"nothing new; {len(waiting)} bundle(s) are put off. --all to see them")
-            else:
-                print("nothing waiting for review")
-            return 0
-        bundle = bundles[0]
-        items = [i for i in bundle["proposals"] if args.all or not i["deferred_at"]]
+            print("nothing waiting for review")
+        return 0
+
+    if args.batch is not None or not sys.stdin.isatty():
+        return _one_shot(args, bundles[0])
+    return _sitting(args)
+
+
+def _wanted(cur, waiting: list[dict], args) -> list[dict]:
+    """The bundles this run is about: one named, or every one with something new.
+
+    --all has to widen the bundles as well as the items inside them. A bundle
+    whose every item was put off has deferred == count, so the ordinary filter
+    drops it, and a reader following the advice to pass --all would have been
+    shown the same nothing again.
+    """
+    if args.bundle:
+        wanted = None if args.bundle == "none" else _resolve_session(cur, args.bundle)
+        return [b for b in waiting if b["session_id"] == wanted]
+    if args.all:
+        return list(waiting)
+    return [b for b in waiting if b["deferred"] < b["count"]]
+
+
+def _undecided(bundle: dict, args) -> list[dict]:
+    """A bundle's items, minus what was already put off unless --all asks for it."""
+    return [i for i in bundle["proposals"] if args.all or not i["deferred_at"]]
+
+
+def _one_shot(args, bundle: dict) -> int:
+    """The bundle printed whole and decided by one script, for pipes and tests."""
+    with transaction(args.dsn) as cur:
+        items = _undecided(bundle, args)
         _print_review(cur, bundle, items)
+    if args.batch is None:
+        print("\nnot a terminal; pass --batch to decide non-interactively")
+        return 0
+    return _apply_review(args, items, args.batch)
 
-    script = args.batch
-    if script is None:
-        if not sys.stdin.isatty():
-            print("\nnot a terminal; pass --batch to decide non-interactively")
+
+# --------------------------------------------------------------------------
+# reading one key at a time
+# --------------------------------------------------------------------------
+_TOKENS = {
+    "\x1b[A": "up",
+    "\x1b[B": "down",
+    "\x1b[C": "right",
+    "\x1b[D": "left",
+    "\x1b[5~": "pageup",
+    "\x1b[6~": "pagedown",
+    "\x1b[H": "home",
+    "\x1b[F": "end",
+    "\r": "enter",
+    "\n": "enter",
+    "\x7f": "left",
+    "\x1b": "left",
+    "\x03": "q",
+    "\x04": "q",
+    " ": "space",
+}
+
+
+def _getkey() -> str:
+    """One keystroke, without waiting for a return.
+
+    A review that costs a whole typed line per decision is a review that does
+    not happen. Terminals hand arrow keys over as escape sequences, so the
+    escape has to be read and then looked at again: on its own it means go
+    back, and followed by a bracket it is an arrow.
+
+    Where there is no terminal to put into this mode, a typed line stands in
+    for a keystroke, and everything above still works — one key more.
+    """
+    if termios is None or not sys.stdin.isatty():
+        try:
+            typed = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return "q"
+        return _TOKENS.get(typed, typed[:1].lower() or "enter")
+
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        key = _byte(fd)
+        # Read the descriptor rather than sys.stdin. A text stream keeps its own
+        # buffer, so the bracket and the letter of an arrow sequence can already
+        # be inside Python while select still reports the descriptor as empty,
+        # and every arrow key then arrives as three unrelated keystrokes.
+        if key == "\x1b" and select.select([fd], [], [], 0.05)[0]:
+            key += _byte(fd)
+            if key.endswith("["):
+                key += _csi(fd)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+    return _TOKENS.get(key, key.lower())
+
+
+def _csi(fd: int) -> str:
+    """The rest of an escape sequence, up to and including the byte that ends it.
+
+    Arrows end after one byte and page keys do not: Page Down is ESC [ 6 ~, so
+    stopping at the first byte leaves a tilde in the buffer, and the terminal
+    delivers one unknown key followed by another. Both are ignored, and a key
+    pressed twice with nothing happening reads as a key that does nothing.
+
+    The rule is the one the terminal follows: digits and semicolons are
+    parameters, and anything from @ to ~ ends the sequence.
+    """
+    out = ""
+    while select.select([fd], [], [], 0.05)[0]:
+        byte = _byte(fd)
+        out += byte
+        if "@" <= byte <= "~":
+            break
+    return out
+
+
+def _byte(fd: int) -> str:
+    """One byte off the terminal, with the end of input read as leaving."""
+    try:
+        raw = os.read(fd, 1)
+    except OSError:
+        return "\x04"
+    return raw.decode("utf-8", "replace") if raw else "\x04"
+
+
+def _typed(prompt: str) -> str | None:
+    """A line, for the reasons 18.1 makes mandatory. Nothing typed cancels the decision."""
+    try:
+        answer = input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    if not answer:
+        print("  never mind")
+        return None
+    return answer
+
+
+def _screen(text: str) -> None:
+    """Repaint. The page the reader is deciding about should be the whole view."""
+    if sys.stdout.isatty():
+        sys.stdout.write("\x1b[H\x1b[2J")
+    print(text)
+
+
+# --------------------------------------------------------------------------
+# a sitting
+# --------------------------------------------------------------------------
+_SHELF_KEYS = "  ↑↓ move   ⏎ open   a approve it all   s put it off   ? help   q leave"
+_LIST_KEYS = "  ↑↓ move   ⏎ open   a approve the rest   s put off   ← bundles   ? help   q leave"
+_ITEM_KEYS = "  y approve   r turn down   e edit   s put off   a rest   ← list   ? help   q leave"
+
+#: What the review's keys do, for the one keystroke that asks.
+_REVIEW_HELP_SCREEN = """
+  y  approve, and move to the next one. ⏎ does the same.
+
+  r  turn it down, with a reason. The proposal is decided either way, so this
+     is a record and does not get taken back.
+
+  e  open the text in an editor, then approve your wording as a version of
+     yours on top of what was proposed. Both stay in the history.
+
+  s  put it off, saying why. It stops leading the queue until --all asks for it.
+
+  a  approve everything left in this bundle.
+
+  space  read on where a proposal is longer than the screen, and step to the
+         next one where it is not. b goes back to the top of the page.
+
+  Every decision is written as it is made, so leaving with q keeps what is
+  behind you and the next 'mashu review' opens on the rest.
+"""
+
+_WORD = {"a": "approved", "r": "declined", "s": "put off", "e": "edited"}
+_MARK = {"approved": "✓", "declined": "✗", "put off": "·", "edited": "✎"}
+
+
+def _sitting(args) -> int:
+    """The bundles waiting, chosen from a list and worked one at a time.
+
+    Which bundle comes first is an accident of when its session ended, so a
+    sitting that opens on the oldest can open on the largest, and the reader
+    who has ten minutes has no way to spend them on something smaller. The
+    list is the way out: everything waiting, its size and its age beside it,
+    and any of it opened in one keystroke.
+
+    With one bundle waiting there is nothing to choose between, so that one
+    opens straight away.
+    """
+    shelf = _shelf(args)
+    at, note = 0, ""
+    reading = len(shelf) == 1
+
+    while True:
+        if not shelf:
+            if note:
+                print(note)
+            print("\nnothing else waiting")
             return 0
-        print(_REVIEW_HELP)
-        script = input("review> ").strip()
+        at = min(at, len(shelf) - 1)
 
-    return _apply_review(args, items, script)
+        if not reading:
+            _screen(_bundles(shelf, at, note))
+            key = _getkey()
+            if key == "q":
+                return 0
+            if key in ("down", "j"):
+                at = min(len(shelf) - 1, at + 1)
+                continue
+            if key in ("up", "k"):
+                at = max(0, at - 1)
+                continue
+            if key == "a":
+                note = _whole(args, shelf[at])
+                shelf = _shelf(args)
+                continue
+            if key == "s":
+                reason = _typed("  why put the whole bundle off? ")
+                if reason is None:
+                    continue
+                note = _whole(args, shelf[at], verb="s", reason=reason)
+                shelf = _shelf(args)
+                continue
+            if key not in ("enter", "right", "l"):
+                continue
+
+        reading = False
+        here = shelf[at]["session_id"]
+        outcome, note = _open(args, shelf[at], at + 1, len(shelf))
+        if outcome == "leave":
+            print(note)
+            print("\nleft. what was decided is kept; 'mashu review' opens on the rest")
+            return 0
+
+        shelf = _shelf(args)
+        if outcome == "next":
+            # Move past the bundle just worked, unless finishing it took the
+            # bundle off the list, in which case this place already holds the
+            # next one.
+            where = next((i for i, b in enumerate(shelf) if b["session_id"] == here), None)
+            at = where + 1 if where is not None else at
 
 
+def _shelf(args) -> list[dict]:
+    """Everything still waiting, as it stands now rather than as it stood at the start."""
+    with transaction(args.dsn) as cur:
+        waiting = proposals.session_queue(cur)
+        return [b for b in _wanted(cur, waiting, args) if _undecided(b, args)]
+
+
+def _bundles(shelf: list[dict], at: int, note: str) -> str:
+    """Everything waiting, so a reader with ten minutes can spend them on ten minutes."""
+    total = sum(len(_pending(b)) for b in shelf)
+    width = _width()
+    rows = []
+    for number, bundle in enumerate(shelf):
+        items = _pending(bundle)
+        scope = next((i["scope_name"] for i in items if i["scope_name"]), "-")
+        first = items[0]["title"] if items else ""
+        row = _clip(
+            f" {number + 1:>3}  {_pad(scope, 14)} {len(items):>3} to decide  "
+            f"{bundle['days_pending']:>2} day(s)   {first or ''}",
+            width - 1,
+        )
+        rows.append(f"\x1b[1m▸{row[1:]}\x1b[0m" if number == at else row)
+
+    head = f"{len(shelf)} bundle(s) waiting, {total} to decide"
+    return _list_screen(head, rows, at, _trailer(_SHELF_KEYS, note))
+
+
+def _pending(bundle: dict) -> list[dict]:
+    """A bundle's items as the list screen counts them: what is not put off."""
+    return [i for i in bundle["proposals"] if not i["deferred_at"]] or bundle["proposals"]
+
+
+def _open(args, summary, place: int, total: int) -> tuple[str, str]:
+    """Read one bundle in, fresh, and hand it to the reader."""
+    with transaction(args.dsn) as cur:
+        bundle = next(
+            (b for b in proposals.session_queue(cur) if b["session_id"] == summary["session_id"]),
+            None,
+        )
+        items = _undecided(bundle, args) if bundle else []
+        if not items:
+            return "next", ""
+        near = _look_alikes(cur, items)
+        pages = [
+            _item_text(cur, item, n, len(items), near.get(item["target_memory"], []))
+            for n, item in enumerate(items, 1)
+        ]
+    return _bundle_sitting(args, bundle, items, pages, place, total)
+
+
+def _look_alikes(cur, items) -> dict:
+    """The bundle's look-alikes, asked for once per scope rather than per item."""
+    wanted = [item["target_memory"] for item in items if item["target_memory"]]
+    if not wanted:
+        return {}
+    cur.execute(
+        "SELECT memory_id, scope_id FROM memory_entity WHERE memory_id = ANY(%s)", (wanted,)
+    )
+    by_scope: dict = {}
+    for row in cur.fetchall():
+        by_scope.setdefault(row["scope_id"], []).append(row["memory_id"])
+    found: dict = {}
+    for scope_id, memory_ids in by_scope.items():
+        found.update(resolution.look_alikes(cur, scope_id=scope_id, memory_ids=memory_ids))
+    return found
+
+
+def _whole(args, summary, verb: str = "a", reason: str = "") -> str:
+    """A bundle decided from the list, without opening it."""
+    with transaction(args.dsn) as cur:
+        bundle = next(
+            (b for b in proposals.session_queue(cur) if b["session_id"] == summary["session_id"]),
+            None,
+        )
+        items = _undecided(bundle, args) if bundle else []
+    if not items:
+        return ""
+    done: dict[int, str] = {}
+    refused = _rest(args, items, done, verb=verb, reason=reason)
+    return _trailer(_tally(bundle, done, len(items)), refused)
+
+
+def _bundle_sitting(args, bundle, items, pages, place, total) -> tuple[str, str]:
+    """One bundle, from its list of titles down to its last item.
+
+    Returns where to go next — leave, the next bundle, or back up to the list of
+    bundles — and what this one came to, which the caller shows on a screen that
+    survives the repaint.
+    """
+    done: dict[int, str] = {}
+    at = 0
+    reading = False
+    scroll = 0
+    more = 0
+    back: list[int] = []
+    note = ""
+
+    while True:
+        if reading:
+            under = _trailer(_standing(done, at), note, _ITEM_KEYS)
+            page, more = _paged(pages[at], scroll, trailer=under)
+            _screen(page + "\n" + under)
+        else:
+            _screen(_contents(bundle, items, place, total, done, at, note))
+        key = _getkey()
+        if key == "?":
+            _help(_REVIEW_HELP_SCREEN)
+            continue
+        if key not in ("y", "enter", "r", "n", "s", "e", "a"):
+            note = ""
+
+        if key in ("space", "pagedown", "right") and reading:
+            # Read on where a proposal is longer than the screen. Space also
+            # steps to the next proposal where it is not, because in both cases
+            # it means carry on; the page keys stay on the page they name.
+            if more:
+                back.append(scroll)
+                scroll = more
+                continue
+            if key != "space":
+                continue
+        if key == "space":
+            key = "down"
+        if reading and key in ("pageup", "b"):
+            scroll = back.pop() if back else 0
+            continue
+        if reading and key == "home":
+            back, scroll = [], 0
+            continue
+        if not reading and key in ("pagedown", "pageup"):
+            key = "down" if key == "pagedown" else "up"
+        if key in ("home", "end"):
+            at = 0 if key == "home" else len(items) - 1
+            back, scroll = [], 0
+            continue
+
+        if key == "q":
+            return "leave", _tally(bundle, done, len(items))
+        if key in ("down", "j"):
+            at = min(len(items) - 1, at + 1)
+            back, scroll = [], 0
+            continue
+        if key in ("up", "k"):
+            at = max(0, at - 1)
+            back, scroll = [], 0
+            continue
+        if key == "a":
+            note = _rest(args, items, done)
+            if note:
+                continue
+            break
+        if not reading:
+            if key in ("enter", "right", "l"):
+                reading = True
+            elif key == "left":
+                return "up", _tally(bundle, done, len(items))
+            elif key == "s":
+                reason = _typed("  why put the whole bundle off? ")
+                if reason is None:
+                    continue
+                note = _rest(args, items, done, verb="s", reason=reason)
+                if note:
+                    continue
+                break
+            continue
+
+        if key in ("left", "l"):
+            reading = False
+            continue
+        if key in ("y", "enter"):
+            note = _settle(args, items[at], done, at, "a")
+        elif key in ("r", "n"):
+            reason = _typed("  why turn it down? ")
+            if reason is None:
+                continue
+            note = _settle(args, items[at], done, at, "r", reason)
+        elif key == "s":
+            reason = _typed("  why put it off? ")
+            if reason is None:
+                continue
+            note = _settle(args, items[at], done, at, "s", reason)
+        elif key == "e":
+            note = _settle(args, items[at], done, at, "e")
+        else:
+            continue
+
+        # A decision the store refused is not a decision, so the reader stays
+        # where they are and reads why rather than finding themselves one item
+        # further on with nothing recorded behind them.
+        if note:
+            continue
+        if at + 1 >= len(items):
+            break
+        at += 1
+        back, scroll = [], 0
+
+    return "next", _tally(bundle, done, len(items))
+
+
+def _rest(args, items, done, verb: str = "a", reason: str = "") -> str:
+    """Everything in the bundle not decided yet, decided the same way.
+
+    One item the store refuses does not stop the rest of them: what it refused
+    is collected and said once, afterwards.
+    """
+    refused = []
+    for number, item in enumerate(items):
+        if number in done:
+            continue
+        note = _settle(args, item, done, number, verb, reason)
+        if note:
+            refused.append(note)
+    return "\n".join(refused)
+
+
+def _settle(args, item, done, number: int, verb: str, reason: str = "") -> str:
+    """Carry one decision into the store, in a transaction of its own.
+
+    One transaction per item is what lets a reader stop anywhere: what is
+    behind them is committed, and a sitting does not have to be finished to
+    have been worth starting. That only holds if a refusal stops the decision
+    and not the sitting, so what the store declines to do comes back as
+    something to say and the reader keeps their place. Returns that, empty
+    when it simply worked.
+    """
+    if number in done:
+        return (
+            f"  already {done[number]}. a decision is a record and does not get taken back;\n"
+            "  to put this content back, write it as your own with 'mashu remember'"
+        )
+    edited = _edit_text(args, item) if verb == "e" else None
+    try:
+        with transaction(args.dsn) as cur:
+            _decide(cur, args, item, verb, reason, edited=edited)
+    except MashuError as refusal:
+        return f"  {refusal}"
+    done[number] = _WORD[verb]
+    return ""
+
+
+_HELP_KEYS = "  space read on   any other key goes back"
+
+
+def _help(text: str) -> None:
+    """Paint an explanation and wait, so the screens themselves can stay short.
+
+    What each key does belongs one keystroke away, not under every page. A hint
+    block long enough to explain itself is a hint block competing with the
+    thing being read — and it has to fit the screen like everything else, so it
+    is paged the same way.
+    """
+    offset = 0
+    while True:
+        # three lines are pinned above the body, so one of them says what this is
+        page, more = _paged(f"  what each key does\n\n\n{text.strip()}", offset, _HELP_KEYS)
+        _screen(page + "\n" + _HELP_KEYS)
+        if _getkey() != "space" or not more:
+            return
+        offset = more
+
+
+def _trailer(*parts: str) -> str:
+    """Everything printed under a page or a list, as one measurable block.
+
+    One string, because what follows the screen has to be measured before the
+    screen is built and printed after it, and two ways of assembling it is one
+    way too many.
+    """
+    return "\n".join(part for part in parts if part)
+
+
+def _standing(done: dict, at: int) -> str:
+    """Whether this item was already decided in this sitting, said on the page itself."""
+    return f"  ({done[at]} in this sitting)" if at in done else ""
+
+
+def _width() -> int:
+    """How wide the terminal is, not how wide the writing was laid out to be."""
+    return max(40, shutil.get_terminal_size((WIDTH, 24)).columns)
+
+
+def _room(*fixed: str) -> int:
+    """How many lines are left for a list or a page once the fixed parts have theirs.
+
+    A screen that overruns the terminal is a screen the reader has to scroll
+    back through to see its own heading, and on a short console that is every
+    screen. So nothing is printed that does not fit: what will not fit is said
+    as a count instead.
+
+    The fixed parts are handed in and measured rather than counted into a
+    number here. A number is right until somebody adds a line to a heading or a
+    key list, and then it is wrong everywhere that number was used and nothing
+    says so — which is how a five line key list came to be reserved four.
+
+    The one line taken off the end is the newline print() adds after a screen.
+    """
+    used = sum(_rows_of(text) for text in fixed)
+    return max(0, shutil.get_terminal_size((WIDTH, 24)).lines - used - 1)
+
+
+def _rows_of(text: str) -> int:
+    """How many terminal lines a printed block takes.
+
+    Split on the newline rather than by splitlines, which drops a trailing
+    empty line: "a\n" prints two lines and splitlines calls it one. Every block
+    here that ends in a blank line was being counted one short, and the screen
+    ran one row past the bottom.
+    """
+    width = _width()
+    return sum(_rows(line, width) for line in text.split("\n"))
+
+
+def _rows(text: str, width: int) -> int:
+    """How many terminal lines one written line takes once it wraps."""
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    return max(1, -(-_cells(plain) // width))
+
+
+def _list_screen(head: str, rows: list[str], at: int, keys: str) -> str:
+    """A heading, as much of a list as fits under it, and the keys.
+
+    Composed and measured in one place, against the same string. Measuring the
+    parts separately and assembling them separately is how a heading that ends
+    in a newline came to cost two lines and be counted as one, and every list
+    ran one line past the bottom of the screen.
+    """
+    around = f"{head}\n\n\n{keys}"
+    shown, above, below = _fit(rows, at, _room(around))
+    body = [line for line in (above, *shown, below) if line]
+    return f"{head}\n\n" + "\n".join(body) + f"\n\n{keys}"
+
+
+def _fit(rows: list[str], at: int, room: int) -> tuple[list[str], str, str]:
+    """The part of a list that fits in the room given, kept around the cursor."""
+    if len(rows) <= room:
+        return rows, "", ""
+    room = max(1, room - 2)  # the two lines that say what is not being shown
+    top = max(0, min(at - room // 2, len(rows) - room))
+    above = f"  ↑ {top} more" if top else ""
+    below = f"  ↓ {len(rows) - top - room} more" if top + room < len(rows) else ""
+    return rows[top : top + room], above, below
+
+
+def _paged(text: str, offset: int, trailer: str = "") -> tuple[str, int]:
+    """As much of one proposal as fits, and where the next screenful would start.
+
+    The first lines are held on screen whatever the offset: what is being
+    decided about should not scroll away from the deciding.
+
+    Filled twice on purpose. The line that says how much is left is itself a
+    line, so a page filled to the brim and then told it is not the whole thing
+    comes out one row past the bottom of the screen. The first fill answers
+    whether that line is needed; the second makes room for it.
+    """
+    lines = text.splitlines()
+    head, body = lines[:3], lines[3:]
+    room = _room("\n".join(head), trailer)
+
+    shown = _fill(body[offset:], room)
+    if offset + len(shown) >= len(body):
+        return "\n".join(head + shown), 0
+
+    shown = _fill(body[offset:], room - 1)
+    left = len(body) - offset - len(shown)
+    marker = f"  … {left} more line(s), space to go on"
+    return "\n".join(head + shown + [marker]), offset + len(shown)
+
+
+def _fill(lines: list[str], room: int) -> list[str]:
+    """As many of these as fit in the rows given, counting the ones that wrap."""
+    width = _width()
+    out, used = [], 0
+    for line in lines:
+        cost = _rows(line, width)
+        if used + cost > room:
+            break
+        out.append(line)
+        used += cost
+    return out
+
+
+def _cells(text: str) -> int:
+    """How wide this is on a terminal, counting the double-width characters as two."""
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
+def _clip(text: str, cells: int) -> str:
+    """Cut a title to fit, measuring in cells rather than in characters."""
+    if _cells(text) <= cells:
+        return text
+    out, used = [], 0
+    for ch in text:
+        used += 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+        if used > cells - 1:
+            break
+        out.append(ch)
+    return "".join(out) + "…"
+
+
+def _pad(text: str, cells: int) -> str:
+    """Fill a column out to a width, counting cells so a Japanese name lines up too."""
+    clipped = _clip(text, cells)
+    return clipped + " " * max(0, cells - _cells(clipped))
+
+
+def _contents(bundle, items, place: int, total: int, done: dict, at: int, note: str = "") -> str:
+    """The bundle as a list of its titles: what it takes to pass it unread."""
+    name = _short(bundle["session_id"]) if bundle["session_id"] else "none"
+    scope = (items[0]["scope_name"] or "-") if items else "-"
+    head = (
+        f"{scope}  bundle {name}  {len(items)} to decide, "
+        f"waiting {bundle['days_pending']} day(s)    "
+        f"bundle {place} of {total}"
+    )
+    width = _width()
+    rows = []
+    for number, item in enumerate(items):
+        mark = _MARK.get(done.get(number), " ")
+        title = item["title"] or _short(item["proposal_id"])
+        row = _clip(
+            f" {mark} {number + 1:>3}  {item['operation']:<15} "
+            f"{item['memory_type'] or '-':<14} {title}",
+            width - 1,
+        )
+        rows.append(f"\x1b[1m▸{row[1:]}\x1b[0m" if number == at else f" {row[1:]}")
+
+    return _list_screen(head, rows, at, _trailer(_LIST_KEYS, note))
+
+
+def _item_text(cur, item, number: int, of: int, near: list[dict] = ()) -> str:
+    """One proposal as a page of its own, beside what it would displace (18.1)."""
+    label = f" {number} of {of} "
+    across = _across()
+    lines = [
+        "─" * 4 + label + "─" * max(4, across - 4 - _cells(label)),
+        f"{item['operation']}  {item['memory_type'] or '-'}  "
+        f"[{item['scope_name'] or '-'}]  {_short(item['proposal_id'])}",
+        f"{item['title'] or ''}",
+        "",
+    ]
+    if item["review_note"]:
+        lines.append(_wrap(f"(put off earlier: {item['review_note']})"))
+        lines.append("")
+    lines.append(_diff_text(cur, item))
+    resembling = _look_alike_text(list(near))
+    if resembling:
+        lines.append(resembling)
+    lines.append("─" * across)
+    return "\n".join(lines)
+
+
+def _tally(bundle, done: dict, count: int) -> str:
+    """What the bundle came to, said once, so the next one starts on a clean line."""
+    name = _short(bundle["session_id"]) if bundle["session_id"] else "none"
+    parts = []
+    for word in ("approved", "declined", "edited", "put off"):
+        many = sum(1 for value in done.values() if value == word)
+        if many:
+            parts.append(f"{many} {word}")
+    left = count - len(done)
+    if left:
+        parts.append(f"{left} left undecided")
+    return f"\nbundle {name}: " + ", ".join(parts or ["nothing decided"])
+
+
+# --------------------------------------------------------------------------
+# the whole bundle at once
+# --------------------------------------------------------------------------
 _REVIEW_HELP = """
   all                 approve everything still undecided here
   r N reason          turn item N down, with the reason
@@ -1575,32 +2913,40 @@ def _print_review(cur, bundle, items) -> None:
 
 
 def _print_diff(cur, item) -> None:
+    print(_diff_text(cur, item))
+
+
+def _diff_text(cur, item) -> str:
     """What this proposal says, beside what it would displace (18.1)."""
     cur.execute(
         "SELECT applied_version FROM proposal WHERE proposal_id = %s", (item["proposal_id"],)
     )
     version_id = (cur.fetchone() or {}).get("applied_version")
     if version_id is None:
-        print(_wrap("(nothing written yet; this proposal changes nothing until approved)"))
+        lines = [_wrap("(nothing written yet; this proposal changes nothing until approved)")]
         for key, value in (item["payload"] or {}).items():
             if key in ("reason", "status"):
-                print(_wrap(f"{key}: {value}"))
-        return
+                lines.append(_wrap(f"{key}: {value}"))
+        return "\n".join(lines)
 
     version = store.get_version(cur, version_id)
     entity = store.get_entity(cur, version["memory_id"])
+    lines = []
     if version["directive"]:
-        print(_wrap(version["directive"], indent="  > "))
-        print()
-    print(_wrap(version["content"]))
-    _print_grounds(cur, version_id)
+        lines.append(_wrap(version["directive"], indent="  > "))
+        lines.append("")
+    lines.append(_wrap(version["content"]))
+    grounds = _grounds_text(cur, version_id)
+    if grounds:
+        lines.append(grounds)
 
     current = entity["active_version"]
     if current and current != version_id:
-        print("\n     replacing what is active now:")
-        print(_wrap(store.get_version(cur, current)["content"], indent="   | "))
+        lines.append("\n     replacing what is active now:")
+        lines.append(_wrap(store.get_version(cur, current)["content"], indent="   | "))
     elif current is None:
-        print("\n     (new; nothing is active on this entity yet)")
+        lines.append("\n     (new; nothing is active on this entity yet)")
+    return "\n".join(lines)
 
 
 def _apply_review(args, items, script: str) -> int:
@@ -1722,8 +3068,35 @@ def _edit(cur, args, item, edited: str | None) -> None:
     print(f"edited    {item['title']}")
 
 
-def _open_editor(text: str) -> str:
-    editor = os.environ.get("MASHU_EDITOR") or os.environ.get("EDITOR") or "vi"
+#: How to get out of the editors this is likely to reach for. vi is last
+#: because someone who has not chosen an editor has not chosen vi, and being
+#: put inside it with no way out is where an edit stops being possible.
+_EDITORS = (
+    ("nano", "^O saves, ^X leaves"),
+    ("micro", "^S saves, ^Q leaves"),
+    ("vi", "press i to type, then Esc and :wq to save and leave"),
+)
+
+
+def _editor() -> tuple[str, str]:
+    """The editor to open, and how to get back out of it."""
+    chosen = os.environ.get("MASHU_EDITOR") or os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if chosen:
+        head = pathlib.Path(chosen.split()[0]).name
+        return chosen, dict(_EDITORS).get(head, "")
+    for name, way in _EDITORS:
+        if shutil.which(name):
+            return name, way
+    return "vi", dict(_EDITORS)["vi"]
+
+
+def _open_editor(text: str, about: str = "") -> str:
+    """Hand the text to an editor, having said which one and how to leave it."""
+    editor, way = _editor()
+    if about:
+        print(f"\n  {about}")
+    print(f"  opening {editor}" + (f" — {way}" if way else ""))
+    print("  set MASHU_EDITOR to use another one")
     with tempfile.NamedTemporaryFile("w+", suffix=".md", delete=False, encoding="utf-8") as handle:
         handle.write(text)
         path = handle.name
@@ -1976,8 +3349,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     er.set_defaults(func=cmd_eval_retire)
 
-    sl = adm.add_parser("stale", help="adopted rules that name a moment in themselves (25.2)")
-    sl.set_defaults(func=cmd_stale)
+    for where, shown in (
+        (sub, "sweep what stands and has a shelf life (13.1, 30 段 B)"),
+        (adm, argparse.SUPPRESS),
+    ):
+        sl = where.add_parser("stale", help=shown)
+        sl.add_argument(
+            "--list", action="store_true", help="print the whole list instead of walking it"
+        )
+        sl.add_argument("--actor", default="user")
+        sl.set_defaults(func=cmd_stale)
 
     m = adm.add_parser("migrate", help="apply pending migrations")
     m.set_defaults(func=cmd_migrate)

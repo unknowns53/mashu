@@ -36,7 +36,7 @@ import psycopg
 
 from mashu import context, events
 from mashu.embed import get_embedder
-from mashu.models import EventType, MemoryType
+from mashu.models import EventType, MemoryType, VersionStatus
 
 #: How many active memories one query returns before layer 2 is sized.
 DEFAULT_LIMIT = 8
@@ -118,6 +118,16 @@ SCOPE_MATCH_FALLBACK = 0.78
 SCOPE_THRESHOLD_ENV_VAR = "MASHU_SCOPE_THRESHOLD"
 
 UNREVIEWED_TAG = "unreviewed"
+
+#: What is added to a layer 1 row whose own version says the thing is over.
+#:
+#: A completion keeps the active pointer, because "this was done" is worth
+#: finding and is the answer to asking about it again. What it must not do is
+#: arrive looking like work still outstanding. Until this tag existed a task
+#: retired as completed came back first in layer 1, full content, with nothing
+#: on it: the store held the completion, said so in the version's own reason,
+#: and handed the reader the opposite.
+FINISHED_TAG = "finished"
 
 #: What is added to a layer 1 row somebody has proposed retiring (21.1, 30 段 B).
 RETIREMENT_PROPOSED_TAG = "retirement_proposed"
@@ -313,6 +323,7 @@ def active_set(cur: psycopg.Cursor, *, scope_id: UUID | None = None) -> list[dic
 # along with the content and the reader decides.
 _LAYER1_SQL = """
 SELECT e.memory_id, e.scope_id, e.type, e.title, v.version_id, v.content,
+       v.status AS version_status, v.reason AS version_reason,
        1 - (v.content_embedding <=> %(q)s::vector) AS similarity,
        r.proposed_status, r.proposed_reason, r.proposed_by,
        u.update_proposed_by, u.update_proposed_days
@@ -433,7 +444,11 @@ def retrieve(
     cur.execute(_LAYER1_SQL, params)
     active = cur.fetchall()
     for row in active:
-        if row.get("proposed_status"):
+        # Settled before proposed: a version that already carries a retirement
+        # is not a question anyone is still asking.
+        if row.get("version_status") and row["version_status"] != str(VersionStatus.CANDIDATE):
+            row["tag"] = FINISHED_TAG
+        elif row.get("proposed_status"):
             row["tag"] = RETIREMENT_PROPOSED_TAG
         elif row.get("update_proposed_by"):
             row["tag"] = UPDATE_PROPOSED_TAG

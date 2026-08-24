@@ -12,6 +12,7 @@ pointer switch and its status change stay atomic (specification 26).
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -280,6 +281,79 @@ def set_status(
         _clear_active(cur, memory_id=version["memory_id"], actor=actor, reason=reason)
 
 
+def confirm_standing(
+    cur: psycopg.Cursor,
+    *,
+    memory_id: UUID,
+    version_id: UUID,
+    until: datetime,
+    actor: str,
+    reason: str = "",
+) -> None:
+    """Record that somebody looked and this is still true, and when to ask again.
+
+    Not a change to the knowledge, so no version and no status moves. What it
+    records is that somebody read this on a day and did not retire it, which is
+    a fact about the reading and belongs in the log rather than on the memory.
+
+    The sweep needs it because the alternative is worse: with no way to say
+    "still true, ask me later", the only key that makes something stop coming
+    back is a retirement, and a screen that offers retirement as the way to
+    dismiss things will get retirements that were meant as dismissals.
+
+    The version is recorded because what was confirmed is the text somebody
+    read, not the entity for ever, so rewriting it ends the confirmation. That
+    is matched by version and not by time: now() is frozen for a transaction,
+    so a confirmation and a rewrite written in one would carry the same
+    timestamp and no comparison of the two could tell them apart.
+
+    An agent writes these too, for a memory a session bore out (30 段 B), which
+    is why the reason is on the event. A person dismissing an item off a list
+    has nothing to say and does not have to; an agent moving the day a person
+    is next asked has to say what in the session made it say so, or the sweep
+    has no way of disagreeing with it.
+    """
+    get_entity(cur, memory_id)
+    events.record(
+        cur,
+        EventType.STILL_STANDS,
+        actor,
+        memory_id=memory_id,
+        version_id=version_id,
+        detail={"until": until.isoformat(), "reason": reason},
+    )
+
+
+def tell_apart(
+    cur: psycopg.Cursor,
+    *,
+    memory_id: UUID,
+    other: UUID,
+    actor: str,
+    reason: str = "",
+) -> None:
+    """Record that two memories that read alike are two things (20).
+
+    The look-alike screen has no way to be finished otherwise. A pair that a
+    person has examined and found genuinely distinct scores exactly the same
+    the next time it is measured, so without this the same two come back for
+    ever and the screen trains its reader to skip it.
+
+    Written for both directions, because the pair is the thing decided and the
+    order it was shown in is not part of it.
+    """
+    get_entity(cur, memory_id)
+    get_entity(cur, other)
+    for first, second in ((memory_id, other), (other, memory_id)):
+        events.record(
+            cur,
+            EventType.TOLD_APART,
+            actor,
+            memory_id=first,
+            detail={"other": str(second), "reason": reason},
+        )
+
+
 def set_active(
     cur: psycopg.Cursor,
     *,
@@ -354,14 +428,22 @@ def record_evidence(
 
 
 def evidence_for(cur: psycopg.Cursor, version_id: UUID) -> list[dict[str, Any]]:
-    """What this version says it rests on, with each ground's current standing."""
+    """What this version says it rests on, with each ground's current standing.
+
+    The latest version's status comes back beside the active one because
+    adoption is a pointer: retiring a ground takes the pointer off, so an
+    active_version of NULL covers both "never adopted" and "adopted, then
+    found to be wrong". A reader deciding whether to build on this needs those
+    told apart, and only the latest version says which it was.
+    """
     cur.execute(
         """
         SELECT e.memory_id, e.type, e.title, e.status AS entity_status,
-               v.status AS version_status
+               v.status AS version_status, l.status AS latest_status
         FROM memory_evidence ev
         JOIN memory_entity e ON e.memory_id = ev.to_memory
         LEFT JOIN memory_version v ON v.version_id = e.active_version
+        LEFT JOIN memory_version l ON l.version_id = e.latest_version
         WHERE ev.from_version = %s
         ORDER BY e.title
         """,

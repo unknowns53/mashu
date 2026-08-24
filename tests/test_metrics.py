@@ -7,7 +7,7 @@ import uuid
 import psycopg.types.json
 
 from mashu import metrics, proposals, store
-from mashu.models import Delivery, MemoryType, ProposalOperation, SourceType
+from mashu.models import Delivery, MemoryType, ProposalOperation, SourceType, VersionStatus
 
 
 def _seed(cur, scope_id, *, adopt):
@@ -234,3 +234,301 @@ def test_the_worker_getting_there_first_counts_as_recovered(cur, scope_id):
     got = metrics.retirement_eval(cur)
     assert got["recovered"] >= 1
     assert got["recall"] == 1.0
+
+
+def _standing(cur, scope_id, *, type, title, content="本文"):
+    memory_id, _ = store.create_entity(
+        cur,
+        scope_id=scope_id,
+        type=type,
+        title=title,
+        content=content,
+        source_type=SourceType.AGENT,
+        created_by="mashu-worker",
+        actor="mashu-worker",
+        adopt=True,
+    )
+    return memory_id
+
+
+def test_a_standing_task_is_swept_whatever_it_says(cur, scope_id):
+    """13.1 puts only the indefinite kind in Memory; a task from a transcript is not."""
+    memory_id = _standing(cur, scope_id, type=MemoryType.TASK, title="測定器の配線欠陥を直す")
+    found = {row["memory_id"]: row for row in metrics.rot_prone(cur)}
+    assert memory_id in found
+    assert "a task stands until it is finished" in found[memory_id]["why"]
+
+
+def test_a_standing_state_is_swept_because_the_next_one_ends_it(cur, scope_id):
+    memory_id = _standing(cur, scope_id, type=MemoryType.STATE, title="いまの現在地")
+    found = {row["memory_id"]: row for row in metrics.rot_prone(cur)}
+    assert memory_id in found
+    assert "only until the next one" in found[memory_id]["why"]
+
+
+def test_a_task_whose_title_says_it_is_over_is_read_as_that(cur, scope_id):
+    """A completion recorded as something still to do is the shape worth naming."""
+    memory_id = _standing(cur, scope_id, type=MemoryType.TASK, title="Phase 3 を完了した")
+    found = {row["memory_id"]: row for row in metrics.rot_prone(cur)}
+    assert "the title says this is finished" in found[memory_id]["why"]
+
+
+def test_an_ordinary_standing_rule_is_left_off_the_sweep(cur, scope_id):
+    """A list that flags everything standing is a list of everything standing."""
+    memory_id = _standing(
+        cur,
+        scope_id,
+        type=MemoryType.PREFERENCE,
+        title="測ってから値を置く",
+        content="推測で置いた値は下流へ渡さない。",
+    )
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def test_what_is_no_longer_standing_is_not_swept_again(cur, scope_id):
+    """Retiring is what takes something off this list, through the path a person uses."""
+    memory_id = _standing(cur, scope_id, type=MemoryType.TASK, title="もう終わった作業")
+    entity = store.get_entity(cur, memory_id)
+    # a completion the user states is auto committed by the gate (17), which is
+    # the path 'mashu retire' takes and so the one this has to be measured on
+    proposals.propose(
+        cur,
+        actor="user",
+        operation=ProposalOperation.CHANGE_STATUS,
+        payload={
+            "version_id": str(entity["active_version"]),
+            "status": str(VersionStatus.COMPLETED),
+            "reason": "終わったため",
+            "source_type": str(SourceType.USER),
+        },
+        target_memory=memory_id,
+    )
+
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def test_something_read_and_left_standing_stops_coming_back_for_a_while(cur, scope_id):
+    """Without this the only key that dismisses anything is a retirement.
+
+    A screen whose only way to say "not this one" is to retire it collects
+    retirements that were meant as dismissals, and a later session is handed
+    those as readings of the knowledge.
+    """
+    from datetime import datetime, timedelta
+
+    memory_id = _standing(cur, scope_id, type=MemoryType.TASK, title="まだ続いている作業")
+    assert memory_id in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+    store.confirm_standing(
+        cur,
+        memory_id=memory_id,
+        version_id=store.get_entity(cur, memory_id)["active_version"],
+        until=datetime.now().astimezone() + timedelta(days=30),
+        actor="user",
+    )
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def test_a_confirmation_that_has_run_out_puts_it_back(cur, scope_id):
+    from datetime import datetime, timedelta
+
+    memory_id = _standing(cur, scope_id, type=MemoryType.TASK, title="また見る時期の来た作業")
+    store.confirm_standing(
+        cur,
+        memory_id=memory_id,
+        version_id=store.get_entity(cur, memory_id)["active_version"],
+        until=datetime.now().astimezone() - timedelta(days=1),
+        actor="user",
+    )
+    assert memory_id in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def test_rewriting_the_memory_ends_the_confirmation(cur, scope_id):
+    """What was confirmed is the text that was read, not the entity for ever."""
+    from datetime import datetime, timedelta
+
+    memory_id = _standing(cur, scope_id, type=MemoryType.TASK, title="書き直される作業")
+    store.confirm_standing(
+        cur,
+        memory_id=memory_id,
+        version_id=store.get_entity(cur, memory_id)["active_version"],
+        until=datetime.now().astimezone() + timedelta(days=30),
+        actor="user",
+    )
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+    store.add_version(
+        cur,
+        memory_id=memory_id,
+        content="事情が変わって、別のことをする作業になった。",
+        source_type=SourceType.USER,
+        created_by="user",
+        actor="user",
+        based_on_version=store.get_entity(cur, memory_id)["latest_version"],
+        adopt=True,
+    )
+
+    assert memory_id in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def _in_days(cur, days: int):
+    """A moment from the database's clock, read before anything else uses the cursor."""
+    cur.execute("SELECT now() + make_interval(days => %s) AS at", (days,))
+    return cur.fetchone()["at"]
+
+
+def _age(cur, memory_id, *, days: int):
+    """Move a version's writing back in time, so its interval has run."""
+    cur.execute(
+        "UPDATE memory_version SET created_at = now() - make_interval(days => %s) "
+        "WHERE memory_id = %s",
+        (days, memory_id),
+    )
+
+
+def test_a_fact_nobody_has_checked_in_long_enough_comes_back(cur, scope_id):
+    """The reading the other three could not give (13.1, 30 段 B).
+
+    A fact naming the version in use goes out of date without ever saying a
+    date, so no pattern over the text finds it and its type says nothing. Forty
+    six of the real store's standing memories were in that state.
+    """
+    memory_id = _standing(
+        cur,
+        scope_id,
+        type=MemoryType.FACT,
+        title="採用している版は 3 系",
+        content="ここで使う版は 3 系である。",
+    )
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+    _age(cur, memory_id, days=metrics.CHECK_INTERVAL_DAYS["fact"] + 1)
+    found = {row["memory_id"]: row for row in metrics.rot_prone(cur)}
+    assert memory_id in found
+    assert "nobody has looked at this" in found[memory_id]["why"]
+
+
+def test_the_clock_says_unchecked_and_never_says_wrong(cur, scope_id):
+    """A due date is not a verdict, and the wording is the only thing saying so."""
+    memory_id = _standing(
+        cur, scope_id, type=MemoryType.DECISION, title="この手段を採らなかった理由"
+    )
+    _age(cur, memory_id, days=metrics.CHECK_INTERVAL_DAYS["decision"] + 1)
+    found = {row["memory_id"]: row for row in metrics.rot_prone(cur)}
+    assert "wrong" not in found[memory_id]["why"]
+    assert found[memory_id]["overdue_days"] >= 1
+
+
+def test_an_agent_can_answer_the_clock_so_nobody_else_has_to(cur, scope_id):
+    """The whole reason a clock over standing memories is affordable (30 段 B)."""
+    memory_id = _standing(
+        cur, scope_id, type=MemoryType.OBSERVATION, title="ある条件で再現した挙動"
+    )
+    _age(cur, memory_id, days=metrics.CHECK_INTERVAL_DAYS["observation"] + 1)
+    assert memory_id in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+    until = _in_days(cur, 180)
+    store.confirm_standing(
+        cur,
+        memory_id=memory_id,
+        version_id=store.get_entity(cur, memory_id)["active_version"],
+        until=until,
+        actor="mashu-worker",
+        reason="このセッションで同じ挙動を再現した",
+    )
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def test_agents_cannot_keep_one_memory_away_from_a_person_for_ever(cur, scope_id):
+    """The bound that makes the automatic answer safe to accept unattended.
+
+    An agent renewing the same memory every session for the same weak reason
+    is silent: nobody is told, and the store goes on handing it out. So a
+    confirmation from an agent moves the date and cannot move it past
+    CHECK_CEILING_DAYS from the last time a person decided anything here.
+    """
+    memory_id = _standing(cur, scope_id, type=MemoryType.FACT, title="ずっと確認され続ける事実")
+    _age(cur, memory_id, days=metrics.CHECK_CEILING_DAYS + 1)
+    until = _in_days(cur, 180)
+    store.confirm_standing(
+        cur,
+        memory_id=memory_id,
+        version_id=store.get_entity(cur, memory_id)["active_version"],
+        until=until,
+        actor="mashu-worker",
+        reason="まだ通用している",
+    )
+
+    found = {row["memory_id"]: row for row in metrics.rot_prone(cur)}
+    assert memory_id in found, "the ceiling has to bring it back whatever the agent asked for"
+    assert found[memory_id]["capped"] is True
+    assert "without a person deciding anything" in found[memory_id]["why"]
+
+
+def test_a_person_can_put_something_off_past_the_ceiling(cur, scope_id):
+    """The ceiling bounds agents, not the person it exists to reach."""
+    memory_id = _standing(cur, scope_id, type=MemoryType.FACT, title="人が長く置くと決めた事実")
+    _age(cur, memory_id, days=metrics.CHECK_CEILING_DAYS + 1)
+    until = _in_days(cur, metrics.CHECK_CEILING_DAYS * 3)
+    store.confirm_standing(
+        cur,
+        memory_id=memory_id,
+        version_id=store.get_entity(cur, memory_id)["active_version"],
+        until=until,
+        actor="user",
+    )
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def test_a_live_confirmation_silences_a_dated_title_too(cur, scope_id):
+    """Bringing back what somebody just dismissed is not a second reading."""
+    memory_id = _standing(cur, scope_id, type=MemoryType.PREFERENCE, title="2026-08 時点の割り当て")
+    assert memory_id in [row["memory_id"] for row in metrics.rot_prone(cur)]
+    until = _in_days(cur, 30)
+    store.confirm_standing(
+        cur,
+        memory_id=memory_id,
+        version_id=store.get_entity(cur, memory_id)["active_version"],
+        until=until,
+        actor="user",
+    )
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def test_the_sweep_can_answer_for_one_scope(cur, scope_id):
+    """The worker asks about the scope it is extracting, not the whole store."""
+    mine = _standing(cur, scope_id, type=MemoryType.TASK, title="この Scope の作業")
+    other = store.create_scope(cur, name="よその仕事", actor="user")
+    theirs = _standing(cur, other, type=MemoryType.TASK, title="よその Scope の作業")
+
+    here = [row["memory_id"] for row in metrics.rot_prone(cur, scope_id=scope_id)]
+    assert mine in here and theirs not in here
+
+
+def test_upkeep_counts_what_is_due_and_says_where_to_go(cur, scope_id):
+    assert metrics.upkeep(cur)["ok"] is True
+    _standing(cur, scope_id, type=MemoryType.TASK, title="放置されている作業")
+    got = metrics.upkeep(cur)
+    assert got["due"] == 1 and got["ok"] is False
+    assert "mashu stale" in got["warning"]
+
+
+def test_what_was_turned_down_is_not_counted_as_never_decided(cur, scope_id):
+    """A memory with no pointer because somebody decided is the opposite of undecided.
+
+    Counting those as unreviewed made a scope with an empty queue read as a
+    quarter unreviewed, and it would have read that way for ever.
+    """
+    memory_id = _standing(cur, scope_id, type=MemoryType.FACT, title="棚上げされた事実")
+    entity = store.get_entity(cur, memory_id)
+    store.set_status(
+        cur,
+        version_id=entity["active_version"],
+        target=VersionStatus.DORMANT,
+        actor="user",
+        reason="当面は使わない",
+    )
+
+    row = next(r for r in metrics.collect(cur).unreviewed if r["held"])
+    assert row["unreviewed"] == 0, "a shelved memory was decided about"
+    assert row["retired"] == 1

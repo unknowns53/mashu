@@ -12,10 +12,11 @@ import json
 import math
 import sys
 import types
+from uuid import uuid4
 
 import pytest
 
-from mashu import extract, proposals, routing, runs, store, transcript, worker
+from mashu import extract, metrics, proposals, routing, runs, store, transcript, worker
 from mashu.models import EntityStatus, MemoryType, ProposalStatus, SourceType, VersionStatus
 
 # --------------------------------------------------------------------------
@@ -66,9 +67,14 @@ def queued(cur, tmp_path):
     return _queued
 
 
-def answer(proposals_=(), retirements=()):
+def answer(proposals_=(), retirements=(), confirmations=()):
     return json.dumps(
-        {"proposals": list(proposals_), "retirements": list(retirements), "scratch": []},
+        {
+            "proposals": list(proposals_),
+            "retirements": list(retirements),
+            "confirmations": list(confirmations),
+            "scratch": [],
+        },
         ensure_ascii=False,
     )
 
@@ -1548,3 +1554,95 @@ def test_a_file_with_no_session_in_it_is_skipped_rather_than_held(cur, tmp_path,
 
     assert got.state == "skipped"
     assert "no route can reach it" in got.note
+
+
+# --------------------------------------------------------------------------
+# answering the clock (13.1, 30 段 B)
+# --------------------------------------------------------------------------
+def test_a_memory_that_is_due_is_marked_in_what_the_model_is_shown():
+    """The mark is what makes the clock affordable; without it there is nothing to answer."""
+    due = uuid4()
+    active = [
+        {"memory_id": due, "type": "fact", "title": "点検期日の来た事実", "content": "本文"},
+        {"memory_id": uuid4(), "type": "fact", "title": "まだ来ていない事実", "content": "本文"},
+    ]
+    built = extract.build_prompt(log="", scratch=[], active=active, due={due})
+    assert built.count(extract.DUE_MARK) == 1
+    assert built.index(str(due)) < built.index(extract.DUE_MARK)
+
+
+def test_a_confirmation_without_a_ground_is_refused():
+    """One with nothing behind it reads the same as the model declining to think."""
+    known = uuid4()
+    got = extract.parse(
+        answer(confirmations=[{"memory_id": str(known), "title": "題", "reason": ""}]),
+        known_ids={known},
+    )
+    assert not got.confirmations
+    assert "reason is missing" in got.refused[0]
+
+
+def test_a_confirmation_aimed_outside_what_the_model_was_shown_is_refused():
+    got = extract.parse(
+        answer(confirmations=[{"memory_id": str(uuid4()), "title": "題", "reason": "根拠"}]),
+        known_ids={uuid4()},
+    )
+    assert not got.confirmations and "was not in the active set" in got.refused[0]
+
+
+def test_the_worker_answers_the_clock_so_a_person_does_not_have_to(cur, tmp_path, queued, route):
+    """The half of this that decides whether a clock over standing memories is affordable."""
+    memory_id, _ = store.create_entity(
+        cur,
+        scope_id=route,
+        type=MemoryType.FACT,
+        title="このセッションで裏付けの取れた事実",
+        content="ここで使う版は 3 系である。",
+        source_type=SourceType.AGENT,
+        created_by="mashu-worker",
+        actor="mashu-worker",
+        adopt=True,
+    )
+    cur.execute(
+        "UPDATE memory_version SET created_at = now() - make_interval(days => %s) "
+        "WHERE memory_id = %s",
+        (metrics.CHECK_INTERVAL_DAYS["fact"] + 1, memory_id),
+    )
+    assert memory_id in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+    file = write_claude(tmp_path)
+    run = queued(file)
+    said = answer(
+        confirmations=[
+            {"memory_id": str(memory_id), "title": "題", "reason": "3 系で動くことを確かめた"}
+        ]
+    )
+    outcome = worker.process(cur, run, extractor=extract.StubExtractor(said))
+
+    assert outcome.confirmations_filed == 1
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def test_a_task_cannot_be_confirmed_for_later(cur, tmp_path, queued, route):
+    """ "Still open" about a task is the state it was already in, not a confirmation."""
+    memory_id, _ = store.create_entity(
+        cur,
+        scope_id=route,
+        type=MemoryType.TASK,
+        title="まだ終わっていない作業",
+        content="続いている。",
+        source_type=SourceType.AGENT,
+        created_by="mashu-worker",
+        actor="mashu-worker",
+        adopt=True,
+    )
+    file = write_claude(tmp_path)
+    run = queued(file)
+    said = answer(
+        confirmations=[{"memory_id": str(memory_id), "title": "題", "reason": "まだ続いている"}]
+    )
+    outcome = worker.process(cur, run, extractor=extract.StubExtractor(said))
+
+    assert outcome.confirmations_filed == 0
+    assert any("cannot be confirmed for later" in line for line in outcome.refused)
+    assert memory_id in [row["memory_id"] for row in metrics.rot_prone(cur)]

@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import json
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
-from mashu import cli, context, proposals, routing, runs, store
+from mashu import cli, context, metrics, proposals, resolution, routing, runs, store
 from mashu.db import transaction
-from mashu.models import MemoryType, ProposalOperation, SourceType
+from mashu.errors import MashuError
+from mashu.models import EntityStatus, MemoryType, ProposalOperation, SourceType
 
 
 @pytest.fixture
@@ -512,8 +514,10 @@ def test_the_grounds_are_readable_while_the_state_is_still_waiting(
     proposal_id = out.split("proposal ")[1].split()[0]
 
     _, shown = run("inspect", proposal_id)
-    assert "resting on (1)" in shown
+    assert "built on 1 other memory" in shown
     assert "the measurement" in shown
+    # and what its standing means for the reader, not the status name alone
+    assert "not adopted yet" in shown
 
     with transaction(test_dsn) as cur:
         cur.execute(
@@ -1117,3 +1121,606 @@ def test_a_scope_made_without_a_description_says_what_that_costs(test_dsn, run):
     code, out = run("scope", "--add", f"名無し {uuid.uuid4()}")
     assert code == 0
     assert "scope detection has only the name" in out
+
+
+# --------------------------------------------------------------------------
+# the sitting, driven one keystroke at a time (18.1)
+# --------------------------------------------------------------------------
+class _Terminal:
+    """A stand-in for the reader: a keystroke each time one is asked for."""
+
+    def __init__(self, keys):
+        self.keys = list(keys)
+
+    def isatty(self):
+        return True
+
+    def key(self):
+        return self.keys.pop(0) if self.keys else "q"
+
+
+@pytest.fixture
+def sitting(test_dsn, monkeypatch, capsys):
+    """Run 'mashu review' as if a person were pressing keys at it."""
+
+    def _sit(keys, typed=(), *argv):
+        terminal = _Terminal(keys)
+        answers = list(typed)
+        monkeypatch.setattr(cli.sys, "stdin", terminal)
+        monkeypatch.setattr(cli, "_getkey", terminal.key)
+        monkeypatch.setattr("builtins.input", lambda *_: answers.pop(0) if answers else "")
+        code = cli.main(["--dsn", test_dsn, "review", *argv])
+        return code, capsys.readouterr().out
+
+    return _sit
+
+
+def _statuses(test_dsn, session_id) -> dict[str, str]:
+    with transaction(test_dsn) as cur:
+        cur.execute(
+            "SELECT status, payload ->> 'title' AS title FROM proposal "
+            "WHERE session_id = %s ORDER BY seq",
+            (session_id,),
+        )
+        return {row["title"]: row["status"] for row in cur.fetchall()}
+
+
+def test_a_sitting_decides_one_item_per_keystroke(test_dsn, sitting, committed_scope):
+    """The cost 18.1 measured is context switches; the cost left over was typing."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    for title in ("一つ目", "二つ目", "三つ目"):
+        _propose(test_dsn, committed_scope, title, f"{title}の本文", session_id=session_id)
+
+    # open the list, approve the first, turn the second down, approve the rest
+    code, out = sitting(["enter", "y", "r", "a"], ["根拠が薄い"], "--bundle", str(session_id)[:8])
+    assert code == 0
+
+    assert _statuses(test_dsn, session_id) == {
+        "一つ目": "approved",
+        "二つ目": "declined",
+        "三つ目": "approved",
+    }
+    assert "1 approved, 1 declined" in out or "2 approved, 1 declined" in out
+
+
+def test_the_arrows_move_through_a_bundle_without_deciding_anything(
+    test_dsn, sitting, committed_scope
+):
+    """Reading is not deciding. Nothing is settled until a key that settles it."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    for title in ("見るだけ 1", "見るだけ 2"):
+        _propose(test_dsn, committed_scope, title, f"{title}の本文", session_id=session_id)
+
+    code, _ = sitting(
+        ["down", "enter", "down", "up", "left", "q"], (), "--bundle", str(session_id)[:8]
+    )
+    assert code == 0
+    assert set(_statuses(test_dsn, session_id).values()) == {"pending"}
+
+
+def test_leaving_in_the_middle_keeps_what_was_already_decided(test_dsn, sitting, committed_scope):
+    """One transaction per item is what makes a half-finished sitting worth having."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    for title in ("決める分", "残す分"):
+        _propose(test_dsn, committed_scope, title, f"{title}の本文", session_id=session_id)
+
+    code, out = sitting(["enter", "y", "q"], (), "--bundle", str(session_id)[:8])
+    assert code == 0
+    assert _statuses(test_dsn, session_id) == {"決める分": "approved", "残す分": "pending"}
+    assert "'mashu review' opens on the rest" in out
+
+
+def test_a_reason_left_empty_cancels_the_decision_instead_of_making_it(
+    test_dsn, sitting, committed_scope
+):
+    """18.1 makes the reason mandatory, so no reason has to mean no decision."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    _propose(test_dsn, committed_scope, "思い直す分", "本文", session_id=session_id)
+
+    code, out = sitting(["enter", "r", "q"], [""], "--bundle", str(session_id)[:8])
+    assert code == 0
+    assert _statuses(test_dsn, session_id) == {"思い直す分": "pending"}
+    assert "never mind" in out
+
+
+def test_all_widens_the_bundles_and_not_only_the_items_inside_them(test_dsn, run, committed_scope):
+    """The advice to pass --all was showing the same nothing to whoever took it.
+
+    A bundle whose every item is put off has deferred == count, so the filter
+    that keeps settled bundles out of the queue was keeping this one out too,
+    and the only flag that could have brought it back only widened the items
+    within a bundle already chosen.
+    """
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    _propose(test_dsn, committed_scope, "先送りした分", "本文", session_id=session_id)
+    run("review", "--bundle", str(session_id)[:8], "--batch", "s 1 あとで")
+
+    with transaction(test_dsn) as cur:
+        waiting = proposals.session_queue(cur)
+        plain = cli._wanted(cur, waiting, SimpleNamespace(bundle=None, all=False))
+        widened = cli._wanted(cur, waiting, SimpleNamespace(bundle=None, all=True))
+
+    assert session_id not in [b["session_id"] for b in plain]
+    assert session_id in [b["session_id"] for b in widened]
+
+
+def _place(test_dsn, session_id) -> int:
+    """Where a bundle sits in the list a sitting opens on."""
+    with transaction(test_dsn) as cur:
+        shelf = cli._wanted(
+            cur, proposals.session_queue(cur), SimpleNamespace(bundle=None, all=False)
+        )
+    return [b["session_id"] for b in shelf].index(session_id)
+
+
+def test_the_list_of_bundles_lets_a_heavy_one_be_passed_over(test_dsn, sitting, committed_scope):
+    """Which bundle is oldest is an accident; the reader's ten minutes are not."""
+    heavy = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    light = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    for title in ("重い 1", "重い 2", "重い 3"):
+        _propose(test_dsn, committed_scope, title, f"{title}の本文", session_id=heavy)
+    _propose(test_dsn, committed_scope, "軽い 1", "本文", session_id=light)
+
+    keys = ["down"] * _place(test_dsn, light) + ["enter", "a", "q"]
+    code, _ = sitting(keys)
+    assert code == 0
+
+    assert _statuses(test_dsn, light) == {"軽い 1": "approved"}
+    assert set(_statuses(test_dsn, heavy).values()) == {"pending"}
+
+
+def test_finishing_a_bundle_comes_back_to_the_list_with_what_it_came_to(
+    test_dsn, sitting, committed_scope
+):
+    """A tally the next screen wipes is a tally nobody reads, so the list carries it."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    _propose(test_dsn, committed_scope, "片付ける分", "本文", session_id=session_id)
+
+    keys = ["down"] * _place(test_dsn, session_id) + ["enter", "a", "q"]
+    code, out = sitting(keys)
+    assert code == 0
+    assert _statuses(test_dsn, session_id) == {"片付ける分": "approved"}
+    assert "1 approved" in out.rsplit("bundle(s) waiting", 1)[-1]
+
+
+def test_a_whole_bundle_can_be_approved_without_opening_it(test_dsn, sitting, committed_scope):
+    """18.1 expects passing the bundle to be the common case, so it costs one key."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    for title in ("まとめて 1", "まとめて 2"):
+        _propose(test_dsn, committed_scope, title, f"{title}の本文", session_id=session_id)
+
+    keys = ["down"] * _place(test_dsn, session_id) + ["a", "q"]
+    code, _ = sitting(keys)
+    assert code == 0
+    assert set(_statuses(test_dsn, session_id).values()) == {"approved"}
+
+
+def test_deciding_a_second_time_refuses_without_ending_the_sitting(
+    test_dsn, sitting, committed_scope
+):
+    """One keystroke on something already decided was throwing away the sitting.
+
+    proposals guards against deciding a decided proposal twice, and the guard
+    is right. What it raised travelled all the way to main, which printed it
+    and exited, so a reader who changed their mind about item 2 lost item 3
+    onward as well.
+    """
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    for title in ("却下する分", "その次の分"):
+        _propose(test_dsn, committed_scope, title, f"{title}の本文", session_id=session_id)
+
+    # turn the first down, go back to it, try to approve it, then carry on
+    keys = ["enter", "r", "up", "y", "down", "y"]
+    code, out = sitting(keys, ["やっぱり違う"], "--bundle", str(session_id)[:8])
+
+    assert code == 0
+    assert "already declined" in out
+    assert _statuses(test_dsn, session_id) == {
+        "却下する分": "declined",
+        "その次の分": "approved",
+    }
+
+
+def test_a_refusal_from_the_store_leaves_the_reader_where_they_were(
+    test_dsn, sitting, committed_scope, monkeypatch
+):
+    """Whatever the store declines to do, it declines one item, not the sitting."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    for title in ("断られる分", "通る分"):
+        _propose(test_dsn, committed_scope, title, f"{title}の本文", session_id=session_id)
+
+    real = proposals.approve
+    refused = {"once": True}
+
+    def _refuse_once(cur, proposal_id, **kwargs):
+        if refused.pop("once", None):
+            raise MashuError("なにかの理由で通せない")
+        return real(cur, proposal_id, **kwargs)
+
+    monkeypatch.setattr(cli.proposals, "approve", _refuse_once)
+
+    code, out = sitting(["enter", "y", "y", "down", "y"], (), "--bundle", str(session_id)[:8])
+    assert code == 0
+    assert "なにかの理由で通せない" in out
+    assert set(_statuses(test_dsn, session_id).values()) == {"approved"}
+
+
+def test_the_page_says_when_the_store_already_holds_something_like_this(
+    test_dsn, sitting, committed_scope
+):
+    """Noticing a repeat across 200 items is not something a reader should have to do."""
+    with transaction(test_dsn) as cur:
+        store.create_entity(
+            cur,
+            scope_id=committed_scope,
+            type=MemoryType.OBSERVATION,
+            title="同じことを二度言う題名",
+            content="先にこちらが入っていた",
+            source_type=SourceType.AGENT,
+            created_by="claude",
+            actor="claude",
+            adopt=True,
+        )
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    _propose(
+        test_dsn,
+        committed_scope,
+        "同じことを二度言う題名",
+        "あとから同じものが来た",
+        session_id=session_id,
+    )
+
+    code, out = sitting(["enter", "q"], (), "--bundle", str(session_id)[:8])
+    assert code == 0
+    assert "looks like one other in this scope" in out
+    assert "the same title" in out
+    # and it is not decided for the reader: 20 keeps that out of the automatic path
+    assert _statuses(test_dsn, session_id) == {"同じことを二度言う題名": "pending"}
+
+
+def test_an_escape_sequence_is_read_to_its_end(monkeypatch):
+    """A key read as two unknown keys is a key that silently does nothing.
+
+    Arrows end after one byte and page keys do not — Page Down is ESC [ 6 ~ —
+    so stopping at the first byte left a tilde behind and delivered two
+    unrecognised keystrokes instead of one recognised one.
+    """
+    for sequence, expected in (
+        ("\x1b[6~", "pagedown"),
+        ("\x1b[5~", "pageup"),
+        ("\x1b[B", "down"),
+        ("\x1b[1;5B", "\x1b[1;5b"),
+    ):
+        pending = list(sequence)
+
+        monkeypatch.setattr(cli, "_byte", lambda _fd, left=pending: left.pop(0))
+        monkeypatch.setattr(
+            cli.select,
+            "select",
+            lambda *_a, left=pending: ([1], [], []) if left else ([], [], []),
+        )
+        monkeypatch.setattr(
+            cli.sys, "stdin", SimpleNamespace(isatty=lambda: True, fileno=lambda: 0)
+        )
+        monkeypatch.setattr(cli.termios, "tcgetattr", lambda _fd: None)
+        monkeypatch.setattr(cli.termios, "tcsetattr", lambda *_a: None)
+        monkeypatch.setattr(cli.tty, "setcbreak", lambda _fd: None)
+
+        assert cli._getkey() == expected
+        assert not pending, f"{sequence!r} left bytes behind for the next keystroke"
+
+
+def test_page_down_reads_on_within_one_proposal(test_dsn, sitting, committed_scope):
+    """The whole point of the marker is that some key takes you past it."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    _propose(
+        test_dsn,
+        committed_scope,
+        "長い本文の項目",
+        "\n".join(f"行 {n:03d} の本文" for n in range(200)),
+        session_id=session_id,
+    )
+
+    code, out = sitting(["enter", "pagedown", "q"], (), "--bundle", str(session_id)[:8])
+    assert code == 0
+    # one key line per painted screen, so this splits the run into its screens.
+    # The first is the bundle's list of titles; the item pages follow it.
+    first, second = out.split("? help")[1:3]
+    assert "more line(s), space to go on" in first, "the page has to be truncated"
+    assert "行 000 の本文" in first
+    assert "行 000 の本文" not in second, "page down has to move the page"
+    assert "の本文" in second, "and has to keep showing the same proposal"
+    assert _statuses(test_dsn, session_id) == {"長い本文の項目": "pending"}
+
+
+def test_the_short_form_can_be_typed_at_a_prompt(test_dsn, monkeypatch, capsys, committed_scope):
+    """Being told to shorten something is not an instruction without a way to do it.
+
+    The refusal that sends a person here says to shorten a directive. Until the
+    prompt existed the ways to do that were to quote a paragraph of Japanese
+    onto a command line, or to be dropped into whatever editor the environment
+    happened to name, which for an unset EDITOR is vi.
+    """
+    with transaction(test_dsn) as cur:
+        memory_id, _ = store.create_entity(
+            cur,
+            scope_id=committed_scope,
+            type=MemoryType.PREFERENCE,
+            title=f"短くしたい規律 {uuid.uuid4()}",
+            content="とても長い本文が続く。" * 20,
+            source_type=SourceType.USER,
+            created_by="user",
+            actor="user",
+            adopt=True,
+        )
+
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda *_: "短い規律だけを一行で")
+    code = cli.main(["--dsn", test_dsn, "directive", str(memory_id)[:8]])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "against a ceiling of" in out, "shorten it by how much has to be on the screen"
+    with transaction(test_dsn) as cur:
+        entity = store.get_entity(cur, memory_id)
+        assert (
+            store.get_version(cur, entity["active_version"])["directive"] == "短い規律だけを一行で"
+        )
+
+
+def test_without_a_terminal_the_short_form_is_still_an_argument(test_dsn, run, committed_scope):
+    with transaction(test_dsn) as cur:
+        memory_id, _ = store.create_entity(
+            cur,
+            scope_id=committed_scope,
+            type=MemoryType.PREFERENCE,
+            title=f"引数で書く規律 {uuid.uuid4()}",
+            content="本文",
+            source_type=SourceType.USER,
+            created_by="user",
+            actor="user",
+            adopt=True,
+        )
+    code, _ = run("directive", str(memory_id)[:8], "一行で書いた短形")
+    assert code == 0
+
+
+def test_the_editor_is_one_a_person_can_get_out_of(monkeypatch):
+    """Someone who has not chosen an editor has not chosen vi."""
+    monkeypatch.delenv("MASHU_EDITOR", raising=False)
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.setattr(
+        cli.shutil, "which", lambda name: "/usr/bin/nano" if name == "nano" else None
+    )
+    assert cli._editor() == ("nano", "^O saves, ^X leaves")
+
+    monkeypatch.setenv("MASHU_EDITOR", "/opt/homebrew/bin/micro")
+    editor, way = cli._editor()
+    assert editor == "/opt/homebrew/bin/micro"
+    assert "^Q" in way, "and it still says how to leave the one that was chosen"
+
+
+@pytest.fixture
+def sweeping(test_dsn, monkeypatch, capsys):
+    """Run 'mashu stale' as if a person were pressing keys at it."""
+
+    def _sweep(keys, typed=()):
+        terminal = _Terminal(keys)
+        answers = list(typed)
+        monkeypatch.setattr(cli.sys, "stdin", terminal)
+        monkeypatch.setattr(cli, "_getkey", terminal.key)
+        monkeypatch.setattr("builtins.input", lambda *_: answers.pop(0) if answers else "")
+        code = cli.main(["--dsn", test_dsn, "stale"])
+        return code, capsys.readouterr().out
+
+    return _sweep
+
+
+def _standing_task(test_dsn, scope_id, title):
+    with transaction(test_dsn) as cur:
+        memory_id, _ = store.create_entity(
+            cur,
+            scope_id=scope_id,
+            type=MemoryType.TASK,
+            title=title,
+            content=f"{title}の本文",
+            source_type=SourceType.AGENT,
+            created_by="mashu-worker",
+            actor="mashu-worker",
+            adopt=True,
+        )
+    return memory_id
+
+
+def _place_in_sweep(test_dsn, memory_id) -> int:
+    with transaction(test_dsn) as cur:
+        return [row["memory_id"] for row in metrics.rot_prone(cur)].index(memory_id)
+
+
+def test_the_sweep_retires_what_is_finished_with_one_key(test_dsn, sweeping, committed_scope):
+    """13.1 keeps only the indefinite kind in Memory; nothing else expires on its own."""
+    memory_id = _standing_task(test_dsn, committed_scope, f"もう終わった作業 {uuid.uuid4()}")
+
+    keys = ["down"] * _place_in_sweep(test_dsn, memory_id) + ["c", "q"]
+    code, out = sweeping(keys)
+    assert code == 0
+    assert "1 retired" in out
+
+    with transaction(test_dsn) as cur:
+        version = store.get_version(cur, store.get_entity(cur, memory_id)["latest_version"])
+        # and it does not come back tomorrow, or the sweep never finishes
+        still = [row["memory_id"] for row in metrics.rot_prone(cur)]
+    assert version["status"] == "completed"
+    assert memory_id not in still
+
+
+def test_what_the_sweep_is_walked_past_keeps_standing(test_dsn, sweeping, committed_scope):
+    """There is no record of having looked, and inventing one would be a lie."""
+    memory_id = _standing_task(test_dsn, committed_scope, f"まだ終わっていない作業 {uuid.uuid4()}")
+
+    keys = ["down"] * _place_in_sweep(test_dsn, memory_id) + ["enter", "down", "q"]
+    code, out = sweeping(keys)
+    assert code == 0
+    assert "nothing decided" in out or "not looked at" in out
+
+    with transaction(test_dsn) as cur:
+        assert store.get_entity(cur, memory_id)["active_version"] is not None
+
+
+def test_retiring_the_same_one_twice_does_not_end_the_sweep(test_dsn, sweeping, committed_scope):
+    """Retiring is a record too, and one keystroke on it must not cost the sitting."""
+    mark = uuid.uuid4()
+    # two, so the cursor has somewhere to advance to and can be brought back
+    memory_id = _standing_task(test_dsn, committed_scope, f"あ 一度で足りる作業 {mark}")
+    _standing_task(test_dsn, committed_scope, f"ん そのあとに続く作業 {mark}")
+
+    keys = ["down"] * _place_in_sweep(test_dsn, memory_id) + ["c", "up", "c", "q"]
+    code, out = sweeping(keys)
+    assert code == 0
+    assert "already retired" in out
+    assert "1 retired" in out
+
+
+def test_a_person_can_retire_over_a_proposal_that_was_turned_down(test_dsn, run, committed_scope):
+    """The decline was about the agent's proposal, not about the world today.
+
+    15.1 makes the duplicate check look at turned-down proposals too, so a
+    worker cannot file the same retirement twice. Applied to a person typing
+    the command it blocked the one trigger 16.1 has always named, and the store
+    ended up holding tasks nobody could retire.
+    """
+    with transaction(test_dsn) as cur:
+        memory_id, version_id = store.create_entity(
+            cur,
+            scope_id=committed_scope,
+            type=MemoryType.TASK,
+            title=f"却下ののち終わった作業 {uuid.uuid4()}",
+            content="本文",
+            source_type=SourceType.AGENT,
+            created_by="mashu-worker",
+            actor="mashu-worker",
+            adopt=True,
+        )
+        turned_down = proposals.propose(
+            cur,
+            actor="mashu-worker",
+            operation=ProposalOperation.CHANGE_STATUS,
+            payload={
+                # dormant rather than completed: the gate auto commits a plain
+                # task completion (17), and this needs a proposal a person got
+                # to turn down
+                "version_id": str(version_id),
+                "status": "dormant",
+                "reason": "しばらく触らないと読めた",
+                "source_type": str(SourceType.AGENT),
+            },
+            target_memory=memory_id,
+        )["proposal"]
+        proposals.reject(
+            cur, turned_down["proposal_id"], reviewer="user", reason="まだ終わっていない"
+        )
+
+    code, out = run("retire", str(memory_id)[:8], "completed", "--reason", "今度こそ終わった")
+    assert code == 0
+    assert "まだ終わっていない" in out, "and it says what it is going over"
+
+    with transaction(test_dsn) as cur:
+        version = store.get_version(cur, store.get_entity(cur, memory_id)["latest_version"])
+    assert version["status"] == "completed"
+
+
+def test_the_sweep_says_why_the_store_would_not_do_it(test_dsn, sweeping, committed_scope):
+    """A refusal written to stderr is a refusal the next repaint wipes."""
+    memory_id = _standing_task(test_dsn, committed_scope, f"断られる作業 {uuid.uuid4()}")
+
+    def _refuse(args):
+        return 1, "この版はもう別の理由で動かせない"
+
+    keys = ["down"] * _place_in_sweep(test_dsn, memory_id) + ["c", "q"]
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(cli, "_retire_now", _refuse)
+        code, out = sweeping(keys)
+
+    assert code == 0
+    assert "この版はもう別の理由で動かせない" in out
+    with transaction(test_dsn) as cur:
+        assert store.get_entity(cur, memory_id)["active_version"] is not None
+
+
+def _adopted(test_dsn, scope_id, title, content):
+    with transaction(test_dsn) as cur:
+        memory_id, _ = store.create_entity(
+            cur,
+            scope_id=scope_id,
+            type=MemoryType.OBSERVATION,
+            title=title,
+            content=content,
+            source_type=SourceType.AGENT,
+            created_by="claude",
+            actor="claude",
+            adopt=True,
+        )
+    return memory_id
+
+
+def _place_in_pairs(test_dsn, memory_id) -> int:
+    with transaction(test_dsn) as cur:
+        pairs = resolution.adopted_pairs(cur)
+    for number, pair in enumerate(pairs):
+        if memory_id in (pair["left"]["memory_id"], pair["right"]["memory_id"]):
+            return number
+    raise AssertionError("the pair was not offered")
+
+
+def test_the_sweep_offers_look_alikes_among_what_is_already_adopted(
+    test_dsn, sweeping, committed_scope
+):
+    """The check in 20 runs at proposal time and is spent by review; nothing measured after."""
+    title = f"同じ話 {uuid.uuid4()}"
+    first = _adopted(test_dsn, committed_scope, title, "片方の言い方")
+    _adopted(test_dsn, committed_scope, title, "もう片方の言い方")
+
+    keys = ["q"] + ["down"] * _place_in_pairs(test_dsn, first) + ["k", "q"]
+    code, out = sweeping(keys)
+    assert code == 0
+    assert "1 told apart" in out
+
+    with transaction(test_dsn) as cur:
+        pairs = resolution.adopted_pairs(cur)
+    assert first not in [pair["left"]["memory_id"] for pair in pairs]
+
+
+def test_folding_a_pair_leaves_one_entity_and_asks_why_first(test_dsn, sweeping, committed_scope):
+    """The one key here that cannot be undone by pressing another one."""
+    title = f"畳まれる話 {uuid.uuid4()}"
+    first = _adopted(test_dsn, committed_scope, title, "残るほうの言い方")
+    second = _adopted(test_dsn, committed_scope, title, "畳まれるほうの言い方")
+    at = _place_in_pairs(test_dsn, first)
+
+    with transaction(test_dsn) as cur:
+        pair = resolution.adopted_pairs(cur)[at]
+    keep, drop = (first, second) if pair["left"]["memory_id"] == first else (second, first)
+    key = "1" if pair["left"]["memory_id"] == keep else "2"
+
+    keys = ["q"] + ["down"] * at + [key, "q"]
+    code, out = sweeping(keys, typed=["一つの概念を二度書いたもの"])
+    assert code == 0 and "1 folded" in out
+
+    with transaction(test_dsn) as cur:
+        assert store.get_entity(cur, drop)["status"] == str(EntityStatus.MERGED)
+        assert store.get_entity(cur, keep)["status"] == str(EntityStatus.ACTIVE)
+
+
+def test_a_fold_with_no_reason_typed_changes_nothing(test_dsn, sweeping, committed_scope):
+    title = f"理由を出さない話 {uuid.uuid4()}"
+    first = _adopted(test_dsn, committed_scope, title, "片方")
+    second = _adopted(test_dsn, committed_scope, title, "もう片方")
+
+    keys = ["q"] + ["down"] * _place_in_pairs(test_dsn, first) + ["1", "q"]
+    code, out = sweeping(keys, typed=[""])
+    assert code == 0 and "1 folded" not in out
+
+    with transaction(test_dsn) as cur:
+        for memory_id in (first, second):
+            assert store.get_entity(cur, memory_id)["status"] == str(EntityStatus.ACTIVE)
