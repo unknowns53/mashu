@@ -29,6 +29,7 @@ from mashu import (
     db,
     extract,
     importer,
+    metrics,
     proposals,
     resolution,
     retrieval,
@@ -385,8 +386,36 @@ def cmd_scope(args) -> int:
     to live here were withdrawn in v0.11: with the relative cap gone, a scope
     with nothing adopted answers like any other, so declaring it open stopped
     meaning anything and the declaring was work without a judgement in it.
+
+    --add is where a scope comes from. Section 7 has always said only the user
+    creates one, and until now that was true by there being no way at all: an
+    agent could not, and neither could the person the rule reserves it for. A
+    session run somewhere unmapped is held for a scope that cannot be made
+    (16.3), so the ledger's one human-only write had no entrance.
+
+    The description is not decoration. Scope detection matches a query against
+    the name and this line (27.2), and the index in every session opening is
+    this line, so a scope without one is reachable only by someone who already
+    knows it is there.
     """
     with transaction(args.dsn) as cur:
+        if args.add:
+            scope_id = store.create_scope(
+                cur, name=args.add, description=args.about, actor=args.actor
+            )
+            print(f"{args.add}  {_short(scope_id)}")
+            if not args.about:
+                print("  no description; scope detection has only the name to match on")
+            if args.route:
+                row = routing.add(
+                    cur, path_prefix=args.route, scope_id=scope_id, created_by=args.actor
+                )
+                released = runs.release(cur, cwd_prefix=row["path_prefix"])
+                print(f"  {row['path_prefix']}  ->  {args.add}")
+                if released:
+                    print(f"  released {released} held transcript(s) back into the queue")
+            return 0
+
         cur.execute(
             """
             SELECT s.name,
@@ -907,6 +936,92 @@ def cmd_deliver(args) -> int:
             return 1
     print(f"{changed['title']}  ->  {changed['delivery']}")
     return 0
+
+
+def cmd_status(args) -> int:
+    """The indicators of 27.3, and the ones with nowhere to read from (30 段 C).
+
+    Written to be read in one pass while deciding whether to sit down for a
+    review, so the order is: is capture alive, how far behind is the queue, how
+    much of the store has never been decided on, and what every session is
+    paying before it asks anything.
+
+    The last block is the one that earns the command. Section 27.3 names
+    indicators the system cannot yet answer, and a status page that showed only
+    the answerable ones would read as a full account of a system half of whose
+    failure modes nothing is watching.
+    """
+    with transaction(args.dsn) as cur:
+        got = metrics.collect(cur, window_days=args.days)
+
+    health = got.capture
+    print("capture (16.3)")
+    print(
+        f"  succeeded {health['succeeded']}   waiting {health['waiting']}   "
+        f"failed {health['failed']}   held {health['held']}   skipped {health['skipped']}"
+    )
+    if health.get("warning"):
+        print(_wrap(health["warning"], indent="  ! "))
+
+    q, lat = got.queue, got.latency
+    print(f"\nreview load (27.3, last {args.days} day(s))")
+    put_off = f", {q['deferred']} put off" if q["deferred"] else ""
+    print(f"  waiting        {q['proposals']} proposal(s) in {q['bundles']} bundle(s){put_off}")
+    print(f"  oldest wait    {q['oldest_days']} day(s)")
+    print(f"  decided        {lat['decided']} in {lat['bundles']} bundle(s)")
+    print(f"  bundles/day    {lat['bundles_per_day']}")
+    print(f"  time to decide {_span(lat['median_s'])} median, {_span(lat['p90_s'])} p90")
+
+    print("\nunreviewed share (27.3; measured on the store, not on what retrieval returned)")
+    for row in got.unreviewed:
+        print(
+            f"  {row['name']:<14}{row['share']:>5.0%}   "
+            f"({row['unreviewed']} of {row['held']} never decided)"
+        )
+
+    tag = got.tag_share
+    print(f"\ntag share (27.3; {metrics.TAG_SHARE_CEILING:.0%} sustained is the signal)")
+    if not tag["assemblies"]:
+        print("  nothing retrieved in the window")
+    else:
+        median = f"{tag['median']:.0%}" if tag["median"] is not None else "-"
+        flag = "  over the ceiling" if tag["over_ceiling"] else ""
+        print(f"  median {median} over {tag['assemblies']} assembly(s){flag}")
+        print(f"  carried an unreviewed item: {tag['with_any_unreviewed']}")
+
+    print("\nsession opening (21.2)")
+    for row in got.openings:
+        note = f"   {row['trimmed']} trimmed" if row["trimmed"] else ""
+        print(
+            f"  {row['name']:<14}{row['cost']:>5} of {row['budget']}   "
+            f"{row['startup']}+{row['scoped']} pushed{note}"
+        )
+
+    c = got.corrections
+    print("\ncorrections (27.3; counted, not judged — no baseline exists yet)")
+    per = "-" if c["per_100_retrievals"] is None else c["per_100_retrievals"]
+    print(
+        f"  {c['rejected']} turned down, {c['retired_by_hand']} retired by hand, "
+        f"over {c['retrievals']} retrieval(s) = {per} per 100"
+    )
+
+    print("\nnot measured here")
+    for line in got.unmeasured:
+        print(_wrap(line, indent="  - "))
+    return 0
+
+
+def _span(seconds: float | None) -> str:
+    """A duration at the coarsest unit that still says something."""
+    if seconds is None:
+        return "-"
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f}m"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f}h"
+    return f"{seconds / 86400:.1f}d"
 
 
 def cmd_directive(args) -> int:
@@ -1459,6 +1574,10 @@ def build_parser() -> argparse.ArgumentParser:
     n.set_defaults(func=cmd_bootstrap)
 
     c = sub.add_parser("scope", help="what scopes there are, and how much is adopted")
+    c.add_argument("--add", metavar="NAME", help="create a scope (7; the user's call only)")
+    c.add_argument("--about", help="the one line scope detection and the session index use")
+    c.add_argument("--route", metavar="PATH", help="map a directory onto it at the same time")
+    c.add_argument("--actor", default="user")
     c.set_defaults(func=cmd_scope)
 
     ac = sub.add_parser("active", help="everything a scope holds as true (16.1, 27.4b)")
@@ -1585,6 +1704,12 @@ def build_parser() -> argparse.ArgumentParser:
     rv.add_argument("--reviewer", default="user")
     rv.add_argument("--reason", default=None, help="a note recorded on every approval")
     rv.set_defaults(func=cmd_review)
+
+    st = sub.add_parser("status", help="what the system is costing and how far behind (27.3)")
+    st.add_argument(
+        "--days", type=int, default=metrics.WINDOW_DAYS, help="how far back the load figures look"
+    )
+    st.set_defaults(func=cmd_status)
 
     di = sub.add_parser("directive", help="write a memory's short standing form (21.2)")
     di.add_argument("memory", help="memory id, or enough of its start to be unambiguous")

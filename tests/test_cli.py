@@ -1055,3 +1055,45 @@ def test_a_directory_can_be_routed_to_no_scope_on_purpose(test_dsn, run):
 
         cur.execute("DELETE FROM extraction_run WHERE run_id = %s", (held["run_id"],))
         routing.remove(cur, path_prefix="/tmp/scratchpad")
+
+
+def test_a_scope_can_be_created_and_routed_in_one_go(test_dsn, run):
+    """Section 7 reserves this for the user, who until now had no way either.
+
+    A session run in an unmapped directory is held for a scope that has to be
+    made by hand, so the ledger's one human-only write was the one with no
+    entrance at all.
+    """
+    name = f"新しい案件 {uuid.uuid4()}"
+    with transaction(test_dsn) as cur:
+        held = runs.enqueue(
+            cur,
+            source_cli="claude",
+            external_session_id=f"held-{uuid.uuid4()}",
+            transcript_digest=str(uuid.uuid4()),
+            extractor_version="v1",
+            cwd="/tmp/新しい案件/src",
+        )
+        runs.held(cur, run_id=held["run_id"], note="no scope route")
+
+    code, out = run(
+        "scope", "--add", name, "--about", "その案件の設計と運用", "--route", "/tmp/新しい案件"
+    )
+    assert code == 0
+    assert "released 1 held transcript" in out
+
+    with transaction(test_dsn) as cur:
+        scope_id, on_purpose = routing.resolve(cur, "/tmp/新しい案件/src")
+        assert scope_id is not None and not on_purpose
+        cur.execute("SELECT description FROM scope WHERE scope_id = %s", (scope_id,))
+        assert cur.fetchone()["description"] == "その案件の設計と運用"
+
+        cur.execute("DELETE FROM extraction_run WHERE run_id = %s", (held["run_id"],))
+        routing.remove(cur, path_prefix="/tmp/新しい案件")
+
+
+def test_a_scope_made_without_a_description_says_what_that_costs(test_dsn, run):
+    """Detection matches on the name and that line, and the index is that line."""
+    code, out = run("scope", "--add", f"名無し {uuid.uuid4()}")
+    assert code == 0
+    assert "scope detection has only the name" in out
