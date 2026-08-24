@@ -175,3 +175,101 @@ def test_the_entity_status_is_untouched(cur, scope_id):
         cur, memory_id=memory_id, target=MemoryType.OBSERVATION, actor="user", reason="it is one"
     )
     assert store.get_entity(cur, memory_id)["status"] == str(EntityStatus.PROVISIONAL)
+
+
+def test_a_title_can_be_corrected_without_making_a_version(cur, scope_id):
+    """8, 14: the one type whose content is meant to move had a frozen name.
+
+    A Current State is rewritten as the work advances. Its title stayed at
+    whatever the first version said, so a memory whose body was up to date went
+    on announcing the state it had left — and in the session opening, where the
+    title is the line above the text that is right.
+    """
+    memory_id, _ = store.create_entity(
+        cur,
+        scope_id=scope_id,
+        type=MemoryType.STATE,
+        title="shipped as far as the coral sea, next is the south pacific",
+        content="the two layers are in; what is left is calibration",
+        source_type=SourceType.AGENT,
+        created_by="claude",
+        actor="claude",
+        adopt=True,
+    )
+    cur.execute("SELECT count(*) AS n FROM memory_version WHERE memory_id = %s", (memory_id,))
+    before = cur.fetchone()["n"]
+
+    store.set_title(
+        cur,
+        memory_id=memory_id,
+        title="shipped as far as the south pacific, calibration is what is left",
+        actor="user",
+        reason="the south pacific shipped",
+    )
+
+    entity = store.get_entity(cur, memory_id)
+    assert entity["title"].startswith("shipped as far as the south pacific")
+    cur.execute("SELECT count(*) AS n FROM memory_version WHERE memory_id = %s", (memory_id,))
+    assert cur.fetchone()["n"] == before, "a rename is not a change of content"
+
+
+def test_the_title_embedding_moves_with_the_title(cur, scope_id):
+    """20, 21.1: resolution compares against the title and layer 3 ranks by it.
+
+    Leaving the old vector behind would keep the entity findable only under the
+    name it no longer carries, which is the failure being ended rather than
+    moved.
+    """
+    memory_id, _ = store.create_entity(
+        cur,
+        scope_id=scope_id,
+        type=MemoryType.FACT,
+        title="the ramp is half a degree per minute",
+        content="measured on the second run",
+        source_type=SourceType.AGENT,
+        created_by="claude",
+        actor="claude",
+        adopt=True,
+    )
+    cur.execute(
+        "SELECT title_embedding::text AS vec FROM memory_entity WHERE memory_id = %s",
+        (memory_id,),
+    )
+    before = cur.fetchone()["vec"]
+
+    store.set_title(
+        cur,
+        memory_id=memory_id,
+        title="the timeout is nine seconds",
+        actor="user",
+        reason="it was never about the ramp",
+    )
+    cur.execute(
+        "SELECT title_embedding::text AS vec FROM memory_entity WHERE memory_id = %s",
+        (memory_id,),
+    )
+    assert cur.fetchone()["vec"] != before
+
+
+def test_a_retitle_proposal_waits_for_a_person(cur, scope_id):
+    """An agent that could rename could walk an entity away from its duplicate."""
+    memory_id, _ = store.create_entity(
+        cur,
+        scope_id=scope_id,
+        type=MemoryType.FACT,
+        title="the ramp is half a degree per minute",
+        content="measured on the second run",
+        source_type=SourceType.AGENT,
+        created_by="claude",
+        actor="claude",
+        adopt=True,
+    )
+    made = proposals.propose(
+        cur,
+        actor="claude",
+        operation=ProposalOperation.RETITLE,
+        target_memory=memory_id,
+        payload={"title": "something else entirely", "reason": "tidier"},
+    )
+    assert made["ruling"].decision is CommitDecision.HUMAN_REVIEW
+    assert store.get_entity(cur, memory_id)["title"].startswith("the ramp")

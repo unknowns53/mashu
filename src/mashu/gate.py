@@ -118,6 +118,11 @@ def classify(
         # The type decides which line this entity's later changes take, so an
         # agent allowed to set it could choose its own route past review.
         return GateRuling(CommitDecision.HUMAN_REVIEW, "correcting an entity's type")
+    if operation is ProposalOperation.RETITLE:
+        # The title is what entity resolution compares against (20), so an
+        # agent allowed to rewrite one could walk an entity away from the
+        # entity it duplicates and the collision check would stop seeing it.
+        return GateRuling(CommitDecision.HUMAN_REVIEW, "correcting an entity's title")
     if target_status is VersionStatus.DISPROVEN:
         return GateRuling(CommitDecision.HUMAN_REVIEW, "disproving a version")
     if entity_status is EntityStatus.PROVISIONAL:

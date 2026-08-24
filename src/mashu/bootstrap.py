@@ -59,15 +59,21 @@ ORDER BY name
 # The push takes the first, the pull takes the second, so keeping the session
 # opening small no longer costs the reasons.
 #
-# The retirement note rides along here too (21.1). This is the most privileged
-# read there is — pushed into every session before it asks for anything — so it
-# is the last place that should hand over a memory somebody has argued is
-# finished without saying so.
+# The notes on a pending change ride along here too (21.1). This is the most
+# privileged read there is — pushed into every session before it asks for
+# anything — so it is the last place that should hand over a memory somebody
+# has argued is finished, or has already rewritten, without saying so.
+#
+# The update note matters most exactly here. What is pushed is the adopted
+# reading, and a Current State goes out of date in hours while a review takes
+# days; the session that most needs to know a newer one is waiting is the one
+# being handed the older one before it has asked anything.
 _PUSHED_SQL = """
 SELECT e.memory_id, e.scope_id, e.type, e.title, e.delivery,
        v.version_id, coalesce(v.directive, v.content) AS content,
        v.directive IS NOT NULL AS shortened,
-       r.proposed_status, r.proposed_reason, r.proposed_by
+       r.proposed_status, r.proposed_reason, r.proposed_by,
+       u.update_proposed_by, u.update_proposed_days
 FROM memory_entity e
 JOIN memory_version v ON v.version_id = e.active_version AND v.memory_id = e.memory_id
 LEFT JOIN LATERAL (
@@ -82,6 +88,16 @@ LEFT JOIN LATERAL (
     ORDER BY p.seq DESC
     LIMIT 1
 ) r ON TRUE
+LEFT JOIN LATERAL (
+    SELECT p.actor AS update_proposed_by,
+           EXTRACT(DAY FROM now() - p.created_at)::int AS update_proposed_days
+    FROM proposal p
+    WHERE p.target_memory = e.memory_id
+      AND p.status = 'pending'
+      AND p.operation = 'update_version'
+    ORDER BY p.seq DESC
+    LIMIT 1
+) u ON TRUE
 WHERE e.status = 'active'
   AND e.delivery = %(delivery)s
   AND (%(scopes)s::uuid[] IS NULL OR e.scope_id = ANY(%(scopes)s::uuid[]))

@@ -604,6 +604,56 @@ def set_type(
     return {"memory_id": memory_id, "title": entity["title"], "from": previous, "to": target}
 
 
+def set_title(
+    cur: psycopg.Cursor,
+    *,
+    memory_id: UUID,
+    title: str,
+    actor: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Correct what an entity is called (specification 8, 14).
+
+    Nothing about the content moves, so this is not a new version, for the
+    reason set_type gives: an identical body twice in the history would read as
+    a change of mind about the content.
+
+    The title was immutable until now, which held badly for the one type whose
+    content is meant to move. A Current State is rewritten as the work advances
+    and its title stayed at whatever the first version said, so an entity whose
+    body had been brought up to date went on announcing the state it had left —
+    in the session opening, on the line above the text that was right.
+
+    The embedding is rewritten with it. The title is what entity resolution
+    compares against (20) and what layer 3 is ranked by (21.1); leaving the old
+    vector behind would keep the entity findable only under a name it no longer
+    carries, which is the failure this is meant to end rather than move.
+    """
+    title = (title or "").strip()
+    if not title:
+        raise MashuError("a title is what the entity is called; it cannot be empty")
+
+    entity = get_entity(cur, memory_id, lock=True)
+    if EntityStatus(entity["status"]) is EntityStatus.MERGED:
+        raise MergeError(f"entity {memory_id} was merged into {entity['merged_into']}")
+    previous = entity["title"]
+    if previous == title:
+        raise MashuError(f"entity {memory_id} is already called that")
+
+    cur.execute(
+        "UPDATE memory_entity SET title = %s, title_embedding = %s WHERE memory_id = %s",
+        (title, embed_text(title), memory_id),
+    )
+    events.record(
+        cur,
+        EventType.TITLE_CORRECTED,
+        actor,
+        memory_id=memory_id,
+        detail={"from": previous, "to": title, "reason": reason},
+    )
+    return {"memory_id": memory_id, "from": previous, "to": title}
+
+
 def merge_entities(
     cur: psycopg.Cursor,
     *,
@@ -848,10 +898,22 @@ def _check_still_fits(cur: psycopg.Cursor, *, entity: dict, version_id: UUID) ->
         scope_id=scope_id,
     )
     if not fits:
+        # The way out depends on whether this version has a short form, and the
+        # advice has to name a route that exists. set_directive writes to the
+        # adopted version, so "give it a directive" is not something the holder
+        # of a waiting candidate can do: adopting is what is being refused, and
+        # nothing can be written onto a version until it is adopted. A version
+        # carrying no directive has to be proposed again with one.
+        route = (
+            "this version carries no directive, and one can only be written onto an "
+            "adopted version — so propose it again carrying one, or move something "
+            "out of the pack first"
+            if version["directive"] is None
+            else "shorten its directive, or move something out of the pack first"
+        )
         raise DeliveryError(
             f"adopting this version puts the {delivery} pack at {cost} token, over "
-            f"{bootstrap.BOOTSTRAP_TOKEN_BUDGET}; shorten it, give it a directive, "
-            f"or move something out of the pack first"
+            f"{bootstrap.BOOTSTRAP_TOKEN_BUDGET}; {route}"
         )
 
 

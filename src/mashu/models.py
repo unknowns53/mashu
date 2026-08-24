@@ -97,6 +97,7 @@ class ProposalOperation(StrEnum):
     RESTORE = "restore"
     MERGE = "merge"
     RETYPE = "retype"
+    RETITLE = "retitle"
 
 
 class ProposalStatus(StrEnum):
@@ -165,6 +166,7 @@ class EventType(StrEnum):
     ENTITY_CREATED = "entity_created"
     ENTITY_MERGED = "entity_merged"
     TYPE_CORRECTED = "type_corrected"
+    TITLE_CORRECTED = "title_corrected"
     VERSION_CREATED = "version_created"
     STATUS_CHANGED = "status_changed"
     ACTIVE_SWITCHED = "active_switched"
