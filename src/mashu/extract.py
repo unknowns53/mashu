@@ -133,6 +133,29 @@ class UpdateDraft:
 
 
 @dataclass
+class ConfirmationDraft:
+    """A memory the session bore out, which is why it is not due again yet.
+
+    The other half of the retirement pass, and the half that decides whether
+    any of this is affordable. A store where every standing memory has to be
+    read by a person on a clock is a store with a chore attached, and the chore
+    is what stopped the sweep being run at all. A session that used a memory
+    and found it held is the cheapest evidence there is that it still holds,
+    and it costs nobody anything to say so.
+
+    Asymmetric with retirement, in the other direction. Retirement over-proposes
+    because a missed one goes on being handed out; this one under-proposes,
+    because a confirmation with nothing behind it is how a memory disappears
+    from view for a year. What that asymmetry means in practice: silence is the
+    default, and the memory stays due.
+    """
+
+    memory_id: UUID
+    title: str
+    reason: str
+
+
+@dataclass
 class RetirementDraft:
     memory_id: UUID
     title: str
@@ -147,6 +170,7 @@ class Extraction:
     proposals: list[ProposalDraft] = field(default_factory=list)
     updates: list[UpdateDraft] = field(default_factory=list)
     retirements: list[RetirementDraft] = field(default_factory=list)
+    confirmations: list[ConfirmationDraft] = field(default_factory=list)
     scratch: list[dict[str, Any]] = field(default_factory=list)
     #: Items the check refused, with the reason. Kept rather than dropped: a
     #: model whose output is quietly discarded looks like a model with nothing
@@ -154,7 +178,7 @@ class Extraction:
     refused: list[str] = field(default_factory=list)
 
     def is_empty(self) -> bool:
-        return not self.proposals and not self.updates and not self.retirements
+        return not (self.proposals or self.updates or self.retirements or self.confirmations)
 
 
 # --------------------------------------------------------------------------
@@ -206,14 +230,32 @@ class Prompt(str):
         return str(self)[: self.stable_chars], str(self)[self.stable_chars :]
 
 
+#: The mark on a memory nobody has checked for longer than its kind is left
+#: alone for. Placed on the row rather than in a list of its own, because the
+#: question it asks is about that memory and a second list would have to be
+#: joined back to the first one to be answered.
+DUE_MARK = "  due: 点検期日を過ぎている。このセッションで裏付けが取れたなら confirmations に出す"
+
+
 def build_prompt(
-    *, log: str, scratch: list[dict[str, Any]], active: list[dict[str, Any]]
+    *,
+    log: str,
+    scratch: list[dict[str, Any]],
+    active: list[dict[str, Any]],
+    due: set[UUID] | None = None,
 ) -> Prompt:
     """Assemble the two inputs section 16.1 requires, around the prompt body.
 
     The active set is not optional. With only the log, extraction can add and
     can never retire, which is the shape that leaves finished tasks standing
     and keeps layer 3 permanently empty.
+
+    due names the memories whose interval has run (13.1, 30 段 B). Marking them
+    is what makes the clock affordable: the alternative to an agent answering
+    for what it saw is a person reading every standing memory on a schedule,
+    and that chore is exactly what stopped the sweep being run. The mark asks
+    only about memories the session was going to be shown anyway, so nothing is
+    read twice and the marking costs one line each.
 
     It comes first, and that ordering is a cost decision rather than an
     editorial one. Caching — the provider's own, or an explicit breakpoint —
@@ -222,6 +264,7 @@ def build_prompt(
     paid for every time. The log is the only part that genuinely differs per
     call, so it goes last and the closing instruction with it.
     """
+    due = due or set()
     parts = ["\n---\n\n## 入力 1: この Scope が現在 Active として持つ Memory\n"]
     if active:
         for row in active:
@@ -229,6 +272,8 @@ def build_prompt(
             parts.append(f"  type: {row['type']}")
             parts.append(f"  title: {row['title']}")
             parts.append(f"  content: {_one_block(row['content'])}")
+            if row["memory_id"] in due:
+                parts.append(DUE_MARK)
     else:
         parts.append("(なし。退役の提案は出せない)")
     stable = prompt_body() + "\n".join(parts) + "\n"
@@ -303,7 +348,31 @@ def parse(raw: str, *, known_ids: set[UUID] | None = None) -> Extraction:
         except ExtractionError as failure:
             out.refused.append(f"retirement {index}: {failure}")
 
+    for index, item in enumerate(_list(payload.get("confirmations"))):
+        try:
+            out.confirmations.append(_confirmation(item, known_ids))
+        except ExtractionError as failure:
+            out.refused.append(f"confirmation {index}: {failure}")
+
     return out
+
+
+def _confirmation(item: dict[str, Any], known_ids: set[UUID] | None) -> ConfirmationDraft:
+    """One confirmation, refused unless it names both a memory shown and a ground.
+
+    The reason is required and is not a formality. A confirmation moves the day
+    a person is next asked about the memory, so one with nothing behind it is
+    indistinguishable from the model declining to think about it, and the two
+    have opposite consequences.
+    """
+    memory_id = _as_uuid(item.get("memory_id"))
+    if known_ids is not None and memory_id not in known_ids:
+        raise ExtractionError(f"{memory_id} was not in the active set")
+    return ConfirmationDraft(
+        memory_id=memory_id,
+        title=item.get("title") or "",
+        reason=_text(item, "reason"),
+    )
 
 
 def _list(value: Any) -> list:

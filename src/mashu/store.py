@@ -288,8 +288,9 @@ def confirm_standing(
     version_id: UUID,
     until: datetime,
     actor: str,
+    reason: str = "",
 ) -> None:
-    """Record that a person looked and this is still true, and when to ask again.
+    """Record that somebody looked and this is still true, and when to ask again.
 
     Not a change to the knowledge, so no version and no status moves. What it
     records is that somebody read this on a day and did not retire it, which is
@@ -305,6 +306,12 @@ def confirm_standing(
     is matched by version and not by time: now() is frozen for a transaction,
     so a confirmation and a rewrite written in one would carry the same
     timestamp and no comparison of the two could tell them apart.
+
+    An agent writes these too, for a memory a session bore out (30 段 B), which
+    is why the reason is on the event. A person dismissing an item off a list
+    has nothing to say and does not have to; an agent moving the day a person
+    is next asked has to say what in the session made it say so, or the sweep
+    has no way of disagreeing with it.
     """
     get_entity(cur, memory_id)
     events.record(
@@ -313,8 +320,38 @@ def confirm_standing(
         actor,
         memory_id=memory_id,
         version_id=version_id,
-        detail={"until": until.isoformat()},
+        detail={"until": until.isoformat(), "reason": reason},
     )
+
+
+def tell_apart(
+    cur: psycopg.Cursor,
+    *,
+    memory_id: UUID,
+    other: UUID,
+    actor: str,
+    reason: str = "",
+) -> None:
+    """Record that two memories that read alike are two things (20).
+
+    The look-alike screen has no way to be finished otherwise. A pair that a
+    person has examined and found genuinely distinct scores exactly the same
+    the next time it is measured, so without this the same two come back for
+    ever and the screen trains its reader to skip it.
+
+    Written for both directions, because the pair is the thing decided and the
+    order it was shown in is not part of it.
+    """
+    get_entity(cur, memory_id)
+    get_entity(cur, other)
+    for first, second in ((memory_id, other), (other, memory_id)):
+        events.record(
+            cur,
+            EventType.TOLD_APART,
+            actor,
+            memory_id=first,
+            detail={"other": str(second), "reason": reason},
+        )
 
 
 def set_active(

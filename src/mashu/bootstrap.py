@@ -126,6 +126,11 @@ class Bootstrapped:
     #: capture failing means nothing new arrives, review being behind means
     #: what arrived is less certain than it could be. Two different repairs.
     review: dict[str, Any] = field(default_factory=dict)
+    #: What is already held and is due to be checked again (13.1, 30 段 B).
+    #: The third of the same kind, and the one that was missing: the sweep for
+    #: memories past their shelf life had no way of reaching anybody, so it was
+    #: found by noticing the store had gone wrong rather than by being told.
+    upkeep: dict[str, Any] = field(default_factory=dict)
     #: Memory IDs whose content was dropped to stay inside the budget. They are
     #: still listed, by title, so memory_get can fetch what was cut.
     trimmed: list[UUID] = field(default_factory=list)
@@ -158,6 +163,8 @@ def session_bootstrap(
     is working in. Leaving it out is the ordinary case: a session that has not
     started cannot know its scope yet, and the index is what tells it.
     """
+    from mashu import metrics  # imports this module, so not at the top
+
     cur.execute(_SCOPE_INDEX_SQL)
     scope_index = [
         {
@@ -193,6 +200,7 @@ def session_bootstrap(
         temporary=temporary,
         health=runs.health(cur),
         review=proposals.backlog(cur),
+        upkeep=metrics.upkeep(cur),
         trimmed=trimmed,
         tokens=_total_tokens(scope_index, startup, scoped),
     )
@@ -213,6 +221,7 @@ def session_bootstrap(
                 "temporary": [str(row["context_id"]) for row in temporary],
                 "capture_ok": result.health.get("ok"),
                 "review_ok": result.review.get("ok"),
+                "upkeep_ok": result.upkeep.get("ok"),
             },
         )
     return result

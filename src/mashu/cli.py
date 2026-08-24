@@ -1036,6 +1036,10 @@ def cmd_bootstrap(args) -> int:
                 print(_wrap(note, indent="      "))
             print(f"      {body}")
 
+    for name, part in (("capture", got.health), ("review", got.review), ("upkeep", got.upkeep)):
+        if part.get("warning"):
+            print(_wrap(part["warning"], indent=f"\n! {name}: "))
+
     over = " over the ceiling" if got.over_budget else ""
     print(f"\n{got.tokens} token of {bootstrap.BOOTSTRAP_TOKEN_BUDGET}{over}")
     if got.trimmed:
@@ -1097,11 +1101,20 @@ def cmd_status(args) -> int:
     if got.review.get("warning"):
         print(_wrap(got.review["warning"], indent="  ! "))
 
+    up = got.upkeep
+    print("\nupkeep (13.1, 30 段 B)")
+    print(f"  due to check   {up['due']} standing memory(s)")
+    print(f"  oldest overdue {up['oldest_days']} day(s)")
+    print(f"  look-alikes    {len(got.look_alikes)} pair(s) among what is adopted")
+    if up.get("warning"):
+        print(_wrap(up["warning"], indent="  ! "))
+
     print("\nunreviewed share (27.3; measured on the store, not on what retrieval returned)")
     for row in got.unreviewed:
+        retired = f", {row['retired']} decided and not adopted" if row["retired"] else ""
         print(
             f"  {row['name']:<14}{row['share']:>5.0%}   "
-            f"({row['unreviewed']} of {row['held']} never decided)"
+            f"({row['unreviewed']} of {row['held']} never decided{retired})"
         )
 
     tag = got.tag_share
@@ -1137,7 +1150,7 @@ def cmd_status(args) -> int:
         pushed = sum(1 for row in got.self_dating if row["delivery"] != str(Delivery.PULL_ONLY))
         print(
             f"  {len(got.self_dating)} rule(s) name a moment in themselves"
-            f"{f', {pushed} of them pushed' if pushed else ''} — 'mashu admin stale'"
+            f"{f', {pushed} of them pushed' if pushed else ''} — 'mashu stale'"
         )
 
     print("\nnot measured here")
@@ -1327,18 +1340,43 @@ def cmd_stale(args) -> int:
     """
     with transaction(args.dsn) as cur:
         found = metrics.rot_prone(cur)
-    if not found:
-        print("nothing standing names its own end")
-        return 0
+        pairs = resolution.adopted_pairs(cur)
     if args.list or not sys.stdin.isatty():
         _print_stale(found)
+        _print_pairs(pairs)
         return 0
-    return _sweep(args, found)
+    if found:
+        _sweep(args, found)
+    if pairs:
+        _pair_sweep(args, pairs)
+    elif not found:
+        print("nothing standing is due, and nothing adopted reads like anything else")
+    return 0
+
+
+def _print_pairs(pairs: list[dict]) -> None:
+    """The look-alikes at once, for pipes and for reading without deciding."""
+    if not pairs:
+        return
+    print(f"\n{len(pairs)} pair(s) among what is adopted read as one concept\n")
+    for pair in pairs:
+        print(f"  [{pair['scope_name']}]  {_alike(pair)}")
+        for side in ("left", "right"):
+            print(f"    {_short(pair[side]['memory_id'])}  {pair[side]['title']}")
+        print()
+
+
+def _alike(pair: dict) -> str:
+    """How alike, said as the thing measured rather than as a number alone."""
+    return "the same title" if pair["same_title"] else f"{pair['similarity']:.2f} alike"
 
 
 def _print_stale(found: list[dict]) -> None:
     """The whole list at once, for pipes and for reading without deciding."""
-    print(f"{len(found)} standing memory(s) with a shelf life\n")
+    if not found:
+        print("nothing standing is due to be checked")
+        return
+    print(f"{len(found)} standing memory(s) are due to be checked\n")
     for row in found:
         pushed = "" if row["delivery"] == str(Delivery.PULL_ONLY) else f"  [{row['delivery']}]"
         print(f"  {_short(row['memory_id'])}  {row['type']}  [{row['scope_name']}]{pushed}")
@@ -1554,6 +1592,202 @@ def _retire_one(args, row, done: dict, number: int, key: str) -> str:
         return f"  {said}"
     done[number] = _SWEPT[status]
     return ""
+
+
+#: The look-alike pass, which asks a different question from the one above.
+#:
+#: Nothing here is about shelf life. Two memories that read as one concept are
+#: the failure section 20 exists to prevent, and both of them answer as current
+#: with nothing in the state marking them as rivals, so the split never surfaces
+#: on its own. The check runs when a proposal is written and is spent by review
+#: time; what got through is adopted and never measured again.
+#:
+#: Two answers and they are not degrees of each other. Folding says these were
+#: always one thing, and one of the two entities stops existing as a separate
+#: row. Telling apart says they are two, and is recorded for the same reason a
+#: confirmation is: a pair nobody records a decision about scores the same next
+#: time and comes back for ever, which teaches its reader to skip the screen.
+_PAIR_LIST_KEYS = "  ↑↓ move   ⏎ open   1/2 fold   k two things   ? help   q leave"
+_PAIR_ITEM_KEYS = (
+    "  1 keep the first   2 keep the second   k two things   ← list   ? help   q leave"
+)
+
+_PAIR_HELP = """
+  1  keep the first, and fold the second into it. One entity from here on,
+     carrying the first one's reading. The folded row stays in the log,
+     marked merged and pointing at what it became, because past context
+     assemblies recorded its id and deleting it would break those.
+
+  2  the same the other way round.
+
+  k  they are two things. Nothing changes, and the pair stops being offered.
+     Without this the screen has no way of ever being finished: two memories
+     that read alike go on reading alike however many times you look.
+
+  Folding asks for a reason first. It is the one key here that cannot be
+  undone by pressing another one.
+"""
+
+_PAIR_MARK = {"folded": "✓", "told apart": "·"}
+
+
+def _pair_sweep(args, pairs: list[dict]) -> int:
+    """The look-alike pairs, walked the same way the shelf-life list is."""
+    done: dict[int, str] = {}
+    at, scroll, more = 0, 0, 0
+    reading = False
+    back: list[int] = []
+    note = ""
+
+    while True:
+        if reading:
+            under = _trailer(_standing(done, at), note, _PAIR_ITEM_KEYS)
+            page, more = _paged(_pair_page(pairs[at], at + 1, len(pairs)), scroll, trailer=under)
+            _screen(page + "\n" + under)
+        else:
+            _screen(_pair_list(pairs, at, done, note))
+        key = _getkey()
+        if key == "?":
+            _help(_PAIR_HELP)
+            continue
+        if key not in ("1", "2", "k"):
+            note = ""
+
+        if key in ("space", "pagedown", "right") and reading:
+            if more:
+                back.append(scroll)
+                scroll = more
+                continue
+            if key != "space":
+                continue
+        if key == "space":
+            key = "down"
+        if reading and key in ("pageup", "b"):
+            scroll = back.pop() if back else 0
+            continue
+
+        if key == "q":
+            break
+        if key in ("down", "j", "pagedown"):
+            at = min(len(pairs) - 1, at + 1)
+            back, scroll = [], 0
+            continue
+        # k is the answer here and not the vim-style up it is on the other
+        # list. Sharing a key between moving and deciding is fine while every
+        # decision is a retirement asking for a reason first, and is not fine
+        # when one of them writes a record on a single press.
+        if key in ("up", "pageup"):
+            at = max(0, at - 1)
+            back, scroll = [], 0
+            continue
+        if key in ("home", "end"):
+            at = 0 if key == "home" else len(pairs) - 1
+            back, scroll = [], 0
+            continue
+        if not reading and key in ("enter", "right", "l"):
+            reading = True
+            continue
+        if reading and key in ("left", "l"):
+            reading = False
+            continue
+        if key not in ("1", "2", "k"):
+            continue
+
+        note = _settle_pair(args, pairs[at], done, at, key)
+        if note or at + 1 >= len(pairs):
+            continue
+        at += 1
+        back, scroll = [], 0
+
+    print(_paired(done, len(pairs)))
+    return 0
+
+
+def _settle_pair(args, pair: dict, done: dict, number: int, key: str) -> str:
+    """Fold one side into the other, or record that they are two things."""
+    if number in done:
+        return f"  already {done[number]} in this sitting"
+    if key == "k":
+        with transaction(args.dsn) as cur:
+            store.tell_apart(
+                cur,
+                memory_id=pair["left"]["memory_id"],
+                other=pair["right"]["memory_id"],
+                actor=args.actor,
+            )
+        done[number] = "told apart"
+        return ""
+
+    keep, drop = (pair["left"], pair["right"]) if key == "1" else (pair["right"], pair["left"])
+    reason = _typed("  why are these one thing? ")
+    if not reason:
+        return "  a fold needs a reason. it is the one key here that cannot be undone"
+    try:
+        with transaction(args.dsn) as cur:
+            store.merge_entities(
+                cur,
+                source=drop["memory_id"],
+                target=keep["memory_id"],
+                actor=args.actor,
+                reason=reason,
+                keep_active=keep["version_id"],
+            )
+    except MashuError as refusal:
+        return f"  {refusal}"
+    done[number] = "folded"
+    return ""
+
+
+def _pair_list(pairs: list[dict], at: int, done: dict, note: str = "") -> str:
+    """Every look-alike pair, one line each, the closer ones first."""
+    width = _width()
+    rows = []
+    for number, pair in enumerate(pairs):
+        mark = _PAIR_MARK.get(done.get(number), " ")
+        line = _clip(
+            f" {mark} {number + 1:>3}  {_pad(pair['scope_name'], 12)} "
+            f"{_pad(_alike(pair), 14)} {pair['left']['title']}",
+            width - 1,
+        )
+        rows.append(f"\x1b[1m▸{line[1:]}\x1b[0m" if number == at else line)
+    head = f"{len(pairs)} adopted pair(s) read as one concept. one concept, one entity"
+    return _list_screen(head, rows, at, _trailer(_PAIR_LIST_KEYS, note))
+
+
+def _pair_page(pair: dict, number: int, of: int) -> str:
+    """Both memories of a pair, whole, one above the other."""
+    label = f" {number} of {of} "
+    across = _across()
+    lines = [
+        "─" * 4 + label + "─" * max(4, across - 4 - _cells(label)),
+        f"[{pair['scope_name']}]  {_alike(pair)}",
+        "",
+    ]
+    for mark, side in (("1", "left"), ("2", "right")):
+        row = pair[side]
+        lines += [
+            f"{mark}  {row['type']}  {_short(row['memory_id'])}",
+            _wrap(row["title"], indent="   "),
+            _wrap(row["content"], indent="   "),
+            "",
+        ]
+    lines.append("─" * across)
+    return "\n".join(lines)
+
+
+def _paired(done: dict, count: int) -> str:
+    """What the pair pass came to, said in what was decided."""
+    folded = sum(1 for word in done.values() if word == "folded")
+    apart = sum(1 for word in done.values() if word == "told apart")
+    left = count - len(done)
+    parts = []
+    if folded:
+        parts.append(f"{folded} folded")
+    if apart:
+        parts.append(f"{apart} told apart")
+    if left:
+        parts.append(f"{left} left as they were, and offered again next time")
+    return "  " + ", ".join(parts) if parts else "  nothing decided"
 
 
 def _stale_list(found: list[dict], at: int, done: dict, note: str = "") -> str:

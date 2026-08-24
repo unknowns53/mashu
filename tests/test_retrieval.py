@@ -577,9 +577,7 @@ def test_an_ordinary_active_row_carries_no_such_mark(cur, scope_id, author):
 
 def test_being_finished_outranks_being_proposed_for_retirement(cur, scope_id, author):
     """A version that already carries a retirement is not a question anyone is asking."""
-    memory_id, version_id = author(
-        "もう片付いた作業", "本文はここにある。", type=MemoryType.TASK
-    )
+    memory_id, version_id = author("もう片付いた作業", "本文はここにある。", type=MemoryType.TASK)
     proposals.propose(
         cur,
         actor="claude",

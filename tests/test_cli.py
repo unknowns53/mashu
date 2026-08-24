@@ -14,10 +14,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from mashu import cli, context, metrics, proposals, routing, runs, store
+from mashu import cli, context, metrics, proposals, resolution, routing, runs, store
 from mashu.db import transaction
 from mashu.errors import MashuError
-from mashu.models import MemoryType, ProposalOperation, SourceType
+from mashu.models import EntityStatus, MemoryType, ProposalOperation, SourceType
 
 
 @pytest.fixture
@@ -1646,3 +1646,81 @@ def test_the_sweep_says_why_the_store_would_not_do_it(test_dsn, sweeping, commit
     assert "この版はもう別の理由で動かせない" in out
     with transaction(test_dsn) as cur:
         assert store.get_entity(cur, memory_id)["active_version"] is not None
+
+
+def _adopted(test_dsn, scope_id, title, content):
+    with transaction(test_dsn) as cur:
+        memory_id, _ = store.create_entity(
+            cur,
+            scope_id=scope_id,
+            type=MemoryType.OBSERVATION,
+            title=title,
+            content=content,
+            source_type=SourceType.AGENT,
+            created_by="claude",
+            actor="claude",
+            adopt=True,
+        )
+    return memory_id
+
+
+def _place_in_pairs(test_dsn, memory_id) -> int:
+    with transaction(test_dsn) as cur:
+        pairs = resolution.adopted_pairs(cur)
+    for number, pair in enumerate(pairs):
+        if memory_id in (pair["left"]["memory_id"], pair["right"]["memory_id"]):
+            return number
+    raise AssertionError("the pair was not offered")
+
+
+def test_the_sweep_offers_look_alikes_among_what_is_already_adopted(
+    test_dsn, sweeping, committed_scope
+):
+    """The check in 20 runs at proposal time and is spent by review; nothing measured after."""
+    title = f"同じ話 {uuid.uuid4()}"
+    first = _adopted(test_dsn, committed_scope, title, "片方の言い方")
+    _adopted(test_dsn, committed_scope, title, "もう片方の言い方")
+
+    keys = ["q"] + ["down"] * _place_in_pairs(test_dsn, first) + ["k", "q"]
+    code, out = sweeping(keys)
+    assert code == 0
+    assert "1 told apart" in out
+
+    with transaction(test_dsn) as cur:
+        pairs = resolution.adopted_pairs(cur)
+    assert first not in [pair["left"]["memory_id"] for pair in pairs]
+
+
+def test_folding_a_pair_leaves_one_entity_and_asks_why_first(test_dsn, sweeping, committed_scope):
+    """The one key here that cannot be undone by pressing another one."""
+    title = f"畳まれる話 {uuid.uuid4()}"
+    first = _adopted(test_dsn, committed_scope, title, "残るほうの言い方")
+    second = _adopted(test_dsn, committed_scope, title, "畳まれるほうの言い方")
+    at = _place_in_pairs(test_dsn, first)
+
+    with transaction(test_dsn) as cur:
+        pair = resolution.adopted_pairs(cur)[at]
+    keep, drop = (first, second) if pair["left"]["memory_id"] == first else (second, first)
+    key = "1" if pair["left"]["memory_id"] == keep else "2"
+
+    keys = ["q"] + ["down"] * at + [key, "q"]
+    code, out = sweeping(keys, typed=["一つの概念を二度書いたもの"])
+    assert code == 0 and "1 folded" in out
+
+    with transaction(test_dsn) as cur:
+        assert store.get_entity(cur, drop)["status"] == str(EntityStatus.MERGED)
+        assert store.get_entity(cur, keep)["status"] == str(EntityStatus.ACTIVE)
+
+
+def test_a_fold_with_no_reason_typed_changes_nothing(test_dsn, sweeping, committed_scope):
+    title = f"理由を出さない話 {uuid.uuid4()}"
+    first = _adopted(test_dsn, committed_scope, title, "片方")
+    second = _adopted(test_dsn, committed_scope, title, "もう片方")
+
+    keys = ["q"] + ["down"] * _place_in_pairs(test_dsn, first) + ["1", "q"]
+    code, out = sweeping(keys, typed=[""])
+    assert code == 0 and "1 folded" not in out
+
+    with transaction(test_dsn) as cur:
+        for memory_id in (first, second):
+            assert store.get_entity(cur, memory_id)["status"] == str(EntityStatus.ACTIVE)

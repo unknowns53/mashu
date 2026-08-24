@@ -15,9 +15,11 @@ that goes quiet when the thing it watches dies.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import UUID
 
 import psycopg
 
@@ -44,6 +46,12 @@ class Status:
     review: dict[str, Any] = field(default_factory=dict)
     latency: dict[str, Any] = field(default_factory=dict)
     unreviewed: list[dict[str, Any]] = field(default_factory=list)
+    upkeep: dict[str, Any] = field(default_factory=dict)
+    #: Pairs among what is adopted that read as one concept (20, 30 段 B).
+    #: Read here and not at session start: it costs a scan of the store per
+    #: scope, which is affordable for a command somebody typed and is not
+    #: affordable as a fixed cost on every session opening.
+    look_alikes: list[dict[str, Any]] = field(default_factory=list)
     tag_share: dict[str, Any] = field(default_factory=dict)
     openings: list[dict[str, Any]] = field(default_factory=list)
     corrections: dict[str, Any] = field(default_factory=dict)
@@ -53,7 +61,7 @@ class Status:
 
 def collect(cur: psycopg.Cursor, *, window_days: int = WINDOW_DAYS) -> Status:
     """Read every indicator that has a source, and name the ones that do not."""
-    from mashu import proposals, runs
+    from mashu import proposals, resolution, runs
 
     return Status(
         capture=runs.health(cur),
@@ -61,6 +69,8 @@ def collect(cur: psycopg.Cursor, *, window_days: int = WINDOW_DAYS) -> Status:
         review=proposals.backlog(cur),
         latency=_latency(cur, window_days),
         unreviewed=_unreviewed_share(cur),
+        upkeep=upkeep(cur),
+        look_alikes=resolution.adopted_pairs(cur),
         tag_share=_tag_share(cur, window_days),
         openings=_openings(cur),
         corrections=_corrections(cur, window_days),
@@ -128,15 +138,26 @@ def _unreviewed_share(cur: psycopg.Cursor) -> list[dict[str, Any]]:
     whether review is keeping up with the store, and an answer taken from the
     returned set would be measuring the cap instead of the system — which is
     what 27.3 warns about, and what the tag share below deliberately does.
+
+    Undecided is read off the latest version's status and not off the absence
+    of the active pointer. The two look alike and are opposites: a memory that
+    was turned down or shelved has no pointer *because* somebody decided about
+    it. Counting those as unreviewed made a scope whose queue was empty read as
+    a quarter unreviewed, and it would have read that way for ever, because
+    nothing that has already been decided can be decided again.
     """
     cur.execute(
         """
         SELECT s.name,
                count(*) AS held,
                count(e.active_version) AS adopted,
-               count(*) - count(e.active_version) AS unreviewed
+               count(*) FILTER (WHERE e.active_version IS NULL
+                                  AND l.status = 'candidate') AS unreviewed,
+               count(*) FILTER (WHERE e.active_version IS NULL
+                                  AND l.status <> 'candidate') AS retired
         FROM scope s
         JOIN memory_entity e ON e.scope_id = s.scope_id AND e.status <> 'merged'
+        LEFT JOIN memory_version l ON l.version_id = e.latest_version
         WHERE s.status = 'active'
         GROUP BY s.name
         ORDER BY s.name
@@ -467,9 +488,58 @@ _ROTS_BY_TYPE = {
     "state": "a current state is current only until the next one is written",
 }
 
+#: How long each type is left alone before somebody is asked about it again
+#: (13.1, 30 段 B).
+#:
+#: Section 13.1 sorts what is worth keeping by how long it stays true and puts
+#: only the indefinite kind into Memory. Measured against the real store that
+#: sorting turned out to be two readings, not one. A task and a state are
+#: certain to expire, and the sweep has always caught them by type. A fact, an
+#: observation and an interpretation were filed as indefinite and are not: a
+#: fact that names the version in use, or a reading of why something behaved as
+#: it did, stops being true without ever naming a date, so no pattern over the
+#: text can find it. Forty-six of the store's two hundred and twenty-six
+#: standing memories were in that state with no reading of shelf life at all.
+#:
+#: What replaces the missing reading is a date rather than a judgement. Nothing
+#: here decides that a memory has rotted — it decides that nobody has looked in
+#: long enough that looking is worth a moment.
+#:
+#: These numbers are not measured, and unlike the thresholds in 27.2 there is
+#: nothing to measure them against yet: it takes a year of a memory's life to
+#: learn what a year of it was worth. They are ordered by how provisional the
+#: type is on its face, and they are meant to be moved once the incident tally
+#: (30 段 D) can say which types were being used after they went stale.
+CHECK_INTERVAL_DAYS = {
+    "task": 0,
+    "state": 0,
+    "hypothesis": 60,
+    "interpretation": 60,
+    "observation": 180,
+    "fact": 180,
+    "decision": 365,
+    "preference": 365,
+}
 
-def rot_prone(cur: psycopg.Cursor) -> list[dict[str, Any]]:
-    """Standing memories whose truth has a shelf life (13.1, 25.2 移行, 30 段 B).
+#: The longest a run of agent confirmations can keep one memory away from a
+#: person.
+#:
+#: An agent that reads a session and finds a memory borne out can say so, which
+#: is what keeps this from being a chore somebody has to remember. The failure
+#: that buys is silent: a memory renewed every session by the same agent for
+#: the same weak reason never reaches anybody, and the store goes on handing it
+#: out. So an agent's confirmation moves the date, and cannot move it past this
+#: far from the last time a person decided anything about the memory.
+CHECK_CEILING_DAYS = 365
+
+#: Who counts as a person for the ceiling above. Everything else is an agent.
+#: The list rather than a flag on the event because the events are already
+#: written and carry only the actor.
+PEOPLE = ("user",)
+
+
+def rot_prone(cur: psycopg.Cursor, *, scope_id: UUID | None = None) -> list[dict[str, Any]]:
+    """Standing memories that are due to be looked at again (13.1, 25.2, 30 段 B).
 
     Section 13.1 divides what is worth keeping by how long it stays true, and
     puts only the indefinite kind into Memory. What arrives from a transcript
@@ -478,57 +548,44 @@ def rot_prone(cur: psycopg.Cursor) -> list[dict[str, Any]]:
     afterwards. So the kinds that name their own end have to be swept, because
     nothing about them expires on its own.
 
-    Three readings, and none of them is a verdict:
+    Four readings, and none of them is a verdict:
 
     - the type says so. A task ends when it is done and a state ends when the
       next state is written. Both are certain to expire and neither says when.
     - the writing dates itself, which is what self_dating already reads.
     - the title says the thing is finished while the memory still stands as
       something to do, which is the shape of a completion recorded as a task.
+    - nobody has looked in the length of time its type is left alone for. This
+      is the reading the other three could not give: a fact naming the version
+      in use, or an interpretation of why something behaved as it did, goes out
+      of date without ever saying a date, and no pattern over the text finds it.
+
+    The fourth is a clock and not a claim, so what it says is that nobody has
+    checked, never that the memory is wrong. What answers it is usually not a
+    person: an agent that saw the memory borne out during a session records the
+    confirmation itself, and the item is not due again for its interval. What
+    reaches a person is what no session had anything to say about — and, at
+    most CHECK_CEILING_DAYS apart, everything, because a run of agent
+    confirmations cannot keep one memory away from a person for ever.
 
     Precision is the cheap side. A false flag costs a glance; a task that
     finished in July and is still handed to every session that asks is the debt
     this exists to pay down.
     """
     cur.execute(
-        """
-        SELECT e.memory_id, e.title, e.type, e.delivery, s.name AS scope_name,
-               v.version_id, v.directive, v.content,
-               EXTRACT(DAY FROM now() - v.created_at)::int AS days
-        FROM memory_entity e
-        JOIN memory_version v ON v.version_id = e.active_version
-        JOIN scope s ON s.scope_id = e.scope_id
-        LEFT JOIN LATERAL (
-            -- The last time a person read this one and said it still holds.
-            -- Matched on the version they read rather than on when they read
-            -- it, so rewriting the memory ends the confirmation. Times would
-            -- not do: now() is frozen for a transaction, so a confirmation and
-            -- a rewrite written in one carry the same timestamp.
-            -- Ordered by event_id for the same reason.
-            SELECT (l.detail ->> 'until')::timestamptz AS ask_again
-            FROM event_log l
-            WHERE l.memory_id = e.memory_id
-              AND l.event_type = 'still_stands'
-              AND l.version_id = e.active_version
-            ORDER BY l.event_id DESC
-            LIMIT 1
-        ) c ON TRUE
-        WHERE e.status = 'active'
-          -- A completion keeps the active pointer, so standing has to be read
-          -- off the version and not off the pointer alone. Without this a task
-          -- retired today is on the list again tomorrow and the sweep never
-          -- finishes, which is the one thing a sweep has to do.
-          AND v.status = 'candidate'
-          -- and neither does one a person has already read and left standing,
-          -- until the day they asked to be asked again. The confirmation is
-          -- about the text they read, so rewriting the memory ends it.
-          AND (c.ask_again IS NULL OR c.ask_again <= now())
-        ORDER BY s.name, e.type, e.title
-        """
+        _ROT_PRONE_SQL,
+        {
+            "intervals": json.dumps(CHECK_INTERVAL_DAYS),
+            "ceiling": CHECK_CEILING_DAYS,
+            "people": list(PEOPLE),
+            "scope": scope_id,
+        },
     )
     found = []
     for row in cur.fetchall():
         why, matched, matched_in = None, None, None
+        if row["overdue_days"] is not None:
+            why = _overdue(row)
         for field_name in ("title", "directive"):
             text = row[field_name]
             hit = _SELF_DATING.search(text) if text else None
@@ -543,3 +600,154 @@ def rot_prone(cur: psycopg.Cursor) -> list[dict[str, Any]]:
         if why:
             found.append({**row, "why": why, "matched": matched, "matched_in": matched_in})
     return found
+
+
+def upkeep(cur: psycopg.Cursor) -> dict[str, Any]:
+    """How much of what stands is due to be looked at (13.1, 30 段 B).
+
+    Shaped like runs.health and proposals.backlog because it is the third of
+    the same kind and is carried the same way. Capture failing means nothing
+    new arrives; review being behind means what arrived is less certain than it
+    could be; this one means what is already held has not been checked in
+    longer than its type is left alone for. Three different repairs, and each
+    is invisible from inside a session unless the session opening says so.
+
+    That is the whole reason it is here. The sweep existed and was never run:
+    nothing pulled anybody towards it, so it was found by noticing the store
+    had gone wrong rather than by being told. A count at the top of every
+    session is the cheapest thing that can change that.
+
+    The look-alike screen is deliberately not in this. It costs a scan of the
+    store for every scope, and a fixed cost paid by every session is the one
+    place in this system where that is not affordable — 21.2 keeps the opening
+    fixed for the same reason. It is read by `mashu stale`, which is where the
+    person who was told to look is already going.
+    """
+    found = rot_prone(cur)
+    overdue = [row["overdue_days"] for row in found if row["overdue_days"] is not None]
+    return {
+        "due": len(found),
+        "oldest_days": max(overdue) if overdue else 0,
+        "ok": not found,
+        "warning": (
+            None
+            if not found
+            else f"{len(found)} standing memory(s) are due to be checked — 'mashu stale'"
+        ),
+    }
+
+
+def _overdue(row: dict[str, Any]) -> str:
+    """Why the clock brought this one back, said as what has and has not happened."""
+    since = row["unchecked_days"]
+    if row["confirmed_by"] is None:
+        return (
+            f"nobody has looked at this since it was written {since} day(s) ago, "
+            f"and a {row['type']} is left alone for "
+            f"{CHECK_INTERVAL_DAYS.get(row['type'], 0)} day(s)"
+        )
+    if row["capped"]:
+        return (
+            f"{row['confirmed_by']} has confirmed this {row['confirmations']} time(s) "
+            f"without a person deciding anything about it for {since} day(s)"
+        )
+    return f"{row['confirmed_by']} last confirmed this {since} day(s) ago"
+
+
+#: What is due, and why it is due, in one read.
+#:
+#: The date a memory comes back on is derived rather than stored. Three parts,
+#: and the ordering between them is the whole of the rule:
+#:
+#: - with no confirmation at all, the type's own interval from when the version
+#:   was written.
+#: - with a confirmation, the date that confirmation asked for.
+#: - unless that confirmation came from an agent, in which case it cannot reach
+#:   past CHECK_CEILING_DAYS from the last time a person decided anything here.
+#:
+#: The last human moment is read as the later of the version being written and
+#: the last confirmation a person left. The first is an approximation — a
+#: version is written when the proposal is committed, which is a person's
+#: decision for anything that went to review and is not for anything that did
+#: not — and it errs towards asking sooner, which is the safe direction for a
+#: ceiling whose job is to stop a memory disappearing from view.
+#:
+#: Ordered by event_id and matched on version_id for the reason confirm_standing
+#: gives: now() is frozen for a transaction, so a confirmation and a rewrite
+#: written in one carry the same timestamp and no comparison of times can tell
+#: them apart.
+_ROT_PRONE_SQL = """
+WITH standing AS (
+    SELECT e.memory_id, e.title, e.type, e.delivery, e.scope_id,
+           v.version_id, v.directive, v.content, v.created_at,
+           (%(intervals)s::jsonb ->> e.type)::int AS interval_days
+    FROM memory_entity e
+    JOIN memory_version v ON v.version_id = e.active_version
+    -- A completion keeps the active pointer, so standing has to be read off
+    -- the version and not off the pointer alone. Without this a task retired
+    -- today is on the list again tomorrow and the sweep never finishes, which
+    -- is the one thing a sweep has to do.
+    WHERE e.status = 'active' AND v.status = 'candidate'
+),
+looked AS (
+    SELECT s.memory_id,
+           last.actor AS confirmed_by,
+           last.ask_again,
+           counted.confirmations,
+           greatest(s.created_at, coalesce(human.at, s.created_at)) AS last_human
+    FROM standing s
+    LEFT JOIN LATERAL (
+        SELECT l.actor, (l.detail ->> 'until')::timestamptz AS ask_again
+        FROM event_log l
+        WHERE l.memory_id = s.memory_id
+          AND l.event_type = 'still_stands'
+          AND l.version_id = s.version_id
+        ORDER BY l.event_id DESC
+        LIMIT 1
+    ) last ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT max(l.created_at) AS at
+        FROM event_log l
+        WHERE l.memory_id = s.memory_id
+          AND l.event_type = 'still_stands'
+          AND l.version_id = s.version_id
+          AND l.actor = ANY(%(people)s)
+    ) human ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT count(*) AS confirmations
+        FROM event_log l
+        WHERE l.memory_id = s.memory_id
+          AND l.event_type = 'still_stands'
+          AND l.version_id = s.version_id
+          AND NOT l.actor = ANY(%(people)s)
+    ) counted ON TRUE
+)
+SELECT s.memory_id, s.title, s.type, s.delivery, sc.name AS scope_name,
+       s.version_id, s.directive, s.content,
+       EXTRACT(DAY FROM now() - s.created_at)::int AS days,
+       l.confirmed_by, l.confirmations,
+       l.ask_again IS NOT NULL
+           AND NOT l.confirmed_by = ANY(%(people)s)
+           AND l.ask_again > l.last_human + make_interval(days => %(ceiling)s) AS capped,
+       EXTRACT(DAY FROM now() - coalesce(l.last_human, s.created_at))::int AS unchecked_days,
+       CASE WHEN _due.interval_ends <= now()
+            THEN EXTRACT(DAY FROM now() - _due.interval_ends)::int
+       END AS overdue_days
+FROM standing s
+JOIN scope sc ON sc.scope_id = s.scope_id
+JOIN looked l ON l.memory_id = s.memory_id
+CROSS JOIN LATERAL (
+    SELECT CASE
+        WHEN l.ask_again IS NULL THEN NULL
+        WHEN l.confirmed_by = ANY(%(people)s) THEN l.ask_again
+        ELSE least(l.ask_again, l.last_human + make_interval(days => %(ceiling)s))
+    END AS ask_again,
+    s.created_at + make_interval(days => coalesce(s.interval_days, 0)) AS interval_ends
+) _due
+-- A live confirmation silences every reading and not only the clock. Somebody
+-- read this one and said it still holds; bringing it back because its title
+-- carries a date is bringing back the thing they just dismissed.
+WHERE (_due.ask_again IS NULL OR _due.ask_again <= now())
+  AND (%(scope)s::uuid IS NULL OR s.scope_id = %(scope)s::uuid)
+ORDER BY sc.name, s.type, s.title
+"""

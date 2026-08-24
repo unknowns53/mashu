@@ -369,3 +369,166 @@ def test_rewriting_the_memory_ends_the_confirmation(cur, scope_id):
     )
 
     assert memory_id in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def _in_days(cur, days: int):
+    """A moment from the database's clock, read before anything else uses the cursor."""
+    cur.execute("SELECT now() + make_interval(days => %s) AS at", (days,))
+    return cur.fetchone()["at"]
+
+
+def _age(cur, memory_id, *, days: int):
+    """Move a version's writing back in time, so its interval has run."""
+    cur.execute(
+        "UPDATE memory_version SET created_at = now() - make_interval(days => %s) "
+        "WHERE memory_id = %s",
+        (days, memory_id),
+    )
+
+
+def test_a_fact_nobody_has_checked_in_long_enough_comes_back(cur, scope_id):
+    """The reading the other three could not give (13.1, 30 段 B).
+
+    A fact naming the version in use goes out of date without ever saying a
+    date, so no pattern over the text finds it and its type says nothing. Forty
+    six of the real store's standing memories were in that state.
+    """
+    memory_id = _standing(
+        cur,
+        scope_id,
+        type=MemoryType.FACT,
+        title="採用している版は 3 系",
+        content="ここで使う版は 3 系である。",
+    )
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+    _age(cur, memory_id, days=metrics.CHECK_INTERVAL_DAYS["fact"] + 1)
+    found = {row["memory_id"]: row for row in metrics.rot_prone(cur)}
+    assert memory_id in found
+    assert "nobody has looked at this" in found[memory_id]["why"]
+
+
+def test_the_clock_says_unchecked_and_never_says_wrong(cur, scope_id):
+    """A due date is not a verdict, and the wording is the only thing saying so."""
+    memory_id = _standing(
+        cur, scope_id, type=MemoryType.DECISION, title="この手段を採らなかった理由"
+    )
+    _age(cur, memory_id, days=metrics.CHECK_INTERVAL_DAYS["decision"] + 1)
+    found = {row["memory_id"]: row for row in metrics.rot_prone(cur)}
+    assert "wrong" not in found[memory_id]["why"]
+    assert found[memory_id]["overdue_days"] >= 1
+
+
+def test_an_agent_can_answer_the_clock_so_nobody_else_has_to(cur, scope_id):
+    """The whole reason a clock over standing memories is affordable (30 段 B)."""
+    memory_id = _standing(
+        cur, scope_id, type=MemoryType.OBSERVATION, title="ある条件で再現した挙動"
+    )
+    _age(cur, memory_id, days=metrics.CHECK_INTERVAL_DAYS["observation"] + 1)
+    assert memory_id in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+    until = _in_days(cur, 180)
+    store.confirm_standing(
+        cur,
+        memory_id=memory_id,
+        version_id=store.get_entity(cur, memory_id)["active_version"],
+        until=until,
+        actor="mashu-worker",
+        reason="このセッションで同じ挙動を再現した",
+    )
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def test_agents_cannot_keep_one_memory_away_from_a_person_for_ever(cur, scope_id):
+    """The bound that makes the automatic answer safe to accept unattended.
+
+    An agent renewing the same memory every session for the same weak reason
+    is silent: nobody is told, and the store goes on handing it out. So a
+    confirmation from an agent moves the date and cannot move it past
+    CHECK_CEILING_DAYS from the last time a person decided anything here.
+    """
+    memory_id = _standing(cur, scope_id, type=MemoryType.FACT, title="ずっと確認され続ける事実")
+    _age(cur, memory_id, days=metrics.CHECK_CEILING_DAYS + 1)
+    until = _in_days(cur, 180)
+    store.confirm_standing(
+        cur,
+        memory_id=memory_id,
+        version_id=store.get_entity(cur, memory_id)["active_version"],
+        until=until,
+        actor="mashu-worker",
+        reason="まだ通用している",
+    )
+
+    found = {row["memory_id"]: row for row in metrics.rot_prone(cur)}
+    assert memory_id in found, "the ceiling has to bring it back whatever the agent asked for"
+    assert found[memory_id]["capped"] is True
+    assert "without a person deciding anything" in found[memory_id]["why"]
+
+
+def test_a_person_can_put_something_off_past_the_ceiling(cur, scope_id):
+    """The ceiling bounds agents, not the person it exists to reach."""
+    memory_id = _standing(cur, scope_id, type=MemoryType.FACT, title="人が長く置くと決めた事実")
+    _age(cur, memory_id, days=metrics.CHECK_CEILING_DAYS + 1)
+    until = _in_days(cur, metrics.CHECK_CEILING_DAYS * 3)
+    store.confirm_standing(
+        cur,
+        memory_id=memory_id,
+        version_id=store.get_entity(cur, memory_id)["active_version"],
+        until=until,
+        actor="user",
+    )
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def test_a_live_confirmation_silences_a_dated_title_too(cur, scope_id):
+    """Bringing back what somebody just dismissed is not a second reading."""
+    memory_id = _standing(cur, scope_id, type=MemoryType.PREFERENCE, title="2026-08 時点の割り当て")
+    assert memory_id in [row["memory_id"] for row in metrics.rot_prone(cur)]
+    until = _in_days(cur, 30)
+    store.confirm_standing(
+        cur,
+        memory_id=memory_id,
+        version_id=store.get_entity(cur, memory_id)["active_version"],
+        until=until,
+        actor="user",
+    )
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def test_the_sweep_can_answer_for_one_scope(cur, scope_id):
+    """The worker asks about the scope it is extracting, not the whole store."""
+    mine = _standing(cur, scope_id, type=MemoryType.TASK, title="この Scope の作業")
+    other = store.create_scope(cur, name="よその仕事", actor="user")
+    theirs = _standing(cur, other, type=MemoryType.TASK, title="よその Scope の作業")
+
+    here = [row["memory_id"] for row in metrics.rot_prone(cur, scope_id=scope_id)]
+    assert mine in here and theirs not in here
+
+
+def test_upkeep_counts_what_is_due_and_says_where_to_go(cur, scope_id):
+    assert metrics.upkeep(cur)["ok"] is True
+    _standing(cur, scope_id, type=MemoryType.TASK, title="放置されている作業")
+    got = metrics.upkeep(cur)
+    assert got["due"] == 1 and got["ok"] is False
+    assert "mashu stale" in got["warning"]
+
+
+def test_what_was_turned_down_is_not_counted_as_never_decided(cur, scope_id):
+    """A memory with no pointer because somebody decided is the opposite of undecided.
+
+    Counting those as unreviewed made a scope with an empty queue read as a
+    quarter unreviewed, and it would have read that way for ever.
+    """
+    memory_id = _standing(cur, scope_id, type=MemoryType.FACT, title="棚上げされた事実")
+    entity = store.get_entity(cur, memory_id)
+    store.set_status(
+        cur,
+        version_id=entity["active_version"],
+        target=VersionStatus.DORMANT,
+        actor="user",
+        reason="当面は使わない",
+    )
+
+    row = next(r for r in metrics.collect(cur).unreviewed if r["held"])
+    assert row["unreviewed"] == 0, "a shelved memory was decided about"
+    assert row["retired"] == 1

@@ -40,6 +40,7 @@ import psycopg
 from mashu import (
     events,
     extract,
+    metrics,
     proposals,
     resolution,
     retrieval,
@@ -183,12 +184,14 @@ class Outcome:
     proposals_filed: int = 0
     updates_filed: int = 0
     retirements_filed: int = 0
+    confirmations_filed: int = 0
     refused: list[str] = field(default_factory=list)
 
     def line(self) -> str:
         counts = (
             f"{self.proposals_filed} new, {self.updates_filed} update(s), "
-            f"{self.retirements_filed} retirement(s)"
+            f"{self.retirements_filed} retirement(s), "
+            f"{self.confirmations_filed} confirmed"
         )
         return f"{str(self.run_id)[:8]}  {self.state:<9} {counts}  {self.note}".rstrip()
 
@@ -266,7 +269,11 @@ def prepare(
     runs.set_reading(cur, run_id=run_id, reading=mode)
     log = transcript.render(session, turns, sent=sent)
     active = retrieval.active_set(cur, scope_id=scope_id)
-    prompt = extract.build_prompt(log=log, scratch=scratch_items, active=active)
+    # What is due is read here rather than pushed at session start: the model
+    # is already being handed the whole active set, so the only thing missing
+    # was which rows to ask about (13.1, 30 段 B).
+    due = {row["memory_id"] for row in metrics.rot_prone(cur, scope_id=scope_id)}
+    prompt = extract.build_prompt(log=log, scratch=scratch_items, active=active, due=due)
     estimated = retrieval.estimate_tokens(prompt)
 
     # An infinite ceiling means the extractor answering this run is not
@@ -331,6 +338,7 @@ def land(cur: psycopg.Cursor, plan: Plan, answer: str, *, extractor: extract.Ext
         cur, result, session=plan.session, run=run, outcome=outcome, session_id=plan.session_id
     )
     _file_retirements(cur, result, outcome=outcome, session_id=plan.session_id)
+    _file_confirmations(cur, result, outcome=outcome)
 
     usage = getattr(extractor, "usage", {}) or {}
     runs.spend(
@@ -403,6 +411,7 @@ def _record_pass(
             "proposals": outcome.proposals_filed,
             "updates": outcome.updates_filed,
             "retirements": outcome.retirements_filed,
+            "confirmations": outcome.confirmations_filed,
             "refused": len(result.refused),
             "final": final,
             "reading": plan.mode,
@@ -949,6 +958,68 @@ def _file_retirements(
         outcome.retirements_filed += 1
 
 
+def _file_confirmations(
+    cur: psycopg.Cursor,
+    result: extract.Extraction,
+    *,
+    outcome: Outcome,
+) -> None:
+    """Record that a session bore out a memory that was due (13.1, 30 段 B).
+
+    Written straight rather than proposed, and that is the one place in this
+    module where an agent's judgement takes effect unattended. What justifies
+    it is what a confirmation is: no version is written, no status moves, and
+    nothing about the knowledge changes. The record is that somebody read this
+    on a day and did not find it broken, which is a fact about the reading.
+
+    What it does change is when a person is next asked, and that is bounded
+    rather than trusted. rot_prone will not let a run of these push one memory
+    past CHECK_CEILING_DAYS from the last time a person decided anything about
+    it, so the worst an over-confident extractor can buy is a year, not for
+    ever. The reason it gave is on the event either way, which is what a person
+    reading the sweep needs in order to disagree with it.
+    """
+    for draft in result.confirmations:
+        try:
+            entity = store.get_entity(cur, draft.memory_id)
+        except MashuError as failure:
+            outcome.refused.append(f"{draft.memory_id}: {failure}")
+            continue
+        if not entity["active_version"]:
+            outcome.refused.append(
+                f"nothing standing to confirm on {draft.title or entity['title']}"
+            )
+            continue
+        days = metrics.CHECK_INTERVAL_DAYS.get(str(entity["type"]), 0)
+        if not days:
+            # A task and a state carry their own end, so no amount of looking
+            # makes them due later. Saying "still open" about a task is not a
+            # confirmation, it is the state the task was already in.
+            outcome.refused.append(
+                f"a {entity['type']} cannot be confirmed for later: {entity['title']}"
+            )
+            continue
+        store.confirm_standing(
+            cur,
+            memory_id=draft.memory_id,
+            version_id=entity["active_version"],
+            until=_ask_again(cur, days),
+            actor=WORKER_ACTOR,
+            reason=draft.reason,
+        )
+        outcome.confirmations_filed += 1
+
+
+def _ask_again(cur: psycopg.Cursor, days: int) -> datetime:
+    """The day this becomes due again, taken from the database's clock.
+
+    Not from the worker's own: the run may be landed long after it was read,
+    and every other time in this store is written by the same now().
+    """
+    cur.execute("SELECT now() + make_interval(days => %s) AS at", (days,))
+    return cur.fetchone()["at"]
+
+
 def _stale_rejection(clash: DuplicateProposalError) -> dict[str, Any] | None:
     """Whether an old rejection has stopped being a bar (see REJECTION_HORIZON_DAYS).
 
@@ -986,6 +1057,7 @@ def _note(outcome: Outcome, result: extract.Extraction, plan: Plan | None = None
         f"{outcome.proposals_filed}/{len(result.proposals)} proposals",
         f"{outcome.updates_filed}/{len(result.updates)} updates",
         f"{outcome.retirements_filed}/{len(result.retirements)} retirements",
+        f"{outcome.confirmations_filed}/{len(result.confirmations)} confirmations",
     ]
     if outcome.refused:
         parts.append(f"{len(outcome.refused)} refused")

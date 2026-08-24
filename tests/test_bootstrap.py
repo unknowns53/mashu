@@ -481,3 +481,49 @@ def test_the_refusal_names_a_route_that_exists(cur, scope_id, write):
             adopt=True,
             based_on_version=store.get_entity(cur, memory_id)["latest_version"],
         )
+
+
+def test_a_session_is_told_what_is_due_the_way_it_is_told_about_capture(cur, scope_id):
+    """The third queue, and the one that had no way of reaching anybody (13.1, 30 段 B).
+
+    The sweep for memories past their shelf life existed and was never run:
+    capture and review are carried into every session opening and this was not,
+    so it was found by noticing the store had gone wrong rather than by being
+    told about it.
+    """
+    got = bootstrap.session_bootstrap(cur, actor="claude", record_event=False)
+    assert got.upkeep["ok"] is True and got.upkeep["due"] == 0
+
+    store.create_entity(
+        cur,
+        scope_id=scope_id,
+        type=MemoryType.TASK,
+        title="誰も点検していない作業",
+        content="続いている。",
+        source_type=SourceType.AGENT,
+        created_by="mashu-worker",
+        actor="mashu-worker",
+        adopt=True,
+    )
+    got = bootstrap.session_bootstrap(cur, actor="claude", record_event=False)
+    assert got.upkeep["due"] == 1 and got.upkeep["ok"] is False
+    assert "mashu stale" in got.upkeep["warning"]
+
+
+def test_what_is_due_costs_the_opening_nothing_it_did_not_already_cost(cur, scope_id):
+    """21.2 keeps the opening a fixed cost, and a count is not a payload."""
+    before = bootstrap.session_bootstrap(cur, actor="claude", record_event=False).tokens
+    store.create_entity(
+        cur,
+        scope_id=scope_id,
+        type=MemoryType.TASK,
+        title="点検期日の来た作業",
+        content="続いている。",
+        source_type=SourceType.AGENT,
+        created_by="mashu-worker",
+        actor="mashu-worker",
+        adopt=True,
+    )
+    after = bootstrap.session_bootstrap(cur, actor="claude", record_event=False)
+    assert after.upkeep["due"] == 1
+    assert after.tokens == before, "a pull-only memory is counted, never pushed"

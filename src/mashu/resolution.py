@@ -217,3 +217,77 @@ def look_alikes(
         if len(near) < limit:
             near.append(row)
     return out
+
+
+def adopted_pairs(cur: psycopg.Cursor, *, floor: float | None = None) -> list[dict[str, Any]]:
+    """Look-alikes among what the store already holds as true (20, 30 段 B).
+
+    The check in section 20 runs when a proposal is written and is spent by the
+    time anybody reads it: review shows one proposal at a time, and telling it
+    apart from two hundred others is not something a reader can do from memory.
+    Whatever slips through is then adopted and never measured again. Ten of
+    seventy-seven memories in one scope of the real store had a look-alike
+    sitting beside them, and nothing in the system was in a position to say so.
+
+    Answers in pairs rather than per memory, because the decision is about the
+    two together: either they are one concept and one of them should be folded
+    into the other, or they are two and saying so should stop them coming back.
+    Ordered by similarity, so the most alike is read first.
+    """
+    cur.execute(_ADOPTED_SQL)
+    by_scope: dict[UUID, list[UUID]] = {}
+    held: dict[UUID, dict[str, Any]] = {}
+    for row in cur.fetchall():
+        by_scope.setdefault(row["scope_id"], []).append(row["memory_id"])
+        held[row["memory_id"]] = row
+
+    apart = _told_apart(cur)
+    seen: set[frozenset[UUID]] = set()
+    pairs: list[dict[str, Any]] = []
+    for scope_id, ids in by_scope.items():
+        found = look_alikes(cur, scope_id=scope_id, memory_ids=ids, floor=floor)
+        for memory_id, near in found.items():
+            for other in near:
+                key = frozenset((memory_id, other["memory_id"]))
+                # The other side may not be adopted — look_alikes reads the
+                # whole scope — and a pair whose other half is a candidate is
+                # review's business rather than the sweep's.
+                if len(key) < 2 or key in seen or key in apart:
+                    continue
+                if other["memory_id"] not in held:
+                    continue
+                seen.add(key)
+                pairs.append(
+                    {
+                        "scope_name": held[memory_id]["scope_name"],
+                        "similarity": other["similarity"],
+                        "same_title": other["same_title"],
+                        "left": held[memory_id],
+                        "right": held[other["memory_id"]],
+                    }
+                )
+    pairs.sort(key=lambda pair: (not pair["same_title"], -(pair["similarity"] or 0)))
+    return pairs
+
+
+def _told_apart(cur: psycopg.Cursor) -> set[frozenset[UUID]]:
+    """Pairs a person has already examined and found to be two things."""
+    cur.execute(
+        """
+        SELECT memory_id, (detail ->> 'other')::uuid AS other
+        FROM event_log
+        WHERE event_type = 'told_apart' AND detail ? 'other'
+        """
+    )
+    return {frozenset((row["memory_id"], row["other"])) for row in cur.fetchall()}
+
+
+_ADOPTED_SQL = """
+SELECT e.memory_id, e.scope_id, e.type, e.title, s.name AS scope_name,
+       e.active_version AS version_id, coalesce(v.directive, v.content) AS content
+FROM memory_entity e
+JOIN memory_version v ON v.version_id = e.active_version
+JOIN scope s ON s.scope_id = e.scope_id
+WHERE e.status = 'active' AND s.status = 'active'
+ORDER BY s.name, e.title
+"""

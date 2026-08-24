@@ -172,6 +172,7 @@ class EventType(StrEnum):
     VERSION_CREATED = "version_created"
     STATUS_CHANGED = "status_changed"
     STILL_STANDS = "still_stands"
+    TOLD_APART = "told_apart"
     ACTIVE_SWITCHED = "active_switched"
     EVIDENCE_RECORDED = "evidence_recorded"
     CONTEXT_RECORDED = "context_recorded"
