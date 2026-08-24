@@ -152,6 +152,11 @@ class Plan:
     mode: str = "log"
     covered: int = 0
     unread: int = 0
+    #: The rows the scratch came from, and how they were found. Which of the
+    #: two ways matters: an id match means the CLI never rotated the session,
+    #: and a place match means it did and the fallback carried the run.
+    scratch_from: list = field(default_factory=list)
+    found_by: str = "none"
 
 
 @dataclass
@@ -210,7 +215,7 @@ def prepare(cur: psycopg.Cursor, run: dict[str, Any], *, dry_run: bool = False) 
     if checkpoint and not remaining:
         return _skip(cur, run_id, f"nothing new since turn {checkpoint}")
 
-    scratch_items = _scratch(cur, run)
+    scratch_items, scratch_from, found_by = _scratch(cur, run, session)
     turns, more, mode = _reading(session, remaining, scratch_items)
 
     # Only on the first pass. A session already judged worth reading must not
@@ -230,7 +235,7 @@ def prepare(cur: psycopg.Cursor, run: dict[str, Any], *, dry_run: bool = False) 
     spent = runs.spent_today(cur)
     if spent + estimated > runs.DAILY_INPUT_BUDGET:
         note = f"daily input budget reached ({spent} spent, this one needs about {estimated})"
-        runs.defer(cur, run_id=run_id, until_hours=24, note=note)
+        runs.defer(cur, run_id=run_id, note=note)
         return Outcome(run_id, "deferred", note)
 
     if dry_run:
@@ -256,6 +261,8 @@ def prepare(cur: psycopg.Cursor, run: dict[str, Any], *, dry_run: bool = False) 
         mode=mode,
         covered=len(turns),
         unread=len(remaining),
+        scratch_from=scratch_from,
+        found_by=found_by,
     )
 
 
@@ -305,7 +312,7 @@ def land(cur: psycopg.Cursor, plan: Plan, answer: str, *, extractor: extract.Ext
         outcome.note = f"{_note(outcome, result, plan)}; read to turn {read_to} of {plan.records}"
         return outcome
 
-    _clear_scratch(cur, run)
+    _clear_scratch(cur, plan.scratch_from)
     runs.succeeded(
         cur,
         run_id=run_id,
@@ -327,6 +334,7 @@ def land(cur: psycopg.Cursor, plan: Plan, answer: str, *, extractor: extract.Ext
             "reading": plan.mode,
             "turns_read": plan.covered,
             "turns_unread": plan.unread,
+            "scratch_found_by": plan.found_by,
         },
     )
     outcome.note = _note(outcome, result, plan)
@@ -506,22 +514,69 @@ def _session(cur: psycopg.Cursor, run: dict[str, Any]) -> dict[str, Any]:
     return cur.fetchone()
 
 
-def _scratch(cur: psycopg.Cursor, run: dict[str, Any]) -> list[dict[str, Any]]:
-    """What the session itself put down, if it was talking to the MCP server."""
+def _scratch(cur: psycopg.Cursor, run: dict[str, Any], session) -> tuple[list, list, str]:
+    """What this session put down, and which rows it came from (0020).
+
+    By id where the id still holds. It often does not: the MCP server reads its
+    session id from the environment it started in, and a CLI issues a new one
+    when a conversation is compacted or resumed without restarting the server,
+    so from that moment the notes are written under the previous id while the
+    transcript being extracted carries the current one. Nothing in the
+    transcript joins the two, and the sessions this happens to are the long
+    ones — which are exactly the ones worth not reading in full.
+
+    So by place and time when the id misses. A session was in a directory and
+    its notes carry the moment each was written; the transcript names the same
+    directory and covers a stretch of clock. Two sessions in one directory at
+    once will each see the other's notes, which costs a few extra turns read
+    and a stray line in the prompt. The alternative was missing every compacted
+    session in silence.
+    """
     cur.execute(
-        "SELECT scratch FROM agent_session WHERE source_cli = %s AND external_session_id = %s",
+        "SELECT session_id, scratch FROM agent_session "
+        "WHERE source_cli = %s AND external_session_id = %s",
         (run["source_cli"], run["external_session_id"]),
     )
     row = cur.fetchone()
-    return (row or {}).get("scratch") or []
+    if row and row["scratch"]:
+        return row["scratch"], [row["session_id"]], "id"
 
+    cwd = run.get("cwd") or session.cwd
+    moments = [turn.at for turn in session.turns if turn.at]
+    if not cwd or not moments:
+        return [], [], "none"
+    first, last = min(moments), max(moments)
 
-def _clear_scratch(cur: psycopg.Cursor, run: dict[str, Any]) -> None:
-    """Only after the extraction succeeded (25.1); the retry needs its input."""
     cur.execute(
-        "UPDATE agent_session SET scratch = NULL "
-        "WHERE source_cli = %s AND external_session_id = %s",
-        (run["source_cli"], run["external_session_id"]),
+        "SELECT session_id, scratch FROM agent_session "
+        "WHERE cwd = %s AND coalesce(jsonb_array_length(scratch), 0) > 0",
+        (cwd,),
+    )
+    items: list = []
+    sources: list = []
+    for other in cur.fetchall():
+        within = [
+            item
+            for item in other["scratch"]
+            if (at := _moment(item.get("created_at"))) is not None and first <= at <= last
+        ]
+        if within:
+            items += within
+            sources.append(other["session_id"])
+    return items, sources, ("place" if items else "none")
+
+
+def _clear_scratch(cur: psycopg.Cursor, session_ids: list) -> None:
+    """Only after the extraction succeeded (25.1); the retry needs its input.
+
+    Clears the rows the notes actually came from rather than the row this
+    transcript's id names, because after a compaction those are not the same
+    row and clearing the wrong one leaves the notes to be read again forever.
+    """
+    if not session_ids:
+        return
+    cur.execute(
+        "UPDATE agent_session SET scratch = NULL WHERE session_id = ANY(%s)", (session_ids,)
     )
 
 

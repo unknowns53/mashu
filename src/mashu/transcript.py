@@ -55,9 +55,12 @@ RESULT_LIMIT = 200
 #: log is a worse trade than a few duplicated lines.
 FOLD_MIN_CHARS = 40
 
-#: How much of a repeated turn its place-holder echoes. Enough to see what is
-#: being repeated without paying for it again.
-FOLD_ECHO = 24
+#: How much of a repeated turn its place-holder echoes. Not zero: folding is
+#: decided over the session, so the body a place-holder stands for may be in a
+#: window this call did not read, and without any handle at all the reader has
+#: nothing. Not long either — measured over a real session, 24 characters cost
+#: 13% of the whole rendered log to say what 12 says.
+FOLD_ECHO = 12
 
 CLIS = ("claude", "codex")
 

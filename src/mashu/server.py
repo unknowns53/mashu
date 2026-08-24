@@ -55,6 +55,11 @@ ACTOR_ENV_VAR = "MASHU_AGENT"
 #:
 #: The CLIs already export this; MASHU_EXTERNAL_SESSION_ID overrides for
 #: anything that does not.
+#:
+#: It is read once, at startup, because that is the only time it is offered,
+#: and it goes stale: a CLI hands out a new id when a conversation is compacted
+#: or resumed, and this process is not restarted with it. So the id is written
+#: down but not relied on alone — see the cwd, which is why 0020 exists.
 SESSION_ENV_VARS = (
     "MASHU_EXTERNAL_SESSION_ID",
     "CLAUDE_CODE_SESSION_ID",
@@ -93,6 +98,12 @@ def session(cur: psycopg.Cursor) -> UUID:
     so that an agent which skipped the bootstrap still has its proposals
     bundled. Whether the bootstrap happened is a separate question, and the
     event log is where it is answered.
+
+    The working directory is recorded beside the id because the id is the part
+    that goes stale. A conversation that is compacted keeps this process and
+    gets a new id, so what is written here stops matching the transcript that
+    will be extracted; the directory does not move, and the scratch items carry
+    their own moments, which is enough to find them again (0020).
     """
     global _session_id
     if _session_id is not None:
@@ -107,18 +118,18 @@ def session(cur: psycopg.Cursor) -> UUID:
         cli, external_id = outside
         cur.execute(
             """
-            INSERT INTO agent_session (agent, source_cli, external_session_id)
-            VALUES (%s, %s, %s)
+            INSERT INTO agent_session (agent, source_cli, external_session_id, cwd)
+            VALUES (%s, %s, %s, %s)
             ON CONFLICT (source_cli, external_session_id) WHERE external_session_id IS NOT NULL
-            DO UPDATE SET agent = EXCLUDED.agent
+            DO UPDATE SET agent = EXCLUDED.agent, cwd = EXCLUDED.cwd
             RETURNING session_id
             """,
-            (actor(), cli, external_id),
+            (actor(), cli, external_id, os.getcwd()),
         )
     else:
         cur.execute(
-            "INSERT INTO agent_session (agent) VALUES (%s) RETURNING session_id",
-            (actor(),),
+            "INSERT INTO agent_session (agent, cwd) VALUES (%s, %s) RETURNING session_id",
+            (actor(), os.getcwd()),
         )
     _session_id = cur.fetchone()["session_id"]
     return _session_id

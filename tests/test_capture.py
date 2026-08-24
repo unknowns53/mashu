@@ -1262,3 +1262,75 @@ def test_the_ledger_says_which_reading_ran(cur, tmp_path, queued, route):
     detail = cur.fetchone()["detail"]
     assert detail["reading"] == "scratch"
     assert detail["turns_read"] < detail["turns_unread"]
+
+
+def test_a_budget_deferral_waits_for_the_budget_and_not_for_a_clock(
+    cur, tmp_path, queued, route, monkeypatch
+):
+    """A fixed twenty-four hours looks equivalent to the reset and is not.
+
+    The allowance frees at midnight while a run deferred in the afternoon stays
+    blocked until the same time tomorrow, so the one nightly pass in between
+    finds it shut and it waits an extra whole day. Sixty transcripts deferred
+    that way do not drain.
+    """
+    monkeypatch.setattr(runs, "DAILY_INPUT_BUDGET", 1)
+    run = queued(write_claude(tmp_path))
+    worker.process(cur, run, extractor=extract.StubExtractor(answer()))
+
+    cur.execute(
+        "SELECT next_retry_at = date_trunc('day', now()) + interval '1 day' AS at_reset "
+        "FROM extraction_run WHERE run_id = %s",
+        (run["run_id"],),
+    )
+    assert cur.fetchone()["at_reset"]
+
+
+def test_scratch_survives_the_session_id_being_rotated(cur, tmp_path, queued, route):
+    """The id the MCP server holds goes stale and the notes do not move (0020).
+
+    A server reads its session id from the environment it started in, and a CLI
+    issues a new one when a conversation is compacted without restarting the
+    server. From then on the notes are written under the old id while the
+    transcript carries the new one, and nothing in the transcript joins them.
+    The directory and the clock do.
+    """
+    turns = [_timed(f"{n:02d} 番目の長い話 " + "本文 " * 30, n) for n in range(40)]
+    cur.execute(
+        "INSERT INTO agent_session (agent, source_cli, external_session_id, cwd, scratch) "
+        "VALUES ('claude', 'claude', 'the-id-before-the-compaction', '/work/proj', %s)",
+        (json.dumps([_flag(20, "圧縮前に書き留めたこと")], ensure_ascii=False),),
+    )
+    stub = extract.StubExtractor(answer())
+    outcome = worker.process(cur, queued(write_claude(tmp_path, turns)), extractor=stub)
+
+    assert "圧縮前に書き留めたこと" in stub.prompts[0]
+    assert "read around" in outcome.note
+
+    cur.execute(
+        "SELECT scratch FROM agent_session "
+        "WHERE external_session_id = 'the-id-before-the-compaction'"
+    )
+    assert cur.fetchone()["scratch"] is None
+
+
+def test_notes_from_another_stretch_of_the_same_directory_are_left_alone(
+    cur, tmp_path, queued, route
+):
+    """Place alone would sweep up every session that ever worked here."""
+    turns = [_timed(f"{n:02d} 番目の長い話 " + "本文 " * 30, n) for n in range(40)]
+    cur.execute(
+        "INSERT INTO agent_session (agent, source_cli, external_session_id, cwd, scratch) "
+        "VALUES ('claude', 'claude', 'last-week', '/work/proj', %s)",
+        (
+            json.dumps(
+                [{"kind": "note", "content": "先週の話", "created_at": "2026-08-01T09:00:00Z"}]
+            ),
+        ),
+    )
+    stub = extract.StubExtractor(answer())
+    worker.process(cur, queued(write_claude(tmp_path, turns)), extractor=stub)
+
+    assert "先週の話" not in stub.prompts[0]
+    cur.execute("SELECT scratch FROM agent_session WHERE external_session_id = 'last-week'")
+    assert cur.fetchone()["scratch"] is not None

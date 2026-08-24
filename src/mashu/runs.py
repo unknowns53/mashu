@@ -200,22 +200,34 @@ def release(cur: psycopg.Cursor, *, cwd_prefix: str | None = None) -> int:
     return cur.rowcount
 
 
-def defer(cur: psycopg.Cursor, *, run_id: UUID, until_hours: int, note: str) -> dict[str, Any]:
+def defer(
+    cur: psycopg.Cursor, *, run_id: UUID, note: str, until_hours: int | None = None
+) -> dict[str, Any]:
     """Put a run back without spending one of its attempts.
 
     Deferral is not failure. The attempt counter exists to stop a broken
     transcript costing forever, and a run that never reached the model has not
     told us anything about whether it is broken.
+
+    Leaving out until_hours means the next budget reset, and that is the right
+    answer whenever the budget is what stopped the run. A fixed twenty-four
+    hours looks equivalent and is not: the allowance frees at midnight while
+    the run stays blocked until the same clock time tomorrow, so the one
+    nightly pass in between finds it still shut and the run waits an extra
+    whole day. Sixty transcripts deferred that way do not drain.
     """
     cur.execute(
         """
         UPDATE extraction_run
-        SET state = 'retrying', attempts = greatest(attempts - 1, 0), note = %s,
-            next_retry_at = now() + make_interval(hours => %s)
-        WHERE run_id = %s
+        SET state = 'retrying', attempts = greatest(attempts - 1, 0), note = %(note)s,
+            next_retry_at = CASE
+                WHEN %(hours)s::int IS NULL THEN date_trunc('day', now()) + interval '1 day'
+                ELSE now() + make_interval(hours => %(hours)s::int)
+            END
+        WHERE run_id = %(run_id)s
         RETURNING *
         """,
-        (note, until_hours, run_id),
+        {"note": note, "hours": until_hours, "run_id": run_id},
     )
     row = cur.fetchone()
     if row is None:
