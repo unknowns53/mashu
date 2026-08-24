@@ -232,8 +232,13 @@ def prepare(cur: psycopg.Cursor, run: dict[str, Any], *, dry_run: bool = False) 
     scratch_items, scratch_from, found_by = _scratch(cur, run, session)
     # Only a reading that took its windows from the front covers everything up
     # to the mark, so only that one may fold a repeat against what it carried.
-    sent = session.sent(checkpoint) if run.get("reading") != "scratch" else []
-    turns, more, mode = _reading(session, remaining, scratch_items, sent)
+    carried = session.sent(checkpoint) if run.get("reading") != "scratch" else []
+    # What the reading folded against comes back out of it, rather than being
+    # worked out a second time here. The prompt has to be rendered with exactly
+    # the set the window was priced on: two derivations of the same thing agree
+    # until one of them is edited, and then the log quietly stops matching what
+    # the budget was told it would cost.
+    turns, more, mode, sent = _reading(session, remaining, scratch_items, carried)
 
     # Only on the first pass. A session already judged worth reading must not
     # be abandoned half way through because its second window happens to be
@@ -412,7 +417,7 @@ def process(
 
 def _reading(
     session, turns: list, scratch_items: list[dict[str, Any]], sent: list[str] | None = None
-) -> tuple[list, bool, str]:
+) -> tuple[list, bool, str, list]:
     """Which turns this call reads, and under which of the two contracts (16.3).
 
     Section 16.3 named scratch the first input and the log the fallback, and
@@ -440,8 +445,8 @@ def _reading(
         # ever saw, and a place-holder standing for a body nobody read is worse
         # than the duplicate it saved.
         chosen, more = _window(marked, sent=None)
-        return chosen, more, "scratch"
-    return (*_window(turns, sent=sent), "log")
+        return chosen, more, "scratch", []
+    return (*_window(turns, sent=sent), "log", sent or [])
 
 
 def _flagged(turns: list, scratch_items: list[dict[str, Any]]) -> list:
