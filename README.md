@@ -190,7 +190,9 @@ uv run mashu route --add /path/to/project --scope <scope name>
 uv run mashu work --limit 4
 ```
 
-Model を呼ぶ部分は差し替えできる。`MASHU_EXTRACTOR` に `api`（`ANTHROPIC_API_KEY` が要る）、`cli:claude`、`cli:codex`、`auto`（既定）を渡す。仕様の第一選択は専用予算の小型モデルだが、鍵が無ければ対話 CLI の subprocess へ落ちる。
+Model を呼ぶ部分は差し替えできる。`MASHU_EXTRACTOR` に `api`（`ANTHROPIC_API_KEY` が要る）、`cli:codex`、`cli:claude`、`auto`（既定）を渡す。`auto` は鍵があれば API、無ければ CLI へ落ち、**CLI のうちは codex を先に試す**。
+
+どちらの CLI かは費用の話であると同時に、勘定がどこに乗るかの話でもある。仕様が専用予算を第一選択にした理由は「対話用の枠と抽出費用が混ざると日次の上限を中央で管理できない」ことであり、このリポジトリを触っている CLI とは別の CLI へ回せば、鍵が無くてもその分離は得られる。`MASHU_EXTRACTOR_MODEL` で個別に指定でき、省略時の既定は CLI ごとに違う（codex なら `gpt-5.6-luna`、claude なら `claude-haiku-4-5`）。
 
 ### 動かしつづける
 

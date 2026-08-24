@@ -50,7 +50,18 @@ DEFAULT_WORKDIR = "~/.mashu/extractor"
 
 EXTRACTOR_ENV_VAR = "MASHU_EXTRACTOR"
 MODEL_ENV_VAR = "MASHU_EXTRACTOR_MODEL"
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+
+#: The API extractor talks to Anthropic, so its default is an Anthropic model.
+DEFAULT_MODEL = "claude-haiku-4-5"
+
+#: Each CLI answers for a different provider, so the default has to be per CLI.
+#: One shared default meant asking codex for an Anthropic model, which is not a
+#: fallback that degrades — it is one that does not run.
+DEFAULT_CLI_MODELS = {
+    "claude": DEFAULT_MODEL,
+    "codex": "gpt-5.6-luna",
+}
+
 DEFAULT_TIMEOUT = 600
 
 RETIREMENT_TARGETS = ("completed", "disproven", "dormant")
@@ -368,10 +379,14 @@ def workdir() -> pathlib.Path:
 class CLIExtractor:
     """Run the extraction through a conversational CLI already on the machine.
 
-    The specification's fallback, and the one that needs no key. What it costs
-    comes out of the same allowance as the conversations, which is exactly the
-    accounting the first choice exists to avoid, so it is a way to start rather
-    than a way to run.
+    The specification's fallback, and the one that needs no key.
+
+    Which CLI matters more than the section's original wording allowed for. The
+    objection to running extraction through a conversational CLI was that its
+    cost lands on the same allowance as the conversations, so no daily ceiling
+    can be kept centrally. That objection is about *whose* allowance, not about
+    the shape of the call: a CLI billed to a different account keeps extraction
+    off the conversation's ledger, which is what the first choice was for.
 
     Hooks are off and the working directory is somewhere the sweeper does not
     walk. Without both, extraction produces a transcript that the next run
@@ -383,7 +398,9 @@ class CLIExtractor:
     ):
         self.cli = cli
         self.name = f"cli:{cli}"
-        self.model = model or os.environ.get(MODEL_ENV_VAR) or DEFAULT_MODEL
+        self.model = (
+            model or os.environ.get(MODEL_ENV_VAR) or DEFAULT_CLI_MODELS.get(cli, DEFAULT_MODEL)
+        )
         self.timeout = timeout
 
     def command(self, out: pathlib.Path | None = None) -> list[str]:
@@ -520,9 +537,17 @@ def get_extractor(spec: str | None = None) -> Extractor:
     """Build the extractor named by configuration.
 
     'auto' takes the specification's order: the separate allowance if it is
-    there, the conversational CLI if it is not. It never silently answers with
+    there, a conversational CLI if it is not. It never silently answers with
     nothing, because a worker that appears to run and files nothing is the
     silent failure the ledger exists to make impossible.
+
+    Among the CLIs, codex is tried first. Not because of what either model
+    costs — that moves — but because this repository is worked on through the
+    Claude CLI, so billing extraction to the other account is what keeps the
+    nightly run off the same ledger as the conversation that is watching it.
+    That separation is the whole reason 16.3 wanted a separate allowance, and
+    it is available here without a key. Set MASHU_EXTRACTOR to cli:claude to
+    put it back.
     """
     spec = (spec or os.environ.get(EXTRACTOR_ENV_VAR) or "auto").strip()
 
@@ -536,7 +561,7 @@ def get_extractor(spec: str | None = None) -> Extractor:
         api = APIExtractor()
         if api.available():
             return api
-        for cli in ("claude", "codex"):
+        for cli in ("codex", "claude"):
             candidate = CLIExtractor(cli)
             if candidate.available():
                 return candidate

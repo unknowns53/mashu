@@ -952,3 +952,49 @@ def test_a_held_run_is_closed_when_the_same_session_arrives_again(cur, tmp_path,
     cur.execute("SELECT state FROM extraction_run WHERE run_id = %s", (held["run_id"],))
     assert cur.fetchone()["state"] == "skipped"
     assert runs.health(cur)["held"] == 0
+
+
+# --------------------------------------------------------------------------
+# which extractor runs, and what model it asks for (16.3)
+# --------------------------------------------------------------------------
+def test_each_cli_defaults_to_a_model_its_own_provider_answers_for():
+    """One shared default asked codex for an Anthropic model.
+
+    That is not a fallback that degrades, it is one that does not run: the
+    whole point of keeping a second implementation is that the night still
+    files something when the first is unavailable.
+    """
+    assert extract.get_extractor("cli:codex").model == "gpt-5.6-luna"
+    assert extract.get_extractor("cli:claude").model.startswith("claude-")
+
+
+def test_the_model_can_still_be_named_for_either_cli(monkeypatch):
+    monkeypatch.setenv(extract.MODEL_ENV_VAR, "some-other-model")
+    assert extract.get_extractor("cli:codex").model == "some-other-model"
+    assert extract.get_extractor("cli:claude").model == "some-other-model"
+
+
+def test_auto_prefers_the_cli_that_is_not_billed_to_this_conversation(monkeypatch):
+    """16.3 wanted extraction off the allowance the conversation uses.
+
+    It asked for a separate budget and settled for a conversational CLI when
+    there was no key. Which CLI still decides whose ledger the night lands on,
+    and this repository is worked on through the Claude one.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(extract.CLIExtractor, "available", lambda self: True)
+    assert extract.get_extractor("auto").name == "cli:codex"
+
+
+def test_auto_still_answers_when_only_the_other_cli_is_there(monkeypatch):
+    """A worker that appears to run and files nothing is the silent failure."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(extract.CLIExtractor, "available", lambda self: self.cli == "claude")
+    assert extract.get_extractor("auto").name == "cli:claude"
+
+
+def test_auto_refuses_out_loud_when_nothing_can_run(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(extract.CLIExtractor, "available", lambda self: False)
+    with pytest.raises(extract.ExtractionError):
+        extract.get_extractor("auto")
