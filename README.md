@@ -115,6 +115,42 @@ uv run mashu admin migrate
 | `mashu bootstrap` | セッション開始時に渡す内容と token を表示 |
 | `mashu incident --cause <cause> --note <note>` | 事故を原因つきで記録。無引数で集計を表示 |
 
+### Review の進め方
+
+`mashu review` は束を開いて対話に入る。読むだけの操作と、決める操作を分けてある。
+
+```
+mashu admin queue                 待っている束の一覧
+mashu inspect --bundle <id>       束の中身を読む（何も変わらない）
+mashu review --bundle <id>        束を開いて決める。束を省くと最古の束
+```
+
+`review>` のプロンプトで打つもの:
+
+| 打つもの | 意味 |
+|---|---|
+| `all` | この束の未決を全部承認 |
+| `r N 理由` | N 番を却下。理由は必須 |
+| `e N` | N 番の本文をエディタで直し、自分の名義で承認 |
+| `s N 理由` | N 番を先送り。理由は必須 |
+| `q` | 何も決めずに抜ける |
+
+`;` で区切って一度に渡せる。`all` は他の指定と併せると「残り全部」の意味になるので、`r 3 古い; all` は 3 番だけ却下して残りを承認する。`--batch` に同じ文字列を渡せば対話なしで実行できる。
+
+先送りした項目は次の `review` に出てこない。`--all` で戻る。
+
+### Review を通さずに書く
+
+`remember` と `retire` は User 発話が出どころなので Auto Commit で反映される。仕様 17 節。
+
+```
+mashu remember <本文> --scope <名前> --type <型> --title <題>
+mashu remember <本文> --until 5d
+mashu retire <id> completed --reason <理由>
+```
+
+`--scope --type --title` は必須で、`--until` を付けたときだけ三つとも不要になる。`--until` で書いたものは Temporary Context になり、Review も退役も要らず期限で消える。仕様 25.2 節。`--kind` は既定が `fact` で、規律として書くなら `preference` を渡す。
+
 ### 機械が実行する操作
 
 次の 3 つを MCP 設定と launch agent から呼ぶ。

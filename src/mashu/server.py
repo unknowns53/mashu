@@ -318,11 +318,12 @@ def build_server() -> Any:
         A retired memory answers with its status and the reason it was retired,
         never with its content.
         """
-        with db.transaction() as cur:
-            try:
-                return _plain(_read_one(cur, UUID(memory_id)))
-            except MashuError as e:
-                return _failure(e)
+        try:
+            with db.transaction() as cur:
+                answer = _read_one(cur, UUID(memory_id))
+        except MashuError as e:
+            return _failure(e)
+        return _plain(answer)
 
     @server.tool()
     def scope_list() -> dict[str, Any]:
@@ -394,16 +395,17 @@ def build_server() -> Any:
         right to interrupt every future session are deliberately not the same
         right.
         """
+        try:
+            moment = datetime.fromisoformat(expires_at)
+        except ValueError:
+            return {
+                "ok": False,
+                "error": f"'{expires_at}' is not an ISO timestamp",
+            }
+        if moment.tzinfo is None:
+            moment = moment.astimezone()
+
         with db.transaction() as cur:
-            try:
-                moment = datetime.fromisoformat(expires_at)
-            except ValueError:
-                return {
-                    "ok": False,
-                    "error": f"'{expires_at}' is not an ISO timestamp",
-                }
-            if moment.tzinfo is None:
-                moment = moment.astimezone()
             row = context.put(
                 cur,
                 content=content,
@@ -455,8 +457,14 @@ def build_server() -> Any:
         does not make it user-stated, because a claim about who said it is
         exactly what an injected instruction would make.
         """
-        with db.transaction() as cur:
-            try:
+        # The transaction sits inside the try, not the other way round. A
+        # refusal has to leave the store as it found it, and some of them are
+        # raised after the proposal row is already written: the optimistic
+        # lock (24) fires when the row is applied as a candidate version.
+        # Catching that inside the block ends it cleanly and commits the row
+        # the caller was told had been refused.
+        try:
+            with db.transaction() as cur:
                 result = proposals.propose(
                     cur,
                     actor=actor(),
@@ -468,23 +476,23 @@ def build_server() -> Any:
                     allow_duplicate=allow_duplicate,
                     allow_similar=allow_similar,
                 )
-            except DuplicateProposalError as e:
-                return _failure(e, existing=e.existing)
-            except resolution.SimilarEntityError as e:
-                return _failure(e, candidates=e.candidates)
-            except MashuError as e:
-                return _failure(e)
+        except DuplicateProposalError as e:
+            return _failure(e, existing=e.existing)
+        except resolution.SimilarEntityError as e:
+            return _failure(e, candidates=e.candidates)
+        except MashuError as e:
+            return _failure(e)
 
-            return _plain(
-                {
-                    "ok": True,
-                    "proposal_id": result["proposal"]["proposal_id"],
-                    "memory_id": result["proposal"]["target_memory"],
-                    "version_id": result["proposal"]["applied_version"],
-                    "commit_line": str(result["ruling"].decision),
-                    "why": result["ruling"].reason,
-                }
-            )
+        return _plain(
+            {
+                "ok": True,
+                "proposal_id": result["proposal"]["proposal_id"],
+                "memory_id": result["proposal"]["target_memory"],
+                "version_id": result["proposal"]["applied_version"],
+                "commit_line": str(result["ruling"].decision),
+                "why": result["ruling"].reason,
+            }
+        )
 
     return server
 
