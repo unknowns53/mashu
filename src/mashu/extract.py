@@ -21,7 +21,6 @@ that could nominate its own gate would be writing the rules it is filed under.
 from __future__ import annotations
 
 import json
-import math
 import os
 import pathlib
 import re
@@ -517,7 +516,11 @@ class CLIExtractor:
         # it eats the allowance they need and the ceiling applies. codex is a
         # different account; the same reasoning that lets it be first choice is
         # what makes the ceiling meaningless for it.
-        self.budget = math.inf if cli == "codex" else float(runs.DAILY_INPUT_BUDGET)
+        # Every extractor is charged against the same day. A path exempted
+        # because its tokens are billed elsewhere still spends a quota
+        # somebody owns, and the ledger stops being able to say what a
+        # night cost the moment one of its readers is uncounted.
+        self.budget = float(runs.DAILY_INPUT_BUDGET)
 
     def command(self, out: pathlib.Path | None = None) -> list[str]:
         if self.cli == "claude":

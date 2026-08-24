@@ -133,6 +133,12 @@ class IncidentCause(StrEnum):
     BOOTSTRAP = "bootstrap"
     #: missed: the index was there and nothing went and looked (6.1).
     PULL = "pull"
+    #: missed: another source answered first, so nothing was asked (30.1).
+    #: Apart from pull because the repair is the opposite one. A pull miss
+    #: says the store was not consulted; this says it could not have been,
+    #: because a static file always in context already held an answer and
+    #: never declares itself out of date or out of scope.
+    PREEMPTION = "source_preemption"
     #: missed: it was never written down at all (16.3).
     CAPTURE = "capture"
     #: stale: a temporary context outlived its window (25.2).

@@ -280,15 +280,42 @@ def _fit(
     return trimmed
 
 
+#: What a pushed row costs beyond its own words.
+#:
+#: Measured against the real payload rather than reasoned about. A row goes out
+#: as JSON carrying three UUIDs, the key names around them, and the type and
+#: delivery fields, and none of that was being counted. The ceiling in 21.2 is
+#: an admission control that refuses a change putting the opening over budget,
+#: so a counter reading half the true cost does not merely misreport — it
+#: disables the invariant it exists to enforce. The store's own opening
+#: measured 3,208 token on the wire against a counter saying 1,549.
+ROW_OVERHEAD = 90
+
+#: The same for a scope in the index, which carries one UUID and three keys.
+INDEX_OVERHEAD = 40
+
+#: What rides along whatever else is pushed: capture, review, upkeep, the
+#: standing note, and the envelope. Fixed, so it is added once.
+ENVELOPE = 190
+
+
 def _total_tokens(
     scope_index: list[dict[str, Any]],
     *groups: list[dict[str, Any]],
 ) -> int:
-    """What the payload costs as it currently stands."""
-    cost = sum(estimate_tokens(f"{row['name']} {row['summary']}") for row in scope_index)
+    """What the payload costs as it is actually handed over.
+
+    Counted with the scaffolding, not only the words. See ROW_OVERHEAD.
+    """
+    cost = ENVELOPE
+    cost += sum(
+        estimate_tokens(f"{row['name']} {row['summary']}") + INDEX_OVERHEAD for row in scope_index
+    )
     for group in groups:
         for row in group:
-            cost += estimate_tokens(row["title"]) + estimate_tokens(row["content"] or "")
+            cost += estimate_tokens(row["title"])
+            cost += estimate_tokens(row["content"] or "")
+            cost += ROW_OVERHEAD
     return cost
 
 

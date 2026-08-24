@@ -505,9 +505,20 @@ def test_the_sweep_can_answer_for_one_scope(cur, scope_id):
     assert mine in here and theirs not in here
 
 
-def test_upkeep_counts_what_is_due_and_says_where_to_go(cur, scope_id):
+def test_upkeep_warns_about_a_backlog_and_not_about_work_existing(cur, scope_id):
+    """A line that is lit by the ordinary condition of a project is not read.
+
+    task and state are due the day they are written, so `ok` read off the count
+    alone could never come back to true while any project had work open. 20.3
+    says it in the other screen's words: a screen that can never be finished
+    teaches its reader to skip it.
+    """
     assert metrics.upkeep(cur)["ok"] is True
-    _standing(cur, scope_id, type=MemoryType.TASK, title="放置されている作業")
+    memory_id = _standing(cur, scope_id, type=MemoryType.TASK, title="いま進んでいる作業")
+    got = metrics.upkeep(cur)
+    assert got["due"] == 1 and got["ok"] is True
+
+    _age(cur, memory_id, days=metrics.UPKEEP_STALE_DAYS + 1)
     got = metrics.upkeep(cur)
     assert got["due"] == 1 and got["ok"] is False
     assert "mashu stale" in got["warning"]

@@ -532,6 +532,16 @@ CHECK_INTERVAL_DAYS = {
 #: far from the last time a person decided anything about the memory.
 CHECK_CEILING_DAYS = 365
 
+#: How long something may sit on the sweep before the session opening says so.
+#:
+#: Not zero, and the reason is the one 20.3 states about the look-alike screen:
+#: a screen that can never be finished teaches its reader to skip it. task and
+#: state are due the moment they are written, so a scope holding one open task
+#: — the ordinary condition of any project — would light the warning for ever
+#: and it would stop being read. What the opening should carry is a backlog
+#: that has been ignored, not the existence of work in progress.
+UPKEEP_STALE_DAYS = 14
+
 #: Who counts as a person for the ceiling above. Everything else is an agent.
 #: The list rather than a flag on the event because the events are already
 #: written and carry only the actor.
@@ -625,14 +635,16 @@ def upkeep(cur: psycopg.Cursor) -> dict[str, Any]:
     """
     found = rot_prone(cur)
     overdue = [row["overdue_days"] for row in found if row["overdue_days"] is not None]
+    oldest = max(overdue) if overdue else 0
     return {
         "due": len(found),
-        "oldest_days": max(overdue) if overdue else 0,
-        "ok": not found,
+        "oldest_days": oldest,
+        "ok": oldest < UPKEEP_STALE_DAYS,
         "warning": (
             None
-            if not found
-            else f"{len(found)} standing memory(s) are due to be checked — 'mashu stale'"
+            if oldest < UPKEEP_STALE_DAYS
+            else f"{len(found)} standing memory(s) are due to be checked, "
+            f"the oldest for {oldest} day(s) — 'mashu stale'"
         ),
     }
 

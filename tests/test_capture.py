@@ -447,8 +447,15 @@ def test_the_daily_budget_does_not_bind_an_extractor_billed_somewhere_else(
     assert runs.spent_today(cur) > 0
 
 
-def test_which_cli_extraction_runs_through_decides_whether_the_ceiling_applies():
-    assert extract.CLIExtractor("codex").budget == math.inf
+def test_the_daily_ceiling_applies_to_whoever_answers():
+    """A reader exempted from the ledger is a night the ledger cannot price.
+
+    The codex path used to carry an infinite budget on the reasoning that its
+    tokens are billed on a subscription rather than per call. What that bought
+    was a day on which 2.1M token were read against a stated ceiling of 400k,
+    with nothing in the ledger able to say so.
+    """
+    assert extract.CLIExtractor("codex").budget == runs.DAILY_INPUT_BUDGET
     assert extract.CLIExtractor("claude").budget == runs.DAILY_INPUT_BUDGET
     assert extract.APIExtractor().budget == runs.DAILY_INPUT_BUDGET
 

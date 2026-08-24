@@ -226,13 +226,23 @@ def backlog(cur: psycopg.Cursor) -> dict[str, Any]:
     Candidates are counted but do not raise the warning on their own. They are
     already retrievable, tagged unreviewed (21.1), so leaving them costs
     precision rather than access.
+
+    That last paragraph was the intent and not the behaviour: the age test ran
+    over every pending row, so an old candidate raised the warning the sentence
+    above says it does not. Section 17 made review optional, and a queue that
+    goes red for exercising the option is a queue nobody can leave alone. The
+    age is now read off the blocked rows, which are the ones that genuinely
+    wait on a person.
     """
     cur.execute(
         """
         SELECT
           count(*) AS waiting,
           count(*) FILTER (WHERE blocked.proposal_id IS NOT NULL) AS blocking,
-          EXTRACT(EPOCH FROM now() - min(p.created_at)) / 86400 AS oldest_days
+          EXTRACT(
+              EPOCH FROM now() - min(p.created_at)
+              FILTER (WHERE blocked.proposal_id IS NOT NULL)
+          ) / 86400 AS oldest_days
         FROM proposal p
         LEFT JOIN LATERAL (
             SELECT e.proposal_id FROM event_log e
@@ -345,6 +355,15 @@ def propose(
     # published slowly rather than not at all. Review will not catch it: review
     # reads for whether a claim is true.
     verdict = redact.check(payload.get("title"), payload.get("content"), payload.get("directive"))
+    if verdict.unchecked:
+        # 24 asks for the check to report that it could not run, and reading
+        # only `allowed` turned "no pattern file" into "nothing to redact".
+        # The file is gitignored, so the state that silently passes everything
+        # is the state of any fresh clone.
+        raise ProposalError(
+            "the redaction patterns could not be read, so nothing can be checked; "
+            f"write {redact.PATTERNS_FILE} or set {redact.PATTERNS_ENV_VAR}"
+        )
     if not verdict.allowed:
         raise ProposalError(
             f"this content {verdict.reason()} and may not enter the store. "

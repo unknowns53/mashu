@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mashu import bootstrap, proposals, store
+from mashu import bootstrap, metrics, proposals, store
 from mashu.errors import DeliveryError, NotFoundError
 from mashu.models import Delivery, EventType, MemoryType, ProposalOperation, SourceType
 
@@ -206,7 +206,7 @@ def test_the_scoped_material_gives_up_its_body_before_the_startup_pack(cur, scop
     push(MemoryType.PREFERENCE, "reply language", "answer in Japanese " * 40)
     state, _ = write(MemoryType.STATE, "where the analysis stands", "the third run " * 40)
 
-    got = bootstrap.session_bootstrap(cur, actor="claude", scopes=[scope_id], budget=250)
+    got = bootstrap.session_bootstrap(cur, actor="claude", scopes=[scope_id], budget=650)
     assert state in got.trimmed
     assert all(row["memory_id"] not in got.trimmed for row in got.startup)
 
@@ -506,7 +506,18 @@ def test_a_session_is_told_what_is_due_the_way_it_is_told_about_capture(cur, sco
         adopt=True,
     )
     got = bootstrap.session_bootstrap(cur, actor="claude", record_event=False)
-    assert got.upkeep["due"] == 1 and got.upkeep["ok"] is False
+    assert got.upkeep["due"] == 1, "it is counted the moment it is written"
+    assert got.upkeep["ok"] is True, "and an open task is not a backlog"
+
+    # It becomes a warning by being ignored, not by existing. A scope holding
+    # one open task is the ordinary condition of any project, and a line lit by
+    # that is a line nobody reads (20.3).
+    cur.execute(
+        "UPDATE memory_version SET created_at = now() - make_interval(days => %s)",
+        (metrics.UPKEEP_STALE_DAYS + 1,),
+    )
+    got = bootstrap.session_bootstrap(cur, actor="claude", record_event=False)
+    assert got.upkeep["ok"] is False
     assert "mashu stale" in got.upkeep["warning"]
 
 
