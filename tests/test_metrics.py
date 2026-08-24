@@ -7,7 +7,7 @@ import uuid
 import psycopg.types.json
 
 from mashu import metrics, proposals, store
-from mashu.models import Delivery, MemoryType, ProposalOperation, SourceType
+from mashu.models import Delivery, MemoryType, ProposalOperation, SourceType, VersionStatus
 
 
 def _seed(cur, scope_id, *, adopt):
@@ -234,3 +234,74 @@ def test_the_worker_getting_there_first_counts_as_recovered(cur, scope_id):
     got = metrics.retirement_eval(cur)
     assert got["recovered"] >= 1
     assert got["recall"] == 1.0
+
+
+def _standing(cur, scope_id, *, type, title, content="本文"):
+    memory_id, _ = store.create_entity(
+        cur,
+        scope_id=scope_id,
+        type=type,
+        title=title,
+        content=content,
+        source_type=SourceType.AGENT,
+        created_by="mashu-worker",
+        actor="mashu-worker",
+        adopt=True,
+    )
+    return memory_id
+
+
+def test_a_standing_task_is_swept_whatever_it_says(cur, scope_id):
+    """13.1 puts only the indefinite kind in Memory; a task from a transcript is not."""
+    memory_id = _standing(cur, scope_id, type=MemoryType.TASK, title="測定器の配線欠陥を直す")
+    found = {row["memory_id"]: row for row in metrics.rot_prone(cur)}
+    assert memory_id in found
+    assert "a task stands until it is finished" in found[memory_id]["why"]
+
+
+def test_a_standing_state_is_swept_because_the_next_one_ends_it(cur, scope_id):
+    memory_id = _standing(cur, scope_id, type=MemoryType.STATE, title="いまの現在地")
+    found = {row["memory_id"]: row for row in metrics.rot_prone(cur)}
+    assert memory_id in found
+    assert "only until the next one" in found[memory_id]["why"]
+
+
+def test_a_task_whose_title_says_it_is_over_is_read_as_that(cur, scope_id):
+    """A completion recorded as something still to do is the shape worth naming."""
+    memory_id = _standing(cur, scope_id, type=MemoryType.TASK, title="Phase 3 を完了した")
+    found = {row["memory_id"]: row for row in metrics.rot_prone(cur)}
+    assert "the title says this is finished" in found[memory_id]["why"]
+
+
+def test_an_ordinary_standing_rule_is_left_off_the_sweep(cur, scope_id):
+    """A list that flags everything standing is a list of everything standing."""
+    memory_id = _standing(
+        cur,
+        scope_id,
+        type=MemoryType.PREFERENCE,
+        title="測ってから値を置く",
+        content="推測で置いた値は下流へ渡さない。",
+    )
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]
+
+
+def test_what_is_no_longer_standing_is_not_swept_again(cur, scope_id):
+    """Retiring is what takes something off this list, through the path a person uses."""
+    memory_id = _standing(cur, scope_id, type=MemoryType.TASK, title="もう終わった作業")
+    entity = store.get_entity(cur, memory_id)
+    # a completion the user states is auto committed by the gate (17), which is
+    # the path 'mashu retire' takes and so the one this has to be measured on
+    proposals.propose(
+        cur,
+        actor="user",
+        operation=ProposalOperation.CHANGE_STATUS,
+        payload={
+            "version_id": str(entity["active_version"]),
+            "status": str(VersionStatus.COMPLETED),
+            "reason": "終わったため",
+            "source_type": str(SourceType.USER),
+        },
+        target_memory=memory_id,
+    )
+
+    assert memory_id not in [row["memory_id"] for row in metrics.rot_prone(cur)]

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mashu import cli, context, proposals, routing, runs, store
+from mashu import cli, context, metrics, proposals, routing, runs, store
 from mashu.db import transaction
 from mashu.errors import MashuError
 from mashu.models import MemoryType, ProposalOperation, SourceType
@@ -1497,3 +1497,84 @@ def test_the_editor_is_one_a_person_can_get_out_of(monkeypatch):
     editor, way = cli._editor()
     assert editor == "/opt/homebrew/bin/micro"
     assert "^Q" in way, "and it still says how to leave the one that was chosen"
+
+
+@pytest.fixture
+def sweeping(test_dsn, monkeypatch, capsys):
+    """Run 'mashu stale' as if a person were pressing keys at it."""
+
+    def _sweep(keys, typed=()):
+        terminal = _Terminal(keys)
+        answers = list(typed)
+        monkeypatch.setattr(cli.sys, "stdin", terminal)
+        monkeypatch.setattr(cli, "_getkey", terminal.key)
+        monkeypatch.setattr("builtins.input", lambda *_: answers.pop(0) if answers else "")
+        code = cli.main(["--dsn", test_dsn, "stale"])
+        return code, capsys.readouterr().out
+
+    return _sweep
+
+
+def _standing_task(test_dsn, scope_id, title):
+    with transaction(test_dsn) as cur:
+        memory_id, _ = store.create_entity(
+            cur,
+            scope_id=scope_id,
+            type=MemoryType.TASK,
+            title=title,
+            content=f"{title}の本文",
+            source_type=SourceType.AGENT,
+            created_by="mashu-worker",
+            actor="mashu-worker",
+            adopt=True,
+        )
+    return memory_id
+
+
+def _place_in_sweep(test_dsn, memory_id) -> int:
+    with transaction(test_dsn) as cur:
+        return [row["memory_id"] for row in metrics.rot_prone(cur)].index(memory_id)
+
+
+def test_the_sweep_retires_what_is_finished_with_one_key(test_dsn, sweeping, committed_scope):
+    """13.1 keeps only the indefinite kind in Memory; nothing else expires on its own."""
+    memory_id = _standing_task(test_dsn, committed_scope, f"もう終わった作業 {uuid.uuid4()}")
+
+    keys = ["down"] * _place_in_sweep(test_dsn, memory_id) + ["c", "q"]
+    code, out = sweeping(keys)
+    assert code == 0
+    assert "1 retired" in out
+
+    with transaction(test_dsn) as cur:
+        version = store.get_version(cur, store.get_entity(cur, memory_id)["latest_version"])
+        # and it does not come back tomorrow, or the sweep never finishes
+        still = [row["memory_id"] for row in metrics.rot_prone(cur)]
+    assert version["status"] == "completed"
+    assert memory_id not in still
+
+
+def test_what_the_sweep_is_walked_past_keeps_standing(test_dsn, sweeping, committed_scope):
+    """There is no record of having looked, and inventing one would be a lie."""
+    memory_id = _standing_task(test_dsn, committed_scope, f"まだ終わっていない作業 {uuid.uuid4()}")
+
+    keys = ["down"] * _place_in_sweep(test_dsn, memory_id) + ["enter", "down", "q"]
+    code, out = sweeping(keys)
+    assert code == 0
+    assert "nothing retired" in out or "left standing" in out
+
+    with transaction(test_dsn) as cur:
+        assert store.get_entity(cur, memory_id)["active_version"] is not None
+
+
+def test_retiring_the_same_one_twice_does_not_end_the_sweep(test_dsn, sweeping, committed_scope):
+    """Retiring is a record too, and one keystroke on it must not cost the sitting."""
+    mark = uuid.uuid4()
+    # two, so the cursor has somewhere to advance to and can be brought back
+    memory_id = _standing_task(test_dsn, committed_scope, f"あ 一度で足りる作業 {mark}")
+    _standing_task(test_dsn, committed_scope, f"ん そのあとに続く作業 {mark}")
+
+    keys = ["down"] * _place_in_sweep(test_dsn, memory_id) + ["c", "up", "c", "q"]
+    code, out = sweeping(keys)
+    assert code == 0
+    assert "already retired" in out
+    assert "1 retired" in out

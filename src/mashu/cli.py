@@ -25,6 +25,7 @@ import sys
 import tempfile
 import textwrap
 import unicodedata
+from types import SimpleNamespace
 from uuid import UUID
 
 try:  # the review reads single keystrokes, which needs a posix terminal
@@ -993,6 +994,8 @@ def _pending_note(row) -> str | None:
     is pushed is the adopted reading and a Current State goes out of date in
     hours while a review takes days.
     """
+    if row.get("version_status") and row["version_status"] != str(VersionStatus.CANDIDATE):
+        return f"! this is {row['version_status']}: {row['version_reason'] or 'no reason recorded'}"
     if row.get("proposed_status"):
         return (
             f"! {row['proposed_by']} has proposed {row['proposed_status']}: "
@@ -1308,42 +1311,213 @@ def cmd_incident(args) -> int:
 
 
 def cmd_stale(args) -> int:
-    """Adopted rules that name a moment in themselves (25.2 移行, 30 段 C).
+    """Sweep what stands and has a shelf life (13.1, 25.2 移行, 30 段 B).
 
-    A window written down in the years before there was anywhere to put one.
-    Section 25.2 gives two ways out and does not choose between them: move it to
-    a temporary context that expires by the clock, or rewrite it without the
-    date so what is left is indefinite and true. Which one applies is a reading
-    of the content, so nothing here decides.
+    Section 13.1 puts only the indefinite kind of knowledge into Memory, and
+    what arrives from a transcript does not carry that division: the worker
+    reads a session in which a task was open and files the task, true of that
+    session and of nothing after it. Nothing expires on its own, so the kinds
+    that name their own end have to be walked.
 
-    A screen, not a verdict, and the match is printed so waving off a wrong one
-    costs a glance. Some of these are rules *about* shelf life rather than rules
-    *with* one, and no pattern tells those apart.
+    Read like the review, because it is the same work on the other side: a list
+    to move through, the whole memory when one is opened, one key to retire it.
+    Nothing is a verdict here. What is left alone stays standing, and there is
+    no record of having looked, so a memory waved off comes back next time —
+    which is right, because it is still true only until it is not.
     """
     with transaction(args.dsn) as cur:
-        found = metrics.self_dating(cur)
-        if not found:
-            print("nothing adopted names a moment in itself")
-            return 0
-        print(f"{len(found)} adopted rule(s) name a moment in themselves\n")
-        for row in found:
-            pushed = "" if row["delivery"] == str(Delivery.PULL_ONLY) else f"  [{row['delivery']}]"
-            print(
-                f"  {_short(row['memory_id'])}  {row['matched']!r} in {row['matched_in']}"
-                f"  [{row['scope_name']}]{pushed}"
-            )
-            print(_wrap(row["title"], indent="      "))
-            print()
-        print(
-            _wrap(
-                "each is either a window — 'mashu retire <id> dormant --reason', then "
-                "'mashu remember --until <when> --kind fact|preference' — or a rule that "
-                "reads as dated and is not, in which case rewrite it without the date. "
-                "The screen does not tell them apart.",
-                indent="  ",
-            )
+        found = metrics.rot_prone(cur)
+    if not found:
+        print("nothing standing names its own end")
+        return 0
+    if args.list or not sys.stdin.isatty():
+        _print_stale(found)
+        return 0
+    return _sweep(args, found)
+
+
+def _print_stale(found: list[dict]) -> None:
+    """The whole list at once, for pipes and for reading without deciding."""
+    print(f"{len(found)} standing memory(s) with a shelf life\n")
+    for row in found:
+        pushed = "" if row["delivery"] == str(Delivery.PULL_ONLY) else f"  [{row['delivery']}]"
+        print(f"  {_short(row['memory_id'])}  {row['type']}  [{row['scope_name']}]{pushed}")
+        print(_wrap(row["title"], indent="      "))
+        print(_wrap(row["why"], indent="      · "))
+        print()
+    print(
+        _wrap(
+            "each is either finished — 'mashu retire <id> completed --reason' — a window, "
+            "which becomes 'mashu retire <id> dormant --reason' and then 'mashu remember "
+            "--until <when>', or something that reads as dated and is not, in which case "
+            "rewrite it without the date. The screen does not tell them apart.",
+            indent="  ",
         )
+    )
+
+
+_SWEEP_LIST_KEYS = "  ↑↓ move   ⏎ open it   c finished   d set aside   x wrong   q leave"
+_SWEEP_ITEM_KEYS = (
+    "  c finished   d set aside   x wrong   ↑↓ another one   ← the list   q leave\n"
+    "  space read on   b top     what you leave alone keeps standing"
+)
+
+_RETIRING = {
+    "c": (str(VersionStatus.COMPLETED), None),
+    "d": (str(VersionStatus.DORMANT), "why set it aside? "),
+    "x": (str(VersionStatus.DISPROVEN), "what makes it wrong? "),
+}
+_SWEPT = {"completed": "retired", "dormant": "set aside", "disproven": "disproven"}
+
+
+def _sweep(args, found: list[dict]) -> int:
+    """The rot-prone list, walked at reading pace, retired a key at a time."""
+    done: dict[int, str] = {}
+    at, scroll, more = 0, 0, 0
+    reading = False
+    back: list[int] = []
+    note = ""
+
+    while True:
+        if reading:
+            page, more = _paged(_stale_page(found[at], at + 1, len(found)), scroll)
+            _screen(page + _standing(done, at) + _said(note) + "\n" + _SWEEP_ITEM_KEYS)
+        else:
+            _screen(_stale_list(found, at, done) + _said(note))
+        key = _getkey()
+        if key not in _RETIRING:
+            note = ""
+
+        if key in ("space", "pagedown", "right") and reading:
+            if more:
+                back.append(scroll)
+                scroll = more
+                continue
+            if key != "space":
+                continue
+        if key == "space":
+            key = "down"
+        if reading and key in ("pageup", "b"):
+            scroll = back.pop() if back else 0
+            continue
+
+        if key == "q":
+            break
+        if key in ("down", "j", "pagedown"):
+            at = min(len(found) - 1, at + 1)
+            back, scroll = [], 0
+            continue
+        if key in ("up", "k", "pageup"):
+            at = max(0, at - 1)
+            back, scroll = [], 0
+            continue
+        if key in ("home", "end"):
+            at = 0 if key == "home" else len(found) - 1
+            back, scroll = [], 0
+            continue
+        if not reading and key in ("enter", "right", "l"):
+            reading = True
+            continue
+        if reading and key in ("left", "l"):
+            reading = False
+            continue
+        if key not in _RETIRING:
+            continue
+
+        note = _retire_one(args, found[at], done, at, key)
+        if note or at + 1 >= len(found):
+            continue
+        at += 1
+        back, scroll = [], 0
+
+    print(_swept(done, len(found)))
     return 0
+
+
+def _retire_one(args, row, done: dict, number: int, key: str) -> str:
+    """Retire one, through the same path the typed command takes.
+
+    Whatever the store refuses it refuses one memory, not the sitting: the
+    sweep is worth starting only if stopping in the middle keeps what is
+    behind.
+    """
+    if number in done:
+        return f"  already {done[number]}. retiring is a record and does not get taken back"
+    status, ask = _RETIRING[key]
+    if ask is None:
+        reason = "swept at the terminal: this is finished"
+    else:
+        reason = _typed("  " + ask)
+        if reason is None:
+            return ""
+    asked = SimpleNamespace(
+        dsn=args.dsn,
+        memory_id=str(row["memory_id"]),
+        status=status,
+        reason=reason,
+        actor=args.actor,
+        reviewer=args.actor,
+    )
+    try:
+        if cmd_retire(asked) != 0:
+            return "  the store would not retire this one; 'mashu inspect' says more"
+    except MashuError as refusal:
+        return f"  {refusal}"
+    done[number] = _SWEPT[status]
+    return ""
+
+
+def _stale_list(found: list[dict], at: int, done: dict) -> str:
+    """Everything standing that has a shelf life, one line each."""
+    width = _width()
+    rows = []
+    for number, row in enumerate(found):
+        mark = "✓" if number in done else " "
+        line = _clip(
+            f" {mark} {number + 1:>3}  {_pad(row['scope_name'], 12)} "
+            f"{row['type']:<12} {row['title']}",
+            width - 1,
+        )
+        rows.append(f"\x1b[1m▸{line[1:]}\x1b[0m" if number == at else line)
+    shown, above, below = _shown(rows, at, reserve=8)
+    lines = [
+        f"{len(found)} standing memory(s) name their own end. what is left alone keeps standing\n"
+    ]
+    lines += [line for line in (above, *shown, below) if line]
+    lines.append("\n" + _SWEEP_LIST_KEYS)
+    return "\n".join(lines)
+
+
+def _stale_page(row: dict, number: int, of: int) -> str:
+    """One standing memory, whole, with the reading that put it on the list."""
+    label = f" {number} of {of} "
+    across = _across()
+    pushed = "" if row["delivery"] == str(Delivery.PULL_ONLY) else f"  [{row['delivery']}]"
+    return "\n".join(
+        [
+            "─" * 4 + label + "─" * max(4, across - 4 - _cells(label)),
+            f"{row['type']}  [{row['scope_name']}]{pushed}  {_short(row['memory_id'])}  "
+            f"written {row['days']} day(s) ago",
+            row["title"],
+            "",
+            _wrap(f"on the list because {row['why']}", indent="  · "),
+            "",
+            _wrap(row["content"]),
+            "─" * across,
+        ]
+    )
+
+
+def _swept(done: dict, count: int) -> str:
+    """What the sweep came to."""
+    if not done:
+        return f"\nnothing retired; all {count} keep standing"
+    parts = []
+    for word in ("retired", "set aside", "disproven"):
+        many = sum(1 for value in done.values() if value == word)
+        if many:
+            parts.append(f"{many} {word}")
+    return "\n" + ", ".join(parts) + f"; {count - len(done)} left standing"
 
 
 def _span(seconds: float | None) -> str:
@@ -2741,8 +2915,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     er.set_defaults(func=cmd_eval_retire)
 
-    sl = adm.add_parser("stale", help="adopted rules that name a moment in themselves (25.2)")
-    sl.set_defaults(func=cmd_stale)
+    for where, shown in (
+        (sub, "sweep what stands and has a shelf life (13.1, 30 段 B)"),
+        (adm, argparse.SUPPRESS),
+    ):
+        sl = where.add_parser("stale", help=shown)
+        sl.add_argument(
+            "--list", action="store_true", help="print the whole list instead of walking it"
+        )
+        sl.add_argument("--actor", default="user")
+        sl.set_defaults(func=cmd_stale)
 
     m = adm.add_parser("migrate", help="apply pending migrations")
     m.set_defaults(func=cmd_migrate)

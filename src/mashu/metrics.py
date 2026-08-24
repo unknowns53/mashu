@@ -271,6 +271,12 @@ _SELF_DATING = re.compile(
 )
 
 
+#: A title claiming the thing is over. Read only on memories still standing as
+#: tasks, where the claim and the standing contradict each other; anywhere else
+#: "済み" is ordinary prose and means nothing about shelf life.
+_DONE = re.compile(r"完了した|済みである|リリース済み|了した$|done$", re.IGNORECASE)
+
+
 def self_dating(cur: psycopg.Cursor) -> list[dict[str, Any]]:
     """Active memories whose own rule names a moment (25.2 移行).
 
@@ -292,7 +298,7 @@ def self_dating(cur: psycopg.Cursor) -> list[dict[str, Any]]:
         FROM memory_entity e
         JOIN memory_version v ON v.version_id = e.active_version
         JOIN scope s ON s.scope_id = e.scope_id
-        WHERE e.status = 'active'
+        WHERE e.status = 'active' AND v.status = 'candidate'
         ORDER BY s.name, e.title
         """
     )
@@ -451,3 +457,70 @@ def pushed_total(cur: psycopg.Cursor) -> int:
         (str(Delivery.PULL_ONLY),),
     )
     return cur.fetchone()["count"]
+
+
+#: Why a standing memory is likely to have stopped being true. Type is the
+#: strongest reading of the three: a task and a state carry their own end,
+#: which nothing about how they are written can take away.
+_ROTS_BY_TYPE = {
+    "task": "a task stands until it is finished, and nothing says this one still is not",
+    "state": "a current state is current only until the next one is written",
+}
+
+
+def rot_prone(cur: psycopg.Cursor) -> list[dict[str, Any]]:
+    """Standing memories whose truth has a shelf life (13.1, 25.2 移行, 30 段 B).
+
+    Section 13.1 divides what is worth keeping by how long it stays true, and
+    puts only the indefinite kind into Memory. What arrives from a transcript
+    does not carry that division: the worker reads a session in which a task was
+    open and files the task, and the task is true of that session and of nothing
+    afterwards. So the kinds that name their own end have to be swept, because
+    nothing about them expires on its own.
+
+    Three readings, and none of them is a verdict:
+
+    - the type says so. A task ends when it is done and a state ends when the
+      next state is written. Both are certain to expire and neither says when.
+    - the writing dates itself, which is what self_dating already reads.
+    - the title says the thing is finished while the memory still stands as
+      something to do, which is the shape of a completion recorded as a task.
+
+    Precision is the cheap side. A false flag costs a glance; a task that
+    finished in July and is still handed to every session that asks is the debt
+    this exists to pay down.
+    """
+    cur.execute(
+        """
+        SELECT e.memory_id, e.title, e.type, e.delivery, s.name AS scope_name,
+               v.directive, v.content,
+               EXTRACT(DAY FROM now() - v.created_at)::int AS days
+        FROM memory_entity e
+        JOIN memory_version v ON v.version_id = e.active_version
+        JOIN scope s ON s.scope_id = e.scope_id
+        WHERE e.status = 'active'
+          -- A completion keeps the active pointer, so standing has to be read
+          -- off the version and not off the pointer alone. Without this a task
+          -- retired today is on the list again tomorrow and the sweep never
+          -- finishes, which is the one thing a sweep has to do.
+          AND v.status = 'candidate'
+        ORDER BY s.name, e.type, e.title
+        """
+    )
+    found = []
+    for row in cur.fetchall():
+        why, matched, matched_in = None, None, None
+        for field_name in ("title", "directive"):
+            text = row[field_name]
+            hit = _SELF_DATING.search(text) if text else None
+            if hit:
+                matched, matched_in = hit.group(), field_name
+                why = f"it names a moment in itself: {hit.group()!r} in the {field_name}"
+                break
+        if row["type"] in _ROTS_BY_TYPE:
+            why = _ROTS_BY_TYPE[row["type"]]
+        if row["type"] == "task" and _DONE.search(row["title"]):
+            why = "the title says this is finished, and it is still standing as something to do"
+        if why:
+            found.append({**row, "why": why, "matched": matched, "matched_in": matched_in})
+    return found
