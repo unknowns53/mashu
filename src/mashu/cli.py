@@ -1347,25 +1347,47 @@ def _print_stale(found: list[dict]) -> None:
         print()
     print(
         _wrap(
-            "each is either finished — 'mashu retire <id> completed --reason' — a window, "
-            "which becomes 'mashu retire <id> dormant --reason' and then 'mashu remember "
-            "--until <when>', or something that reads as dated and is not, in which case "
-            "rewrite it without the date. The screen does not tell them apart.",
+            "completed keeps answering, with its finish shown, because a finished task "
+            "read as unfinished is the thing this store exists to stop. dormant and "
+            "disproven stop answering: layer 3 carries the title, the status and the "
+            "reason, never the content, so the reason is the whole of what a later "
+            "reader gets. Both are one way — coming back means writing it again. "
+            "Something that only reads as dated is neither; rewrite it without the date.",
             indent="  ",
         )
     )
 
 
-_SWEEP_LIST_KEYS = "  ↑↓ move   ⏎ open it   c finished   d set aside   x wrong   q leave"
+#: The three retirements, said as what each one does to the memory afterwards
+#: rather than by the name of the status it writes.
+#:
+#: They are not three shades of the same thing. completed keeps the active
+#: pointer, so the memory stays in layer 1 with its finished mark: section 1
+#: names "a finished task treated as unfinished" as a problem to solve, and the
+#: way to solve it is to keep answering with the finish visible. dormant and
+#: disproven take the pointer off, and layer 3 then carries the title, the
+#: status and the reason and never the content — so the reason typed here is
+#: the whole of what a later reader gets. Both are absorbing (12): the way back
+#: is to write the thing again as a new version, not to undo this.
+_SWEEP_LIST_KEYS = "  ↑↓ move   ⏎ open it   c it is done   d not in use   x it was wrong   q leave"
 _SWEEP_ITEM_KEYS = (
-    "  c finished   d set aside   x wrong   ↑↓ another one   ← the list   q leave\n"
-    "  space read on   b top     what you leave alone keeps standing"
+    "  c it is done, and worth finding as a record    ↑↓ another one   ← the list\n"
+    "  d not in use now, and might be again           space read on    b top\n"
+    "  x it was wrong; do not derive it again         q leave\n"
+    "  d and x withhold the content and are one way. "
+    "what you leave alone keeps standing"
 )
 
 _RETIRING = {
     "c": (str(VersionStatus.COMPLETED), None),
-    "d": (str(VersionStatus.DORMANT), "why set it aside? "),
-    "x": (str(VersionStatus.DISPROVEN), "what makes it wrong? "),
+    "d": (
+        str(VersionStatus.DORMANT),
+        "why set it aside? (this is all a later reader gets) ",
+    ),
+    "x": (
+        str(VersionStatus.DISPROVEN),
+        "what makes it wrong? (this is handed back so nobody derives it again) ",
+    ),
 }
 _SWEPT = {"completed": "retired", "dormant": "set aside", "disproven": "disproven"}
 
