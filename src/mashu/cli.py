@@ -1527,46 +1527,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dsn", default=None, help="database connection string")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    q = sub.add_parser("queue", help="list proposals waiting for review, by session")
-    q.set_defaults(func=cmd_queue)
-
-    s = sub.add_parser("show", help="show one proposal, or a whole bundle, in full")
+    s = sub.add_parser("inspect", help="show one proposal, or a whole bundle, in full")
     s.add_argument("proposal_id", nargs="?")
     s.add_argument("--bundle", help="session id prefix, or 'none', to read the whole bundle")
     s.set_defaults(func=cmd_show)
 
-    a = sub.add_parser("approve", help="approve a proposal or a whole bundle")
-    a.add_argument("proposal_id", nargs="?")
-    a.add_argument("--bundle", help="session id prefix, or 'none' for the unattributed bundle")
-    a.add_argument("--skip", nargs="*", default=[], help="proposal ids to leave out")
-    a.add_argument("--reviewer", default="user")
-    a.add_argument("--reason", default=None)
-    a.set_defaults(func=cmd_approve)
-
-    r = sub.add_parser("reject", help="turn a proposal down, with a reason")
-    r.add_argument("proposal_id")
-    r.add_argument("--reason", required=True)
-    r.add_argument("--reviewer", default="user")
-    r.set_defaults(func=cmd_reject)
-
-    f = sub.add_parser("search", help="run a query through the retrieval pipeline")
+    f = sub.add_parser("find", help="run a query through the retrieval pipeline")
     f.add_argument("query")
     f.add_argument("--type", action="append", help="restrict to a memory type")
     f.add_argument("--limit", type=int, default=retrieval.DEFAULT_LIMIT)
     f.add_argument("--actor", default="user")
     f.set_defaults(func=cmd_search)
-
-    b = sub.add_parser("backfill", help="embed rows that have no vector yet")
-    b.set_defaults(func=cmd_backfill)
-
-    i = sub.add_parser("import", help="import a JSON file of memories into a scope")
-    i.add_argument("file")
-    i.add_argument("--scope", required=True, help="name of an existing scope")
-    i.add_argument("--actor", default="import")
-    i.set_defaults(func=cmd_import)
-
-    m = sub.add_parser("migrate", help="apply pending migrations")
-    m.set_defaults(func=cmd_migrate)
 
     n = sub.add_parser("bootstrap", help="show the fixed context a session starts with")
     n.add_argument("--scope", default=None, help="narrow the current state to one scope")
@@ -1606,63 +1577,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="record it even though a similar entity exists (20)",
     )
     rm.set_defaults(func=cmd_remember)
-
-    rt = sub.add_parser("retype", help="correct what kind of thing an entity is (8)")
-    rt.add_argument("memory")
-    rt.add_argument("--to", required=True, choices=[str(t) for t in MemoryType])
-    rt.add_argument("--reason", required=True)
-    rt.add_argument("--actor", default="user")
-    rt.set_defaults(func=cmd_retype)
-
-    mg = sub.add_parser("merge", help="fold one entity into another (20.2)")
-    mg.add_argument("source", help="the entity that stops being separate")
-    mg.add_argument("--into", required=True, help="the entity it becomes part of")
-    mg.add_argument(
-        "--keep-active",
-        metavar="WHICH",
-        help="which version stays active: 'source', 'into', or a version id",
-    )
-    mg.add_argument("--reason", required=True)
-    mg.add_argument("--actor", default="user")
-    mg.set_defaults(func=cmd_merge)
-
-    t = sub.add_parser("state", help="propose a scope's current state (14)")
-    t.add_argument("file", help="file holding the summary")
-    t.add_argument("--scope", required=True, help="name of an existing scope")
-    t.add_argument("--title", help="required when the scope has no current state yet")
-    t.add_argument(
-        "--evidence", nargs="*", default=[], metavar="ID", help="memories the summary rests on"
-    )
-    t.add_argument("--source-type", default="agent", choices=[str(s) for s in SourceType])
-    t.add_argument("--source-reference", default=None)
-    t.add_argument("--actor", default="claude")
-    t.add_argument(
-        "--anyway",
-        action="store_true",
-        help="propose even though an equivalent one is already waiting (15.1)",
-    )
-    t.set_defaults(func=cmd_state)
-
-    eq = sub.add_parser("enqueue", help="claim a transcript for extraction (16.3)")
-    eq.add_argument("transcript", help="path to the session transcript")
-    eq.add_argument("--cli", choices=transcript.CLIS, help="which CLI produced it")
-    eq.add_argument("--session", help="that CLI's session id; read from the file if omitted")
-    eq.add_argument("--cwd", help="the directory it ran in; read from the file if omitted")
-    eq.add_argument("--extractor-version", default=extract.EXTRACTOR_VERSION)
-    eq.set_defaults(func=cmd_enqueue)
-
-    ru = sub.add_parser("runs", help="whether automatic capture is still working (16.3)")
-    ru.set_defaults(func=cmd_runs)
-
-    ev = sub.add_parser("evidence", help="what a memory rests on, and what rests on it (19)")
-    ev.add_argument("memory")
-    ev.set_defaults(func=cmd_evidence)
-
-    w = sub.add_parser("preview", help="rank a scope's candidates, caps off (27.1)")
-    w.add_argument("query")
-    w.add_argument("--scope", required=True)
-    w.add_argument("--limit", type=int, default=retrieval.DEFAULT_LIMIT)
-    w.set_defaults(func=cmd_preview)
 
     d = sub.add_parser("deliver", help="move a memory between push and pull (21.2)")
     d.add_argument("memory", help="memory id, or enough of its start to be unambiguous")
@@ -1721,10 +1635,164 @@ def build_parser() -> argparse.ArgumentParser:
     v = sub.add_parser("serve", help="run the MCP server over stdio")
     v.add_argument("--agent", default=None, help="the identity proposals are recorded under")
     v.set_defaults(func=cmd_serve)
+
+    # ----------------------------------------------------------------------
+    # Maintenance, migration and evaluation (30 段 C).
+    #
+    # Separated from the daily surface because review is optional now, and
+    # a person who has to find `review` among two dozen names weighted
+    # towards one-off chores is a person who opens it less often. Nothing
+    # here is rarely useful; it is rarely useful *while deciding*.
+    #
+    # serve, sweep and work stay above: those are the three a machine types,
+    # and their names are a contract with the MCP config and the launch
+    # agent, neither of which lives in this repository.
+    # ----------------------------------------------------------------------
+    admin = sub.add_parser("admin", help="maintenance, migration and evaluation")
+    adm = admin.add_subparsers(dest="admin_command", required=True)
+
+    q = adm.add_parser("queue", help="list proposals waiting for review, by session")
+    q.set_defaults(func=cmd_queue)
+
+    a = adm.add_parser("approve", help="approve a proposal or a whole bundle")
+    a.add_argument("proposal_id", nargs="?")
+    a.add_argument("--bundle", help="session id prefix, or 'none' for the unattributed bundle")
+    a.add_argument("--skip", nargs="*", default=[], help="proposal ids to leave out")
+    a.add_argument("--reviewer", default="user")
+    a.add_argument("--reason", default=None)
+    a.set_defaults(func=cmd_approve)
+
+    r = adm.add_parser("reject", help="turn a proposal down, with a reason")
+    r.add_argument("proposal_id")
+    r.add_argument("--reason", required=True)
+    r.add_argument("--reviewer", default="user")
+    r.set_defaults(func=cmd_reject)
+
+    i = adm.add_parser("import", help="import a JSON file of memories into a scope")
+    i.add_argument("file")
+    i.add_argument("--scope", required=True, help="name of an existing scope")
+    i.add_argument("--actor", default="import")
+    i.set_defaults(func=cmd_import)
+
+    b = adm.add_parser("backfill", help="embed rows that have no vector yet")
+    b.set_defaults(func=cmd_backfill)
+
+    m = adm.add_parser("migrate", help="apply pending migrations")
+    m.set_defaults(func=cmd_migrate)
+
+    w = adm.add_parser("preview", help="rank a scope's candidates, caps off (27.1)")
+    w.add_argument("query")
+    w.add_argument("--scope", required=True)
+    w.add_argument("--limit", type=int, default=retrieval.DEFAULT_LIMIT)
+    w.set_defaults(func=cmd_preview)
+
+    eq = adm.add_parser("enqueue", help="claim a transcript for extraction (16.3)")
+    eq.add_argument("transcript", help="path to the session transcript")
+    eq.add_argument("--cli", choices=transcript.CLIS, help="which CLI produced it")
+    eq.add_argument("--session", help="that CLI's session id; read from the file if omitted")
+    eq.add_argument("--cwd", help="the directory it ran in; read from the file if omitted")
+    eq.add_argument("--extractor-version", default=extract.EXTRACTOR_VERSION)
+    eq.set_defaults(func=cmd_enqueue)
+
+    ru = adm.add_parser("runs", help="whether automatic capture is still working (16.3)")
+    ru.set_defaults(func=cmd_runs)
+
+    ev = adm.add_parser("evidence", help="what a memory rests on, and what rests on it (19)")
+    ev.add_argument("memory")
+    ev.set_defaults(func=cmd_evidence)
+
+    rt = adm.add_parser("retype", help="correct what kind of thing an entity is (8)")
+    rt.add_argument("memory")
+    rt.add_argument("--to", required=True, choices=[str(t) for t in MemoryType])
+    rt.add_argument("--reason", required=True)
+    rt.add_argument("--actor", default="user")
+    rt.set_defaults(func=cmd_retype)
+
+    mg = adm.add_parser("merge", help="fold one entity into another (20.2)")
+    mg.add_argument("source", help="the entity that stops being separate")
+    mg.add_argument("--into", required=True, help="the entity it becomes part of")
+    mg.add_argument(
+        "--keep-active",
+        metavar="WHICH",
+        help="which version stays active: 'source', 'into', or a version id",
+    )
+    mg.add_argument("--reason", required=True)
+    mg.add_argument("--actor", default="user")
+    mg.set_defaults(func=cmd_merge)
+
+    t = adm.add_parser("state", help="propose a scope's current state (14)")
+    t.add_argument("file", help="file holding the summary")
+    t.add_argument("--scope", required=True, help="name of an existing scope")
+    t.add_argument("--title", help="required when the scope has no current state yet")
+    t.add_argument(
+        "--evidence", nargs="*", default=[], metavar="ID", help="memories the summary rests on"
+    )
+    t.add_argument("--source-type", default="agent", choices=[str(s) for s in SourceType])
+    t.add_argument("--source-reference", default=None)
+    t.add_argument("--actor", default="claude")
+    t.add_argument(
+        "--anyway",
+        action="store_true",
+        help="propose even though an equivalent one is already waiting (15.1)",
+    )
+    t.set_defaults(func=cmd_state)
+
     return parser
 
 
+#: Where each name went when the daily surface was separated from maintenance
+#: (30 段 C). A command that stops answering without saying where it went is
+#: indistinguishable from one that was taken away, and the person typing it
+#: cannot tell which from the error argparse gives.
+_MOVED = {
+    "search": "find",
+    "show": "inspect",
+    **{
+        name: f"admin {name}"
+        for name in (
+            "queue",
+            "approve",
+            "reject",
+            "import",
+            "backfill",
+            "migrate",
+            "preview",
+            "enqueue",
+            "runs",
+            "evidence",
+            "retype",
+            "merge",
+            "state",
+        )
+    },
+}
+
+
+def _moved(argv: list[str]) -> tuple[str, str] | None:
+    """The subcommand someone typed, if it is one that moved.
+
+    Reads past the global options rather than taking argv[0]: --dsn carries a
+    value, and mistaking that value for the subcommand would answer about the
+    wrong word.
+    """
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--dsn":
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return (token, _MOVED[token]) if token in _MOVED else None
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
+    moved = _moved(list(sys.argv[1:] if argv is None else argv))
+    if moved:
+        print(f"'{moved[0]}' is now 'mashu {moved[1]}'", file=sys.stderr)
+        return 2
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)

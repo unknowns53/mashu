@@ -75,7 +75,7 @@ def test_the_queue_names_the_bundle_and_its_wait(run, test_dsn, committed_scope)
         session_id,
     )
 
-    code, out = run("queue")
+    code, out = run("admin", "queue")
     assert code == 0
     assert str(session_id)[:8] in out
     assert out.index("cli observation") < out.index("cli decision"), (
@@ -85,14 +85,14 @@ def test_the_queue_names_the_bundle_and_its_wait(run, test_dsn, committed_scope)
 
 def test_show_prints_the_proposed_text(run, test_dsn, committed_scope):
     proposal = _propose(test_dsn, committed_scope, "cli show", "the enclosure timed out again")
-    code, out = run("show", str(proposal["proposal_id"])[:8])
+    code, out = run("inspect", str(proposal["proposal_id"])[:8])
     assert code == 0
     assert "the enclosure timed out again" in out
 
 
 def test_approving_by_prefix_makes_it_current(run, test_dsn, committed_scope):
     proposal = _propose(test_dsn, committed_scope, "cli approve", "the ramp is half a degree")
-    code, out = run("approve", str(proposal["proposal_id"])[:8], "--reason", "checked")
+    code, out = run("admin", "approve", str(proposal["proposal_id"])[:8], "--reason", "checked")
     assert code == 0
 
     with transaction(test_dsn) as cur:
@@ -102,7 +102,9 @@ def test_approving_by_prefix_makes_it_current(run, test_dsn, committed_scope):
 
 def test_rejecting_records_the_reason(run, test_dsn, committed_scope):
     proposal = _propose(test_dsn, committed_scope, "cli reject", "an uncalibrated reading")
-    code, _ = run("reject", str(proposal["proposal_id"])[:8], "--reason", "wrong thermocouple")
+    code, _ = run(
+        "admin", "reject", str(proposal["proposal_id"])[:8], "--reason", "wrong thermocouple"
+    )
     assert code == 0
 
     with transaction(test_dsn) as cur:
@@ -115,13 +117,13 @@ def test_an_ambiguous_prefix_stops_rather_than_guessing(run, test_dsn, committed
     _propose(test_dsn, committed_scope, "cli ambiguous one", "some content")
     _propose(test_dsn, committed_scope, "cli ambiguous two", "other content")
     with pytest.raises(SystemExit) as caught:
-        run("show", "")
+        run("inspect", "")
     assert "use more characters" in str(caught.value)
 
 
 def test_an_unknown_prefix_stops(run):
     with pytest.raises(SystemExit):
-        run("show", "ffffffffff")
+        run("inspect", "ffffffffff")
 
 
 def test_search_prints_all_three_layers(run, test_dsn, committed_scope):
@@ -137,7 +139,7 @@ def test_search_prints_all_three_layers(run, test_dsn, committed_scope):
             actor="claude",
             adopt=True,
         )
-    code, out = run("search", "searchable ramp")
+    code, out = run("find", "searchable ramp")
     assert code == 0
     assert "layer 1  active" in out
     assert "layer 2  unreviewed" in out
@@ -159,7 +161,7 @@ def test_the_queue_warns_about_candidates_no_review_can_reach(run, test_dsn, com
             actor="import",
             adopt=False,
         )
-    code, out = run("queue")
+    code, out = run("admin", "queue")
     assert code == 0
     assert "no pending proposal" in out
     assert "cli orphan" in out
@@ -186,7 +188,7 @@ def test_backfill_embeds_what_was_written_without_a_vector(run, test_dsn, commit
             (version_id,),
         )
 
-    code, out = run("backfill")
+    code, out = run("admin", "backfill")
     assert code == 0
 
     with transaction(test_dsn) as cur:
@@ -225,7 +227,7 @@ def test_import_places_a_file_of_memories_into_a_scope(run, test_dsn, committed_
         encoding="utf-8",
     )
 
-    code, out = run("import", str(path), "--scope", scope_name)
+    code, out = run("admin", "import", str(path), "--scope", scope_name)
     assert code == 0
     assert "1 new entity proposal(s)" in out
     assert "cli import subject" in out
@@ -261,7 +263,7 @@ def test_an_import_run_is_one_bundle(run, test_dsn, committed_scope, tmp_path):
         encoding="utf-8",
     )
 
-    code, out = run("import", str(path), "--scope", scope_name)
+    code, out = run("admin", "import", str(path), "--scope", scope_name)
     assert code == 0
     assert "bundle " in out
 
@@ -305,7 +307,7 @@ def test_a_bundle_can_be_read_as_one_document(run, test_dsn, committed_scope):
         session_id=session_id,
     )
 
-    code, out = run("show", "--bundle", str(session_id)[:8])
+    code, out = run("inspect", "--bundle", str(session_id)[:8])
     assert code == 0
     assert "2 proposal(s)" in out
     assert "the exit code was 1" in out
@@ -336,10 +338,10 @@ def test_a_bundle_shows_where_each_memory_came_from(run, test_dsn, committed_sco
         ),
         encoding="utf-8",
     )
-    _, out = run("import", str(path), "--scope", scope_name)
+    _, out = run("admin", "import", str(path), "--scope", scope_name)
     bundle = out.splitlines()[0].split()[1]
 
-    code, shown = run("show", "--bundle", bundle)
+    code, shown = run("inspect", "--bundle", bundle)
     assert code == 0
     assert "memory/ssd-timeout.md" in shown
     assert "check the enclosure first" in shown
@@ -363,7 +365,7 @@ def test_the_queue_shows_which_scope_each_proposal_landed_in(run, test_dsn, comm
         cur.execute("SELECT name FROM scope WHERE scope_id = %s", (committed_scope,))
         scope_name = cur.fetchone()["name"]
 
-    code, out = run("queue")
+    code, out = run("admin", "queue")
     assert code == 0
     assert scope_name[:14] in out
 
@@ -372,7 +374,7 @@ def test_import_refuses_a_scope_that_does_not_exist(run, tmp_path):
     path = tmp_path / "memories.json"
     path.write_text("[]", encoding="utf-8")
     with pytest.raises(SystemExit):
-        run("import", str(path), "--scope", "no such scope")
+        run("admin", "import", str(path), "--scope", "no such scope")
 
 
 def _scope_name(test_dsn, scope_id):
@@ -391,6 +393,7 @@ def test_a_current_state_is_proposed_with_the_memories_it_rests_on(
     draft.write_text("where the scope stands, saying only what its references say", "utf-8")
 
     code, out = run(
+        "admin",
         "state",
         str(draft),
         "--scope",
@@ -423,10 +426,10 @@ def test_a_second_state_becomes_a_version_of_the_first_not_a_rival(
     draft = tmp_path / "state.md"
 
     draft.write_text("the first reading", "utf-8")
-    run("state", str(draft), "--scope", name, "--title", "current state")
+    run("admin", "state", str(draft), "--scope", name, "--title", "current state")
 
     draft.write_text("the second reading", "utf-8")
-    code, out = run("state", str(draft), "--scope", name, "--anyway")
+    code, out = run("admin", "state", str(draft), "--scope", name, "--anyway")
     assert code == 0
     assert "new version of" in out
 
@@ -442,14 +445,22 @@ def test_a_first_state_without_a_title_says_so(run, test_dsn, committed_scope, t
     draft = tmp_path / "state.md"
     draft.write_text("a reading", "utf-8")
     with pytest.raises(SystemExit, match="pass --title"):
-        run("state", str(draft), "--scope", _scope_name(test_dsn, committed_scope))
+        run("admin", "state", str(draft), "--scope", _scope_name(test_dsn, committed_scope))
 
 
 def test_an_empty_draft_is_refused(run, test_dsn, committed_scope, tmp_path):
     draft = tmp_path / "state.md"
     draft.write_text("   \n", "utf-8")
     with pytest.raises(SystemExit, match="is empty"):
-        run("state", str(draft), "--scope", _scope_name(test_dsn, committed_scope), "--title", "s")
+        run(
+            "admin",
+            "state",
+            str(draft),
+            "--scope",
+            _scope_name(test_dsn, committed_scope),
+            "--title",
+            "s",
+        )
 
 
 def test_evidence_shows_both_directions(run, test_dsn, committed_scope, tmp_path):
@@ -459,6 +470,7 @@ def test_evidence_shows_both_directions(run, test_dsn, committed_scope, tmp_path
     draft = tmp_path / "state.md"
     draft.write_text("what the measurement means", "utf-8")
     run(
+        "admin",
         "state",
         str(draft),
         "--scope",
@@ -469,7 +481,7 @@ def test_evidence_shows_both_directions(run, test_dsn, committed_scope, tmp_path
         ground_id[:8],
     )
 
-    code, out = run("evidence", ground_id[:8])
+    code, out = run("admin", "evidence", ground_id[:8])
     assert code == 0
     assert "rests on (0" in out
     assert "supports (1)" in out
@@ -487,6 +499,7 @@ def test_the_grounds_are_readable_while_the_state_is_still_waiting(
     draft = tmp_path / "state.md"
     draft.write_text("what the measurement means", "utf-8")
     _, out = run(
+        "admin",
         "state",
         str(draft),
         "--scope",
@@ -498,7 +511,7 @@ def test_the_grounds_are_readable_while_the_state_is_still_waiting(
     )
     proposal_id = out.split("proposal ")[1].split()[0]
 
-    _, shown = run("show", proposal_id)
+    _, shown = run("inspect", proposal_id)
     assert "resting on (1)" in shown
     assert "the measurement" in shown
 
@@ -509,7 +522,7 @@ def test_the_grounds_are_readable_while_the_state_is_still_waiting(
         )
         state_id = str(cur.fetchone()["memory_id"])
 
-    _, listed = run("evidence", state_id[:8])
+    _, listed = run("admin", "evidence", state_id[:8])
     assert "awaiting review" in listed
     assert "the measurement" in listed
 
@@ -526,10 +539,10 @@ def test_redrafting_a_state_that_is_still_waiting_is_stopped(
     name = _scope_name(test_dsn, committed_scope)
     draft = tmp_path / "state.md"
     draft.write_text("the first reading", "utf-8")
-    run("state", str(draft), "--scope", name, "--title", "current state")
+    run("admin", "state", str(draft), "--scope", name, "--title", "current state")
 
     draft.write_text("the second reading", "utf-8")
-    code, _ = run("state", str(draft), "--scope", name)
+    code, _ = run("admin", "state", str(draft), "--scope", name)
     assert code == 1
 
 
@@ -541,6 +554,7 @@ def test_merging_folds_one_entity_into_another(run, test_dsn, committed_scope):
     target = _propose(test_dsn, committed_scope, "SSD debugging", "the drive dropped out")
 
     code, out = run(
+        "admin",
         "merge",
         str(source["target_memory"])[:8],
         "--into",
@@ -567,6 +581,7 @@ def test_merging_asks_which_reading_survives_when_both_are_active(run, test_dsn,
             proposals.approve(cur, proposal["proposal_id"], reviewer="user", reason="both stand")
 
     code, _ = run(
+        "admin",
         "merge",
         str(source["target_memory"])[:8],
         "--into",
@@ -580,6 +595,7 @@ def test_merging_asks_which_reading_survives_when_both_are_active(run, test_dsn,
         keep = store.get_entity(cur, source["target_memory"])["active_version"]
 
     code, out = run(
+        "admin",
         "merge",
         str(source["target_memory"])[:8],
         "--into",
@@ -605,6 +621,7 @@ def test_which_side_survives_can_be_named_before_the_versions_exist(run, test_ds
             proposals.approve(cur, proposal["proposal_id"], reviewer="user", reason="both stand")
 
     code, _ = run(
+        "admin",
         "merge",
         str(source["target_memory"])[:8],
         "--into",
@@ -677,6 +694,7 @@ def test_retype_corrects_the_kind_without_touching_the_content(run, test_dsn, co
         before = store.get_entity(cur, proposal["target_memory"])["active_version"]
 
     code, out = run(
+        "admin",
         "retype",
         str(proposal["target_memory"])[:8],
         "--to",
@@ -844,7 +862,7 @@ def test_runs_reports_that_capture_stopped(run, test_dsn):
             ):
                 break
 
-    code, out = run("runs")
+    code, out = run("admin", "runs")
     assert code == 0
     assert "failed 1" in out
     assert "Nothing new is reaching the store" in out
@@ -855,11 +873,11 @@ def test_enqueue_claims_a_transcript_once(run, test_dsn, tmp_path):
     transcript = tmp_path / "session.jsonl"
     transcript.write_text('{"a": 1}\n', "utf-8")
 
-    code, first = run("enqueue", str(transcript), "--cli", "claude", "--session", "ext-1")
+    code, first = run("admin", "enqueue", str(transcript), "--cli", "claude", "--session", "ext-1")
     assert code == 0
     assert "queued" in first
 
-    _, second = run("enqueue", str(transcript), "--cli", "claude", "--session", "ext-1")
+    _, second = run("admin", "enqueue", str(transcript), "--cli", "claude", "--session", "ext-1")
     assert first.split()[0] == second.split()[0]
 
     with transaction(test_dsn) as cur:
@@ -870,10 +888,10 @@ def test_enqueue_claims_a_transcript_once(run, test_dsn, tmp_path):
 def test_a_changed_transcript_is_a_new_run(run, test_dsn, tmp_path):
     transcript = tmp_path / "session.jsonl"
     transcript.write_text('{"a": 1}\n', "utf-8")
-    run("enqueue", str(transcript), "--cli", "claude", "--session", "ext-2")
+    run("admin", "enqueue", str(transcript), "--cli", "claude", "--session", "ext-2")
 
     transcript.write_text('{"a": 1}\n{"b": 2}\n', "utf-8")
-    run("enqueue", str(transcript), "--cli", "claude", "--session", "ext-2")
+    run("admin", "enqueue", str(transcript), "--cli", "claude", "--session", "ext-2")
 
     with transaction(test_dsn) as cur:
         cur.execute("SELECT count(*) AS n FROM extraction_run WHERE external_session_id = 'ext-2'")
@@ -882,7 +900,9 @@ def test_a_changed_transcript_is_a_new_run(run, test_dsn, tmp_path):
 
 def test_a_missing_transcript_does_not_fail_the_hook(run, tmp_path):
     """A non-zero exit here is a visible error for something nobody asked for."""
-    code, _ = run("enqueue", str(tmp_path / "gone.jsonl"), "--cli", "claude", "--session", "ext-3")
+    code, _ = run(
+        "admin", "enqueue", str(tmp_path / "gone.jsonl"), "--cli", "claude", "--session", "ext-3"
+    )
     assert code == 0
 
 

@@ -92,7 +92,7 @@ createdb mashu
 ```
 
 ```bash
-uv run mashu migrate
+uv run mashu admin migrate
 ```
 
 `migrate` が `CREATE EXTENSION vector` から流すので、pgvector が入っていれば他の準備は要らない。接続先は既定で `dbname=mashu`、環境変数 `MASHU_DATABASE_URL` で変えられる。
@@ -105,32 +105,50 @@ fresh clone では git hook を入れる。
 
 ## 使う
 
+毎日の面。Review は随意なので、決めている最中に読む必要のないものは `admin` 以下へ分けてある。
+
 | コマンド | 内容 |
 |---|---|
+| `mashu status` | 捕捉が生きているか、queue がどれだけ遅れているか、開始時の塊がいくらか |
+| `mashu review` | 最古の束を開き、一括承認・却下・編集・明示の先送りまで 1 回で終える |
+| `mashu find <query>` | 三層を通して引く |
+| `mashu inspect <id>` / `--bundle <id>` | 1 件、または束を 1 つの読み物として表示 |
 | `mashu remember <body>` | User が述べた知識を記録する。Review を待たず active になる |
 | `mashu retire <id> <status> --reason` | 終わった・覆ったことを User が直接記録する |
-| `mashu review` | 最古の束を開き、一括承認・却下・編集・明示の先送りまで 1 回で終える |
-| `mashu queue` | Review 待ちをセッション束ごとに並べる |
-| `mashu show <id>` / `--bundle <id>` | 1 件、または束を 1 つの読み物として表示 |
-| `mashu approve <id>` / `--bundle <id>` | 承認。`--skip` で束から抜ける |
-| `mashu reject <id> --reason` | 却下。理由は必須 |
-| `mashu search <query>` | 三層を通して引く |
 | `mashu active --scope <name>` | その Scope が真として持つもの全件（退役の洗い出しの入力） |
-| `mashu state <file> --scope <name>` | Current State を references 付きで提案する |
-| `mashu evidence <id>` | 何に依拠しているか、何がそれに依拠しているか |
-| `mashu retype <id> --to <type>` | Entity の type を訂正する |
-| `mashu merge <id> --into <id>` | Entity を統合する |
-| `mashu deliver <id> <delivery>` | push と pull のあいだで動かす |
-| `mashu work` | 抽出 worker を queue に対して走らせる |
-| `mashu sweep` | hook が取り落とした transcript を台帳へ積む |
+| `mashu scope` | Scope ごとの採用済み・未審査の件数 |
+| `mashu scope --add <name> --about <line>` | Scope を作る。`--route` で対応づけまで一手 |
 | `mashu route --add <path> --scope <name>` | 作業ディレクトリを Scope に対応づける |
 | `mashu route --ignore <path>` | そのディレクトリは捕捉しないと決める |
+| `mashu directive <id> <short>` | 押し込むときに渡る短形を書く |
+| `mashu deliver <id> <delivery>` | push と pull のあいだで動かす |
 | `mashu bootstrap` | セッション開始時に渡る固定の塊とその token |
-| `mashu scope` | Scope ごとの採用済み・未審査の件数 |
-| `mashu preview <query> --scope` | 上限をかけずに順位だけ見る（移植の検証用） |
-| `mashu import <file.json> --scope` | JSON を candidate として取り込む |
-| `mashu backfill` | 埋め込みを持たない行を後から埋める |
+
+機械が打つ 3 つ。名前はこのリポジトリの外——MCP 設定と launch agent——との約束なので上に残してある。
+
+| コマンド | 内容 |
+|---|---|
 | `mashu serve` | MCP Server を stdio で起動 |
+| `mashu sweep` | hook が取り落とした transcript を台帳へ積む |
+| `mashu work` | 抽出 worker を queue に対して走らせる |
+
+保守・移植・評価。
+
+| コマンド | 内容 |
+|---|---|
+| `mashu admin queue` | Review 待ちをセッション束ごとに並べる |
+| `mashu admin approve <id>` / `--bundle <id>` | 承認。`--skip` で束から抜ける |
+| `mashu admin reject <id> --reason` | 却下。理由は必須 |
+| `mashu admin state <file> --scope <name>` | Current State を references 付きで提案する |
+| `mashu admin evidence <id>` | 何に依拠しているか、何がそれに依拠しているか |
+| `mashu admin retype <id> --to <type>` | Entity の type を訂正する |
+| `mashu admin merge <id> --into <id>` | Entity を統合する |
+| `mashu admin preview <query> --scope` | 上限をかけずに順位だけ見る（移植の検証用） |
+| `mashu admin import <file.json> --scope` | JSON を candidate として取り込む |
+| `mashu admin backfill` | 埋め込みを持たない行を後から埋める |
+| `mashu admin enqueue` | transcript を抽出のために台帳へ積む |
+| `mashu admin runs` | 捕捉台帳の生の行（`status` の元） |
+| `mashu admin migrate` | 未適用の migration を流す |
 
 ## Agent から使う
 
@@ -185,7 +203,7 @@ Model を呼ぶ部分は差し替えできる。`MASHU_EXTRACTOR` に `api`（`A
 ```
 docs/mashu-mvp.md              実装仕様書。設計判断とその理由の正本
 docs/prompts/                  Session End Extraction のプロンプト
-migrations/                    連番の SQL。mashu migrate が順に流す
+migrations/                    連番の SQL。mashu admin migrate が順に流す
 src/mashu/                     実装
 tests/                         実 PostgreSQL に対して走る。harness/ は仕様 28 節のシナリオ
 tools/session_end_hook.sh      SessionEnd hook。台帳へ積むだけで返る
