@@ -187,13 +187,23 @@ def held(cur: psycopg.Cursor, *, run_id: UUID, note: str) -> dict[str, Any]:
 
 
 def release(cur: psycopg.Cursor, *, cwd_prefix: str | None = None) -> int:
-    """Put held runs back in the queue, once whatever held them is resolved."""
+    """Put held runs back in the queue, once whatever held them is resolved.
+
+    Whole path segments, the same as routing.resolve. A plain string prefix
+    releases /a/mashu-old on a route for /a/mashu, and resolve then holds it
+    again on the next pass, so the count reported to the person adding the
+    route names transcripts the route does not cover.
+    """
     cur.execute(
         """
         UPDATE extraction_run
         SET state = 'queued', note = NULL, completed_at = NULL
         WHERE state = 'held'
-          AND (%(prefix)s::text IS NULL OR cwd LIKE %(prefix)s || '%%')
+          AND (
+            %(prefix)s::text IS NULL
+            OR cwd = %(prefix)s
+            OR cwd LIKE rtrim(%(prefix)s, '/') || '/%%'
+          )
         """,
         {"prefix": cwd_prefix},
     )
