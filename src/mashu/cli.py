@@ -987,6 +987,13 @@ def cmd_route(args) -> int:
             if released:
                 print(f"released {released} held transcript(s) back into the queue")
             return 0
+        if args.ignore:
+            row = routing.add(cur, path_prefix=args.ignore, scope_id=None, created_by=args.actor)
+            released = runs.release(cur, cwd_prefix=row["path_prefix"])
+            print(f"{row['path_prefix']}  ->  (no scope, on purpose)")
+            if released:
+                print(f"released {released} held transcript(s) back into the queue")
+            return 0
         if args.remove:
             print("removed" if routing.remove(cur, path_prefix=args.remove) else "no such route")
             return 0
@@ -996,7 +1003,7 @@ def cmd_route(args) -> int:
             print("no routes; every transcript will be held until one exists")
             return 0
         for row in rows:
-            print(f"{row['path_prefix']}\n    -> {row['scope_name'] or '(not captured)'}")
+            print(f"{row['path_prefix']}\n    -> {row['scope_name'] or '(no scope, on purpose)'}")
     return 0
 
 

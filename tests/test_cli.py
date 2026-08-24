@@ -13,7 +13,7 @@ import uuid
 
 import pytest
 
-from mashu import cli, context, proposals, runs, store
+from mashu import cli, context, proposals, routing, runs, store
 from mashu.db import transaction
 from mashu.models import MemoryType, ProposalOperation, SourceType
 
@@ -1022,3 +1022,36 @@ def test_a_route_is_stated_and_a_held_transcript_is_released_when_it_appears(
 
     with transaction(test_dsn) as cur:
         cur.execute("DELETE FROM extraction_run WHERE run_id = %s", (held["run_id"],))
+
+
+def test_a_directory_can_be_routed_to_no_scope_on_purpose(test_dsn, run):
+    """The third answer, reachable from the terminal (16.3, migration 0017).
+
+    The schema, the resolver and the argument all carried it; the command body
+    did not, so "seen, and deliberately not captured" could not be said. A run
+    from such a directory stayed held, and the health line it lit rides into
+    every session opening — a warning that never goes out is one nobody reads.
+    """
+    with transaction(test_dsn) as cur:
+        held = runs.enqueue(
+            cur,
+            source_cli="claude",
+            external_session_id=f"held-{uuid.uuid4()}",
+            transcript_digest=str(uuid.uuid4()),
+            extractor_version="v1",
+            cwd="/tmp/scratchpad/throwaway",
+        )
+        runs.held(cur, run_id=held["run_id"], note="no scope route")
+
+    code, out = run("route", "--ignore", "/tmp/scratchpad")
+    assert code == 0
+    assert "no scope, on purpose" in out
+    assert "released 1 held transcript" in out
+
+    with transaction(test_dsn) as cur:
+        scope_id, on_purpose = routing.resolve(cur, "/tmp/scratchpad/throwaway")
+        assert scope_id is None
+        assert on_purpose is True
+
+        cur.execute("DELETE FROM extraction_run WHERE run_id = %s", (held["run_id"],))
+        routing.remove(cur, path_prefix="/tmp/scratchpad")
