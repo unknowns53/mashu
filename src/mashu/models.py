@@ -108,6 +108,40 @@ class ProposalStatus(StrEnum):
     AUTO_COMMITTED = "auto_committed"
 
 
+class IncidentKind(StrEnum):
+    """The two directions this system can fail an agent (27.5, 反証条件 3).
+
+    They are opposite, and one list would blur them. missed is knowledge the
+    store held and the session never received; stale is knowledge the store had
+    withdrawn and handed over as current anyway.
+    """
+
+    MISSED = "missed"
+    STALE = "stale"
+
+
+class IncidentCause(StrEnum):
+    """Where an accident sends you back to (27.5, 30 段 E).
+
+    capture is the one 段 E adds. Before unattended capture there was nobody to
+    have missed writing something down, so the old two-way split — pushed too
+    little, or pulled too rarely — had nowhere to put it.
+    """
+
+    #: missed: it should have been in the session opening and was not (21.2).
+    BOOTSTRAP = "bootstrap"
+    #: missed: the index was there and nothing went and looked (6.1).
+    PULL = "pull"
+    #: missed: it was never written down at all (16.3).
+    CAPTURE = "capture"
+    #: stale: a temporary context outlived its window (25.2).
+    FILTER = "filter"
+    #: stale: a rule with a shelf life was written on the indefinite side (段 C).
+    INVENTORY = "inventory"
+    #: stale: the user said it was finished and nothing picked that up (27.4b).
+    MARKER = "marker"
+
+
 class ConflictStatus(StrEnum):
     """Specification 23. Recorded by hand; never resolved automatically."""
 
@@ -127,6 +161,7 @@ class EventType(StrEnum):
     SCOPE_READINESS_SET = "scope_readiness_set"
     SCOPE_PROMOTED = "scope_promoted"
     DELIVERY_SET = "delivery_set"
+    DIRECTIVE_SET = "directive_set"
     ENTITY_CREATED = "entity_created"
     ENTITY_MERGED = "entity_merged"
     TYPE_CORRECTED = "type_corrected"
@@ -137,8 +172,11 @@ class EventType(StrEnum):
     CONTEXT_RECORDED = "context_recorded"
     CONTEXT_REVOKED = "context_revoked"
     PROPOSAL_CREATED = "proposal_created"
+    PROPOSAL_DEFERRED = "proposal_deferred"
+    EXTRACTION_FILED = "extraction_filed"
     PROPOSAL_COMMITTED = "proposal_committed"
     PROPOSAL_REJECTED = "proposal_rejected"
     CONTEXT_ASSEMBLED = "context_assembled"
     SESSION_BOOTSTRAPPED = "session_bootstrapped"
     CONFLICT_RECORDED = "conflict_recorded"
+    INCIDENT_RECORDED = "incident_recorded"

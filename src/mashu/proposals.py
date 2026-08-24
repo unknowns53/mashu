@@ -23,7 +23,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Jsonb
 
-from mashu import events, resolution, store
+from mashu import events, redact, resolution, store
 from mashu.errors import DuplicateProposalError, NotFoundError, ProposalError
 from mashu.gate import CommitDecision, GateRuling, classify
 from mashu.models import (
@@ -156,7 +156,7 @@ def session_queue(cur: psycopg.Cursor) -> list[dict]:
     cur.execute(
         """
         SELECT p.proposal_id, p.session_id, p.actor, p.operation, p.target_memory,
-               p.payload, p.created_at, p.seq,
+               p.payload, p.created_at, p.seq, p.deferred_at, p.review_note,
                EXTRACT(DAY FROM now() - p.created_at)::int AS days_pending,
                COALESCE(e.type, p.payload ->> 'type') AS memory_type,
                COALESCE(e.title, p.payload ->> 'title') AS title,
@@ -196,11 +196,70 @@ def session_queue(cur: psycopg.Cursor) -> list[dict]:
                 "session_id": session_id,
                 "count": len(items),
                 "days_pending": max(i["days_pending"] for i in items),
+                "deferred": sum(1 for i in items if i["deferred_at"]),
                 "proposals": items,
             }
         )
-    out.sort(key=lambda b: -b["days_pending"])
+    # A bundle whose every item a reviewer has already looked at and put off
+    # sorts last. Waiting longest is the right order among things nobody has
+    # seen; it is the wrong order for the one thing somebody chose to leave.
+    out.sort(key=lambda b: (b["deferred"] == b["count"], -b["days_pending"]))
     return out
+
+
+#: How long a proposal may wait before the next session is told about it.
+#: Not a service level: a week is roughly when the session that produced a
+#: proposal has stopped being the one that could still judge it cheaply.
+REVIEW_STALE_DAYS = 7
+
+
+def backlog(cur: psycopg.Cursor) -> dict[str, Any]:
+    """What is waiting for a person, for a session start to carry.
+
+    Section 16.3 put capture health here on the reasoning that during a
+    stretch nobody attends, the next session is the only reader guaranteed to
+    arrive. The review queue has the same shape and no such reader: a proposal
+    the gate sent to a person is not retrievable and nothing else will move it,
+    so it waits until someone happens to look. This is the same warning applied
+    to the other queue.
+
+    Candidates are counted but do not raise the warning on their own. They are
+    already retrievable, tagged unreviewed (21.1), so leaving them costs
+    precision rather than access.
+    """
+    cur.execute(
+        """
+        SELECT
+          count(*) AS waiting,
+          count(*) FILTER (WHERE blocked.proposal_id IS NOT NULL) AS blocking,
+          EXTRACT(EPOCH FROM now() - min(p.created_at)) / 86400 AS oldest_days
+        FROM proposal p
+        LEFT JOIN LATERAL (
+            SELECT e.proposal_id FROM event_log e
+            WHERE e.proposal_id = p.proposal_id
+              AND e.detail->>'gate' = 'human_review'
+            LIMIT 1
+        ) blocked ON true
+        WHERE p.status = 'pending' AND p.deferred_at IS NULL
+        """
+    )
+    row = dict(cur.fetchone())
+    oldest = row["oldest_days"]
+    row["oldest_days"] = round(float(oldest), 1) if oldest is not None else None
+    row["ok"] = not row["blocking"] and (oldest is None or float(oldest) < REVIEW_STALE_DAYS)
+    row["warning"] = None if row["ok"] else _review_warning(row)
+    return row
+
+
+def _review_warning(row: dict[str, Any]) -> str:
+    parts = []
+    if row["blocking"]:
+        parts.append(
+            f"{row['blocking']} proposal(s) are held for a person and nothing else will move them"
+        )
+    if row["oldest_days"] is not None and row["oldest_days"] >= REVIEW_STALE_DAYS:
+        parts.append(f"the oldest of {row['waiting']} has waited {row['oldest_days']} day(s)")
+    return "review is behind: " + "; ".join(parts) + ". 'mashu review' takes a bundle at a time."
 
 
 _ORPHAN_SQL = """
@@ -279,6 +338,19 @@ def propose(
     judgement call.
     """
     operation = ProposalOperation(operation)
+
+    # Before anything else, and for every proposer including the user. What
+    # lands here is read into every session and travels outward from there into
+    # whatever those agents write, so an identifier that gets in has been
+    # published slowly rather than not at all. Review will not catch it: review
+    # reads for whether a claim is true.
+    verdict = redact.check(payload.get("title"), payload.get("content"), payload.get("directive"))
+    if not verdict.allowed:
+        raise ProposalError(
+            f"this content {verdict.reason()} and may not enter the store. "
+            f"Rewrite it without the identifier; the store is read into every "
+            f"session and carried outward from there"
+        )
 
     if operation is ProposalOperation.CHANGE_STATUS and payload.get("status") == str(
         VersionStatus.REJECTED
@@ -520,6 +592,32 @@ def approve_bundle(
 # --------------------------------------------------------------------------
 # internals
 # --------------------------------------------------------------------------
+def defer(cur: psycopg.Cursor, proposal_id: UUID, *, reviewer: str, note: str) -> dict:
+    """Record that a reviewer looked at this and chose to wait (30 段 C).
+
+    A skip that leaves no trace is indistinguishable from never having been
+    read, so the same item returns to the top of the next sitting and is skipped
+    again. Requiring a note is not bureaucracy: it is what separates "not yet"
+    from "not this", and only one of those is going to change.
+    """
+    proposal = _pending(cur, proposal_id)
+    cur.execute(
+        "UPDATE proposal SET deferred_at = now(), review_note = %s WHERE proposal_id = %s "
+        "RETURNING *",
+        (note, proposal_id),
+    )
+    row = cur.fetchone()
+    events.record(
+        cur,
+        EventType.PROPOSAL_DEFERRED,
+        reviewer,
+        proposal_id=proposal_id,
+        memory_id=proposal["target_memory"],
+        detail={"note": note},
+    )
+    return row
+
+
 def _pending(cur: psycopg.Cursor, proposal_id: UUID) -> dict:
     proposal = get(cur, proposal_id)
     if ProposalStatus(proposal["status"]) in _DECIDED:
@@ -686,9 +784,17 @@ def _apply_on_approval(cur: psycopg.Cursor, proposal: dict, *, actor: str) -> No
         return
 
     if operation is ProposalOperation.CHANGE_STATUS:
+        # Through _as_uuid, because an id that has been through JSONB comes
+        # back a string. set_status decides whether to clear the active pointer
+        # by comparing this against the entity's, and a UUID never equals a
+        # string: the version went dormant while the entity went on pointing at
+        # it, so a retirement approved here retired nothing and said so in the
+        # affirmative. That is section 1's "a disproven hypothesis is reused",
+        # produced by the operation built to prevent it, and it is the path
+        # every unattended retirement takes (30 段 B holds them all for review).
         store.set_status(
             cur,
-            version_id=payload["version_id"],
+            version_id=_as_uuid(payload["version_id"]),
             target=VersionStatus(payload["status"]),
             actor=actor,
             reason=payload["reason"],
@@ -699,7 +805,7 @@ def _apply_on_approval(cur: psycopg.Cursor, proposal: dict, *, actor: str) -> No
         store.set_active(
             cur,
             memory_id=proposal["target_memory"],
-            version_id=payload["version_id"],
+            version_id=_as_uuid(payload["version_id"]),
             actor=actor,
             reason=payload.get("reason"),
         )
@@ -716,13 +822,14 @@ def _apply_on_approval(cur: psycopg.Cursor, proposal: dict, *, actor: str) -> No
         return
 
     if operation is ProposalOperation.MERGE:
+        keep_active = payload.get("keep_active")
         store.merge_entities(
             cur,
             source=proposal["target_memory"],
-            target=payload["into"],
+            target=_as_uuid(payload["into"]),
             actor=actor,
             reason=payload["reason"],
-            keep_active=payload.get("keep_active"),
+            keep_active=_as_uuid(keep_active) if keep_active else None,
         )
         return
 

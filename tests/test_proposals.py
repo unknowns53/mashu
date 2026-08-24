@@ -576,3 +576,72 @@ def test_an_unrelated_title_in_the_same_scope_is_not_a_duplicate(cur, scope_id):
         allow_similar=True,
     )
     assert result["proposal"]["status"] == "pending"
+
+
+def test_a_retirement_approved_at_review_takes_the_pointer_off(cur, scope_id):
+    """The pointer has to move, not just the status (10, 16.1, 30 段 B).
+
+    Retiring a version and leaving the entity pointing at it produces exactly
+    the failure section 1 names: the memory stays current truth while its own
+    row says it was withdrawn. This is the path every unattended retirement
+    takes, because the worker holds all of them for review, so a break here is
+    silent and permanent — the retirement reports success and retires nothing.
+    """
+    seed = _propose_create(cur, scope_id)["proposal"]
+    version_id = seed["applied_version"]
+    proposals.approve(cur, seed["proposal_id"], reviewer="user")
+    assert store.get_entity(cur, seed["target_memory"])["active_version"] == version_id
+
+    filed = proposals.propose(
+        cur,
+        actor="mashu-worker",
+        operation=ProposalOperation.CHANGE_STATUS,
+        target_memory=seed["target_memory"],
+        payload={
+            # A string, as it will be after a round trip through JSONB. The
+            # comparison inside set_status is against a UUID.
+            "version_id": str(version_id),
+            "status": str(VersionStatus.DORMANT),
+            "reason": "the run it described was replaced",
+        },
+        allow_duplicate=True,
+    )
+    proposals.approve(cur, filed["proposal"]["proposal_id"], reviewer="user")
+
+    assert store.get_version(cur, version_id)["status"] == VersionStatus.DORMANT
+    assert store.get_entity(cur, seed["target_memory"])["active_version"] is None
+
+
+def test_a_candidate_waiting_does_not_raise_the_review_warning(cur, scope_id):
+    _propose_create(cur, scope_id)
+    got = proposals.backlog(cur)
+    assert (got["waiting"], got["blocking"], got["ok"]) == (1, 0, True)
+    assert got["warning"] is None
+
+
+def test_a_proposal_held_for_a_person_raises_it_at_once(cur, scope_id):
+    _propose_create(cur, scope_id)
+    _propose_create(cur, scope_id, allow_duplicate=True, allow_similar=True)
+    got = proposals.backlog(cur)
+    assert got["blocking"] == 1
+    assert got["ok"] is False
+    assert "nothing else will move them" in got["warning"]
+
+
+def test_an_old_candidate_raises_it_even_with_nothing_held(cur, scope_id):
+    made = _propose_create(cur, scope_id)["proposal"]
+    cur.execute(
+        "UPDATE proposal SET created_at = now() - make_interval(days => %s) WHERE proposal_id = %s",
+        (proposals.REVIEW_STALE_DAYS + 2, made["proposal_id"]),
+    )
+    got = proposals.backlog(cur)
+    assert got["blocking"] == 0
+    assert got["ok"] is False
+    assert "has waited" in got["warning"]
+
+
+def test_deciding_takes_it_back_off_the_warning(cur, scope_id):
+    made = _propose_create(cur, scope_id)
+    proposals.approve(cur, made["proposal"]["proposal_id"], reviewer="user")
+    got = proposals.backlog(cur)
+    assert (got["waiting"], got["oldest_days"], got["ok"]) == (0, None, True)

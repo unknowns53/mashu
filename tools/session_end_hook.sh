@@ -4,6 +4,9 @@
 # and returns. No model runs here. The worker does the expensive part later,
 # with nothing waiting on it.
 #
+# The working directory is passed along because it is what decides the scope,
+# and by the time the worker looks, the process that knew it has exited.
+#
 # Install by pointing the CLI's SessionEnd hook at this file. It never exits
 # non-zero: a hook that fails loudly interrupts something the user did not ask
 # for, and a session that misses the queue is one the sweeper will find.
@@ -18,14 +21,19 @@ field() {
 
 transcript=$(field transcript_path)
 session=$(field session_id)
+cwd=$(field cwd)
 cli="${MASHU_SOURCE_CLI:-claude}"
 
-[ -n "$transcript" ] && [ -n "$session" ] || exit 0
+[ -n "$transcript" ] || exit 0
+
+set -- enqueue "$transcript" --cli "$cli"
+[ -n "$session" ] && set -- "$@" --session "$session"
+[ -n "$cwd" ] && set -- "$@" --cwd "$cwd"
 
 # MASHU_BIN must name one executable, not a command line.
 if [ "${MASHU_HOOK_DEBUG:-}" = "1" ]; then
-    "$MASHU" enqueue "$transcript" --cli "$cli" --session "$session" || true
+    "$MASHU" "$@" || true
 else
-    "$MASHU" enqueue "$transcript" --cli "$cli" --session "$session" >/dev/null 2>&1 || true
+    "$MASHU" "$@" >/dev/null 2>&1 || true
 fi
 exit 0

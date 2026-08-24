@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The motor. Everything else in the capture pipeline is a thing that runs when
+  called; this is what calls it. Without a unit like this the store still only
+  fills when a person types a command, which is the regression the pipeline
+  exists to close.
+
+  Two jobs in one: sweep picks up transcripts no session-end hook claimed, then
+  work takes what the queue holds. Both are safe to run at any time — the
+  ledger's unique key makes a repeat a no-op, and a claim already held by
+  another worker is skipped rather than duplicated.
+
+  Copy to ~/Library/LaunchAgents/, edit the three paths, then load it. See the
+  README section on capture for what to change and how to check it is running.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mashu.capture</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <!-- EDIT: the path to the mashu executable in this project's venv.
+             Twenty-four workers rather than one: the worker calls the model
+             and then waits minutes for the answer, so a single process spends
+             most of the night idle. The provider is not what bounds this;
+             memory is. A worker holds 15-80 MB while waiting and about 550 MB
+             while it embeds, so the count is set from this machine's RAM with
+             the OS left eight gigabytes, and the starts are spaced a second
+             apart so they do not all load the embedding model at once. A
+             worker that finds the queue empty exits, so the count costs
+             nothing on a quiet night. claim() takes rows FOR UPDATE SKIP LOCKED and
+             commits the running state before the call, so concurrent workers
+             never take the same run. A session read across several windows
+             stays ordered because each window returns to the queue only after
+             its checkpoint has moved. -->
+        <string>MASHU=REPLACE_WITH_PROJECT/.venv/bin/mashu; "$MASHU" sweep --days 2 &amp;&amp; i=1; while [ $i -le 24 ]; do "$MASHU" work --limit 40 &amp; i=$((i+1)); sleep 1; done; wait</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>4</integer>
+        <key>Minute</key><integer>30</integer>
+    </dict>
+
+    <!-- Do not run at load: the first run should be one you watched. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+        <!-- api, cli:claude, cli:codex, or auto. Named rather than left on
+             auto: auto prefers the API whenever a key is in the environment,
+             and which extractor answers now decides whether the daily input
+             ceiling applies at all. codex is billed to an account these
+             conversations do not spend, so it carries no ceiling and the
+             queue drains at whatever rate it can. Putting this back to
+             cli:claude or api restores the ceiling with it. -->
+        <key>MASHU_EXTRACTOR</key>
+        <string>cli:codex</string>
+    </dict>
+
+    <!-- EDIT: somewhere you will actually look when something goes wrong. -->
+    <key>StandardOutPath</key>
+    <string>REPLACE_WITH_PROJECT/.capture.log</string>
+    <key>StandardErrorPath</key>
+    <string>REPLACE_WITH_PROJECT/.capture.log</string>
+</dict>
+</plist>

@@ -37,7 +37,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import bootstrap, db, proposals, resolution, retrieval, scratch, store
+from mashu import bootstrap, context, db, proposals, resolution, retrieval, scratch, store
 from mashu.errors import DuplicateProposalError, MashuError
 from mashu.models import MemoryType, ProposalOperation, SourceType, VersionStatus
 
@@ -45,6 +45,41 @@ from mashu.models import MemoryType, ProposalOperation, SourceType, VersionStatu
 #: configuration, one entry per agent, so that the event log names which agent
 #: proposed what.
 ACTOR_ENV_VAR = "MASHU_AGENT"
+
+#: How this process learns which CLI session it belongs to. Without it the
+#: scratch an agent writes cannot be found again: the worker looks it up by
+#: (source_cli, external_session_id) from the transcript, and a session row
+#: holding only an agent name has nothing to match on. Stage one of the capture
+#: pipeline is then dead — the scratch is written, never read, never cleared,
+#: and the extraction pays the transcript-only price every time.
+#:
+#: The CLIs already export this; MASHU_EXTERNAL_SESSION_ID overrides for
+#: anything that does not.
+#:
+#: It is read once, at startup, because that is the only time it is offered,
+#: and it goes stale: a CLI hands out a new id when a conversation is compacted
+#: or resumed, and this process is not restarted with it. So the id is written
+#: down but not relied on alone — see the cwd, which is why 0020 exists.
+SESSION_ENV_VARS = (
+    "MASHU_EXTERNAL_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_SESSION_ID",
+)
+SOURCE_CLI_ENV_VAR = "MASHU_SOURCE_CLI"
+
+
+def external_session() -> tuple[str, str] | None:
+    """The CLI and session id this process is serving, if it can be known."""
+    for name in SESSION_ENV_VARS:
+        value = os.environ.get(name)
+        if value:
+            cli = os.environ.get(SOURCE_CLI_ENV_VAR) or (
+                "codex" if name == "CODEX_SESSION_ID" else "claude"
+            )
+            return cli, value
+    return None
+
+
 DEFAULT_ACTOR = "agent"
 
 _session_id: UUID | None = None
@@ -63,14 +98,40 @@ def session(cur: psycopg.Cursor) -> UUID:
     so that an agent which skipped the bootstrap still has its proposals
     bundled. Whether the bootstrap happened is a separate question, and the
     event log is where it is answered.
+
+    The working directory is recorded beside the id because the id is the part
+    that goes stale. A conversation that is compacted keeps this process and
+    gets a new id, so what is written here stops matching the transcript that
+    will be extracted; the directory does not move, and the scratch items carry
+    their own moments, which is enough to find them again (0020).
     """
     global _session_id
-    if _session_id is None:
+    if _session_id is not None:
+        return _session_id
+
+    outside = external_session()
+    if outside is not None:
+        # Adopt the row the worker will look for, or make it. Both sides then
+        # name the same session, so what an agent proposes live and what the
+        # extraction proposes afterwards land in one review bundle, and the
+        # scratch written here is the scratch the extraction reads.
+        cli, external_id = outside
         cur.execute(
-            "INSERT INTO agent_session (agent) VALUES (%s) RETURNING session_id",
-            (actor(),),
+            """
+            INSERT INTO agent_session (agent, source_cli, external_session_id, cwd)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (source_cli, external_session_id) WHERE external_session_id IS NOT NULL
+            DO UPDATE SET agent = EXCLUDED.agent, cwd = EXCLUDED.cwd
+            RETURNING session_id
+            """,
+            (actor(), cli, external_id, os.getcwd()),
         )
-        _session_id = cur.fetchone()["session_id"]
+    else:
+        cur.execute(
+            "INSERT INTO agent_session (agent, cwd) VALUES (%s, %s) RETURNING session_id",
+            (actor(), os.getcwd()),
+        )
+    _session_id = cur.fetchone()["session_id"]
     return _session_id
 
 
@@ -136,7 +197,11 @@ def build_server() -> Any:
             "of every session before anything else: it returns the index of "
             "what is known, and without it memory_search has nothing to aim "
             "at. Propose changes rather than assuming them; nothing here is "
-            "edited in place."
+            "edited in place. As you work, call scratch_put on anything that "
+            "looks worth keeping past this session: it costs no review, and "
+            "it is what the end-of-session extraction reads. A session that "
+            "flags nothing is read from its transcript instead, which is "
+            "roughly a hundred times the input for a worse answer."
         ),
     )
 
@@ -151,9 +216,20 @@ def build_server() -> Any:
         not save it anywhere, and stop using it past valid_until.
 
         capture says whether automatic capture is still working. If it is not
-        ok, tell the user in one line — nothing new is reaching the store from
-        the sessions it names, and during a stretch where nobody is checking,
-        you are the only reader that arrives.
+        ok, tell the user in one line, because nothing new is reaching the
+        store from the sessions it names, and during a stretch where nobody is
+        checking, you are the only reader that arrives.
+
+        review says what is waiting for the user to decide. Same reasoning,
+        other queue: a proposal the gate held for a person is not retrievable
+        and nothing else will move it. If it is not ok, say so in one line too.
+
+        Then keep scratch_put in hand for the rest of the session. Nothing
+        written here becomes knowledge on its own; what it does is tell the
+        extraction where to look. Flag a session and it is read around your
+        flags. Flag nothing and the whole transcript is read instead, which
+        for a working evening is a hundred times the input and a poorer
+        result, because nobody marked which part mattered.
 
         Pass scopes once you know which scopes the session is working in, to
         get their current state as well. The index always covers the whole
@@ -176,12 +252,17 @@ def build_server() -> Any:
                     "scoped": got.scoped,
                     "temporary": got.temporary,
                     "capture": got.health,
+                    "review": got.review,
                     "trimmed": got.trimmed,
                     "tokens": got.tokens,
                     "over_budget": got.over_budget,
                     "note": (
                         "Entries under trimmed had their content dropped to stay "
-                        "inside the token ceiling; fetch them with memory_get."
+                        "inside the token ceiling; fetch them with memory_get. "
+                        "Call scratch_put during this session on anything worth "
+                        "keeping past it: that is what the end-of-session "
+                        "extraction reads, and a session that flags nothing has "
+                        "its whole transcript read instead."
                     ),
                 }
             )
@@ -195,13 +276,19 @@ def build_server() -> Any:
     ) -> dict[str, Any]:
         """Search the knowledge state. Answers in three layers.
 
-        active: current knowledge, usable as it stands.
+        active: current knowledge, usable as it stands. A row carrying
+            proposed_status has a pending proposal to retire it: still current,
+            but somebody has argued it is finished or wrong, and the reason is
+            on the row. Weigh it; do not treat it as already gone.
         unreviewed: written but not yet confirmed by a human. Usable, but do
             not make a definite claim on it alone, and do not propose the same
             thing again.
         retired: refuted, parked or turned down. Content is deliberately
             withheld; the reason is what you are given. Do not re-derive these,
             and if you argue against the reason, bring new grounds.
+        temporary: conditions that hold until a stated moment — a quota, an
+            outage, an arrangement for this month. Not knowledge and not
+            sorted with it; they stop applying on their own at expires_at.
         """
         with db.transaction() as cur:
             got = retrieval.retrieve(
@@ -219,6 +306,7 @@ def build_server() -> Any:
                     "active": got.active,
                     "unreviewed": got.unreviewed,
                     "retired": got.retired,
+                    "temporary": got.temporary,
                     "dropped_unreviewed": got.dropped_unreviewed,
                 }
             )
@@ -270,12 +358,64 @@ def build_server() -> Any:
         Use it for what would otherwise be lost when the session closes: a
         result you have not acted on yet, a suspicion worth testing, a step you
         left unfinished. kind is note, candidate, or work_state.
+
+        Calling this also decides what the extraction reads. Each item marks a
+        moment, and the transcript is read around those moments rather than end
+        to end. So the cost of capturing this session, and how well it is
+        captured, both follow from whether you flagged anything: a working
+        evening flagged is a few thousand tokens read at the points that
+        mattered, and the same evening unflagged is a few hundred thousand read
+        with nothing pointing anywhere.
         """
         with db.transaction() as cur:
             item = scratch.put(
                 cur, session_id=session(cur), content=content, kind=kind, source_turn=source_turn
             )
             return _plain({"ok": True, "item": item})
+
+    @server.tool()
+    def context_put(
+        content: str, expires_at: str, kind: str = "fact", scope: str | None = None
+    ) -> dict[str, Any]:
+        """Record something that is true only until a stated moment (25.2).
+
+        For conditions rather than knowledge: a quota that resets, a machine
+        that is down until Friday, a model available this month. These stop
+        applying on their own, so they cost no review and need no retirement —
+        the clock does it, with nothing in the way that could be down.
+
+        expires_at is an ISO timestamp and may be at most two weeks out. Longer
+        than that is a claim about how things are wearing a window, and belongs
+        in memory_propose where a person can look at it.
+
+        What you write here comes back from memory_search, in a block beside
+        the three layers. It is not pushed into other sessions' openings; only
+        what the user states directly goes there. The right to write and the
+        right to interrupt every future session are deliberately not the same
+        right.
+        """
+        with db.transaction() as cur:
+            try:
+                moment = datetime.fromisoformat(expires_at)
+            except ValueError:
+                return {
+                    "ok": False,
+                    "error": f"'{expires_at}' is not an ISO timestamp",
+                }
+            if moment.tzinfo is None:
+                moment = moment.astimezone()
+            row = context.put(
+                cur,
+                content=content,
+                expires_at=moment,
+                kind=kind,
+                source_type=SourceType.AGENT,
+                created_by=actor(),
+                actor=actor(),
+                scope_id=UUID(scope) if scope else None,
+                source_reference=f"session {session(cur)}",
+            )
+            return _plain({"ok": True, "context": row})
 
     @server.tool()
     def scratch_get() -> dict[str, Any]:

@@ -30,7 +30,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import context, runs
+from mashu import context, proposals, runs
 from mashu.events import record
 from mashu.models import Delivery, EventType
 from mashu.retrieval import estimate_tokens
@@ -58,12 +58,30 @@ ORDER BY name
 # rule as a person reviewed it; content is the whole of it with the reasons.
 # The push takes the first, the pull takes the second, so keeping the session
 # opening small no longer costs the reasons.
+#
+# The retirement note rides along here too (21.1). This is the most privileged
+# read there is — pushed into every session before it asks for anything — so it
+# is the last place that should hand over a memory somebody has argued is
+# finished without saying so.
 _PUSHED_SQL = """
 SELECT e.memory_id, e.scope_id, e.type, e.title, e.delivery,
        v.version_id, coalesce(v.directive, v.content) AS content,
-       v.directive IS NOT NULL AS shortened
+       v.directive IS NOT NULL AS shortened,
+       r.proposed_status, r.proposed_reason, r.proposed_by
 FROM memory_entity e
 JOIN memory_version v ON v.version_id = e.active_version AND v.memory_id = e.memory_id
+LEFT JOIN LATERAL (
+    SELECT p.payload ->> 'status' AS proposed_status,
+           p.payload ->> 'reason' AS proposed_reason,
+           p.actor                AS proposed_by
+    FROM proposal p
+    WHERE p.target_memory = e.memory_id
+      AND p.status = 'pending'
+      AND p.operation = 'change_status'
+      AND p.payload ->> 'status' IN ('disproven', 'dormant', 'completed')
+    ORDER BY p.seq DESC
+    LIMIT 1
+) r ON TRUE
 WHERE e.status = 'active'
   AND e.delivery = %(delivery)s
   AND (%(scopes)s::uuid[] IS NULL OR e.scope_id = ANY(%(scopes)s::uuid[]))
@@ -88,6 +106,10 @@ class Bootstrapped:
     #: during a week nobody attends, the next session is the only reader
     #: guaranteed to arrive.
     health: dict[str, Any] = field(default_factory=dict)
+    #: What is waiting for a person to decide. Beside health rather than in it:
+    #: capture failing means nothing new arrives, review being behind means
+    #: what arrived is less certain than it could be. Two different repairs.
+    review: dict[str, Any] = field(default_factory=dict)
     #: Memory IDs whose content was dropped to stay inside the budget. They are
     #: still listed, by title, so memory_get can fetch what was cut.
     trimmed: list[UUID] = field(default_factory=list)
@@ -154,6 +176,7 @@ def session_bootstrap(
         scoped=scoped,
         temporary=temporary,
         health=runs.health(cur),
+        review=proposals.backlog(cur),
         trimmed=trimmed,
         tokens=_total_tokens(scope_index, startup, scoped),
     )
@@ -173,6 +196,7 @@ def session_bootstrap(
                 "over_budget": result.over_budget,
                 "temporary": [str(row["context_id"]) for row in temporary],
                 "capture_ok": result.health.get("ok"),
+                "review_ok": result.review.get("ok"),
             },
         )
     return result
@@ -243,6 +267,27 @@ def _total_tokens(
     return cost
 
 
+def _with_change(
+    pack: list[dict[str, Any]],
+    memory_id: UUID | None,
+    content: str | None,
+) -> list[dict[str, Any]]:
+    """One opening, with the memory under consideration carrying its new body.
+
+    Copies rather than edits in place: the same startup rows appear in every
+    opening being weighed, so writing the hypothetical onto them would leave it
+    on the rows the next opening is measured from.
+    """
+    if memory_id is None:
+        return pack
+    changed = [dict(row) for row in pack]
+    for row in changed:
+        if row.get("memory_id") == memory_id:
+            row["content"] = content
+            return changed
+    return [*changed, {"title": "", "content": content}]
+
+
 def would_fit(
     cur: psycopg.Cursor,
     *,
@@ -259,28 +304,33 @@ def would_fit(
     failed; the place to catch that is where the change that would cause it is
     being approved, while there is still someone to hand it back to.
 
-    scope_id adds that scope's scope_required memories, which is the pack a
-    session working in it actually receives. Without it this measured only the
-    part of the pack that is the same for everyone, and a current state is
-    never in that part.
+    scope_id names the scope riding along with the startup pack, which together
+    are what a session working in it receives.
+
+    Passing None measures the heaviest opening, not the lightest. A session
+    that never narrows to a scope gets the startup pack alone, but that is not
+    the case the ceiling has to survive, and measuring it was how a promotion
+    into the startup pack could be accepted and still cost every scoped session
+    the current state it opens with: inside the budget for a session that
+    learned nothing, over it for every session that learned where it was.
     """
     cur.execute(_SCOPE_INDEX_SQL)
     index = [
         {"name": row["name"], "summary": _one_line(row["description"])} for row in cur.fetchall()
     ]
     cur.execute(_PUSHED_SQL, {"scopes": None, "delivery": str(Delivery.STARTUP_REQUIRED)})
-    pack = [dict(row) for row in cur.fetchall()]
+    base = [dict(row) for row in cur.fetchall()]
+
     if scope_id is not None:
         cur.execute(_PUSHED_SQL, {"scopes": [scope_id], "delivery": str(Delivery.SCOPE_REQUIRED)})
-        pack += [dict(row) for row in cur.fetchall()]
+        openings = [base + [dict(row) for row in cur.fetchall()]]
+    else:
+        cur.execute(_PUSHED_SQL, {"scopes": None, "delivery": str(Delivery.SCOPE_REQUIRED)})
+        by_scope: dict[UUID, list[dict[str, Any]]] = {}
+        for row in cur.fetchall():
+            by_scope.setdefault(row["scope_id"], []).append(dict(row))
+        # No scope pushes anything yet, so the startup pack is the whole opening.
+        openings = [base + rows for rows in by_scope.values()] or [base]
 
-    if memory_id is not None:
-        for row in pack:
-            if row["memory_id"] == memory_id:
-                row["content"] = content
-                break
-        else:
-            pack.append({"title": "", "content": content})
-
-    cost = _total_tokens(index, pack)
+    cost = max(_total_tokens(index, _with_change(pack, memory_id, content)) for pack in openings)
     return cost <= budget, cost

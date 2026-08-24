@@ -314,15 +314,22 @@ def test_every_layer_is_written_to_the_event_log(cur, scope_id, author):
     assert str(memory_id) in detail["layer3"]
 
 
-def test_scope_detection_finds_the_right_ledger_entry(cur):
-    polymer = store.create_scope(
-        cur, name="cloud point measurement", actor="user", description="ramp rates and DLS"
-    )
-    other = store.create_scope(
-        cur, name="SSD failure analysis", actor="user", description="enclosure timeouts"
-    )
+def test_scope_detection_reads_what_a_scope_holds_not_what_it_is_called(cur):
+    """27.2 measured the label method and it does not separate.
+
+    Matching a query against a scope's name and one-line summary put every real
+    query inside a tenth of every scope and got the ranking wrong four times in
+    seven. Three words cannot say what a scope is about. What a scope holds can,
+    so the query goes against the memories and the scopes the best matches live
+    in are the answer — a question about concentration rather than about an
+    absolute similarity.
+    """
+    polymer = store.create_scope(cur, name="scope one", actor="user", description="unrelated words")
+    other = store.create_scope(cur, name="scope two", actor="user", description="unrelated words")
     for scope, title, content in [
         (polymer, "ramp rate", "the ramp is half a degree per minute"),
+        (polymer, "ramp check", "the ramp is checked before every run"),
+        (polymer, "ramp limit", "the ramp is never above one degree per minute"),
         (other, "timeout length", "the timeout is nine seconds"),
     ]:
         store.create_entity(
@@ -337,9 +344,10 @@ def test_scope_detection_finds_the_right_ledger_entry(cur):
             adopt=True,
         )
 
-    got = retrieval.retrieve(cur, "cloud point measurement", actor="claude")
+    # The scope names say nothing about ramps; only the memories do.
+    got = retrieval.retrieve(cur, "the ramp is half a degree per minute", actor="claude")
     assert got.scopes == [polymer]
-    assert _titles(got.active) == ["ramp rate"]
+    assert "ramp rate" in _titles(got.active)
 
 
 def test_an_undetectable_query_searches_everything_rather_than_guessing(cur, scope_id, author):
@@ -350,19 +358,18 @@ def test_an_undetectable_query_searches_everything_rather_than_guessing(cur, sco
     assert _titles(got.active) == ["ramp rate"]
 
 
-def test_a_scope_with_no_vector_is_skipped_rather_than_breaking_detection(cur, author):
-    """Scopes predate migration 0006; backfill is what fills them in."""
-    from mashu import store as _store
+def test_a_scope_too_small_to_concentrate_declines_rather_than_guesses(cur):
+    """A scope holding almost nothing cannot show concentration, and says so.
 
-    detectable = _store.create_scope(
-        cur, name="cloud point measurement", actor="user", description="ramp rates"
-    )
-    stale = _store.create_scope(cur, name="an older scope", actor="user")
-    cur.execute("UPDATE scope SET name_embedding = NULL WHERE scope_id = %s", (stale,))
-
-    _store.create_entity(
+    This is the mechanism declining, not failing. An empty answer means "search
+    everything", which is where a query about a nearly empty scope needed to go
+    in any case. Guessing it instead would narrow layer 1 onto one or two
+    memories and hide the rest of the ledger.
+    """
+    small = store.create_scope(cur, name="scope one", actor="user")
+    store.create_entity(
         cur,
-        scope_id=detectable,
+        scope_id=small,
         type=MemoryType.FACT,
         title="ramp rate",
         content="the ramp is half a degree per minute",
@@ -372,8 +379,9 @@ def test_a_scope_with_no_vector_is_skipped_rather_than_breaking_detection(cur, a
         adopt=True,
     )
 
-    got = retrieval.retrieve(cur, "cloud point measurement", actor="claude")
-    assert got.scopes == [detectable]
+    got = retrieval.retrieve(cur, "the ramp is half a degree per minute", actor="claude")
+    assert got.scopes == []
+    assert _titles(got.active) == ["ramp rate"]
 
 
 def test_the_ledger_is_not_re_encoded_on_every_query(cur, scope_id, author, monkeypatch):

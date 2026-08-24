@@ -29,7 +29,7 @@ from mashu.errors import MashuError
 
 THRESHOLD_ENV_VAR = "MASHU_RESOLUTION_THRESHOLD"
 
-#: Measured, not guessed (27.2, tools/measure_thresholds.py). Against the real
+#: Measured, not guessed (27.2, `mashu admin thresholds`). Against the real
 #: store the same-scope pairs of distinct concepts run to a maximum of 0.921,
 #: and ten rewordings of real titles run from 0.891 up. The two overlap, so no
 #: value separates them and the number is a choice about which error to make.
