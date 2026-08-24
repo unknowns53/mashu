@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import pathlib
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -1148,9 +1148,14 @@ def sweep(
     Deliberately does not read them. Whether a transcript is worth a model is
     the worker's judgement, made once, in one place; a sweeper that also
     decided would be a second copy of that rule that nobody keeps in step.
+
+    Walks from where it last got to rather than from a fixed number of days
+    ago. A window is a promise that nothing goes wrong for longer than the
+    window, and the failure this guards against — the hook stops enqueueing and
+    nobody notices — is exactly the one that lasts longer than that. since_days
+    is the reach of the first sweep only, before there is a mark to walk from.
     """
     roots = roots or TRANSCRIPT_ROOTS
-    cutoff = (datetime.now() - timedelta(days=since_days)).timestamp()
     workdir = str(extract.workdir())
     found: list[dict[str, Any]] = []
 
@@ -1158,9 +1163,20 @@ def sweep(
         base = pathlib.Path(root).expanduser()
         if not base.exists():
             continue
+        with transaction(dsn) as cur:
+            mark = runs.swept_to(cur, cli)
+        cutoff = (
+            mark.timestamp()
+            if mark is not None
+            else (datetime.now() - timedelta(days=since_days)).timestamp()
+        )
+        seen = 0
+        newest = cutoff
         for path in sorted(base.rglob("*.jsonl"), key=lambda p: -p.stat().st_mtime)[:limit]:
             if path.stat().st_mtime < cutoff:
                 break
+            seen += 1
+            newest = max(newest, path.stat().st_mtime)
             if any(part in NOT_A_SESSION for part in path.parts):
                 continue
             try:
@@ -1187,6 +1203,17 @@ def sweep(
                     cwd=session.cwd,
                 )
             found.append(run)
+
+        # Written whether or not anything was enqueued. A quiet sweep is the
+        # ordinary case and it is still evidence that the sweeper is alive,
+        # which is the whole reason health reads this.
+        with transaction(dsn) as cur:
+            runs.mark_swept(
+                cur,
+                source_cli=cli,
+                swept_to=datetime.fromtimestamp(newest, UTC),
+                files_seen=seen,
+            )
     return found
 
 

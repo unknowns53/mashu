@@ -179,6 +179,8 @@ class EventType(StrEnum):
     STATUS_CHANGED = "status_changed"
     STILL_STANDS = "still_stands"
     TOLD_APART = "told_apart"
+    GUARD_PINNED = "guard_pinned"
+    GUARD_FIRED = "guard_fired"
     ACTIVE_SWITCHED = "active_switched"
     EVIDENCE_RECORDED = "evidence_recorded"
     CONTEXT_RECORDED = "context_recorded"

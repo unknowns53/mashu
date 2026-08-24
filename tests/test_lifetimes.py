@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import os
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from mashu import bootstrap, context, runs, scratch
+from mashu import bootstrap, context, runs, scratch, worker
+from mashu.db import transaction
 from mashu.errors import NotFoundError
 from mashu.models import SourceType
 
@@ -320,3 +323,74 @@ def test_health_is_quiet_when_there_is_nothing_wrong(cur):
     state = runs.health(cur)
     assert state["ok"] is True
     assert state["warning"] is None
+
+
+def test_a_sweeper_that_stopped_is_the_one_failure_counting_rows_cannot_see(cur):
+    """16.3 asks whether capture is still working, and rows cannot answer it.
+
+    If the hook stops enqueueing and the sweeper stops running, the lost
+    sessions are in neither place. Nothing failed, nothing is waiting, and
+    capture is dead. That is the state a year of nobody attending reaches
+    quietly, so the last time the sweeper spoke is part of the reading.
+    """
+    assert runs.health(cur)["ok"] is True, "never having swept is a fresh install"
+
+    runs.mark_swept(cur, source_cli="claude", swept_to=datetime.now(UTC), files_seen=3)
+    got = runs.health(cur)
+    assert got["ok"] is True and got["swept_hours_ago"] is not None
+
+    cur.execute(
+        "UPDATE sweep_watermark SET swept_at = now() - make_interval(hours => %s)",
+        (runs.SWEEP_SILENT_HOURS + 1,),
+    )
+    got = runs.health(cur)
+    assert got["ok"] is False
+    assert got["warning"]
+
+
+def test_the_sweep_walks_from_where_it_got_to_rather_than_a_fixed_window(committing_dsn, tmp_path):
+    """A window promises nothing goes wrong for longer than the window.
+
+    The failure it guards against is the one that lasts longer than that: the
+    hook stops enqueueing, nobody notices for a fortnight, and by the time the
+    sweeper is asked the transcripts have fallen out the back of its reach.
+    """
+    root = tmp_path / "claude"
+    root.mkdir()
+    old = root / "old.jsonl"
+    old.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "sessionId": "long-ago",
+                "cwd": "/work/x",
+                "message": {"content": "問"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    long_ago = (datetime.now() - timedelta(days=90)).timestamp()
+    os.utime(old, (long_ago, long_ago))
+    roots = {"claude": str(root)}
+
+    with transaction(committing_dsn) as cur:
+        cur.execute("DELETE FROM sweep_watermark WHERE source_cli = 'claude'")
+
+    # With no mark, the fixed reach decides, and a file this old is past it.
+    assert worker.sweep(committing_dsn, roots=roots, since_days=7) == []
+
+    # The sweep still leaves a mark, because a quiet sweep is evidence too.
+    with transaction(committing_dsn) as cur:
+        assert runs.swept_to(cur, "claude") is not None
+        cur.execute(
+            "UPDATE sweep_watermark SET swept_to = now() - make_interval(days => 120) "
+            "WHERE source_cli = 'claude'"
+        )
+
+    found = worker.sweep(committing_dsn, roots=roots, since_days=7)
+    assert [row["external_session_id"] for row in found] == ["long-ago"]
+
+    with transaction(committing_dsn) as cur:
+        cur.execute("DELETE FROM extraction_run WHERE external_session_id = 'long-ago'")
+        cur.execute("DELETE FROM sweep_watermark WHERE source_cli = 'claude'")
