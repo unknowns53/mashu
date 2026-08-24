@@ -122,6 +122,12 @@ UNREVIEWED_TAG = "unreviewed"
 #: What is added to a layer 1 row somebody has proposed retiring (21.1, 30 段 B).
 RETIREMENT_PROPOSED_TAG = "retirement_proposed"
 
+#: What is added to a layer 1 row somebody has already rewritten (21.1). The
+#: half of that section's annotation that had not been built: a newer reading
+#: exists and is waiting for a person, and until they get to it the reader is
+#: being handed the older one with nothing to say so.
+UPDATE_PROPOSED_TAG = "update_proposed"
+
 _CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿ｦ-ﾟ]")
 
 
@@ -308,7 +314,8 @@ def active_set(cur: psycopg.Cursor, *, scope_id: UUID | None = None) -> list[dic
 _LAYER1_SQL = """
 SELECT e.memory_id, e.scope_id, e.type, e.title, v.version_id, v.content,
        1 - (v.content_embedding <=> %(q)s::vector) AS similarity,
-       r.proposed_status, r.proposed_reason, r.proposed_by
+       r.proposed_status, r.proposed_reason, r.proposed_by,
+       u.update_proposed_by, u.update_proposed_days
 FROM memory_entity e
 JOIN memory_version v ON v.version_id = e.active_version AND v.memory_id = e.memory_id
 LEFT JOIN LATERAL (
@@ -323,6 +330,16 @@ LEFT JOIN LATERAL (
     ORDER BY p.seq DESC
     LIMIT 1
 ) r ON TRUE
+LEFT JOIN LATERAL (
+    SELECT p.actor AS update_proposed_by,
+           EXTRACT(DAY FROM now() - p.created_at)::int AS update_proposed_days
+    FROM proposal p
+    WHERE p.target_memory = e.memory_id
+      AND p.status = 'pending'
+      AND p.operation = 'update_version'
+    ORDER BY p.seq DESC
+    LIMIT 1
+) u ON TRUE
 WHERE e.status = 'active'
   AND v.content_embedding IS NOT NULL
   AND (%(scopes)s::uuid[] IS NULL OR e.scope_id = ANY(%(scopes)s::uuid[]))
@@ -418,6 +435,8 @@ def retrieve(
     for row in active:
         if row.get("proposed_status"):
             row["tag"] = RETIREMENT_PROPOSED_TAG
+        elif row.get("update_proposed_by"):
+            row["tag"] = UPDATE_PROPOSED_TAG
 
     # Layers 2 and 3 stay inside the scopes the query landed in. Returning a
     # whole scope's retired memories would let layer 3 crowd the context out

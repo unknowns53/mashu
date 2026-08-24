@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from mashu import bootstrap, store
+from mashu import bootstrap, proposals, store
 from mashu.errors import DeliveryError, NotFoundError
-from mashu.models import Delivery, EventType, MemoryType, SourceType
+from mashu.models import Delivery, EventType, MemoryType, ProposalOperation, SourceType
 
 
 @pytest.fixture
@@ -401,3 +401,83 @@ def test_a_scope_promotion_is_weighed_at_all(cur, scope_id, write):
     with pytest.raises(DeliveryError):
         store.set_delivery(cur, memory_id=memory_id, delivery=Delivery.SCOPE_REQUIRED, actor="user")
     assert store.get_entity(cur, memory_id)["delivery"] == Delivery.PULL_ONLY
+
+
+def test_the_push_says_when_a_newer_version_is_waiting(cur, scope_id):
+    """21.1's other half: the annotation existed only for retirement.
+
+    What is pushed is the adopted reading. A Current State goes out of date in
+    hours and a review takes days, so the session most in need of knowing that
+    a newer reading is written is the one being handed the older one before it
+    has asked anything.
+    """
+    memory_id, version_id = store.create_entity(
+        cur,
+        scope_id=scope_id,
+        type=MemoryType.STATE,
+        title="where the work stands",
+        content="the first scenario is shipped",
+        source_type=SourceType.AGENT,
+        created_by="claude",
+        actor="claude",
+        adopt=True,
+    )
+    before = bootstrap.session_bootstrap(cur, actor="claude", scopes=[scope_id])
+    assert not any(row.get("update_proposed_by") for row in before.scoped)
+
+    proposals.propose(
+        cur,
+        actor="mashu-worker",
+        operation=ProposalOperation.UPDATE_VERSION,
+        target_memory=memory_id,
+        based_on_version=version_id,
+        payload={
+            "content": "the second scenario is shipped too",
+            "source_type": str(SourceType.AGENT),
+        },
+    )
+
+    after = bootstrap.session_bootstrap(cur, actor="claude", scopes=[scope_id])
+    pushed = [row for row in after.scoped if row["memory_id"] == memory_id]
+    assert len(pushed) == 1
+    assert pushed[0]["update_proposed_by"] == "mashu-worker"
+    # Still the adopted reading. The note says a newer one exists; it does not
+    # hand it over, which is what layer 2 is for.
+    assert "first scenario" in pushed[0]["content"]
+
+
+def test_the_refusal_names_a_route_that_exists(cur, scope_id, write):
+    """The advice sent the reader to a door that is shut from this side.
+
+    set_directive writes onto the adopted version, so a candidate waiting to be
+    adopted cannot be given one: adopting is the thing being refused. Telling
+    its holder to give it a directive costs them the round trip of finding that
+    out, and the way through — proposing it again carrying one — went unsaid.
+    """
+    memory_id, _ = write(MemoryType.STATE, "where things stand", "short enough")
+
+    with pytest.raises(DeliveryError, match="propose it again carrying one"):
+        store.add_version(
+            cur,
+            memory_id=memory_id,
+            content="word " * 3000,
+            source_type=SourceType.USER,
+            created_by="user",
+            actor="user",
+            adopt=True,
+            based_on_version=store.get_entity(cur, memory_id)["latest_version"],
+        )
+
+    # With one, the advice is about shortening what is there.
+    with pytest.raises(DeliveryError, match="shorten its directive"):
+        store.add_version(
+            cur,
+            memory_id=memory_id,
+            content="word " * 3000,
+            directive="word " * 3000,
+            source_type=SourceType.USER,
+            created_by="user",
+            actor="user",
+            adopt=True,
+            based_on_version=store.get_entity(cur, memory_id)["latest_version"],
+        )

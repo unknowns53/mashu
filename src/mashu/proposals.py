@@ -821,6 +821,16 @@ def _apply_on_approval(cur: psycopg.Cursor, proposal: dict, *, actor: str) -> No
         )
         return
 
+    if operation is ProposalOperation.RETITLE:
+        store.set_title(
+            cur,
+            memory_id=proposal["target_memory"],
+            title=payload["title"],
+            actor=actor,
+            reason=payload["reason"],
+        )
+        return
+
     if operation is ProposalOperation.MERGE:
         keep_active = payload.get("keep_active")
         store.merge_entities(

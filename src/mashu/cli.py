@@ -275,14 +275,9 @@ def cmd_search(args) -> int:
         print(f"layer 1  active ({len(got.active)})")
         for row in got.active:
             print(f"  [{row['type']}] {row['title']}  ({row['similarity']:.3f})")
-            if row.get("proposed_status"):
-                print(
-                    _wrap(
-                        f"! {row['proposed_by']} has proposed {row['proposed_status']}: "
-                        f"{row['proposed_reason'] or 'no reason given'}",
-                        indent="      ",
-                    )
-                )
+            note = _pending_note(row)
+            if note:
+                print(_wrap(note, indent="      "))
             print(_wrap(row["content"], indent="      "))
 
         print(f"\nlayer 2  unreviewed ({len(got.unreviewed)}, {got.dropped_unreviewed} dropped)")
@@ -658,6 +653,31 @@ def cmd_retype(args) -> int:
     return 0
 
 
+def cmd_retitle(args) -> int:
+    """Correct what an entity is called (8, 14).
+
+    The user runs it directly, for the reason retype is run directly: naming is
+    a judgement, and an agent asking for it waits for a person anyway (17).
+
+    A Current State is what needs it. Its body is rewritten as the work moves
+    and its title stayed where the first version left it, so the session
+    opening announced a state the entity itself had stopped holding.
+
+    No version is created. The content does not change.
+    """
+    with transaction(args.dsn) as cur:
+        entity = _resolve_entity(cur, args.memory)
+        moved = store.set_title(
+            cur,
+            memory_id=entity["memory_id"],
+            title=args.to,
+            actor=args.actor,
+            reason=args.reason,
+        )
+    print(f"{moved['from']}\n  ->  {moved['to']}")
+    return 0
+
+
 def cmd_merge(args) -> int:
     """Fold one entity into another, keeping the history (20.2).
 
@@ -895,6 +915,29 @@ def cmd_evidence(args) -> int:
     return 0
 
 
+def _pending_note(row) -> str | None:
+    """What is already proposed against a row being handed over (21.1).
+
+    Both halves of that section's annotation. The retirement note came first;
+    the update note is the one that matters for anything pushed, because what
+    is pushed is the adopted reading and a Current State goes out of date in
+    hours while a review takes days.
+    """
+    if row.get("proposed_status"):
+        return (
+            f"! {row['proposed_by']} has proposed {row['proposed_status']}: "
+            f"{row['proposed_reason'] or 'no reason given'}"
+        )
+    if row.get("update_proposed_by"):
+        days = row.get("update_proposed_days")
+        waited = f", waiting {days}d" if days else ""
+        return (
+            f"! a newer version is written and unreviewed "
+            f"(by {row['update_proposed_by']}{waited}); this is the adopted one"
+        )
+    return None
+
+
 def cmd_bootstrap(args) -> int:
     """Show what a session start is handed, and what it costs (21.2)."""
     with transaction(args.dsn) as cur:
@@ -915,6 +958,9 @@ def cmd_bootstrap(args) -> int:
         for row in rows:
             body = row["content"] if row["content"] is not None else "(trimmed; use memory_get)"
             print(f"  {str(row['memory_id'])[:8]}  {row['title']}")
+            note = _pending_note(row)
+            if note:
+                print(_wrap(note, indent="      "))
             print(f"      {body}")
 
     over = " over the ceiling" if got.over_budget else ""
@@ -1908,6 +1954,13 @@ def build_parser() -> argparse.ArgumentParser:
     rt.add_argument("--reason", required=True)
     rt.add_argument("--actor", default="user")
     rt.set_defaults(func=cmd_retype)
+
+    rn = adm.add_parser("retitle", help="correct what an entity is called (8, 14)")
+    rn.add_argument("memory")
+    rn.add_argument("--to", required=True, help="the new title")
+    rn.add_argument("--reason", required=True)
+    rn.add_argument("--actor", default="user")
+    rn.set_defaults(func=cmd_retitle)
 
     mg = adm.add_parser("merge", help="fold one entity into another (20.2)")
     mg.add_argument("source", help="the entity that stops being separate")
