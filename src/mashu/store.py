@@ -354,14 +354,22 @@ def record_evidence(
 
 
 def evidence_for(cur: psycopg.Cursor, version_id: UUID) -> list[dict[str, Any]]:
-    """What this version says it rests on, with each ground's current standing."""
+    """What this version says it rests on, with each ground's current standing.
+
+    The latest version's status comes back beside the active one because
+    adoption is a pointer: retiring a ground takes the pointer off, so an
+    active_version of NULL covers both "never adopted" and "adopted, then
+    found to be wrong". A reader deciding whether to build on this needs those
+    told apart, and only the latest version says which it was.
+    """
     cur.execute(
         """
         SELECT e.memory_id, e.type, e.title, e.status AS entity_status,
-               v.status AS version_status
+               v.status AS version_status, l.status AS latest_status
         FROM memory_evidence ev
         JOIN memory_entity e ON e.memory_id = ev.to_memory
         LEFT JOIN memory_version v ON v.version_id = e.active_version
+        LEFT JOIN memory_version l ON l.version_id = e.latest_version
         WHERE ev.from_version = %s
         ORDER BY e.title
         """,

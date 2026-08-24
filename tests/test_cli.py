@@ -514,8 +514,10 @@ def test_the_grounds_are_readable_while_the_state_is_still_waiting(
     proposal_id = out.split("proposal ")[1].split()[0]
 
     _, shown = run("inspect", proposal_id)
-    assert "resting on (1)" in shown
+    assert "built on 1 other memory" in shown
     assert "the measurement" in shown
+    # and what its standing means for the reader, not the status name alone
+    assert "not adopted yet" in shown
 
     with transaction(test_dsn) as cur:
         cur.execute(

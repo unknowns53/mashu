@@ -60,6 +60,7 @@ from mashu.incidents import LEADS_TO
 from mashu.migrate import migrate
 from mashu.models import (
     Delivery,
+    EntityStatus,
     IncidentCause,
     MemoryType,
     ProposalOperation,
@@ -194,13 +195,38 @@ def _grounds_text(cur, version_id) -> str:
     grounds = store.evidence_for(cur, version_id)
     if not grounds:
         return ""
-    lines = [f"\nresting on ({len(grounds)}):"]
+    many = "memory" if len(grounds) == 1 else "memories"
+    lines = [
+        f"\n  built on {len(grounds)} other {many}. deciding this one does not decide them (19):"
+    ]
     for row in grounds:
-        standing = row["version_status"] or "nothing adopted yet"
-        lines.append(
-            f"    {_short(row['memory_id'])}  [{row['type']}] {row['title']}  ({standing})"
-        )
+        lines.append(f"    [{row['type']}] {row['title']}")
+        lines.append(f"      {_standing_of(row)}   ·   mashu inspect {_short(row['memory_id'])}")
     return "\n".join(lines)
+
+
+#: What a ground's standing means for the reader deciding on top of it. The
+#: status names are the store's vocabulary and say nothing on their own to
+#: someone who is being asked a question about this proposal, not about that one.
+_STANDING = {
+    str(VersionStatus.CANDIDATE): "not adopted yet: its own review has not happened",
+    str(VersionStatus.DISPROVEN): "disproven: what this is built on was found to be wrong",
+    str(VersionStatus.COMPLETED): "completed: what this is built on is finished",
+    str(VersionStatus.DORMANT): "set aside: out of use, and open to being taken up again",
+    str(VersionStatus.REJECTED): "turned down at review",
+    str(VersionStatus.SUPERSEDED): "replaced by a newer reading",
+}
+
+
+def _standing_of(row) -> str:
+    """Where a ground stands, said as what it means rather than as a status name."""
+    if row["entity_status"] == str(EntityStatus.MERGED):
+        return "folded into another memory"
+    if row["version_status"] is not None:
+        if row["entity_status"] == str(EntityStatus.PROVISIONAL):
+            return "adopted, but the entity is provisional and stays out of layer 1"
+        return "adopted: standing knowledge"
+    return _STANDING.get(row["latest_status"], "not adopted: nothing of it is standing")
 
 
 def _print_grounds(cur, version_id) -> None:
@@ -928,11 +954,8 @@ def cmd_evidence(args) -> int:
         grounds = store.evidence_for(cur, reading) if reading else []
         print(f"rests on ({len(grounds)}, read from the {which} version)")
         for ground in grounds:
-            standing = ground["version_status"] or "nothing adopted yet"
-            print(
-                f"  {_short(ground['memory_id'])}  [{ground['type']}] "
-                f"{ground['title']}  ({standing})"
-            )
+            print(f"  {_short(ground['memory_id'])}  [{ground['type']}] {ground['title']}")
+            print(f"    {_standing_of(ground)}")
 
         dependants = store.resting_on(cur, entity["memory_id"])
         print(f"\nsupports ({len(dependants)})")
