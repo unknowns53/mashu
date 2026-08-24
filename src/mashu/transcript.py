@@ -4,12 +4,29 @@ The transcript format is not a stable interface — it belongs to the CLI, which
 changes it whenever it likes — so the per-CLI knowledge is confined here and
 pinned by fixtures. Everything upstream works on turns.
 
-Two things a raw transcript is bad at, and both are handled here.
+Three things a raw transcript is bad at, and all three are handled here.
 
 It is mostly not conversation. A few megabytes of tool payloads surround a much
 smaller exchange, and the extraction judges what was concluded, not the bytes
 that flowed through, so reasoning blocks and result bodies are dropped or
 clipped.
+
+It repeats itself. Measured over two real sessions, 33% and 56% of what
+survives the clipping is a turn whose text appeared earlier word for word —
+notifications, boilerplate result lines, the same file edited the same way. An
+agent-driven session is mostly made of these, and paying for the second copy
+buys nothing the first did not already say. So a repeat is rendered as a
+place-holder that keeps its position, its role and a few characters of what it
+was, which leaves the order and the frequency intact and pays for the body
+once.
+
+Folding is decided over the whole session rather than over the window being
+sent, and that is the only place this costs anything. A window may show a
+place-holder whose body was in an earlier window, which this call did not read.
+It is a small price for a large one: folded per window the saving was 3%,
+because the repeats are scattered across the evening rather than bunched, and
+folded per session it is 47%. What the later call loses is text the same
+pipeline already read, from the same session, into the same scope.
 
 And it grows. A session that is extracted twice would pay for its first half
 again, every time, so every turn carries the ordinal of the record it came from
@@ -30,6 +47,15 @@ TOOL_SUMMARY_KEYS = ("description", "command", "file_path", "pattern", "query", 
 
 TOOL_ARG_LIMIT = 160
 RESULT_LIMIT = 200
+
+#: A repeat shorter than this is printed in full. Below roughly this length the
+#: place-holder costs as much as the text it stands in for, and an unreadable
+#: log is a worse trade than a few duplicated lines.
+FOLD_MIN_CHARS = 40
+
+#: How much of a repeated turn its place-holder echoes. Enough to see what is
+#: being repeated without paying for it again.
+FOLD_ECHO = 24
 
 CLIS = ("claude", "codex")
 
@@ -52,6 +78,23 @@ class Session:
     title: str | None = None
     records: int = 0
     turns: list[Turn] = field(default_factory=list)
+    _blocks: dict[int, str] | None = field(default=None, repr=False, compare=False)
+
+    def blocks(self) -> dict[int, str]:
+        """The rendered block for every turn, by ordinal, repeats folded.
+
+        Built over the whole session and then looked up, so a window shows a
+        turn in full only if nothing earlier in the session already said it —
+        including the parts read by an earlier call. Cached because both the
+        caller that prices a window and the one that renders it need the same
+        answer, and rebuilding it per window would make the fold depend on
+        where the window happened to start.
+        """
+        if self._blocks is None:
+            self._blocks = dict(
+                zip((t.ordinal for t in self.turns), chunks(self.turns), strict=True)
+            )
+        return self._blocks
 
     def since(self, checkpoint: int | None) -> list[Turn]:
         """The turns that arrived after the last successful extraction."""
@@ -248,15 +291,35 @@ def read(path: pathlib.Path, *, source_cli: str | None = None) -> Session:
     return _read_claude(path, session)
 
 
+def chunks(turns: list[Turn]) -> list[str]:
+    """One rendered block per turn, with repeats folded to a place-holder.
+
+    Reading forwards, so the first occurrence of a text is decided by what
+    precedes it and nothing later can change an earlier block. Session.blocks
+    is what callers want; this is the pass it is built from.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for turn in turns:
+        if len(turn.text) >= FOLD_MIN_CHARS and turn.text in seen:
+            out.append(f"\n## {turn.role} (再掲: {_clip(turn.text, FOLD_ECHO)})")
+        else:
+            seen.add(turn.text)
+            out.append(f"\n## {turn.role}\n\n{turn.text}")
+    return out
+
+
 def render(session: Session, turns: list[Turn] | None = None) -> str:
     """The condensed log the extraction reads."""
     turns = session.turns if turns is None else turns
+    blocks = session.blocks()
     header = [
         f"# session {session.external_id or session.path.stem}",
         "",
         f"- cli: {session.source_cli}",
         f"- title: {session.title or '(none recorded)'}",
         f"- turns kept: {len(turns)}",
+        "- このセッションで既に出た内容は「(再掲: …)」に畳んである。順序と回数はそのまま。",
+        "- 畳まれた本文がこの抜粋の外にあることもある。その場合も既に読まれている。",
     ]
-    body = [f"\n## {turn.role}\n\n{turn.text}" for turn in turns]
-    return "\n".join(header) + "\n" + "\n".join(body) + "\n"
+    return "\n".join(header) + "\n" + "\n".join(blocks[t.ordinal] for t in turns) + "\n"

@@ -518,6 +518,8 @@ hook で Model を走らせないのは、終了 hook の時間枠が短いた�
 - **Scratch-first**: 抽出入力は Scratch と前回 checkpoint 以降の transcript 差分に限る
 - 小セッションは skip する(Scratch 空・実質的な user turn が 2 未満・圧縮後が閾値以下・明示の marker 無し、を**すべて**満たす場合のみ)
 - 長セッションは turn 境界で chunk し、全文の一括再送をしない。**実装**: 1 回の model 呼び出しに与える上限を置き、超える分は `extraction_run.checkpoint` を cursor として次の pass へ回す。窓は**先頭から**取る——末尾だけ読む形は安いが、長い夜の冒頭、すなわち残りが依拠している判断が落ちる側になる。実測で 1 セッション 22 万〜70 万 token だったものが 6 万〜9 万に収まる
+- **同一 turn の畳み込み**: 一字一句同じ turn が再び現れたら、位置と role と先頭 24 字だけを残した place-holder に畳む。実測で、clip を通した後になお 33%(対話寄り)〜56%(Agent 主導)が既出の turn そのものだった。畳み込みは**窓単位ではなくセッション単位で決める**。繰り返しは夜全体に散っていて固まっていないので、窓ごとに畳み直すと削減は 3% にしかならず、セッション単位なら 47% になる。代償は、ある窓が「本文が前の窓にあった」place-holder を運びうること——その本文は同じパイプラインが同じセッションから同じ Scope へ既に読んでいる。実測で 1 セッション全体が 24 万→17 万、68 万→36 万 token、窓数は 4→3、11→7
+- **不変部分を先に置く**: Prompt は「本文 + Active 集合」「セッションログ」の順に組む。Caching は prefix しか再利用しないので、毎回変わるログを先頭に置くと後ろの不変部分まで窓ごとに払い直しになる。API 経路ではその境界に cache breakpoint を打つ。**ただし日次予算は cache hit も読んだ token として数える。** 予算が縛っているのは読む量であって金額なので、hit を除いて数えると上限が誰の判断も経ずに緩む
 - 日次の入力予算を持ち、超過は捨てずに翌日へ defer する
 
 **沈黙する失敗を構造的に禁止する。** 永続台帳 `extraction_run` を置き、(source_cli, external_session_id, transcript_digest, extractor_version) を一意とする。一時失敗は指数 retry、規定回数で dead letter。DB 停止時は local spool に残す。

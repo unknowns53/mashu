@@ -182,24 +182,45 @@ def _find_prompt() -> pathlib.Path:
     raise ExtractionError(f"cannot find {PROMPT_FILE}")
 
 
-def build_prompt(*, log: str, scratch: list[dict[str, Any]], active: list[dict[str, Any]]) -> str:
+class Prompt(str):
+    """The assembled prompt, and where the part that repeats verbatim ends.
+
+    A string, because everything that handles it only wants to send it. The one
+    exception is the extractor that can say so: the instructions and the
+    scope's active set are the same text on the next call — every window of one
+    long session, and every session in the same scope that night — while the
+    log never is. Marking the boundary is what lets that half be charged once.
+    """
+
+    stable_chars: int
+
+    def __new__(cls, text: str, stable_chars: int = 0) -> Prompt:
+        self = super().__new__(cls, text)
+        self.stable_chars = stable_chars
+        return self
+
+    def parts(self) -> tuple[str, str]:
+        """The reusable prefix and the rest."""
+        return str(self)[: self.stable_chars], str(self)[self.stable_chars :]
+
+
+def build_prompt(
+    *, log: str, scratch: list[dict[str, Any]], active: list[dict[str, Any]]
+) -> Prompt:
     """Assemble the two inputs section 16.1 requires, around the prompt body.
 
     The active set is not optional. With only the log, extraction can add and
     can never retire, which is the shape that leaves finished tasks standing
     and keeps layer 3 permanently empty.
+
+    It comes first, and that ordering is a cost decision rather than an
+    editorial one. Caching — the provider's own, or an explicit breakpoint —
+    only ever reuses a prefix, so anything placed before the log is paid for
+    once however many windows a session takes, and anything placed after it is
+    paid for every time. The log is the only part that genuinely differs per
+    call, so it goes last and the closing instruction with it.
     """
-    parts = [prompt_body(), "\n---\n\n## 入力 1: このセッションの記録\n"]
-    parts.append(_UNTRUSTED_NOTE)
-    if scratch:
-        parts.append(f"<{SCRATCH_TAG}>")
-        for item in scratch:
-            parts.append(f"- ({item.get('kind', 'note')}) {_fence_safe(item.get('content', ''))}")
-        parts.append(f"</{SCRATCH_TAG}>\n")
-    parts.append(f"<{LOG_TAG}>")
-    parts.append(_fence_safe(log))
-    parts.append(f"</{LOG_TAG}>")
-    parts.append("\n---\n\n## 入力 2: この Scope が現在 Active として持つ Memory\n")
+    parts = ["\n---\n\n## 入力 1: この Scope が現在 Active として持つ Memory\n"]
     if active:
         for row in active:
             parts.append(f"- memory_id: {row['memory_id']}")
@@ -208,8 +229,19 @@ def build_prompt(*, log: str, scratch: list[dict[str, Any]], active: list[dict[s
             parts.append(f"  content: {_one_block(row['content'])}")
     else:
         parts.append("(なし。退役の提案は出せない)")
+    stable = prompt_body() + "\n".join(parts) + "\n"
+
+    parts = ["\n---\n\n## 入力 2: このセッションの記録\n", _UNTRUSTED_NOTE]
+    if scratch:
+        parts.append(f"<{SCRATCH_TAG}>")
+        for item in scratch:
+            parts.append(f"- ({item.get('kind', 'note')}) {_fence_safe(item.get('content', ''))}")
+        parts.append(f"</{SCRATCH_TAG}>\n")
+    parts.append(f"<{LOG_TAG}>")
+    parts.append(_fence_safe(log))
+    parts.append(f"</{LOG_TAG}>")
     parts.append("\n---\n\n上記に対する JSON を出力せよ。")
-    return "\n".join(parts)
+    return Prompt(stable + "\n".join(parts), stable_chars=len(stable))
 
 
 def _one_block(text: str) -> str:
@@ -472,6 +504,21 @@ class CLIExtractor:
         return answer
 
 
+def _content(prompt: str) -> list[dict[str, Any]]:
+    """The prompt as blocks, with a cache breakpoint after the reusable prefix.
+
+    Recorded usage is left alone on purpose. A cache read is still input the
+    budget has to see: it is cheaper, not free, and a ledger that stopped
+    counting it would report a night as free that was not.
+    """
+    stable, volatile = prompt.parts() if isinstance(prompt, Prompt) else ("", str(prompt))
+    blocks: list[dict[str, Any]] = []
+    if stable:
+        blocks.append({"type": "text", "text": stable, "cache_control": {"type": "ephemeral"}})
+    blocks.append({"type": "text", "text": volatile})
+    return blocks
+
+
 class APIExtractor:
     """The specification's first choice: a small model on a separate allowance.
 
@@ -507,11 +554,22 @@ class APIExtractor:
         message = client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": _content(prompt)}],
         )
+        # Everything the model read, cached or not. The API reports a cache hit
+        # outside input_tokens, so recording that field alone would make the
+        # ledger say a night cost a fraction of what it read — and the budget
+        # is a bound on reading. Cheaper is not the same as smaller; the split
+        # is kept beside the total so the saving can be seen without the cap
+        # quietly loosening.
+        usage = message.usage
+        cached = getattr(usage, "cache_read_input_tokens", 0) or 0
+        created = getattr(usage, "cache_creation_input_tokens", 0) or 0
         self.usage = {
-            "input_tokens": message.usage.input_tokens,
-            "output_tokens": message.usage.output_tokens,
+            "input_tokens": usage.input_tokens + cached + created,
+            "output_tokens": usage.output_tokens,
+            "cache_read_input_tokens": cached,
+            "cache_creation_input_tokens": created,
         }
         return "".join(block.text for block in message.content if block.type == "text")
 

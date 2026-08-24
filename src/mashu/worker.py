@@ -190,7 +190,7 @@ def prepare(cur: psycopg.Cursor, run: dict[str, Any], *, dry_run: bool = False) 
     if checkpoint and not remaining:
         return _skip(cur, run_id, f"nothing new since turn {checkpoint}")
 
-    turns, more = _window(remaining)
+    turns, more = _window(session, remaining)
     scratch_items = _scratch(cur, run)
 
     # Only on the first pass. A session already judged worth reading must not
@@ -320,17 +320,22 @@ def process(
     return land(cur, plan, extractor.run(plan.prompt), extractor=extractor)
 
 
-def _window(turns: list) -> tuple[list, bool]:
+def _window(session, turns: list) -> tuple[list, bool]:
     """As many turns from the front as one call may hold, and whether more remain.
 
     From the front, not the back. Reading only the tail would be cheaper and
     would quietly lose the beginning of every long session, which is where the
     decisions that the rest of the evening rests on are usually made.
+
+    Priced on what the log will actually say, not on the raw turn: a repeat is
+    rendered as a place-holder, and charging it the full body would fill the
+    budget with text nobody sends and split the session into twice the calls.
     """
     budget = MAX_INPUT_TOKENS
+    blocks = session.blocks()
     taken: list = []
     for turn in turns:
-        cost = retrieval.estimate_tokens(turn.text)
+        cost = retrieval.estimate_tokens(blocks[turn.ordinal])
         if taken and budget - cost < 0:
             return taken, True
         budget -= cost

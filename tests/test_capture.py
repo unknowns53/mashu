@@ -9,6 +9,8 @@ does not claim to be the user, and it does not read the same transcript twice.
 from __future__ import annotations
 
 import json
+import sys
+import types
 
 import pytest
 
@@ -1019,3 +1021,143 @@ def test_auto_refuses_out_loud_when_nothing_can_run(monkeypatch):
     monkeypatch.setattr(extract.CLIExtractor, "available", lambda self: False)
     with pytest.raises(extract.ExtractionError):
         extract.get_extractor("auto")
+
+
+# --------------------------------------------------------------------------
+# what the extraction is charged for
+# --------------------------------------------------------------------------
+def _claude(text, role="assistant"):
+    body = {"content": text} if role == "user" else {"content": [{"type": "text", "text": text}]}
+    return {"type": role, "sessionId": "s-1", "cwd": "/work/proj", "message": body}
+
+
+def test_a_repeated_turn_is_paid_for_once(tmp_path):
+    """Two thirds of a long agent session is text it already said.
+
+    Notifications, boilerplate result lines, the same edit reported twice.
+    Sending the body again buys nothing the first copy did not already say, so
+    the repeat becomes a place-holder that keeps its position and its role.
+    """
+    long = ("同じ長い報告文 " * 20).strip()
+    session = transcript.read(
+        write_claude(tmp_path, [_claude(long), _claude("別の話"), _claude(long)])
+    )
+    out = transcript.render(session)
+
+    assert out.count(long) == 1
+    assert out.count("## assistant (再掲: ") == 1
+    assert "別の話" in out
+
+
+def test_a_repeat_is_folded_against_the_session_not_the_window(tmp_path):
+    """The saving lives across windows, and so must the fold.
+
+    Repeats are scattered over an evening rather than bunched, so a fold that
+    resets at each window catches almost nothing — measured on a real
+    transcript it was 3% against 47%. The price is that a window may carry a
+    place-holder whose body was in an earlier window; that body was read by the
+    same pipeline, for the same session, into the same scope.
+    """
+    long = ("同じ長い報告文 " * 20).strip()
+    turns = [_claude(long), *[_claude(f"{n} 番目") for n in range(6)], _claude(long)]
+    session = transcript.read(write_claude(tmp_path, turns))
+
+    later = transcript.render(session, session.turns[-1:])
+    assert long not in later
+    assert "## assistant (再掲: " in later
+
+
+def test_a_short_repeat_is_printed_in_full(tmp_path):
+    """Below the floor the place-holder costs as much as the text it replaces."""
+    session = transcript.read(write_claude(tmp_path, [_claude("はい"), _claude("はい")]))
+    assert transcript.render(session).count("はい") == 2
+
+
+def test_a_window_is_priced_on_what_is_actually_sent(cur, tmp_path, queued, route, monkeypatch):
+    """Otherwise the budget fills with text nobody sends.
+
+    A repeat costs a place-holder, and charging it the full body would split
+    the session into more calls than it needs — the opposite of the point.
+    """
+    monkeypatch.setattr(worker, "MAX_INPUT_TOKENS", 400)
+    long = ("同じ長い報告文 " * 20).strip()
+    turns = [_claude("最初の話"), *[_claude(long) for _ in range(8)], _claude("最後の話")]
+
+    stub = extract.StubExtractor(answer())
+    outcome = worker.process(cur, queued(write_claude(tmp_path, turns)), extractor=stub)
+
+    assert outcome.state == "succeeded"
+    assert "最後の話" in stub.prompts[0]
+
+
+def test_the_active_set_comes_before_the_log(cur):
+    """Caching only ever reuses a prefix (16.3).
+
+    The instructions and the scope's active set are the same text on the next
+    call; the log never is. Putting the log first means paying for everything
+    behind it again on every window of every session.
+    """
+    prompt = extract.build_prompt(
+        log="会話",
+        scratch=[],
+        active=[{"memory_id": "m-1", "type": "fact", "title": "題", "content": "本文"}],
+    )
+    assert prompt.index("入力 1: この Scope") < prompt.index("入力 2: このセッション")
+    assert prompt.index("本文") < prompt.index("入力 2: このセッション")
+
+
+def test_the_prompt_says_where_its_reusable_half_ends(cur):
+    """Two calls on one scope differ only after the mark."""
+    active = [{"memory_id": "m-1", "type": "fact", "title": "題", "content": "本文"}]
+    first = extract.build_prompt(log="ひとつ目の窓", scratch=[], active=active)
+    second = extract.build_prompt(log="ふたつ目の窓", scratch=[], active=active)
+
+    assert first.parts()[0] == second.parts()[0]
+    assert first.parts()[0] + first.parts()[1] == str(first)
+    assert "本文" in first.parts()[0]
+    assert "ひとつ目の窓" in first.parts()[1]
+
+
+def test_a_cached_prefix_is_still_charged_to_the_budget(cur):
+    """Cheaper is not free, and a ledger that stopped counting it would lie."""
+    prompt = extract.build_prompt(log="会話", scratch=[], active=[])
+    blocks = extract._content(prompt)
+
+    assert blocks[0]["cache_control"] == {"type": "ephemeral"}
+    assert "".join(block["text"] for block in blocks) == str(prompt)
+
+
+def test_a_cache_hit_is_counted_as_something_the_model_read(monkeypatch):
+    """The daily budget bounds reading, and a cache read is still reading.
+
+    The API reports a hit outside input_tokens, so taking that field alone
+    would have the ledger call a night nearly free the first time caching
+    worked, and the cap would loosen without anybody deciding to loosen it.
+    """
+
+    class _Usage:
+        input_tokens = 100
+        output_tokens = 10
+        cache_read_input_tokens = 4000
+        cache_creation_input_tokens = 900
+
+    class _Message:
+        usage = _Usage()
+        content = [type("Block", (), {"type": "text", "text": "{}"})()]
+
+    class _Messages:
+        def create(self, **_):
+            return _Message()
+
+    class _Client:
+        messages = _Messages()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setitem(
+        sys.modules, "anthropic", types.SimpleNamespace(Anthropic=lambda *a, **k: _Client())
+    )
+    extractor = extract.APIExtractor()
+    extractor.run(extract.build_prompt(log="会話", scratch=[], active=[]))
+
+    assert extractor.usage["input_tokens"] == 5000
+    assert extractor.usage["cache_read_input_tokens"] == 4000
