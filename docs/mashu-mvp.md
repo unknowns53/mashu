@@ -524,6 +524,8 @@ hook で Model を走らせないのは、終了 hook の時間枠が短いた�
 
 そして **health は人間の巡回ではなく、必ず読まれる経路——session_bootstrap——へ押し込む。** 失敗件数と最古 queued age が閾値を超えたら、次のセッションの Bootstrap が警告を運ぶ。**誰も面倒を見ない期間の監視者は、次に来るセッションである。**
 
+同じ原理を Review の待ち行列にも当てる。Human Review Required に落ちた Proposal は Retrieval に載らず、他に動かす経路も無いため、人間が思い出すまで止まる。Bootstrap は `blocking`(人間待ちの件数)と `oldest_days`(最古の待ち日数)を運び、前者が 1 件でもあるか、後者が閾値を超えたときに警告する。Candidate は `unreviewed` タグ付きで取得できる以上、溜まっていること自体は警告の条件にしない(21.1節)。
+
 **Scope routing**: cwd / project root から既存 Scope への明示 map を worker が持つ。map に無い cwd の抽出結果は Proposal 化せず台帳に保留し、警告に載せる。**Scope の推測はしない。** 保留は skip と別の状態にする——skip は「処理済み」だが保留は route が追加された時点で作業可能になるので、区別できて queue へ戻せる必要がある。
 
 ただし答えは**三つ**要る。「この Scope」「意図的にどの Scope でもない」「route が無い」。人が埋めるべき穴は三つ目だけで、二つ目と一緒にすると保留が永久に残る。ダウンロードフォルダで一度走らせただけで health 行が恒久的に赤くなり、**常時出ている警告は読まれない**——health を Bootstrap に載せた理由そのものが消える。
