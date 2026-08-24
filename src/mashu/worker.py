@@ -213,6 +213,14 @@ def prepare(
     session = transcript.read(path, source_cli=run["source_cli"])
     cwd = run.get("cwd") or session.cwd
 
+    # Before routing, because held is a question for a person and this one has
+    # no answer. Routes are matched on the directory, so a run without one can
+    # never be released by adding a route, however many are added: the run and
+    # the health warning it raises stay on forever. In practice these are
+    # marker files a CLI leaves beside the real transcripts, carrying no turns.
+    if not cwd:
+        return _skip(cur, run_id, "no working directory is recorded, so no route can reach it")
+
     scope_id, ignored = routing.resolve(cur, cwd)
     if ignored:
         return _skip(cur, run_id, f"{cwd} is mapped to no scope on purpose")

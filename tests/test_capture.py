@@ -1519,3 +1519,32 @@ def test_every_window_leaves_its_own_audit_line(cur, tmp_path, queued, route, mo
     assert len(lines) > 1
     assert [line["final"] for line in lines] == [False] * (len(lines) - 1) + [True]
     assert all(line["turns_dropped"] == 0 for line in lines)
+
+
+def test_a_route_releases_its_own_tree_and_not_a_name_that_starts_the_same(cur):
+    for cwd in ("/a/mashu", "/a/mashu/sub", "/a/mashu-old"):
+        made = runs.enqueue(
+            cur,
+            source_cli="claude",
+            external_session_id=cwd,
+            transcript_digest=cwd,
+            extractor_version="v1",
+            cwd=cwd,
+        )
+        runs.held(cur, run_id=made["run_id"], note="no scope route")
+
+    assert runs.release(cur, cwd_prefix="/a/mashu") == 2
+
+    cur.execute("SELECT cwd FROM extraction_run WHERE state = 'held'")
+    assert [row["cwd"] for row in cur.fetchall()] == ["/a/mashu-old"]
+
+
+def test_a_file_with_no_session_in_it_is_skipped_rather_than_held(cur, tmp_path, queued):
+    """A route is the answer to an unmapped directory, not to an empty file."""
+    empty = tmp_path / "bridge.jsonl"
+    empty.write_text('{"type": "bridge-session", "sessionId": "d1cbcd72"}\n', encoding="utf-8")
+
+    got = worker.prepare(cur, queued(empty, cwd=None))
+
+    assert got.state == "skipped"
+    assert "no route can reach it" in got.note
