@@ -24,6 +24,9 @@ data/
 *.db
 *.sqlite3
 
+# Capture agent log: what the nightly run said, per machine
+.capture.log
+
 # Editor / OS
 .DS_Store
 .vscode/
