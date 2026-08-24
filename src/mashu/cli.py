@@ -1821,8 +1821,8 @@ def _whole(args, summary, verb: str = "a", reason: str = "") -> str:
     if not items:
         return ""
     done: dict[int, str] = {}
-    _rest(args, items, done, verb=verb, reason=reason)
-    return _tally(bundle, done, len(items))
+    refused = _rest(args, items, done, verb=verb, reason=reason)
+    return _tally(bundle, done, len(items)) + _said(refused)
 
 
 def _bundle_sitting(args, bundle, items, pages, place, total) -> tuple[str, str]:
@@ -1837,14 +1837,17 @@ def _bundle_sitting(args, bundle, items, pages, place, total) -> tuple[str, str]
     reading = False
     scroll = 0
     more = 0
+    note = ""
 
     while True:
         if reading:
-            page, more = _paged(pages[at], scroll)
-            _screen(page + _standing(done, at) + "\n" + _ITEM_KEYS)
+            page, more = _paged(pages[at], scroll, said=note)
+            _screen(page + _standing(done, at) + _said(note) + "\n" + _ITEM_KEYS)
         else:
-            _screen(_contents(bundle, items, place, total, done, at))
+            _screen(_contents(bundle, items, place, total, done, at) + _said(note))
         key = _getkey()
+        if key not in ("y", "enter", "r", "n", "s", "e", "a"):
+            note = ""
 
         if key == "space":
             # Read on where a proposal is longer than the screen, and step to
@@ -1869,7 +1872,9 @@ def _bundle_sitting(args, bundle, items, pages, place, total) -> tuple[str, str]
             scroll = 0
             continue
         if key == "a":
-            _rest(args, items, done)
+            note = _rest(args, items, done)
+            if note:
+                continue
             break
         if not reading:
             if key in ("enter", "right", "l"):
@@ -1880,7 +1885,9 @@ def _bundle_sitting(args, bundle, items, pages, place, total) -> tuple[str, str]
                 reason = _typed("  why put the whole bundle off? ")
                 if reason is None:
                     continue
-                _rest(args, items, done, verb="s", reason=reason)
+                note = _rest(args, items, done, verb="s", reason=reason)
+                if note:
+                    continue
                 break
             continue
 
@@ -1888,22 +1895,27 @@ def _bundle_sitting(args, bundle, items, pages, place, total) -> tuple[str, str]
             reading = False
             continue
         if key in ("y", "enter"):
-            _settle(args, items[at], done, at, "a")
+            note = _settle(args, items[at], done, at, "a")
         elif key in ("r", "n"):
             reason = _typed("  why turn it down? ")
             if reason is None:
                 continue
-            _settle(args, items[at], done, at, "r", reason)
+            note = _settle(args, items[at], done, at, "r", reason)
         elif key == "s":
             reason = _typed("  why put it off? ")
             if reason is None:
                 continue
-            _settle(args, items[at], done, at, "s", reason)
+            note = _settle(args, items[at], done, at, "s", reason)
         elif key == "e":
-            _settle(args, items[at], done, at, "e")
+            note = _settle(args, items[at], done, at, "e")
         else:
             continue
 
+        # A decision the store refused is not a decision, so the reader stays
+        # where they are and reads why rather than finding themselves one item
+        # further on with nothing recorded behind them.
+        if note:
+            continue
         if at + 1 >= len(items):
             break
         at += 1
@@ -1912,24 +1924,50 @@ def _bundle_sitting(args, bundle, items, pages, place, total) -> tuple[str, str]
     return "next", _tally(bundle, done, len(items))
 
 
-def _rest(args, items, done, verb: str = "a", reason: str = "") -> None:
-    """Everything in the bundle not decided yet, decided the same way."""
+def _rest(args, items, done, verb: str = "a", reason: str = "") -> str:
+    """Everything in the bundle not decided yet, decided the same way.
+
+    One item the store refuses does not stop the rest of them: what it refused
+    is collected and said once, afterwards.
+    """
+    refused = []
     for number, item in enumerate(items):
-        if number not in done:
-            _settle(args, item, done, number, verb, reason)
+        if number in done:
+            continue
+        note = _settle(args, item, done, number, verb, reason)
+        if note:
+            refused.append(note)
+    return "\n".join(refused)
 
 
-def _settle(args, item, done, number: int, verb: str, reason: str = "") -> None:
+def _settle(args, item, done, number: int, verb: str, reason: str = "") -> str:
     """Carry one decision into the store, in a transaction of its own.
 
     One transaction per item is what lets a reader stop anywhere: what is
     behind them is committed, and a sitting does not have to be finished to
-    have been worth starting.
+    have been worth starting. That only holds if a refusal stops the decision
+    and not the sitting, so what the store declines to do comes back as
+    something to say and the reader keeps their place. Returns that, empty
+    when it simply worked.
     """
+    if number in done:
+        return (
+            f"  already {done[number]}. a decision is a record and does not get taken back;\n"
+            "  to put this content back, write it as your own with 'mashu remember'"
+        )
     edited = _edit_text(args, item) if verb == "e" else None
-    with transaction(args.dsn) as cur:
-        _decide(cur, args, item, verb, reason, edited=edited)
+    try:
+        with transaction(args.dsn) as cur:
+            _decide(cur, args, item, verb, reason, edited=edited)
+    except MashuError as refusal:
+        return f"  {refusal}"
     done[number] = _WORD[verb]
+    return ""
+
+
+def _said(note: str) -> str:
+    """A refusal, under the screen it belongs to rather than in place of it."""
+    return f"\n{note}" if note else ""
 
 
 def _standing(done: dict, at: int) -> str:
@@ -1971,7 +2009,7 @@ def _shown(rows: list[str], at: int, reserve: int) -> tuple[list[str], str, str]
     return rows[top : top + room], above, below
 
 
-def _paged(text: str, offset: int) -> tuple[str, int]:
+def _paged(text: str, offset: int, said: str = "") -> tuple[str, int]:
     """As much of one proposal as fits, and where the next screenful would start.
 
     The first lines are held on screen whatever the offset: what is being
@@ -1982,7 +2020,11 @@ def _paged(text: str, offset: int) -> tuple[str, int]:
     head, body = lines[:3], lines[3:]
     # what the page costs besides its body: the heading, the line that says
     # whether it was already decided, a blank, and the two lines of keys
-    room = _room(sum(_rows(line, width) for line in head) + 5)
+    room = _room(
+        sum(_rows(line, width) for line in head)
+        + 5
+        + sum(_rows(line, width) for line in said.splitlines())
+    )
     shown, used = [], 0
     for line in body[offset:]:
         cost = _rows(line, width)

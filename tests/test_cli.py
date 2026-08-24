@@ -16,6 +16,7 @@ import pytest
 
 from mashu import cli, context, proposals, routing, runs, store
 from mashu.db import transaction
+from mashu.errors import MashuError
 from mashu.models import MemoryType, ProposalOperation, SourceType
 
 
@@ -1289,4 +1290,54 @@ def test_a_whole_bundle_can_be_approved_without_opening_it(test_dsn, sitting, co
     keys = ["down"] * _place(test_dsn, session_id) + ["a", "q"]
     code, _ = sitting(keys)
     assert code == 0
+    assert set(_statuses(test_dsn, session_id).values()) == {"approved"}
+
+
+def test_deciding_a_second_time_refuses_without_ending_the_sitting(
+    test_dsn, sitting, committed_scope
+):
+    """One keystroke on something already decided was throwing away the sitting.
+
+    proposals guards against deciding a decided proposal twice, and the guard
+    is right. What it raised travelled all the way to main, which printed it
+    and exited, so a reader who changed their mind about item 2 lost item 3
+    onward as well.
+    """
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    for title in ("却下する分", "その次の分"):
+        _propose(test_dsn, committed_scope, title, f"{title}の本文", session_id=session_id)
+
+    # turn the first down, go back to it, try to approve it, then carry on
+    keys = ["enter", "r", "up", "y", "down", "y"]
+    code, out = sitting(keys, ["やっぱり違う"], "--bundle", str(session_id)[:8])
+
+    assert code == 0
+    assert "already declined" in out
+    assert _statuses(test_dsn, session_id) == {
+        "却下する分": "declined",
+        "その次の分": "approved",
+    }
+
+
+def test_a_refusal_from_the_store_leaves_the_reader_where_they_were(
+    test_dsn, sitting, committed_scope, monkeypatch
+):
+    """Whatever the store declines to do, it declines one item, not the sitting."""
+    session_id = _session(test_dsn, f"sit-{uuid.uuid4()}")
+    for title in ("断られる分", "通る分"):
+        _propose(test_dsn, committed_scope, title, f"{title}の本文", session_id=session_id)
+
+    real = proposals.approve
+    refused = {"once": True}
+
+    def _refuse_once(cur, proposal_id, **kwargs):
+        if refused.pop("once", None):
+            raise MashuError("なにかの理由で通せない")
+        return real(cur, proposal_id, **kwargs)
+
+    monkeypatch.setattr(cli.proposals, "approve", _refuse_once)
+
+    code, out = sitting(["enter", "y", "y", "down", "y"], (), "--bundle", str(session_id)[:8])
+    assert code == 0
+    assert "なにかの理由で通せない" in out
     assert set(_statuses(test_dsn, session_id).values()) == {"approved"}
