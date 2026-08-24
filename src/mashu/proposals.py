@@ -37,7 +37,7 @@ from mashu.models import (
 )
 
 _DECIDED = frozenset(
-    {ProposalStatus.APPROVED, ProposalStatus.REJECTED, ProposalStatus.AUTO_COMMITTED}
+    {ProposalStatus.APPROVED, ProposalStatus.DECLINED, ProposalStatus.AUTO_COMMITTED}
 )
 
 
@@ -93,7 +93,7 @@ def find_duplicate_proposals(
                    created_at, decided_at,
                    EXTRACT(DAY FROM now() - created_at)::int AS days_pending
             FROM proposal
-            WHERE status IN ('pending', 'rejected') AND target_memory = %s
+            WHERE status IN ('pending', 'declined') AND target_memory = %s
             ORDER BY created_at
             """,
             (target_memory,),
@@ -112,7 +112,7 @@ def find_duplicate_proposals(
                EXTRACT(DAY FROM now() - p.created_at)::int AS days_pending
         FROM proposal p
         LEFT JOIN memory_entity e ON e.memory_id = p.target_memory
-        WHERE p.status IN ('pending', 'rejected')
+        WHERE p.status IN ('pending', 'declined')
           AND p.operation = 'create'
           AND p.payload ->> 'scope_id' = %(scope_id)s
           AND (
@@ -369,7 +369,7 @@ def propose(
             title=payload.get("title"),
         )
         if existing:
-            turned_down = [row for row in existing if row["status"] == "rejected"]
+            turned_down = [row for row in existing if row["status"] == "declined"]
             if turned_down:
                 why = turned_down[-1]["decision_reason"]
                 detail = f"{len(turned_down)} of them was turned down: {why}"
@@ -545,7 +545,7 @@ def reject(cur: psycopg.Cursor, proposal_id: UUID, *, reviewer: str, reason: str
     cur.execute(
         """
         UPDATE proposal
-        SET status = 'rejected', reviewer = %s, decided_at = now(), decision_reason = %s
+        SET status = 'declined', reviewer = %s, decided_at = now(), decision_reason = %s
         WHERE proposal_id = %s
         RETURNING *
         """,
@@ -554,7 +554,7 @@ def reject(cur: psycopg.Cursor, proposal_id: UUID, *, reviewer: str, reason: str
     decided = cur.fetchone()
     events.record(
         cur,
-        EventType.PROPOSAL_REJECTED,
+        EventType.PROPOSAL_DECLINED,
         reviewer,
         proposal_id=proposal_id,
         memory_id=decided["target_memory"],

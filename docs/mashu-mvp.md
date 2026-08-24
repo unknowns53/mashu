@@ -14,7 +14,7 @@
 - v0.10: 実データを移植した直後に出た問題への対応。Preference の Auto Commit を User 明示のものに限定(17節)、Scope に lifecycle と readiness manifest を追加(7.1節)、Review 用の preview 経路を分離(27.1節)、Bootstrap の対象を type でなく delivery で決める(21.2節)、version に directive を追加(9・26節)
 - v0.12: 誰も面倒を見ない一週間を成立させる。寿命の三分(13.1節)、Temporary Context の新設(25.2節)、Scratch の実体化(25.1節)、捕捉パイプラインの仕様化(16.3節)、Review の随意化(17節)、開発計画を依存の鎖で引き直し(30節)。撤回: Queue の義務性、未審査比率 50% の反証条件(27.3節)、手動 Conflict 記録(23節)、27.4b の全文ラベリング
 - v0.11: 手動運用に入る前に、Review が構造的に必須になっている経路を断つ。Layer 2 の相対上限を撤回し、守っていたものを強制から観測へ移す(21.1・27.3節)。前提が消えた lifecycle と readiness manifest を撤回(7.1節)。Entity の type を訂正する操作を追加(8・15節)
-- v0.13: 未審査の知識と、動く知識が読めなくなっていた経路を断つ。切替試験の窓を実装(27.5・30節 段 E)。Scope Detection の probe を「層が渡せるもの」全体へ広げ、票を最上位からの距離で減衰させる(27.2節)。保留中の更新の注記を実装し、Bootstrap にも載せる(21.1節)。title を訂正する操作を追加(8・15・17節)。admission control を採用時にも掛け、拒否の文面が実行できる道を指すようにする(21.2節)。26節の役割を「現在のスキーマの写し」から「起点と、その後の索引」へ改める
+- v0.13: 未審査の知識と、動く知識が読めなくなっていた経路を断つ。切替試験の窓を実装(27.5・30節 段 E)。proposal.status の rejected を declined へ改め、version.status との語の衝突を解く(15・26節)。Scope Detection の probe を「層が渡せるもの」全体へ広げ、票を最上位からの距離で減衰させる(27.2節)。保留中の更新の注記を実装し、Bootstrap にも載せる(21.1節)。title を訂正する操作を追加(8・15・17節)。admission control を採用時にも掛け、拒否の文面が実行できる道を指すようにする(21.2節)。26節の役割を「現在のスキーマの写し」から「起点と、その後の索引」へ改める
 
 ---
 
@@ -415,7 +415,8 @@ Open Question は references で表現できないため、summary 内の自由�
 - based_on_version(楽観ロック用。24節)
 - session_id(由来セッション。Review の束ね単位。18.1節)
 - payload
-- status(pending / approved / rejected / auto_committed)
+- status(pending / approved / declined / auto_committed)
+  - **v0.13 で rejected を declined に改める。**version.status の rejected と語が衝突しており、どちらの表を見ているかが分からないと意味が定まらなかった。両者は別の主張である。version の rejected は Layer 3 が返す知識の側の読みで、proposal の declined は Review の列に出る手続きの記録にすぎない。改めたのは手続き側で、Agent へ渡る語彙を動かさないためである。event_log は append only なので、0023 より前の `proposal_rejected` の行はそのまま残る
 - reviewer
 - decided_at
 - decision_reason

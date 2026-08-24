@@ -66,6 +66,6 @@ class DuplicateProposalError(MashuError):
         self.existing = existing
 
     @property
-    def rejected(self) -> list[dict]:
+    def declined(self) -> list[dict]:
         """The ones a reviewer already turned down."""
-        return [row for row in self.existing if row["status"] == "rejected"]
+        return [row for row in self.existing if row["status"] == "declined"]

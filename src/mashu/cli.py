@@ -248,7 +248,7 @@ def cmd_reject(args) -> int:
     with transaction(args.dsn) as cur:
         proposal = _resolve_proposal(cur, args.proposal_id)
         proposals.reject(cur, proposal["proposal_id"], reviewer=args.reviewer, reason=args.reason)
-        print(f"rejected {proposal['proposal_id']}")
+        print(f"declined {proposal['proposal_id']}")
     return 0
 
 
@@ -1053,7 +1053,7 @@ def cmd_status(args) -> int:
     print("\ncorrections (27.3; counted, not judged — no baseline exists yet)")
     per = "-" if c["per_100_retrievals"] is None else c["per_100_retrievals"]
     print(
-        f"  {c['rejected']} turned down, {c['retired_by_hand']} retired by hand, "
+        f"  {c['declined']} turned down, {c['retired_by_hand']} retired by hand, "
         f"over {c['retrievals']} retrieval(s) = {per} per 100"
     )
 
@@ -1483,7 +1483,7 @@ def _agree(cur, args, entity, clash: DuplicateProposalError) -> int:
     """Approve the standing proposal this command was agreeing with."""
     waiting = [row for row in clash.existing if row["status"] == "pending"]
     if not waiting:
-        why = clash.rejected[-1]["decision_reason"] if clash.rejected else "already decided"
+        why = clash.declined[-1]["decision_reason"] if clash.declined else "already decided"
         print(f"{entity['title']}: this was already ruled on ({why})", file=sys.stderr)
         return 1
 
@@ -1652,7 +1652,7 @@ def _decide(cur, args, item, verb: str, reason: str, edited: str | None = None) 
 
     if verb == "r":
         proposals.reject(cur, proposal_id, reviewer=args.reviewer, reason=reason)
-        print(f"rejected  {title}")
+        print(f"declined  {title}")
         return
     if verb == "s":
         proposals.defer(cur, proposal_id, reviewer=args.reviewer, note=reason)

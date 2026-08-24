@@ -902,7 +902,7 @@ def test_an_old_rejection_stops_being_a_bar_and_becomes_an_argument(cur, tmp_pat
     cur.execute("SELECT proposal_id FROM proposal WHERE actor = %s", (worker.WORKER_ACTOR,))
     proposals.reject(cur, cur.fetchone()["proposal_id"], reviewer="user", reason="まだ早い")
     cur.execute(
-        "UPDATE proposal SET decided_at = now() - interval '60 days' WHERE status = 'rejected'"
+        "UPDATE proposal SET decided_at = now() - interval '60 days' WHERE status = 'declined'"
     )
 
     file = write_claude(
@@ -925,7 +925,7 @@ def test_an_old_rejection_stops_being_a_bar_and_becomes_an_argument(cur, tmp_pat
         "ORDER BY seq DESC LIMIT 1",
         (worker.WORKER_ACTOR,),
     )
-    assert cur.fetchone()["payload"]["previously_rejected"]["reason"] == "まだ早い"
+    assert cur.fetchone()["payload"]["previously_declined"]["reason"] == "まだ早い"
 
 
 def test_a_recent_rejection_still_bars_the_worker(cur, tmp_path, queued, route):

@@ -933,7 +933,7 @@ def test_a_sitting_approves_rejects_and_puts_off_in_one_pass(test_dsn, run, comm
         "all; r 2 根拠が薄い; s 3 明日確かめる",
     )
     assert code == 0
-    assert "approved" in out and "rejected" in out and "put off" in out
+    assert "approved" in out and "declined" in out and "put off" in out
 
     with transaction(test_dsn) as cur:
         cur.execute(
@@ -944,7 +944,7 @@ def test_a_sitting_approves_rejects_and_puts_off_in_one_pass(test_dsn, run, comm
         rows = cur.fetchall()
     by_title = {r["title"]: r for r in rows}
     assert by_title["最初の項目"]["status"] == "approved"
-    assert by_title["二番目の項目"]["status"] == "rejected"
+    assert by_title["二番目の項目"]["status"] == "declined"
     assert by_title["三番目の項目"]["status"] == "pending"
     assert by_title["三番目の項目"]["review_note"] == "明日確かめる"
 

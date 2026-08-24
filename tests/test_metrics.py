@@ -61,7 +61,7 @@ def test_the_opening_cost_is_reported_per_scope_against_the_ceiling(cur, scope_i
 
 def test_a_rejection_counts_as_a_correction(cur, scope_id):
     """27.3 counts what a person had to take back, and sets no threshold on it."""
-    before = metrics.collect(cur).corrections["rejected"]
+    before = metrics.collect(cur).corrections["declined"]
     made = proposals.propose(
         cur,
         actor="agent-1",
@@ -77,7 +77,7 @@ def test_a_rejection_counts_as_a_correction(cur, scope_id):
     proposals.reject(cur, made["proposal"]["proposal_id"], reviewer="user", reason="要らない")
 
     got = metrics.collect(cur)
-    assert got.corrections["rejected"] == before + 1
+    assert got.corrections["declined"] == before + 1
     assert got.corrections["per_100_retrievals"] is None or got.corrections["retrievals"] >= 0
 
 
