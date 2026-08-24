@@ -167,6 +167,8 @@ class EventType(StrEnum):
     ENTITY_MERGED = "entity_merged"
     TYPE_CORRECTED = "type_corrected"
     TITLE_CORRECTED = "title_corrected"
+    TRIAL_OPENED = "trial_opened"
+    TRIAL_CLOSED = "trial_closed"
     VERSION_CREATED = "version_created"
     STATUS_CHANGED = "status_changed"
     ACTIVE_SWITCHED = "active_switched"

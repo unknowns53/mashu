@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from mashu import incidents
+from mashu.incidents import IncidentError
 from mashu.models import EventType, IncidentCause, IncidentKind
 
 
@@ -66,3 +67,60 @@ def test_every_cause_says_where_it_sends_you(cur):
     for causes in incidents.CAUSES.values():
         for cause in causes:
             assert incidents.LEADS_TO[cause]
+
+
+# --------------------------------------------------------------------------
+# the trial window (27.5, 30 段 E)
+# --------------------------------------------------------------------------
+def test_a_window_bounds_what_the_tally_counts(cur, scope_id):
+    """27.5 counts accidents inside two weeks of running, not accidents ever.
+
+    Without a mark for when the window opened, the count afterwards is over
+    whatever has accumulated, and the exercise cannot say what it measured.
+    """
+    incidents.record(
+        cur,
+        kind=IncidentKind.MISSED,
+        cause=IncidentCause.BOOTSTRAP,
+        note="before the window; the opening was short",
+        recorded_by="user",
+        scope_id=scope_id,
+        occurred_at="2026-01-01T09:00:00+09:00",
+    )
+    incidents.open_trial(cur, note="native memory switched off", actor="user")
+    incidents.record(
+        cur,
+        kind=IncidentKind.MISSED,
+        cause=IncidentCause.PULL,
+        note="inside the window; the index was there and nobody pulled",
+        recorded_by="user",
+        scope_id=scope_id,
+    )
+
+    since = incidents.current_trial(cur)["opened_at"]
+    inside = incidents.tally(cur, since=since)
+    assert [row["cause"] for row in inside] == [str(IncidentCause.PULL)]
+    assert sum(row["n"] for row in incidents.tally(cur)) == 2
+
+
+def test_two_windows_cannot_overlap(cur):
+    """Which window a tally belongs to is the whole output; it cannot be ambiguous."""
+    incidents.open_trial(cur, note="native memory switched off", actor="user")
+    with pytest.raises(IncidentError, match="close it before opening another"):
+        incidents.open_trial(cur, note="again", actor="user")
+
+    incidents.close_trial(cur, note="two weeks up", actor="user")
+    assert incidents.current_trial(cur) is None
+    incidents.open_trial(cur, note="a second run", actor="user")
+    assert incidents.current_trial(cur) is not None
+
+
+def test_a_window_needs_an_account_of_what_was_switched_off(cur):
+    """Same rule the accident record follows: a row nobody can read later."""
+    with pytest.raises(IncidentError, match="say what is being switched off"):
+        incidents.open_trial(cur, note="   ", actor="user")
+
+
+def test_closing_without_a_window_is_refused(cur):
+    with pytest.raises(IncidentError, match="no window is open"):
+        incidents.close_trial(cur, note="", actor="user")

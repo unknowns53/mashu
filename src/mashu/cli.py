@@ -1134,6 +1134,54 @@ def cmd_eval_retire(args) -> int:
     return 0
 
 
+def cmd_trial(args) -> int:
+    """Open or close a switchover window, or read what happened inside it (27.5).
+
+    The switch itself is a setting on another program, so this system cannot
+    perform it and cannot verify it. What it can do is mark when the window
+    opened, which is what turns the accident count afterwards into a count of
+    something. Without a mark, a tally is over whatever has accumulated.
+    """
+    with transaction(args.dsn) as cur:
+        if args.open:
+            opened = incidents.open_trial(cur, note=args.note or "", actor=args.actor)
+            print(f"window open from {opened['created_at']:%Y-%m-%d %H:%M}")
+            print(_wrap(args.note, indent="  "))
+            return 0
+        if args.close:
+            open_now = incidents.current_trial(cur)
+            incidents.close_trial(cur, note=args.note or "", actor=args.actor)
+            days = _days_since(open_now["opened_at"])
+            print(f"window closed after {days} day(s)")
+            return 0
+
+        open_now = incidents.current_trial(cur)
+        if not open_now:
+            print("no window is open.  'mashu trial --open --note <what is switched off>'")
+            return 0
+        since = open_now["opened_at"]
+        print(f"window open since {since:%Y-%m-%d %H:%M}  ({_days_since(since)} day(s))")
+        note = (open_now["detail"] or {}).get("note")
+        if note:
+            print(_wrap(note, indent="  "))
+
+        counts = incidents.tally(cur, since=since)
+        if not counts:
+            print("\n  no accidents inside the window")
+            return 0
+        print()
+        for row in counts:
+            cause = IncidentCause(row["cause"])
+            print(f"  {row['kind']:<8}{row['cause']:<11}{row['n']:>3}   -> {LEADS_TO[cause]}")
+    return 0
+
+
+def _days_since(when) -> int:
+    from datetime import datetime
+
+    return (datetime.now(tz=when.tzinfo) - when).days
+
+
 def cmd_incident(args) -> int:
     """Record an accident, or read the tally back (27.5, 30 段 D).
 
@@ -1907,6 +1955,13 @@ def build_parser() -> argparse.ArgumentParser:
     ic.add_argument("--days", type=int, default=None, help="how far back to read")
     ic.add_argument("--actor", default="user")
     ic.set_defaults(func=cmd_incident)
+
+    tr = sub.add_parser("trial", help="open or close a switchover window (27.5)")
+    tr.add_argument("--open", action="store_true", help="mark the window as started")
+    tr.add_argument("--close", action="store_true", help="mark it as finished")
+    tr.add_argument("--note", help="what is being switched off; required to open")
+    tr.add_argument("--actor", default="user")
+    tr.set_defaults(func=cmd_trial)
 
     th = adm.add_parser("thresholds", help="measure the similarity distributions (27.2)")
     th.set_defaults(func=cmd_thresholds)

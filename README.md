@@ -286,6 +286,33 @@ uv run mashu admin eval-retire --sample 5
 
 worker の退役候補を、人が述べた退役（marker）と照合する。採点対象は、marker が終了済みかつ抽出済みのセッションに入っている場合だけ。まだ読まれていない log を失敗として数えない。
 
+## 切替
+
+CLI が持っている元の記憶機構を止めて、Mashu だけで 2 週間運用する。この切替は Mashu の機能ではない。**別のプログラムの設定を変える作業**であり、Mashu 側にできるのは窓の開始を記録して、その中で起きた事故を数えることだけである。
+
+手順は四つ。
+
+**① 自動書き込みを止める。** CLI が会話から勝手に記憶を書き足す機能を切る。Claude Code なら `~/.claude/settings.json` の `autoMemoryEnabled` を `false` にする。
+
+**② 古い記憶層を指す指示を外す。** 自動書き込みを切っても、CLI の常設指示（Claude Code の `CLAUDE.md`、Codex の `AGENTS.md`）が「memory ディレクトリを読め」と書いていれば Agent はそこを読む。その記述を外す。**①だけでは切り替わらない。**
+
+**③ 窓を開ける。**
+
+```bash
+uv run mashu trial --open --note "何を止めたか"
+```
+
+**④ 窓の中で起きた事故を記録する。** `mashu incident` で、原因つきで書く。判定は体感でしない。「Mashu に Active として在る内容を Agent が取得できないまま作業し、誤った前提で進んだ」場合を 1 件と数える。
+
+読むときと閉じるとき。
+
+```bash
+uv run mashu trial            # 開いてからの日数と、窓の中の事故
+uv run mashu trial --close --note "2 週間経過"
+```
+
+窓を開けずに数えた件数は、いつからの件数か言えない。集計の意味は窓が与える。
+
 ## 配置
 
 ```

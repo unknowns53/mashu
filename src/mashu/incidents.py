@@ -107,13 +107,81 @@ def record(
     return row
 
 
+# --------------------------------------------------------------------------
+# the trial window (27.5, 30 段 E)
+# --------------------------------------------------------------------------
+# 27.5 measures two weeks of running with the native mechanism switched off,
+# and the switch itself is a setting on another program — nothing this system
+# can do or verify. What it can do is say when the window opened, so the count
+# afterwards is a count of something rather than of whatever has accumulated.
+#
+# The window lives in event_log rather than in a table of its own. There is one
+# at a time, it is opened and closed and never edited, and that is what the log
+# already is. A second place to keep it would be a second thing to keep true.
+
+
+def open_trial(cur: psycopg.Cursor, *, note: str, actor: str) -> dict[str, Any]:
+    """Mark the start of a switchover window (27.5).
+
+    Refuses when one is already open. Two overlapping windows would make the
+    tally ambiguous about which one it belongs to, and the tally is the whole
+    output of the exercise.
+    """
+    open_now = current_trial(cur)
+    if open_now:
+        raise IncidentError(
+            f"a window has been open since {open_now['opened_at']:%Y-%m-%d}; "
+            f"close it before opening another"
+        )
+    if not note or not note.strip():
+        raise IncidentError(
+            "say what is being switched off. A window with no account cannot be "
+            "read afterwards as a test of anything in particular"
+        )
+    return events.record(cur, EventType.TRIAL_OPENED, actor, detail={"note": note.strip()})
+
+
+def close_trial(cur: psycopg.Cursor, *, note: str, actor: str) -> dict[str, Any]:
+    """Mark the end of the window, so what follows is not counted inside it."""
+    if not current_trial(cur):
+        raise IncidentError("no window is open")
+    return events.record(cur, EventType.TRIAL_CLOSED, actor, detail={"note": (note or "").strip()})
+
+
+def current_trial(cur: psycopg.Cursor) -> dict[str, Any] | None:
+    """The window that is open, or None. The latest open with nothing after it."""
+    # Ordered by event_id, not by the clock. created_at defaults to now(),
+    # which in PostgreSQL is the transaction's start time, so two events
+    # written in one transaction carry the same instant and cannot be told
+    # apart by it. event_id is a sequence, so it always can.
+    cur.execute(
+        """
+        SELECT event_id, actor, detail, created_at AS opened_at
+        FROM event_log
+        WHERE event_type = %(open)s
+          AND event_id > coalesce(
+              (SELECT max(event_id) FROM event_log WHERE event_type = %(close)s), 0)
+        ORDER BY event_id DESC
+        LIMIT 1
+        """,
+        {"open": str(EventType.TRIAL_OPENED), "close": str(EventType.TRIAL_CLOSED)},
+    )
+    return cur.fetchone()
+
+
 def listed(
     cur: psycopg.Cursor,
     *,
     kind: IncidentKind | None = None,
     since_days: int | None = None,
+    since: Any = None,
 ) -> list[dict[str, Any]]:
-    """Accidents, newest first, with the title of whatever each one names."""
+    """Accidents, newest first, with the title of whatever each one names.
+
+    since takes a moment rather than a span, which is what reading a trial
+    window needs: the count 27.5 asks for is of what happened inside one, and a
+    window is bounded by when it opened, not by how long ago that was.
+    """
     cur.execute(
         """
         SELECT i.*, e.title, s.name AS scope_name
@@ -123,14 +191,17 @@ def listed(
         WHERE (%(kind)s::text IS NULL OR i.kind = %(kind)s)
           AND (%(days)s::int IS NULL
                OR i.occurred_at > now() - make_interval(days => %(days)s))
+          AND (%(since)s::timestamptz IS NULL OR i.occurred_at >= %(since)s)
         ORDER BY i.occurred_at DESC
         """,
-        {"kind": str(kind) if kind else None, "days": since_days},
+        {"kind": str(kind) if kind else None, "days": since_days, "since": since},
     )
     return cur.fetchall()
 
 
-def tally(cur: psycopg.Cursor, *, since_days: int | None = None) -> list[dict[str, Any]]:
+def tally(
+    cur: psycopg.Cursor, *, since_days: int | None = None, since: Any = None
+) -> list[dict[str, Any]]:
     """How many of each cause, which is the only form the count is useful in."""
     cur.execute(
         """
@@ -138,9 +209,10 @@ def tally(cur: psycopg.Cursor, *, since_days: int | None = None) -> list[dict[st
         FROM incident
         WHERE (%(days)s::int IS NULL
                OR occurred_at > now() - make_interval(days => %(days)s))
+          AND (%(since)s::timestamptz IS NULL OR occurred_at >= %(since)s)
         GROUP BY kind, cause
         ORDER BY kind, count(*) DESC
         """,
-        {"days": since_days},
+        {"days": since_days, "since": since},
     )
     return cur.fetchall()
