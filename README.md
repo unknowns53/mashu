@@ -103,7 +103,19 @@ uv run mashu admin migrate
 ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
 ```
 
-`~/.local/bin` が PATH に無ければ、通っているディレクトリなら何でもよい。shell の alias にしない理由は、alias は対話シェルにしか効かず、スクリプトや launchd から呼べないためである。
+置き先が PATH に入っているかは、置く前に対話シェルで確かめる。`echo $PATH` を別の環境（エディタの統合端末など）で見ると、そちらが足しているものが混ざる。
+
+```bash
+zsh -ic 'echo $PATH | tr ":" "\n" | grep local/bin'
+```
+
+入っていなければ `~/.zshrc` に足す。
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+```
+
+shell の alias にしない理由は、alias は対話シェルにしか効かず、スクリプトや launchd から呼べないためである。
 
 ## 使う
 
