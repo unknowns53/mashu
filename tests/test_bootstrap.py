@@ -361,3 +361,43 @@ def test_a_memory_with_nothing_adopted_has_no_short_form_to_write(cur, write):
     memory_id, _ = write(MemoryType.PREFERENCE, "まだ採用されていない", "本文", adopt=False)
     with pytest.raises(NotFoundError):
         store.set_directive(cur, memory_id=memory_id, directive="短く", actor="user")
+
+
+# --------------------------------------------------------------------------
+# what a promotion is weighed against (21.2)
+# --------------------------------------------------------------------------
+def test_a_startup_promotion_is_weighed_against_the_heaviest_opening(cur, scope_id, write):
+    """The ceiling bounds an opening, not the part of it everyone shares.
+
+    A startup rule rides with every scope in turn, so weighing it against the
+    startup pack alone accepts promotions that leave a scoped session opening
+    without its current state — the state being the longest thing in any pack,
+    and so the first thing the trimming drops.
+    """
+    state_id, _ = write(MemoryType.STATE, "現在地", "現在地。" * 470)
+    store.set_delivery(cur, memory_id=state_id, delivery=Delivery.SCOPE_REQUIRED, actor="user")
+
+    rule_id, _ = write(MemoryType.PREFERENCE, "規律", "規律。" * 270)
+    with pytest.raises(DeliveryError):
+        store.set_delivery(cur, memory_id=rule_id, delivery=Delivery.STARTUP_REQUIRED, actor="user")
+    assert store.get_entity(cur, rule_id)["delivery"] == Delivery.PULL_ONLY
+
+    # It is only the loaded scope that refuses it. A session opening in a scope
+    # that pushes nothing had room all along, which is exactly why measuring
+    # that opening was no answer.
+    empty = store.create_scope(cur, name="a scope that pushes nothing", actor="user")
+    assert bootstrap.would_fit(cur, memory_id=rule_id, content="規律。" * 270, scope_id=empty)[0]
+    assert not bootstrap.would_fit(cur, memory_id=rule_id, content="規律。" * 270)[0]
+
+
+def test_a_scope_promotion_is_weighed_at_all(cur, scope_id, write):
+    """Joining a scope's pack went unmeasured, so only startup was ever refused.
+
+    A state arrives scope_required and so was weighed when it was adopted, but
+    anything else reaching that pack got there by this call, which measured
+    nothing at all.
+    """
+    memory_id, _ = write(MemoryType.PREFERENCE, "長い規律", "規律。" * 950)
+    with pytest.raises(DeliveryError):
+        store.set_delivery(cur, memory_id=memory_id, delivery=Delivery.SCOPE_REQUIRED, actor="user")
+    assert store.get_entity(cur, memory_id)["delivery"] == Delivery.PULL_ONLY

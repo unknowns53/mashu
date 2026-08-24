@@ -407,26 +407,36 @@ def set_delivery(
     a memory startup_required and it is in front of every later session,
     whatever the type says.
 
-    Promoting into the startup pack is refused when the pack would no longer
-    fit. Trimming it to titles instead would silently drop the standing rules
-    the session was supposed to be told, and a fixed cost that quietly stops
-    delivering is worse than one that says it is full.
+    Either promotion is refused when the opening would no longer fit. Trimming
+    it to titles instead would silently drop the standing rules the session was
+    supposed to be told, and a fixed cost that quietly stops delivering is
+    worse than one that says it is full.
+
+    Both are measured, and against the opening a session actually receives.
+    scope_required went unchecked entirely, and startup_required was weighed
+    against the startup pack alone — so thirteen rules could be promoted one
+    after another, each accepted, and leave every scoped session opening
+    without its current state.
     """
     from mashu import bootstrap
 
     delivery = Delivery(delivery)
     entity = get_entity(cur, memory_id, lock=True)
 
-    if delivery is Delivery.STARTUP_REQUIRED and entity["active_version"] is not None:
+    if delivery is not Delivery.PULL_ONLY and entity["active_version"] is not None:
         version = get_version(cur, entity["active_version"])
+        # None means the heaviest opening, which is the case a promotion into
+        # the startup pack has to survive: it rides with every scope in turn.
+        against = entity["scope_id"] if delivery is Delivery.SCOPE_REQUIRED else None
         fits, cost = bootstrap.would_fit(
             cur,
             memory_id=memory_id,
             content=version["directive"] or version["content"],
+            scope_id=against,
         )
         if not fits:
             raise DeliveryError(
-                f"the startup pack would come to {cost} token, over the ceiling of "
+                f"a session opening would come to {cost} token, over the ceiling of "
                 f"{bootstrap.BOOTSTRAP_TOKEN_BUDGET}. Shorten a directive, or take "
                 f"something else out of the pack first"
             )
