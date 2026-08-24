@@ -926,18 +926,18 @@ def cmd_bootstrap(args) -> int:
 
 def cmd_deliver(args) -> int:
     """Move one memory between push and pull (21.2). The user's call only."""
-    with transaction(args.dsn) as cur:
-        entity = _resolve_entity(cur, args.memory)
-        try:
+    try:
+        with transaction(args.dsn) as cur:
+            entity = _resolve_entity(cur, args.memory)
             changed = store.set_delivery(
                 cur,
                 memory_id=entity["memory_id"],
                 delivery=Delivery(args.delivery),
                 actor=args.actor,
             )
-        except DeliveryError as refusal:
-            print(f"not changed: {refusal}")
-            return 1
+    except DeliveryError as refusal:
+        print(f"not changed: {refusal}")
+        return 1
     print(f"{changed['title']}  ->  {changed['delivery']}")
     return 0
 
@@ -1204,20 +1204,20 @@ def cmd_directive(args) -> int:
     carry two or three rules out of dozens, and the way to add one to an
     existing memory was to file a revision whose body had not changed.
     """
-    with transaction(args.dsn) as cur:
-        entity = _resolve_entity(cur, args.memory)
-        if not args.clear and not args.text:
-            raise SystemExit("give the short form, or --clear to take it off")
-        try:
+    if not args.clear and not args.text:
+        raise SystemExit("give the short form, or --clear to take it off")
+    try:
+        with transaction(args.dsn) as cur:
+            entity = _resolve_entity(cur, args.memory)
             changed = store.set_directive(
                 cur,
                 memory_id=entity["memory_id"],
                 directive=None if args.clear else args.text,
                 actor=args.actor,
             )
-        except DeliveryError as refusal:
-            print(f"not changed: {refusal}", file=sys.stderr)
-            return 1
+    except DeliveryError as refusal:
+        print(f"not changed: {refusal}", file=sys.stderr)
+        return 1
     print(f"{changed['title']}")
     if changed["directive"] is None:
         print("  > (no directive; a push would carry the whole content)")

@@ -392,3 +392,50 @@ def test_the_session_start_carries_the_conditions_and_the_capture_health(call, t
     # The health flag itself is asserted where the database rolls back; here
     # another test has deliberately broken a run in the same store.
     assert set(got["capture"]) >= {"ok", "failed", "waiting", "warning"}
+
+
+def test_a_refused_proposal_leaves_nothing_behind(call, test_dsn, scope):
+    """A tool that answers ok: false must not have written anything (24, 26).
+
+    The refusal that showed this up is the optimistic lock. The proposal row is
+    inserted, and only then does applying it as a candidate find that the
+    entity has moved on since the caller read it. Catching that inside the
+    transaction ends the block cleanly, so the row being refused is committed
+    and turns up in the review queue as an item nobody successfully proposed.
+
+    The rule this asserts is wider than the one path. Every refusal a tool
+    reports has to roll back, or whether a rejected change leaves a trace
+    depends on which line of a function raised.
+    """
+    memory_id, first = _write(
+        test_dsn, scope, MemoryType.FACT, "ramp rate", "half a degree per minute"
+    )
+
+    moved = call(
+        "memory_propose",
+        operation="update_version",
+        memory_id=str(memory_id),
+        based_on_version=str(first),
+        payload={"content": "a degree per minute"},
+    )
+    assert moved["ok"] is True
+
+    # Written against the version the entity has now left behind, which is what
+    # a second agent reading before the first one wrote would send.
+    stale = call(
+        "memory_propose",
+        operation="update_version",
+        memory_id=str(memory_id),
+        based_on_version=str(first),
+        payload={"content": "two degrees a minute"},
+        allow_duplicate=True,
+    )
+    assert stale["ok"] is False
+    assert "re-read" in stale["error"]
+
+    with transaction(test_dsn) as cur:
+        cur.execute(
+            "SELECT count(*) AS n FROM proposal WHERE target_memory = %s AND operation = %s",
+            (memory_id, str(ProposalOperation.UPDATE_VERSION)),
+        )
+        assert cur.fetchone()["n"] == 1, "the refused proposal was committed anyway"
