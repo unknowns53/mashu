@@ -909,6 +909,37 @@ def cmd_deliver(args) -> int:
     return 0
 
 
+def cmd_directive(args) -> int:
+    """Write the short standing form a push carries (21.2). The user's call only.
+
+    Without this the short form could only be written when the memory was
+    created, so everything already in the store was pushable only at full
+    length. Against a 2,000 token ceiling that meant a session opening could
+    carry two or three rules out of dozens, and the way to add one to an
+    existing memory was to file a revision whose body had not changed.
+    """
+    with transaction(args.dsn) as cur:
+        entity = _resolve_entity(cur, args.memory)
+        if not args.clear and not args.text:
+            raise SystemExit("give the short form, or --clear to take it off")
+        try:
+            changed = store.set_directive(
+                cur,
+                memory_id=entity["memory_id"],
+                directive=None if args.clear else args.text,
+                actor=args.actor,
+            )
+        except DeliveryError as refusal:
+            print(f"not changed: {refusal}", file=sys.stderr)
+            return 1
+    print(f"{changed['title']}")
+    if changed["directive"] is None:
+        print("  > (no directive; a push would carry the whole content)")
+    else:
+        print(_wrap(changed["directive"], indent="  > "))
+    return 0
+
+
 def cmd_serve(args) -> int:
     """Run the MCP server on stdin and stdout, which is how a CLI starts it."""
     if args.dsn:
@@ -1554,6 +1585,13 @@ def build_parser() -> argparse.ArgumentParser:
     rv.add_argument("--reviewer", default="user")
     rv.add_argument("--reason", default=None, help="a note recorded on every approval")
     rv.set_defaults(func=cmd_review)
+
+    di = sub.add_parser("directive", help="write a memory's short standing form (21.2)")
+    di.add_argument("memory", help="memory id, or enough of its start to be unambiguous")
+    di.add_argument("text", nargs="?", help="the short form a push carries")
+    di.add_argument("--clear", action="store_true", help="take the short form off again")
+    di.add_argument("--actor", default="user")
+    di.set_defaults(func=cmd_directive)
 
     v = sub.add_parser("serve", help="run the MCP server over stdio")
     v.add_argument("--agent", default=None, help="the identity proposals are recorded under")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from mashu import bootstrap, store
-from mashu.errors import DeliveryError
+from mashu.errors import DeliveryError, NotFoundError
 from mashu.models import Delivery, EventType, MemoryType, SourceType
 
 
@@ -310,3 +310,54 @@ def test_one_scope_state_does_not_count_against_another(cur, scope_id, write):
 
     fits, cost = bootstrap.would_fit(cur, scope_id=scope_id)
     assert fits, cost
+
+
+# --------------------------------------------------------------------------
+# writing the short form onto a memory that already exists (21.2)
+# --------------------------------------------------------------------------
+def test_a_directive_written_later_shortens_the_push_without_a_new_version(cur, push):
+    """The short form is a compression of reviewed content, not a revision.
+
+    Everything the importer brought in arrived without one, so before this the
+    only way to shorten a push was to file a revision whose body had not
+    changed — an identical content twice in the history, reading as a change of
+    mind about the content (the objection section 8 raises about retyping).
+    """
+    long_body = "測ってから決める。" * 40
+    memory_id = push(MemoryType.PREFERENCE, "測ってから決める", long_body)
+
+    cur.execute("SELECT count(*) AS n FROM memory_version WHERE memory_id = %s", (memory_id,))
+    before = cur.fetchone()["n"]
+    was_active = store.get_entity(cur, memory_id)["active_version"]
+    full = bootstrap.session_bootstrap(cur, actor="claude").tokens
+
+    store.set_directive(cur, memory_id=memory_id, directive="測ってから決める。", actor="user")
+
+    cur.execute("SELECT count(*) AS n FROM memory_version WHERE memory_id = %s", (memory_id,))
+    assert cur.fetchone()["n"] == before
+    assert store.get_entity(cur, memory_id)["active_version"] == was_active
+
+    got = bootstrap.session_bootstrap(cur, actor="claude")
+    assert got.tokens < full
+    assert got.startup[0]["content"] == "測ってから決める。"
+
+    # The whole of it is still there for anything that pulls.
+    assert store.get_version(cur, was_active)["content"] == long_body
+
+
+def test_a_directive_that_bursts_the_pack_is_handed_back(cur, push):
+    """21.2 refuses the change rather than trimming the pack to fit."""
+    memory_id = push(MemoryType.PREFERENCE, "短く始める", "短く始める。")
+    with pytest.raises(DeliveryError):
+        store.set_directive(cur, memory_id=memory_id, directive="長い規則。" * 500, actor="user")
+    assert (
+        store.get_version(cur, store.get_entity(cur, memory_id)["active_version"])["directive"]
+        is None
+    )
+
+
+def test_a_memory_with_nothing_adopted_has_no_short_form_to_write(cur, write):
+    """A directive is the short form of what the store currently holds as true."""
+    memory_id, _ = write(MemoryType.PREFERENCE, "まだ採用されていない", "本文", adopt=False)
+    with pytest.raises(NotFoundError):
+        store.set_directive(cur, memory_id=memory_id, directive="短く", actor="user")

@@ -127,6 +127,7 @@ class EventType(StrEnum):
     SCOPE_READINESS_SET = "scope_readiness_set"
     SCOPE_PROMOTED = "scope_promoted"
     DELIVERY_SET = "delivery_set"
+    DIRECTIVE_SET = "directive_set"
     ENTITY_CREATED = "entity_created"
     ENTITY_MERGED = "entity_merged"
     TYPE_CORRECTED = "type_corrected"

@@ -445,6 +445,77 @@ def set_delivery(
     return get_entity(cur, memory_id)
 
 
+def set_directive(
+    cur: psycopg.Cursor,
+    *,
+    memory_id: UUID,
+    directive: str | None,
+    actor: str,
+) -> dict[str, Any]:
+    """Give an adopted memory its short standing form (specification 21.2).
+
+    The directive is the same knowledge as the content, compressed to the rule
+    a person would actually be told at a session opening. So writing one is not
+    a new claim and does not make a version: an identical body sitting twice in
+    the history would read as a change of mind about the content, which is the
+    reason section 8 gives for correcting a type in place rather than by
+    revision.
+
+    Only the user writes one, for the same reason only the user sets delivery.
+    The directive is the text pushed into every session that receives this
+    memory, so an agent able to write its own would be writing standing
+    instructions by another route — the hole section 17 closed on preferences,
+    reopened one column over. The person typing it at the terminal is the
+    review that migration 0010 requires: a summary made at read time is an
+    interpretation nobody agreed to.
+
+    A memory that is already pushed has its pack re-measured before the change
+    is taken, and an over-budget one is handed back rather than trimmed (21.2).
+    Shortening is the whole point of a directive, so this refuses in practice
+    only when the new one is longer than what it replaces.
+    """
+    from mashu import bootstrap
+
+    entity = get_entity(cur, memory_id, lock=True)
+    if EntityStatus(entity["status"]) is EntityStatus.MERGED:
+        raise MergeError(f"entity {memory_id} was merged into {entity['merged_into']}")
+
+    version_id = entity["active_version"]
+    if version_id is None:
+        raise NotFoundError(
+            f"{entity['title']} has no active version; a directive is the short form "
+            f"of something the store currently holds as true"
+        )
+
+    delivery = Delivery(entity["delivery"])
+    if directive is not None and delivery is not Delivery.PULL_ONLY:
+        scope_id = entity["scope_id"] if delivery is Delivery.SCOPE_REQUIRED else None
+        fits, cost = bootstrap.would_fit(
+            cur, memory_id=memory_id, content=directive, scope_id=scope_id
+        )
+        if not fits:
+            raise DeliveryError(
+                f"this directive puts the {delivery} pack at {cost} token, over "
+                f"{bootstrap.BOOTSTRAP_TOKEN_BUDGET}; shorten it, or move something "
+                f"else out of the pack first"
+            )
+
+    previous = get_version(cur, version_id)["directive"]
+    cur.execute(
+        "UPDATE memory_version SET directive = %s WHERE version_id = %s",
+        (directive, version_id),
+    )
+    events.record(
+        cur,
+        EventType.DIRECTIVE_SET,
+        actor,
+        memory_id=memory_id,
+        version_id=version_id,
+        detail={"had_one": previous is not None, "cleared": directive is None},
+    )
+    return {"memory_id": memory_id, "title": entity["title"], "directive": directive}
+
+
 def set_entity_status(
     cur: psycopg.Cursor,
     *,
