@@ -1580,3 +1580,69 @@ def test_retiring_the_same_one_twice_does_not_end_the_sweep(test_dsn, sweeping, 
     assert code == 0
     assert "already retired" in out
     assert "1 retired" in out
+
+
+def test_a_person_can_retire_over_a_proposal_that_was_turned_down(test_dsn, run, committed_scope):
+    """The decline was about the agent's proposal, not about the world today.
+
+    15.1 makes the duplicate check look at turned-down proposals too, so a
+    worker cannot file the same retirement twice. Applied to a person typing
+    the command it blocked the one trigger 16.1 has always named, and the store
+    ended up holding tasks nobody could retire.
+    """
+    with transaction(test_dsn) as cur:
+        memory_id, version_id = store.create_entity(
+            cur,
+            scope_id=committed_scope,
+            type=MemoryType.TASK,
+            title=f"却下ののち終わった作業 {uuid.uuid4()}",
+            content="本文",
+            source_type=SourceType.AGENT,
+            created_by="mashu-worker",
+            actor="mashu-worker",
+            adopt=True,
+        )
+        turned_down = proposals.propose(
+            cur,
+            actor="mashu-worker",
+            operation=ProposalOperation.CHANGE_STATUS,
+            payload={
+                # dormant rather than completed: the gate auto commits a plain
+                # task completion (17), and this needs a proposal a person got
+                # to turn down
+                "version_id": str(version_id),
+                "status": "dormant",
+                "reason": "しばらく触らないと読めた",
+                "source_type": str(SourceType.AGENT),
+            },
+            target_memory=memory_id,
+        )["proposal"]
+        proposals.reject(
+            cur, turned_down["proposal_id"], reviewer="user", reason="まだ終わっていない"
+        )
+
+    code, out = run("retire", str(memory_id)[:8], "completed", "--reason", "今度こそ終わった")
+    assert code == 0
+    assert "まだ終わっていない" in out, "and it says what it is going over"
+
+    with transaction(test_dsn) as cur:
+        version = store.get_version(cur, store.get_entity(cur, memory_id)["latest_version"])
+    assert version["status"] == "completed"
+
+
+def test_the_sweep_says_why_the_store_would_not_do_it(test_dsn, sweeping, committed_scope):
+    """A refusal written to stderr is a refusal the next repaint wipes."""
+    memory_id = _standing_task(test_dsn, committed_scope, f"断られる作業 {uuid.uuid4()}")
+
+    def _refuse(args):
+        return 1, "この版はもう別の理由で動かせない"
+
+    keys = ["down"] * _place_in_sweep(test_dsn, memory_id) + ["c", "q"]
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(cli, "_retire_now", _refuse)
+        code, out = sweeping(keys)
+
+    assert code == 0
+    assert "この版はもう別の理由で動かせない" in out
+    with transaction(test_dsn) as cur:
+        assert store.get_entity(cur, memory_id)["active_version"] is not None

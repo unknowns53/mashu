@@ -1547,10 +1547,11 @@ def _retire_one(args, row, done: dict, number: int, key: str) -> str:
         reviewer=args.actor,
     )
     try:
-        if cmd_retire(asked) != 0:
-            return "  the store would not retire this one; 'mashu inspect' says more"
+        code, said = _retire_now(asked)
     except MashuError as refusal:
         return f"  {refusal}"
+    if code:
+        return f"  {said}"
     done[number] = _SWEPT[status]
     return ""
 
@@ -1788,7 +1789,18 @@ def cmd_route(args) -> int:
 # retirement
 # --------------------------------------------------------------------------
 def cmd_retire(args) -> int:
-    """Retire what a person says is finished or wrong (16.1, 30 段 B).
+    """Retire what a person says is finished or wrong (16.1, 30 段 B)."""
+    code, said = _retire_now(args)
+    print(said, file=sys.stderr if code else sys.stdout)
+    return code
+
+
+def _retire_now(args) -> tuple[int, str]:
+    """Do it, and hand back what to say about it rather than printing it.
+
+    The sweep calls this too and paints its own screens, so a refusal written
+    straight to stderr is a refusal the next repaint wipes. What went wrong has
+    to be a value before it can be shown in the place it belongs.
 
     Section 16.1 has always named the user's own statement as a trigger for
     retirement, and there was no way for a person to make one: retiring
@@ -1805,8 +1817,7 @@ def cmd_retire(args) -> int:
         full = store.get_entity(cur, entity["memory_id"])
         version_id = full["active_version"]
         if version_id is None:
-            print(f"{full['title']} has no active version to retire", file=sys.stderr)
-            return 1
+            return 1, f"{full['title']} has no active version to retire"
 
         try:
             made = proposals.propose(
@@ -1836,35 +1847,63 @@ def cmd_retire(args) -> int:
                 reviewer=args.reviewer,
                 reason=f"stated at the terminal: {args.reason}",
             )
-            print(f"{full['title']}  ->  {target}  (reviewed here: {made['ruling'].reason})")
-        else:
-            print(f"{full['title']}  ->  {target}")
-    return 0
+            return 0, f"{full['title']}  ->  {target}  (reviewed here: {made['ruling'].reason})"
+        return 0, f"{full['title']}  ->  {target}"
 
 
-# --------------------------------------------------------------------------
-# review, in one sitting
-# --------------------------------------------------------------------------
-def _agree(cur, args, entity, clash: DuplicateProposalError) -> int:
-    """Approve the standing proposal this command was agreeing with."""
+def _agree(cur, args, entity, clash: DuplicateProposalError) -> tuple[int, str]:
+    """Settle a retirement somebody has already put a proposal behind.
+
+    Pending, and this command is agreeing with it: approve that one rather than
+    filing a second beside it.
+
+    All decided, and the duplicate check (15.1) is looking at a proposal an
+    agent filed and a person turned down. That decision was about the agent's
+    proposal, not about whether the thing is finished today, and a person at
+    the terminal saying it is finished is a trigger in its own right (16.1). So
+    it goes through, over the earlier decision, and the log carries both.
+    """
     waiting = [row for row in clash.existing if row["status"] == "pending"]
-    if not waiting:
-        why = clash.declined[-1]["decision_reason"] if clash.declined else "already decided"
-        print(f"{entity['title']}: this was already ruled on ({why})", file=sys.stderr)
-        return 1
+    if waiting:
+        proposal = waiting[-1]
+        proposals.approve(
+            cur,
+            proposal["proposal_id"],
+            reviewer=args.reviewer,
+            reason=f"agreed at the terminal: {args.reason}",
+        )
+        return 0, (
+            f"{entity['title']}  ->  {proposal['payload'].get('status')}  "
+            f"(approved the proposal {proposal['actor']} was already holding)"
+        )
 
-    proposal = waiting[-1]
-    proposals.approve(
+    earlier = clash.declined[-1] if clash.declined else None
+    made = proposals.propose(
         cur,
-        proposal["proposal_id"],
-        reviewer=args.reviewer,
-        reason=f"agreed at the terminal: {args.reason}",
+        actor=args.actor,
+        operation=ProposalOperation.CHANGE_STATUS,
+        payload={
+            "version_id": str(entity["active_version"]),
+            "status": args.status,
+            "reason": args.reason,
+            "source_type": str(SourceType.USER),
+        },
+        target_memory=entity["memory_id"],
+        allow_duplicate=True,
     )
-    print(
-        f"{entity['title']}  ->  {proposal['payload'].get('status')}  "
-        f"(approved the proposal {proposal['actor']} was already holding)"
-    )
-    return 0
+    proposal = made["proposal"]
+    if proposal["status"] == str(ProposalStatus.PENDING):
+        proposals.approve(
+            cur,
+            proposal["proposal_id"],
+            reviewer=args.reviewer,
+            reason=f"stated at the terminal: {args.reason}",
+        )
+    said = f"{entity['title']}  ->  {args.status}"
+    if earlier:
+        why = earlier["decision_reason"] or "no reason recorded"
+        said += f"  (over a turn-down of {earlier['actor']}'s proposal: {why})"
+    return 0, said
 
 
 def cmd_review(args) -> int:
