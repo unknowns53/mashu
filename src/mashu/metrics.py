@@ -15,6 +15,7 @@ that goes quiet when the thing it watches dies.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -43,6 +44,7 @@ class Status:
     tag_share: dict[str, Any] = field(default_factory=dict)
     openings: list[dict[str, Any]] = field(default_factory=list)
     corrections: dict[str, Any] = field(default_factory=dict)
+    self_dating: list[dict[str, Any]] = field(default_factory=list)
     unmeasured: list[str] = field(default_factory=list)
 
 
@@ -58,6 +60,7 @@ def collect(cur: psycopg.Cursor, *, window_days: int = WINDOW_DAYS) -> Status:
         tag_share=_tag_share(cur, window_days),
         openings=_openings(cur),
         corrections=_corrections(cur, window_days),
+        self_dating=self_dating(cur),
         unmeasured=[
             "束あたりの処理時間 — the review sitting is not timed",
             "期限切れ・完了済みの内容が現在値として使われた件数 — needs incidents (30 段 D)",
@@ -243,6 +246,61 @@ def _corrections(cur: psycopg.Cursor, window_days: int) -> dict[str, Any]:
         round(100 * undone / row["retrievals"], 1) if row["retrievals"] else None
     )
     return row
+
+
+#: A rule that names a moment in itself (25.2). Deliberately loose, and read
+#: only against the title and the directive — the two places that carry the
+#: standing rule. Measured against the real store, a body-wide search matched 44
+#: of 94 memories and almost all of them were provenance ("2026-08-08、ユーザー
+#: が…"), which is a date the rule rests on rather than one it expires with.
+#: Against title and directive the same patterns matched six, which is a glance.
+_SELF_DATING = re.compile(
+    r"\d{4}\s*[-/年]\s*\d{1,2}\s*月?"
+    r"|\d{4}\s*年"
+    r"|現時点"
+    r"|時点[のでにを]"
+    r"|いまのところ"
+    r"|当面"
+    r"|暫定"
+)
+
+
+def self_dating(cur: psycopg.Cursor) -> list[dict[str, Any]]:
+    """Active memories whose own rule names a moment (25.2 移行).
+
+    A screen, not a verdict. Some of these are rules *about* shelf life rather
+    than rules *with* one — "a probe named after a milestone dies when the
+    milestone closes" reads as dated and is not — and no pattern separates
+    those from a rule that quietly stopped being true. What the screen owes the
+    reader is the match, so dismissing a wrong one costs a glance.
+
+    Precision is the cheap side here. A false positive is waved off; a stale
+    rule nobody screens keeps being handed to every session that asks, which is
+    the debt 25.2 names: a window written down in the years before there was
+    anywhere to put one.
+    """
+    cur.execute(
+        """
+        SELECT e.memory_id, e.title, e.type, e.delivery, s.name AS scope_name,
+               v.directive
+        FROM memory_entity e
+        JOIN memory_version v ON v.version_id = e.active_version
+        JOIN scope s ON s.scope_id = e.scope_id
+        WHERE e.status = 'active'
+        ORDER BY s.name, e.title
+        """
+    )
+    found = []
+    for row in cur.fetchall():
+        for field_name in ("title", "directive"):
+            text = row[field_name]
+            if not text:
+                continue
+            hit = _SELF_DATING.search(text)
+            if hit:
+                found.append({**row, "matched": hit.group(), "matched_in": field_name})
+                break
+    return found
 
 
 def pushed_total(cur: psycopg.Cursor) -> int:

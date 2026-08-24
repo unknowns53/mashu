@@ -77,3 +77,63 @@ def test_a_rejection_counts_as_a_correction(cur, scope_id):
     got = metrics.collect(cur)
     assert got.corrections["rejected"] == before + 1
     assert got.corrections["per_100_retrievals"] is None or got.corrections["retrievals"] >= 0
+
+
+def test_a_date_in_the_body_is_provenance_and_is_not_screened(cur, scope_id):
+    """25.2's debt is a rule that names its own moment, not one that cites a date.
+
+    Measured against the real store, a body-wide search matched 44 of 94 and
+    almost all of them were "on 2026-08-08 the user said" — the ground a rule
+    rests on, not the moment it stops being true. Screening those would bury
+    the handful that are actually windows.
+    """
+    store.create_entity(
+        cur,
+        scope_id=scope_id,
+        type=MemoryType.PREFERENCE,
+        title="外からの連続取得は逐次で行う",
+        content="2026-07-07 の遮断を受けた予防措置。**Why:** 2026-08-08 にユーザーが指摘した。",
+        source_type=SourceType.USER,
+        created_by="user",
+        actor="user",
+        adopt=True,
+    )
+    assert not [row for row in metrics.self_dating(cur) if "逐次" in row["title"]]
+
+
+def test_a_rule_that_names_its_own_moment_is_screened_with_the_match(cur, scope_id):
+    """The match is printed, so waving off a wrong one costs a glance."""
+    store.create_entity(
+        cur,
+        scope_id=scope_id,
+        type=MemoryType.PREFERENCE,
+        title="委譲先モデルの選び方——2026-08 時点の顔ぶれ",
+        content="本文",
+        source_type=SourceType.USER,
+        created_by="user",
+        actor="user",
+        adopt=True,
+    )
+    row = next(r for r in metrics.self_dating(cur) if "委譲先" in r["title"])
+    assert row["matched_in"] == "title"
+    assert "2026-08" in row["matched"]
+
+
+def test_the_short_form_is_screened_too_because_it_is_what_gets_pushed(cur, scope_id):
+    """A directive is the rule as every session receives it (21.2)."""
+    memory_id, version_id = store.create_entity(
+        cur,
+        scope_id=scope_id,
+        type=MemoryType.PREFERENCE,
+        title="枠の使い方",
+        content="長い本文",
+        source_type=SourceType.USER,
+        created_by="user",
+        actor="user",
+        adopt=True,
+    )
+    store.set_directive(
+        cur, memory_id=memory_id, directive="当面はこの割り当てで回す。", actor="user"
+    )
+    row = next(r for r in metrics.self_dating(cur) if r["memory_id"] == memory_id)
+    assert row["matched_in"] == "directive"

@@ -1005,9 +1005,58 @@ def cmd_status(args) -> int:
         f"over {c['retrievals']} retrieval(s) = {per} per 100"
     )
 
+    print("\nself-dating actives (25.2 移行)")
+    if not got.self_dating:
+        print("  none; no adopted rule names a moment in itself")
+    else:
+        pushed = sum(1 for row in got.self_dating if row["delivery"] != str(Delivery.PULL_ONLY))
+        print(
+            f"  {len(got.self_dating)} rule(s) name a moment in themselves"
+            f"{f', {pushed} of them pushed' if pushed else ''} — 'mashu admin stale'"
+        )
+
     print("\nnot measured here")
     for line in got.unmeasured:
         print(_wrap(line, indent="  - "))
+    return 0
+
+
+def cmd_stale(args) -> int:
+    """Adopted rules that name a moment in themselves (25.2 移行, 30 段 C).
+
+    A window written down in the years before there was anywhere to put one.
+    Section 25.2 gives two ways out and does not choose between them: move it to
+    a temporary context that expires by the clock, or rewrite it without the
+    date so what is left is indefinite and true. Which one applies is a reading
+    of the content, so nothing here decides.
+
+    A screen, not a verdict, and the match is printed so waving off a wrong one
+    costs a glance. Some of these are rules *about* shelf life rather than rules
+    *with* one, and no pattern tells those apart.
+    """
+    with transaction(args.dsn) as cur:
+        found = metrics.self_dating(cur)
+        if not found:
+            print("nothing adopted names a moment in itself")
+            return 0
+        print(f"{len(found)} adopted rule(s) name a moment in themselves\n")
+        for row in found:
+            pushed = "" if row["delivery"] == str(Delivery.PULL_ONLY) else f"  [{row['delivery']}]"
+            print(
+                f"  {_short(row['memory_id'])}  {row['matched']!r} in {row['matched_in']}"
+                f"  [{row['scope_name']}]{pushed}"
+            )
+            print(_wrap(row["title"], indent="      "))
+            print()
+        print(
+            _wrap(
+                "each is either a window — 'mashu retire <id> dormant --reason', then "
+                "'mashu remember --until <when> --kind fact|preference' — or a rule that "
+                "reads as dated and is not, in which case rewrite it without the date. "
+                "The screen does not tell them apart.",
+                indent="  ",
+            )
+        )
     return 0
 
 
@@ -1676,6 +1725,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     b = adm.add_parser("backfill", help="embed rows that have no vector yet")
     b.set_defaults(func=cmd_backfill)
+
+    sl = adm.add_parser("stale", help="adopted rules that name a moment in themselves (25.2)")
+    sl.set_defaults(func=cmd_stale)
 
     m = adm.add_parser("migrate", help="apply pending migrations")
     m.set_defaults(func=cmd_migrate)

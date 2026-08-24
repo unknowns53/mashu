@@ -148,6 +148,7 @@ fresh clone では git hook を入れる。
 | `mashu admin backfill` | 埋め込みを持たない行を後から埋める |
 | `mashu admin enqueue` | transcript を抽出のために台帳へ積む |
 | `mashu admin runs` | 捕捉台帳の生の行（`status` の元） |
+| `mashu admin stale` | 自分で期限を名乗っている Active を洗い出す（25.2 の移行） |
 | `mashu admin migrate` | 未適用の migration を流す |
 
 ## Agent から使う
