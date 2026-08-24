@@ -1161,3 +1161,104 @@ def test_a_cache_hit_is_counted_as_something_the_model_read(monkeypatch):
 
     assert extractor.usage["input_tokens"] == 5000
     assert extractor.usage["cache_read_input_tokens"] == 4000
+
+
+# --------------------------------------------------------------------------
+# which of the two readings runs
+# --------------------------------------------------------------------------
+def _at(minute):
+    return f"2026-08-24T09:{minute:02d}:00.000Z"
+
+
+def _timed(text, minute, role="assistant"):
+    return dict(_claude(text, role), timestamp=_at(minute))
+
+
+def _flag(minute, content="書き留めたこと"):
+    return {"kind": "note", "content": content, "created_at": _at(minute)}
+
+
+def _put_scratch(cur, items):
+    cur.execute(
+        "INSERT INTO agent_session (agent, source_cli, external_session_id, scratch) "
+        "VALUES ('claude', 'claude', 's-1', %s)",
+        (json.dumps(items, ensure_ascii=False),),
+    )
+
+
+def test_a_session_that_flagged_nothing_is_read_from_its_transcript(cur, tmp_path, queued, route):
+    """The fallback stays exactly what it is today.
+
+    Complying gets cheaper; not complying is unchanged. A change that made the
+    silent case worse would be a punishment for agents that never saw the ask.
+    """
+    turns = [_timed(f"{n:02d} 番目の長い話 " + "本文 " * 30, n) for n in range(12)]
+    stub = extract.StubExtractor(answer())
+    outcome = worker.process(cur, queued(write_claude(tmp_path, turns)), extractor=stub)
+
+    assert "11 番目の長い話" in stub.prompts[0]
+    assert "00 番目の長い話" in stub.prompts[0]
+    assert "read around" not in outcome.note
+
+
+def test_a_session_that_flagged_something_is_read_around_its_flags(cur, tmp_path, queued, route):
+    """The only cut on the table that changes the cost by an order (16.3).
+
+    Folding repeats halved a real evening and no rearrangement reaches a tenth,
+    because the unique prose alone is most of what is left. Reading a fraction
+    does, and the defensible fraction is the one the session pointed at.
+    """
+    turns = [_timed(f"{n:02d} 番目の長い話 " + "本文 " * 30, n) for n in range(40)]
+    _put_scratch(cur, [_flag(30)])
+    stub = extract.StubExtractor(answer())
+    outcome = worker.process(cur, queued(write_claude(tmp_path, turns)), extractor=stub)
+
+    assert "30 番目の長い話" in stub.prompts[0]
+    assert "05 番目の長い話" not in stub.prompts[0]
+    assert "read around" in outcome.note
+
+
+def test_a_marker_alone_does_not_licence_reading_a_fraction(cur, tmp_path, queued, route):
+    """The fraction is defensible because the session pointed at it.
+
+    A session that put nothing down has pointed at nothing, so an explicit
+    request to remember is a reason to read the whole log rather than a licence
+    to read eight turns of it.
+    """
+    turns = [_timed(f"{n:02d} 番目の長い話 " + "本文 " * 30, n) for n in range(40)]
+    turns[30] = _timed("これは覚えておいて", 30, role="user")
+    stub = extract.StubExtractor(answer())
+    worker.process(cur, queued(write_claude(tmp_path, turns)), extractor=stub)
+
+    assert "05 番目の長い話" in stub.prompts[0]
+
+
+def test_a_marker_inside_a_flagged_session_is_still_read(cur, tmp_path, queued, route):
+    """The one case worse than reading everything is skipping the turn where
+    the user said the words out loud."""
+    turns = [_timed(f"{n:02d} 番目の長い話 " + "本文 " * 30, n) for n in range(40)]
+    turns[35] = _timed("これは覚えておいて", 35, role="user")
+    _put_scratch(cur, [_flag(5)])
+    stub = extract.StubExtractor(answer())
+    worker.process(cur, queued(write_claude(tmp_path, turns)), extractor=stub)
+
+    assert "これは覚えておいて" in stub.prompts[0]
+    assert "20 番目の長い話" not in stub.prompts[0]
+
+
+def test_the_ledger_says_which_reading_ran(cur, tmp_path, queued, route):
+    """Whether a fraction costs recall is a question for 27.4, and it cannot be
+    asked of runs that did not say which they were."""
+    turns = [_timed(f"{n:02d} 番目の長い話 " + "本文 " * 30, n) for n in range(40)]
+    _put_scratch(cur, [_flag(20)])
+    worker.process(
+        cur, queued(write_claude(tmp_path, turns)), extractor=extract.StubExtractor(answer())
+    )
+
+    cur.execute(
+        "SELECT detail FROM event_log WHERE event_type = 'extraction_filed' "
+        "ORDER BY created_at DESC LIMIT 1"
+    )
+    detail = cur.fetchone()["detail"]
+    assert detail["reading"] == "scratch"
+    assert detail["turns_read"] < detail["turns_unread"]

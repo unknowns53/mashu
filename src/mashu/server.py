@@ -186,7 +186,11 @@ def build_server() -> Any:
             "of every session before anything else: it returns the index of "
             "what is known, and without it memory_search has nothing to aim "
             "at. Propose changes rather than assuming them; nothing here is "
-            "edited in place."
+            "edited in place. As you work, call scratch_put on anything that "
+            "looks worth keeping past this session: it costs no review, and "
+            "it is what the end-of-session extraction reads. A session that "
+            "flags nothing is read from its transcript instead, which is "
+            "roughly a hundred times the input for a worse answer."
         ),
     )
 
@@ -204,6 +208,13 @@ def build_server() -> Any:
         ok, tell the user in one line — nothing new is reaching the store from
         the sessions it names, and during a stretch where nobody is checking,
         you are the only reader that arrives.
+
+        Then keep scratch_put in hand for the rest of the session. Nothing
+        written here becomes knowledge on its own; what it does is tell the
+        extraction where to look. Flag a session and it is read around your
+        flags. Flag nothing and the whole transcript is read instead, which
+        for a working evening is a hundred times the input and a poorer
+        result, because nobody marked which part mattered.
 
         Pass scopes once you know which scopes the session is working in, to
         get their current state as well. The index always covers the whole
@@ -231,7 +242,11 @@ def build_server() -> Any:
                     "over_budget": got.over_budget,
                     "note": (
                         "Entries under trimmed had their content dropped to stay "
-                        "inside the token ceiling; fetch them with memory_get."
+                        "inside the token ceiling; fetch them with memory_get. "
+                        "Call scratch_put during this session on anything worth "
+                        "keeping past it: that is what the end-of-session "
+                        "extraction reads, and a session that flags nothing has "
+                        "its whole transcript read instead."
                     ),
                 }
             )
@@ -327,6 +342,14 @@ def build_server() -> Any:
         Use it for what would otherwise be lost when the session closes: a
         result you have not acted on yet, a suspicion worth testing, a step you
         left unfinished. kind is note, candidate, or work_state.
+
+        Calling this also decides what the extraction reads. Each item marks a
+        moment, and the transcript is read around those moments rather than end
+        to end. So the cost of capturing this session, and how well it is
+        captured, both follow from whether you flagged anything: a working
+        evening flagged is a few thousand tokens read at the points that
+        mattered, and the same evening unflagged is a few hundred thousand read
+        with nothing pointing anywhere.
         """
         with db.transaction() as cur:
             item = scratch.put(

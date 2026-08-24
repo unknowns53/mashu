@@ -83,6 +83,19 @@ MARKERS = (
     "for future reference",
 )
 
+#: How much of the session either side of a flag the extraction reads (16.3).
+#:
+#: This is the contract scratch was always meant to be, and the only thing on
+#: the table that changes the cost by an order rather than by a half. Folding
+#: repeats took a real evening from 68万 to 36万 token; the unique prose alone
+#: is 165k, so no way of rearranging or trimming a transcript reaches a tenth.
+#: Reading a fraction does, and the only defensible fraction is the one the
+#: session itself pointed at while it was running.
+#:
+#: More behind than ahead: a note is written after the thing it is about.
+SCRATCH_BEFORE = 6
+SCRATCH_AFTER = 2
+
 #: What the worker signs its writes with. A distinct name matters: the commit
 #: gate reads the actor, and review reads it to know an unattended process filed
 #: this rather than an agent in conversation with somebody.
@@ -132,6 +145,13 @@ class Plan:
     active_ids: set[UUID]
     prompt: str
     estimated: int
+    #: Which of the two readings this is, and how much of what was unread it
+    #: covered. Recorded rather than judged: whether reading a fraction costs
+    #: recall is a question for 27.4, and it cannot be asked of runs that did
+    #: not say which they were.
+    mode: str = "log"
+    covered: int = 0
+    unread: int = 0
 
 
 @dataclass
@@ -190,8 +210,8 @@ def prepare(cur: psycopg.Cursor, run: dict[str, Any], *, dry_run: bool = False) 
     if checkpoint and not remaining:
         return _skip(cur, run_id, f"nothing new since turn {checkpoint}")
 
-    turns, more = _window(session, remaining)
     scratch_items = _scratch(cur, run)
+    turns, more, mode = _reading(session, remaining, scratch_items)
 
     # Only on the first pass. A session already judged worth reading must not
     # be abandoned half way through because its second window happens to be
@@ -215,7 +235,12 @@ def prepare(cur: psycopg.Cursor, run: dict[str, Any], *, dry_run: bool = False) 
 
     if dry_run:
         runs.unclaim(cur, run_id=run_id)
-        return Outcome(run_id, "dry-run", f"{estimated} input token, {len(active)} active")
+        return Outcome(
+            run_id,
+            "dry-run",
+            f"{estimated} input token, {len(active)} active, "
+            f"{mode} reading {len(turns)} of {len(remaining)} turn(s)",
+        )
 
     return Plan(
         run=run,
@@ -228,6 +253,9 @@ def prepare(cur: psycopg.Cursor, run: dict[str, Any], *, dry_run: bool = False) 
         active_ids={row["memory_id"] for row in active},
         prompt=prompt,
         estimated=estimated,
+        mode=mode,
+        covered=len(turns),
+        unread=len(remaining),
     )
 
 
@@ -271,10 +299,10 @@ def land(cur: psycopg.Cursor, plan: Plan, answer: str, *, extractor: extract.Ext
             cur,
             run_id=run_id,
             until_hours=0,
-            note=f"{_note(outcome, result)}; read to turn {read_to}, more to come",
+            note=f"{_note(outcome, result, plan)}; read to turn {read_to}, more to come",
         )
         outcome.state = "windowed"
-        outcome.note = f"{_note(outcome, result)}; read to turn {read_to} of {plan.records}"
+        outcome.note = f"{_note(outcome, result, plan)}; read to turn {read_to} of {plan.records}"
         return outcome
 
     _clear_scratch(cur, run)
@@ -282,7 +310,7 @@ def land(cur: psycopg.Cursor, plan: Plan, answer: str, *, extractor: extract.Ext
         cur,
         run_id=run_id,
         model=f"{extractor.name}/{extractor.model}",
-        note=_note(outcome, result),
+        note=_note(outcome, result, plan),
         checkpoint=plan.records,
     )
     events.record(
@@ -296,9 +324,12 @@ def land(cur: psycopg.Cursor, plan: Plan, answer: str, *, extractor: extract.Ext
             "updates": outcome.updates_filed,
             "retirements": outcome.retirements_filed,
             "refused": len(result.refused),
+            "reading": plan.mode,
+            "turns_read": plan.covered,
+            "turns_unread": plan.unread,
         },
     )
-    outcome.note = _note(outcome, result)
+    outcome.note = _note(outcome, result, plan)
     return outcome
 
 
@@ -318,6 +349,72 @@ def process(
     if isinstance(plan, Outcome):
         return plan
     return land(cur, plan, extractor.run(plan.prompt), extractor=extractor)
+
+
+def _reading(session, turns: list, scratch_items: list[dict[str, Any]]) -> tuple[list, bool, str]:
+    """Which turns this call reads, and under which of the two contracts (16.3).
+
+    Section 16.3 named scratch the first input and the log the fallback, and
+    the fallback is what has been running: the motivation was written in a tool
+    description nobody is shown, so nothing was ever flagged, and reading the
+    whole transcript was the only thing left. Wiring the motivation is only
+    half of it — the cost has to actually follow the flags, or an agent that
+    complies pays exactly what one that does not pays.
+
+    So a session that flagged something is read around its flags. A session
+    that flagged nothing is read the way it is read today. That is the shape
+    the failure has to take: complying is cheap, not complying is unchanged,
+    and neither is silently worse.
+
+    What the fraction costs is real and is not hidden. Turns outside the
+    neighbourhoods are not read, and the checkpoint moves past them, so a
+    session that flagged two things in an evening has an evening go by on two
+    flags. The ledger records which reading ran and how much it covered,
+    because that is the only way to find out whether the contract holds.
+    """
+    marked = _flagged(turns, scratch_items)
+    if marked:
+        chosen, more = _window(session, marked)
+        return chosen, more, "scratch"
+    return (*_window(session, turns), "log")
+
+
+def _flagged(turns: list, scratch_items: list[dict[str, Any]]) -> list:
+    """The turns around what this session pointed at, if it pointed at anything.
+
+    A marker is not a flag on its own. An explicit request to remember, inside
+    a session that put nothing down, is a reason to read the whole log rather
+    than a licence to read a fraction of it — the fraction is only defensible
+    because the session pointed at it, and a session that pointed at nothing
+    has not. Inside a session that did flag things, a marker is added to what
+    is read, because the one case worse than reading everything is skipping the
+    turn where the user said the words out loud.
+    """
+    if not scratch_items:
+        return []
+    moments = [_moment(item.get("created_at")) for item in scratch_items]
+    moments += [turn.at for turn in turns if turn.at and _marked(turn.text)]
+    moments = [moment for moment in moments if moment is not None]
+    if not moments:
+        return []
+    return transcript.around(turns, moments, before=SCRATCH_BEFORE, after=SCRATCH_AFTER)
+
+
+def _marked(text: str) -> bool:
+    body = text.lower()
+    return any(marker.lower() in body for marker in MARKERS)
+
+
+def _moment(raw: Any) -> datetime | None:
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.astimezone()
+    if not isinstance(raw, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.astimezone()
 
 
 def _window(session, turns: list) -> tuple[list, bool]:
@@ -374,8 +471,7 @@ def _skip_reason(session, turns, scratch_items) -> str | None:
     size = sum(len(turn.text) for turn in turns)
     if size >= SKIP_MIN_CHARS:
         return None
-    body = "\n".join(turn.text for turn in turns).lower()
-    if any(marker.lower() in body for marker in MARKERS):
+    if any(_marked(turn.text) for turn in turns):
         return None
     return (
         f"nothing to read: {session.user_turns(turns)} user turn(s), "
@@ -697,8 +793,11 @@ def _stale_rejection(clash: DuplicateProposalError) -> dict[str, Any] | None:
     }
 
 
-def _note(outcome: Outcome, result: extract.Extraction) -> str:
-    parts = [
+def _note(outcome: Outcome, result: extract.Extraction, plan: Plan | None = None) -> str:
+    parts = []
+    if plan is not None and plan.mode == "scratch":
+        parts.append(f"read around {plan.covered} of {plan.unread} flagged turn(s)")
+    parts += [
         f"{outcome.proposals_filed}/{len(result.proposals)} proposals",
         f"{outcome.updates_filed}/{len(result.updates)} updates",
         f"{outcome.retirements_filed}/{len(result.retirements)} retirements",

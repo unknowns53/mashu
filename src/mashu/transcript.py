@@ -40,7 +40,9 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+from bisect import bisect_right
 from dataclasses import dataclass, field
+from datetime import datetime
 
 #: Tool arguments worth keeping, in the order they are tried.
 TOOL_SUMMARY_KEYS = ("description", "command", "file_path", "pattern", "query", "prompt", "url")
@@ -62,11 +64,12 @@ CLIS = ("claude", "codex")
 
 @dataclass
 class Turn:
-    """One thing said, and where in the file it was said."""
+    """One thing said, where in the file it was said, and when."""
 
     ordinal: int
     role: str
     text: str
+    at: datetime | None = None
 
 
 @dataclass
@@ -104,6 +107,24 @@ class Session:
 
     def user_turns(self, turns: list[Turn] | None = None) -> int:
         return sum(1 for turn in (self.turns if turns is None else turns) if turn.role == "user")
+
+
+def _at(record: dict) -> datetime | None:
+    """When this record was written, if the CLI said.
+
+    The only handle there is on where in a session something happened. A
+    scratch item knows the moment it was put down and nothing about the file it
+    was put down beside, so without this the two cannot be lined up and the
+    extraction has no choice but to read everything.
+    """
+    raw = record.get("timestamp")
+    if not isinstance(raw, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.astimezone()
 
 
 def digest(path: pathlib.Path) -> str:
@@ -186,7 +207,7 @@ def _read_claude(path: pathlib.Path, session: Session) -> Session:
             continue
         if text:
             session.turns.append(
-                Turn(ordinal, "user" if kind == "user" else "assistant", text.strip())
+                Turn(ordinal, "user" if kind == "user" else "assistant", text.strip(), _at(record))
             )
     return session
 
@@ -212,11 +233,11 @@ def _read_codex(path: pathlib.Path, session: Session) -> Session:
         if kind == "event_msg" and payload.get("type") == "user_message":
             text = (payload.get("message") or "").strip()
             if text:
-                session.turns.append(Turn(ordinal, "user", text))
+                session.turns.append(Turn(ordinal, "user", text, _at(record)))
         elif kind == "event_msg" and payload.get("type") == "agent_message":
             text = (payload.get("message") or "").strip()
             if text:
-                session.turns.append(Turn(ordinal, "assistant", text))
+                session.turns.append(Turn(ordinal, "assistant", text, _at(record)))
         elif kind == "response_item" and payload.get("type") == "custom_tool_call":
             name = payload.get("name", "tool")
             session.turns.append(
@@ -224,6 +245,7 @@ def _read_codex(path: pathlib.Path, session: Session) -> Session:
                     ordinal,
                     "assistant",
                     f"    [{name}] {_clip(payload.get('input') or '', TOOL_ARG_LIMIT)}",
+                    _at(record),
                 )
             )
     return session
@@ -289,6 +311,36 @@ def read(path: pathlib.Path, *, source_cli: str | None = None) -> Session:
     if cli == "codex":
         return _read_codex(path, session)
     return _read_claude(path, session)
+
+
+def around(turns: list[Turn], moments: list[datetime], *, before: int, after: int) -> list[Turn]:
+    """The turns either side of each moment, in order, each at most once.
+
+    What a session flagged while it ran is a point in time, and the transcript
+    is a sequence. This is the join between them, and it is the whole of what
+    makes reading a fraction of a session defensible: the fraction is the one
+    the session itself pointed at.
+
+    Returns nothing when the transcript carries no clock, which is the case
+    that has to fall back to reading the log rather than quietly reading a
+    tenth of it.
+    """
+    placed = [(turn.at, index) for index, turn in enumerate(turns) if turn.at is not None]
+    if not placed or not moments:
+        return []
+
+    clock = [moment for moment, _ in placed]
+    keep: set[int] = set()
+    for moment in moments:
+        # The last turn at or before the moment: a note is written after the
+        # thing it is about, so the span that matters is mostly behind it.
+        at = bisect_right(clock, moment) - 1
+        if at < 0:
+            at = 0
+        low = max(0, at - before + 1)
+        high = min(len(placed) - 1, at + after)
+        keep.update(index for _, index in placed[low : high + 1])
+    return [turns[index] for index in sorted(keep)]
 
 
 def chunks(turns: list[Turn]) -> list[str]:
