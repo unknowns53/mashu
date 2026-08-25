@@ -124,3 +124,24 @@ def test_a_window_needs_an_account_of_what_was_switched_off(cur):
 def test_closing_without_a_window_is_refused(cur):
     with pytest.raises(IncidentError, match="no window is open"):
         incidents.close_trial(cur, note="", actor="user")
+
+
+def test_a_source_that_answered_first_has_its_own_cause(cur):
+    """The failure 6.1 did not model, and the repair is the opposite one (30.1).
+
+    A pull miss says the store was not consulted. This says it could not have
+    been: a static file always in context already held an answer, and it never
+    declares itself out of date or out of scope. Counting them together would
+    send both to "make the index better", which is not the fix for either.
+    """
+    got = incidents.record(
+        cur,
+        kind=IncidentKind.MISSED,
+        cause=IncidentCause.PREEMPTION,
+        note="常設指示ファイルが先に答えを持っていたため蔵を引かなかった",
+        recorded_by="user",
+    )
+    assert got["kind"] == str(IncidentKind.MISSED)
+    assert "delete the value there" in incidents.LEADS_TO[IncidentCause.PREEMPTION]
+
+    assert any(row["cause"] == str(IncidentCause.PREEMPTION) for row in incidents.tally(cur))

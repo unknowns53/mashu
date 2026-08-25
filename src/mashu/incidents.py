@@ -32,6 +32,7 @@ CAUSES: dict[IncidentKind, tuple[IncidentCause, ...]] = {
     IncidentKind.MISSED: (
         IncidentCause.BOOTSTRAP,
         IncidentCause.PULL,
+        IncidentCause.PREEMPTION,
         IncidentCause.CAPTURE,
     ),
     IncidentKind.STALE: (
@@ -47,6 +48,9 @@ CAUSES: dict[IncidentKind, tuple[IncidentCause, ...]] = {
 LEADS_TO = {
     IncidentCause.BOOTSTRAP: "what the session opening carries, and its ceiling (21.2)",
     IncidentCause.PULL: "the calling requirement, and whether stage one is enough (6.1)",
+    IncidentCause.PREEMPTION: (
+        "a static source that answers without being asked — delete the value there (30.1)"
+    ),
     IncidentCause.CAPTURE: "the extractor: skip criteria, input budget, scope routing (16.3)",
     IncidentCause.FILTER: "the temporary context read filter — an outright bug (25.2)",
     IncidentCause.INVENTORY: "the sweep for rules with a shelf life (30 段 C, 'admin stale')",

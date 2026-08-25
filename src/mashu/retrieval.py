@@ -44,6 +44,20 @@ DEFAULT_LIMIT = 8
 #: Absolute cap on layer 2, in tokens (21.1). Provisional; 27.5 revisits it.
 LAYER2_TOKEN_BUDGET = 1500
 
+#: The same for layer 1, which had none.
+#:
+#: The row count was capped and the row size was not, so one long memory
+#: could carry a whole answer past ten thousand token. Measured on the real
+#: store, one query returned 10,917 token of which a single row was 1,444.
+#: A query whose subject the store knows nothing about is the expensive
+#: case, because the embeddings are anisotropic and eight rows come back
+#: regardless — so the cost was highest exactly where the value was lowest.
+#:
+#: What is over the line keeps its title and its id and loses its content,
+#: the same trade 21.2 makes at the session opening: a reader missing a body
+#: can fetch it, a reader missing the row does not know it exists.
+LAYER1_TOKEN_BUDGET = 4000
+
 #: What scope detection reads, and how it weighs what it reads (27.2, 30 段 D).
 #:
 #: Two decisions, taken from measurement, and they answer different questions.
@@ -170,6 +184,9 @@ class Retrieved:
     #: Candidates that matched but were not handed over, counted across the
     #: whole matching set rather than across the query window.
     dropped_unreviewed: int = 0
+    #: Layer 1 rows whose content was dropped to stay inside the budget.
+    #: Still listed, by title, so memory_get can fetch what was cut.
+    shortened: list[UUID] = field(default_factory=list)
     #: Conditions that apply right now (25.2). Beside the three layers rather
     #: than a fourth one: the layers sort indefinite knowledge by its standing,
     #: and a condition with a clock on it is outside that sorting. Included
@@ -287,12 +304,19 @@ def detect_scopes(cur: psycopg.Cursor, query_vector: str) -> ScopeReading:
 # --------------------------------------------------------------------------
 # the layers
 # --------------------------------------------------------------------------
+# A completion keeps the active pointer on purpose (11), so that a finished
+# task answers searches with its finish shown rather than disappearing. That is
+# right for the reading path and wrong here: this set exists so extraction can
+# ask "what has been overtaken", and something already retired is not a
+# question. Left in, every completed task is re-read and re-paid on every
+# extraction of its scope for ever.
 ACTIVE_SET_SQL = """
 SELECT e.memory_id, e.scope_id, e.type, e.title, v.version_id, v.content,
        v.created_at
 FROM memory_entity e
 JOIN memory_version v ON v.version_id = e.active_version AND v.memory_id = e.memory_id
 WHERE e.status = 'active'
+  AND v.status = 'candidate'
   AND (%(scopes)s::uuid[] IS NULL OR e.scope_id = ANY(%(scopes)s::uuid[]))
 ORDER BY e.type, e.title
 """
@@ -473,6 +497,8 @@ def retrieve(
     hit_scopes = scopes or reading.probed or sorted({row["scope_id"] for row in active})
     narrowed = dict(params, scopes=hit_scopes or None)
 
+    shortened = _cap_layer1(active)
+
     cur.execute(_LAYER2_SQL, dict(narrowed, limit=LAYER2_ROW_WINDOW))
     rows = cur.fetchall()
     unreviewed, _ = _cap_layer2(rows)
@@ -497,6 +523,7 @@ def retrieve(
         unreviewed=unreviewed,
         retired=retired,
         dropped_unreviewed=dropped,
+        shortened=shortened,
         temporary=temporary,
     )
     if record:
@@ -512,6 +539,7 @@ def retrieve(
                 "layer2": [str(r["memory_id"]) for r in unreviewed],
                 "layer3": [str(r["memory_id"]) for r in retired],
                 "dropped_unreviewed": dropped,
+                "shortened": [str(m) for m in shortened],
             },
         )
     return result
@@ -556,6 +584,26 @@ def preview(
 #: dropped count is taken from the whole matching set either way, so a backlog
 #: larger than this is still reported at its real size.
 LAYER2_ROW_WINDOW = 64
+
+
+def _cap_layer1(rows: list[dict]) -> list[UUID]:
+    """Drop the content of what is over the budget, in place (21.1).
+
+    Ordered by rank, so the closest matches keep their bodies and the tail
+    gives them up. The first row is admitted whatever it costs, for the reason
+    _cap_layer2 gives: nothing at all is a worse answer than one long one.
+    """
+    spent = 0
+    shortened: list[UUID] = []
+    for row in rows:
+        cost = estimate_tokens(row["content"] or "")
+        if spent + cost > LAYER1_TOKEN_BUDGET and spent:
+            row["content"] = None
+            row["shortened"] = True
+            shortened.append(row["memory_id"])
+            continue
+        spent += cost
+    return shortened
 
 
 def _cap_layer2(rows: list[dict]) -> tuple[list[dict], int]:

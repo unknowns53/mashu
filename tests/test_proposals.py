@@ -628,16 +628,23 @@ def test_a_proposal_held_for_a_person_raises_it_at_once(cur, scope_id):
     assert "nothing else will move them" in got["warning"]
 
 
-def test_an_old_candidate_raises_it_even_with_nothing_held(cur, scope_id):
+def test_an_old_candidate_alone_does_not_raise_the_warning(cur, scope_id):
+    """17 made review optional, and this is what optional has to mean.
+
+    The docstring on backlog already said candidates do not raise the warning
+    on their own — they are retrievable and tagged, so leaving them costs
+    precision rather than access. The age test ran over every pending row
+    regardless, so exercising the option turned the queue red and kept it red.
+    """
     made = _propose_create(cur, scope_id)["proposal"]
     cur.execute(
         "UPDATE proposal SET created_at = now() - make_interval(days => %s) WHERE proposal_id = %s",
         (proposals.REVIEW_STALE_DAYS + 2, made["proposal_id"]),
     )
     got = proposals.backlog(cur)
+    assert got["waiting"] == 1, "it is still counted"
     assert got["blocking"] == 0
-    assert got["ok"] is False
-    assert "has waited" in got["warning"]
+    assert got["ok"] is True and got["warning"] is None
 
 
 def test_deciding_takes_it_back_off_the_warning(cur, scope_id):

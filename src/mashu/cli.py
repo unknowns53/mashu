@@ -39,6 +39,7 @@ from mashu import (
     bootstrap,
     context,
     db,
+    events,
     extract,
     importer,
     incidents,
@@ -62,6 +63,7 @@ from mashu.migrate import migrate
 from mashu.models import (
     Delivery,
     EntityStatus,
+    EventType,
     IncidentCause,
     MemoryType,
     ProposalOperation,
@@ -1029,12 +1031,14 @@ def cmd_bootstrap(args) -> int:
     for label, rows in (("pushed at session start", got.startup), ("for this scope", got.scoped)):
         print(f"\n{label} ({len(rows)})")
         for row in rows:
-            body = row["content"] if row["content"] is not None else "(trimmed; use memory_get)"
-            print(f"  {str(row['memory_id'])[:8]}  {row['title']}")
+            cut = row["content"] is None
+            line = row["title"] if cut else row["content"]
+            mark = "  (trimmed; use memory_get)" if cut else ""
+            print(f"  {_short(row['memory_id'])}{mark}")
+            print(_wrap(line, indent="      "))
             note = _pending_note(row)
             if note:
                 print(_wrap(note, indent="      "))
-            print(f"      {body}")
 
     for name, part in (("capture", got.health), ("review", got.review), ("upkeep", got.upkeep)):
         if part.get("warning"):
@@ -1087,6 +1091,8 @@ def cmd_status(args) -> int:
         f"  succeeded {health['succeeded']}   waiting {health['waiting']}   "
         f"failed {health['failed']}   held {health['held']}   skipped {health['skipped']}"
     )
+    swept = health.get("swept_hours_ago")
+    print(f"  last sweep     {'never' if swept is None else f'{swept}h ago'}")
     if health.get("warning"):
         print(_wrap(health["warning"], indent="  ! "))
 
@@ -1321,6 +1327,90 @@ def cmd_incident(args) -> int:
         print(f"{made['kind']}/{made['cause']}  {_short(made['incident_id'])}")
         print(_wrap(f"leads to: {LEADS_TO[cause]}", indent="  "))
     return 0
+
+
+#: What the guard returns when something has to be read first. Not 1, which is
+#: an error, and not 0, which is a pass: a hook has to tell "nothing pinned"
+#: apart from "pinned, and here it is" without parsing prose.
+GUARD_HOLD = 2
+
+
+def cmd_guard(args) -> int:
+    """Put what is adopted in front of an action, before the action runs (30.1).
+
+    The read guarantee at the size that fits the failure. Section 6.1 placed it
+    at session start and called its own first stage a pseudo-push depending on
+    the agent's obedience; the observed failure was neither stage, because the
+    opening had fired and the index had been delivered and the decision came
+    hours later with an answer already in hand from somewhere else.
+
+    So this is not a reminder. It exits GUARD_HOLD and the hook refuses the
+    action, and the refusal carries what the store holds. Proceeding requires
+    having been shown it. That is the shape of the connection wrapper that
+    ended three network incidents, at a smaller radius.
+
+    Every firing is logged, because whether a gate is read depends entirely on
+    how often it fires and this system has already watched one warning go
+    permanently red and stop being read (16.3, 20.3). The count is what will
+    say whether the radius is right, and it should be looked at rather than
+    reasoned about.
+    """
+    with transaction(args.dsn) as cur:
+        if args.pin or args.unpin:
+            memory_id = _memory_by_ref(cur, args.pin or args.unpin)
+            if args.pin:
+                got = store.pin_guard(
+                    cur, action=args.action, memory_id=memory_id, actor=args.actor
+                )
+                print(f"{'pinned' if got['added'] else 'already pinned'} to {args.action}")
+            else:
+                gone = store.unpin_guard(
+                    cur, action=args.action, memory_id=memory_id, actor=args.actor
+                )
+                print("unpinned" if gone else "nothing was pinned there")
+            return 0
+
+        pinned = store.guard_for(cur, action=args.action if args.action != "all" else None)
+        if not pinned:
+            return 0
+        events.record(
+            cur,
+            EventType.GUARD_FIRED,
+            args.actor,
+            detail={
+                "action": args.action,
+                "memories": [str(row["memory_id"]) for row in pinned],
+            },
+        )
+
+    if args.json:
+        print(json.dumps(pinned, ensure_ascii=False, default=str))
+        return GUARD_HOLD
+    print(f"before this, what the store holds about {args.action}:\n")
+    for row in pinned:
+        print(f"  [{row['type']}] {row['title']}")
+        print(_wrap(row["content"], indent="    "))
+        print(f"    mashu inspect {_short(row['memory_id'])}\n")
+    print(
+        _wrap("read it and decide again. if it still holds, do the same thing again.", indent="  ")
+    )
+    return GUARD_HOLD
+
+
+def _memory_by_ref(cur, ref: str) -> UUID:
+    """A memory by its id, or by a unique prefix of it."""
+    try:
+        return UUID(ref)
+    except ValueError:
+        pass
+    cur.execute(
+        "SELECT memory_id FROM memory_entity WHERE memory_id::text LIKE %s AND status = 'active'",
+        (f"{ref}%",),
+    )
+    rows = cur.fetchall()
+    if len(rows) != 1:
+        raise SystemExit(f"{ref} matches {len(rows)} memories; give more of the id")
+    return rows[0]["memory_id"]
 
 
 def cmd_stale(args) -> int:
@@ -3188,6 +3278,14 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--route", metavar="PATH", help="map a directory onto it at the same time")
     c.add_argument("--actor", default="user")
     c.set_defaults(func=cmd_scope)
+
+    gd = sub.add_parser("guard", help="what must be read before an action runs (30.1)")
+    gd.add_argument("action", help="the name of the action, or 'all' to list every guard")
+    gd.add_argument("--pin", metavar="MEMORY", help="put this memory in front of that action")
+    gd.add_argument("--unpin", metavar="MEMORY", help="take it back off")
+    gd.add_argument("--json", action="store_true", help="the form a hook reads")
+    gd.add_argument("--actor", default="user")
+    gd.set_defaults(func=cmd_guard)
 
     ac = sub.add_parser("active", help="everything a scope holds as true (16.1, 27.4b)")
     ac.add_argument("--scope", help="name of an existing scope; omit for every scope")

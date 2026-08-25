@@ -409,8 +409,42 @@ def failed(cur: psycopg.Cursor, *, run_id: UUID, error: str) -> dict[str, Any]:
     return cur.fetchone()
 
 
+#: How long the sweeper may be silent before that is itself the news (16.3).
+#: Longer than the unit's interval by enough that a missed run is not a
+#: warning, short enough that a dead one surfaces inside a day.
+SWEEP_SILENT_HOURS = 30
+
+
+def mark_swept(cur: psycopg.Cursor, *, source_cli: str, swept_to: Any, files_seen: int) -> None:
+    """Remember where the reading got to, so a gap of any length is walked."""
+    cur.execute(
+        """
+        INSERT INTO sweep_watermark (source_cli, swept_to, swept_at, files_seen)
+        VALUES (%s, %s, now(), %s)
+        ON CONFLICT (source_cli) DO UPDATE
+        SET swept_to = greatest(sweep_watermark.swept_to, excluded.swept_to),
+            swept_at = excluded.swept_at,
+            files_seen = excluded.files_seen
+        """,
+        (source_cli, swept_to, files_seen),
+    )
+
+
+def swept_to(cur: psycopg.Cursor, source_cli: str) -> Any:
+    cur.execute("SELECT swept_to FROM sweep_watermark WHERE source_cli = %s", (source_cli,))
+    row = cur.fetchone()
+    return row["swept_to"] if row else None
+
+
 def health(cur: psycopg.Cursor) -> dict[str, Any]:
-    """One line for a session start: is capture still working?"""
+    """One line for a session start: is capture still working?
+
+    Counting rows in extraction_run cannot answer this on its own. A hook that
+    stops enqueueing and a sweeper that stops running leave nothing behind to
+    count, so the failure that loses every session reads as a clean queue. The
+    last time the sweeper spoke is therefore part of the reading, and its
+    silence is what fills that hole.
+    """
     cur.execute(
         """
         SELECT
@@ -429,11 +463,21 @@ def health(cur: psycopg.Cursor) -> dict[str, Any]:
     row = dict(cur.fetchone())
     oldest = row["oldest_wait_hours"]
     row["oldest_wait_hours"] = round(float(oldest), 1) if oldest is not None else None
+
+    cur.execute(
+        "SELECT EXTRACT(EPOCH FROM now() - max(swept_at)) / 3600 AS hours FROM sweep_watermark"
+    )
+    quiet = cur.fetchone()["hours"]
+    row["swept_hours_ago"] = round(float(quiet), 1) if quiet is not None else None
+
     row["ok"] = (
         row["failed"] < FAILED_WARNING_THRESHOLD
         and not row["held"]
         and not row["stranded"]
         and (oldest is None or float(oldest) < STALE_QUEUE_HOURS)
+        # A sweeper that has never run at all is a fresh install, not an
+        # outage. One that ran and then stopped is the silent case.
+        and (quiet is None or float(quiet) < SWEEP_SILENT_HOURS)
     )
     row["warning"] = None if row["ok"] else _warning(row)
     return row
@@ -453,6 +497,15 @@ def _warning(row: dict[str, Any]) -> str:
     if row.get("held"):
         parts.append(
             f"{row['held']} transcript(s) are held because their working directory maps to no scope"
+        )
+    quiet = row.get("swept_hours_ago")
+    if quiet is not None and quiet >= SWEEP_SILENT_HOURS:
+        # The one line that is not about rows. Everything above counts what
+        # arrived; this counts whether anything is still looking, which is the
+        # only reading that survives both the hook and the sweeper stopping.
+        parts.append(
+            f"the sweeper has not run for {quiet}h, so transcripts nothing "
+            "enqueued are not being found either"
         )
     return (
         "capture is not keeping up: "

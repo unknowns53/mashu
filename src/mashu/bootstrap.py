@@ -193,6 +193,8 @@ def session_bootstrap(
     )
 
     trimmed = _fit(scope_index, scoped, startup, budget=budget)
+    startup = [_shape(row) for row in startup]
+    scoped = [_shape(row) for row in scoped]
     result = Bootstrapped(
         scope_index=scope_index,
         startup=startup,
@@ -280,16 +282,93 @@ def _fit(
     return trimmed
 
 
+#: What a pushed row costs beyond its own words.
+#:
+#: Measured against the real payload rather than reasoned about. A row goes out
+#: as JSON, and the keys and the UUIDs between them were not being counted. The
+#: ceiling in 21.2 is an admission control that refuses a change putting the
+#: opening over budget, so a counter reading half the true cost does not merely
+#: misreport — it disables the invariant it exists to enforce. The store's own
+#: opening measured 3,208 token on the wire against a counter saying 1,549.
+#:
+#: Counting it truthfully then showed what the scaffolding was: 96 token around
+#: a sentence of 100, on a row of thirteen keys. See _shape, which is why this
+#: is now a quarter of what it was. Measured across the store's own pack: 21
+#: to 22 on a row carrying the short-form flag, 17 without it.
+ROW_OVERHEAD = 22
+
+#: The same for a scope in the index, which carries one UUID and three keys.
+INDEX_OVERHEAD = 20
+
+#: What rides along whatever else is pushed: capture, review, upkeep, the
+#: standing note, and the envelope. Fixed, so it is added once.
+ENVELOPE = 215
+
+
 def _total_tokens(
     scope_index: list[dict[str, Any]],
     *groups: list[dict[str, Any]],
 ) -> int:
-    """What the payload costs as it currently stands."""
-    cost = sum(estimate_tokens(f"{row['name']} {row['summary']}") for row in scope_index)
+    """What the payload costs as it is actually handed over.
+
+    Counted with the scaffolding, not only the words. See ROW_OVERHEAD.
+    """
+    cost = ENVELOPE
+    cost += sum(
+        estimate_tokens(f"{row['name']} {row['summary']}") + INDEX_OVERHEAD for row in scope_index
+    )
     for group in groups:
         for row in group:
-            cost += estimate_tokens(row["title"]) + estimate_tokens(row["content"] or "")
+            cost += estimate_tokens(_line(row))
+            cost += ROW_OVERHEAD
     return cost
+
+
+def _line(row: dict[str, Any]) -> str:
+    """The one line a pushed row hands over: its content, or its title instead.
+
+    Counting both was counting something that is not sent. A row carries the
+    directive, and only where that was trimmed away does the title go in its
+    place — so the cost of a row is the cost of whichever of the two survives.
+    """
+    return row.get("content") or row.get("title") or ""
+
+
+#: Notes on a pending change travel together or not at all. Either half of a
+#: pair being present decides what the note says; sending one without the other
+#: leaves the reader holding a claim with no reason attached to it.
+_RETIREMENT_NOTE = ("proposed_status", "proposed_reason", "proposed_by")
+_UPDATE_NOTE = ("update_proposed_by", "update_proposed_days")
+
+
+def _shape(row: dict[str, Any]) -> dict[str, Any]:
+    """One pushed row as it goes over the wire: only the keys that say anything.
+
+    Thirteen keys were going out around one sentence — three UUIDs, two fields
+    holding the same value on every row of the pack, and five nulls — costing
+    96 token of scaffolding for 100 token of words. Two thirds of the opening
+    was structure. Because the ceiling is admission control (21.2) rather than
+    a bill, that does not merely make the session start dear: it spends the
+    budget that decides which standing rules a session is told at all, and the
+    store reached the point of refusing every promotion for a reason that had
+    nothing to do with what was being promoted.
+
+    The title goes where the content survives. Both were being sent and both
+    said the same thing: a directive is the rule as a person reviewed it, and
+    the titles here were written as whole sentences. Where the content was
+    trimmed away the title is the only thing left to name the row by, so that
+    is exactly where it stays.
+    """
+    shaped: dict[str, Any] = {"memory_id": row["memory_id"], "content": row["content"]}
+    if row["content"] is None:
+        shaped["title"] = row["title"]
+    elif row["shortened"]:
+        shaped["shortened"] = True
+    if row.get("proposed_status"):
+        shaped.update({key: row[key] for key in _RETIREMENT_NOTE})
+    if row.get("update_proposed_by"):
+        shaped.update({key: row[key] for key in _UPDATE_NOTE})
+    return shaped
 
 
 def _with_change(

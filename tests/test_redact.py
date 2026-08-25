@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import pytest
 
-from mashu import redact
+from mashu import proposals, redact
+from mashu.errors import MashuError
+from mashu.models import MemoryType, ProposalOperation, SourceType
 
 
 @pytest.fixture
@@ -65,3 +67,28 @@ def test_comments_and_blank_lines_are_not_patterns(patterns):
 def test_matching_ignores_case(patterns):
     patterns("someone")
     assert not redact.check("SomeOne").allowed
+
+
+def test_a_check_that_could_not_run_is_not_a_pass(cur, scope_id, monkeypatch, tmp_path):
+    """24 asks the check to report that it could not run, and nobody read that.
+
+    propose() looked only at `allowed`, which turns "there is no pattern file"
+    into "there is nothing to redact". The file is gitignored, so the state
+    that silently passes everything is the state of any fresh clone.
+    """
+    monkeypatch.setenv(redact.PATTERNS_ENV_VAR, str(tmp_path / "absent"))
+
+    assert redact.check("何でもよい").unchecked is True
+    with pytest.raises(MashuError, match="could not be read"):
+        proposals.propose(
+            cur,
+            actor="claude",
+            operation=ProposalOperation.CREATE,
+            payload={
+                "scope_id": str(scope_id),
+                "type": str(MemoryType.OBSERVATION),
+                "title": "検査の走らない提案",
+                "content": "本文",
+                "source_type": str(SourceType.AGENT),
+            },
+        )

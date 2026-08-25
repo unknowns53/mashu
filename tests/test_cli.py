@@ -1724,3 +1724,83 @@ def test_a_fold_with_no_reason_typed_changes_nothing(test_dsn, sweeping, committ
     with transaction(test_dsn) as cur:
         for memory_id in (first, second):
             assert store.get_entity(cur, memory_id)["status"] == str(EntityStatus.ACTIVE)
+
+
+def test_the_guard_refuses_once_and_hands_over_what_is_held(test_dsn, committed_scope, capsys):
+    """The read guarantee at the size of the failure (30.1).
+
+    6.1 put it at session start and called its own first stage a pseudo-push
+    depending on the agent's obedience. The observed failure was neither stage:
+    the opening had fired and the index had been delivered, and the decision
+    came later with an answer already in hand from somewhere that never says it
+    is out of date.
+    """
+    memory_id = _adopted(
+        test_dsn, committed_scope, f"委譲の宛先 {uuid.uuid4()}", "診断は別の宛先へ"
+    )
+
+    assert cli.main(["--dsn", test_dsn, "guard", "delegate-test"]) == 0, (
+        "nothing pinned, nothing said"
+    )
+
+    cli.main(["--dsn", test_dsn, "guard", "delegate-test", "--pin", str(memory_id)])
+    capsys.readouterr()
+
+    code = cli.main(["--dsn", test_dsn, "guard", "delegate-test"])
+    out = capsys.readouterr().out
+    assert code == cli.GUARD_HOLD, "a pass and a hold have to be told apart without reading prose"
+    assert "診断は別の宛先へ" in out
+    assert "decide again" in out
+
+
+def test_the_guard_follows_the_memory_rather_than_a_version(test_dsn, committed_scope, capsys):
+    """Nothing is pinned to a version, so rewriting changes what the guard says."""
+    memory_id = _adopted(test_dsn, committed_scope, f"書き換わる規則 {uuid.uuid4()}", "古い言い方")
+    cli.main(["--dsn", test_dsn, "guard", "rewrite-test", "--pin", str(memory_id)])
+    capsys.readouterr()
+
+    with transaction(test_dsn) as cur:
+        store.add_version(
+            cur,
+            memory_id=memory_id,
+            content="新しい言い方",
+            source_type=SourceType.USER,
+            created_by="user",
+            actor="user",
+            based_on_version=store.get_entity(cur, memory_id)["latest_version"],
+            adopt=True,
+        )
+
+    cli.main(["--dsn", test_dsn, "guard", "rewrite-test"])
+    out = capsys.readouterr().out
+    assert "新しい言い方" in out and "古い言い方" not in out
+
+
+def test_every_firing_is_recorded_because_a_gate_nobody_reads_is_the_failure(
+    test_dsn, committed_scope, capsys
+):
+    """16.3 watched a warning go permanently red and stop being read.
+
+    Whether this radius is right depends on how often it fires, and that is a
+    question for the ledger rather than for reasoning.
+    """
+    memory_id = _adopted(test_dsn, committed_scope, f"数えられる規則 {uuid.uuid4()}", "本文")
+    cli.main(["--dsn", test_dsn, "guard", "counted-test", "--pin", str(memory_id)])
+    cli.main(["--dsn", test_dsn, "guard", "counted-test"])
+    cli.main(["--dsn", test_dsn, "guard", "counted-test"])
+    capsys.readouterr()
+
+    with transaction(test_dsn) as cur:
+        cur.execute(
+            "SELECT count(*) AS n FROM event_log WHERE event_type = 'guard_fired' "
+            "AND detail ->> 'action' = 'counted-test'"
+        )
+        assert cur.fetchone()["n"] == 2
+
+
+def test_unpinning_takes_it_back_off(test_dsn, committed_scope, capsys):
+    memory_id = _adopted(test_dsn, committed_scope, f"外される規則 {uuid.uuid4()}", "本文")
+    cli.main(["--dsn", test_dsn, "guard", "unpin-test", "--pin", str(memory_id)])
+    cli.main(["--dsn", test_dsn, "guard", "unpin-test", "--unpin", str(memory_id)])
+    capsys.readouterr()
+    assert cli.main(["--dsn", test_dsn, "guard", "unpin-test"]) == 0

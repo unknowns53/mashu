@@ -27,6 +27,7 @@ import os
 import pathlib
 import re
 import sqlite3
+import threading
 from array import array
 from typing import Protocol, runtime_checkable
 
@@ -172,6 +173,12 @@ class CachedEmbedder:
             / "embeddings.sqlite3"
         )
         self._db: sqlite3.Connection | None = None
+        # The MCP server answers tool calls on a thread pool, so the connection
+        # opened by the first call is used by later ones from other threads.
+        # sqlite3 refuses that by default and the refusal surfaced as a failed
+        # memory_search rather than as a slow one, because this layer sits in
+        # front of the embedder rather than beside it.
+        self._lock = threading.Lock()
 
     @property
     def name(self) -> str:
@@ -191,7 +198,7 @@ class CachedEmbedder:
         if self._db is None:
             try:
                 self._path.parent.mkdir(parents=True, exist_ok=True)
-                self._db = sqlite3.connect(self._path)
+                self._db = sqlite3.connect(self._path, check_same_thread=False)
                 self._db.execute(
                     "CREATE TABLE IF NOT EXISTS vector ("
                     "  key TEXT PRIMARY KEY, value BLOB NOT NULL)"
@@ -217,28 +224,30 @@ class CachedEmbedder:
         return f"{self.name}\x00{role}\x00{digest}"
 
     def _get(self, role: str, text: str) -> list[float] | None:
-        db = self._connect()
-        if db is None:
-            return None
-        row = db.execute(
-            "SELECT value FROM vector WHERE key = ?", (self._key(role, text),)
-        ).fetchone()
+        with self._lock:
+            db = self._connect()
+            if db is None:
+                return None
+            row = db.execute(
+                "SELECT value FROM vector WHERE key = ?", (self._key(role, text),)
+            ).fetchone()
         if row is None:
             return None
         return list(array("f", row[0]))
 
     def _put(self, role: str, text: str, vector: list[float]) -> None:
-        db = self._connect()
-        if db is None:
-            return
-        try:
-            db.execute(
-                "INSERT OR REPLACE INTO vector (key, value) VALUES (?, ?)",
-                (self._key(role, text), array("f", vector).tobytes()),
-            )
-            db.commit()
-        except sqlite3.Error:
-            pass
+        with self._lock:
+            db = self._connect()
+            if db is None:
+                return
+            try:
+                db.execute(
+                    "INSERT OR REPLACE INTO vector (key, value) VALUES (?, ?)",
+                    (self._key(role, text), array("f", vector).tobytes()),
+                )
+                db.commit()
+            except sqlite3.Error:
+                pass
 
     def embed_query(self, text: str) -> list[float]:
         cached = self._get("query", text)

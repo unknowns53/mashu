@@ -601,3 +601,56 @@ def test_being_finished_outranks_being_proposed_for_retirement(cur, scope_id, au
     got = retrieval.retrieve(cur, "もう片付いた作業", actor="claude", record=False)
     row = next(r for r in got.active if r["memory_id"] == memory_id)
     assert row["tag"] == retrieval.FINISHED_TAG
+
+
+def test_layer_one_gives_up_bodies_rather_than_growing_without_limit(cur, scope_id, author):
+    """The row count was capped and the row size was not (21.1).
+
+    Measured on the real store, one query returned 10,917 token of which a
+    single row was 1,444. The expensive case was a query the store knows
+    nothing about: the embeddings are anisotropic, so eight rows come back
+    regardless, and the cost was highest exactly where the value was lowest.
+    """
+    for number in range(6):
+        author(f"送風の設定 その{number}", "推測で置いた値は下流へ渡さない。" * 120)
+
+    got = retrieval.retrieve(cur, "送風の設定", actor="claude", scope_id=scope_id)
+    assert got.shortened, "something has to give up its body"
+    kept = [row for row in got.active if row["content"] is not None]
+    assert kept, "and the closest match keeps it"
+    spent = sum(retrieval.estimate_tokens(row["content"]) for row in kept)
+    assert spent <= retrieval.LAYER1_TOKEN_BUDGET + retrieval.estimate_tokens(kept[0]["content"]), (
+        "the first row is admitted whatever it costs, and nothing else overruns"
+    )
+
+
+def test_what_gave_up_its_body_is_still_named(cur, scope_id, author):
+    """21.2 makes the same trade at the opening: a missing body can be fetched."""
+    for number in range(6):
+        author(f"測定の順序 その{number}", "先に空試験をする。" * 150)
+
+    got = retrieval.retrieve(cur, "測定の順序", actor="claude", scope_id=scope_id)
+    cut = [row for row in got.active if row["content"] is None]
+    assert cut, "this query has to overrun for the test to mean anything"
+    assert all(row["title"] and row["memory_id"] for row in cut)
+    assert {row["memory_id"] for row in cut} == set(got.shortened)
+
+
+def test_a_finished_version_is_not_part_of_what_the_scope_holds(cur, scope_id, author):
+    """active_set answers "what has been overtaken", and a retirement is not a question."""
+    memory_id, version_id = author("もう片付いた作業", "本文はここにある。", type=MemoryType.TASK)
+    assert memory_id in [row["memory_id"] for row in retrieval.active_set(cur, scope_id=scope_id)]
+
+    store.set_status(
+        cur,
+        version_id=version_id,
+        target=VersionStatus.COMPLETED,
+        actor="user",
+        reason="終わったため",
+    )
+    held = [row["memory_id"] for row in retrieval.active_set(cur, scope_id=scope_id)]
+    assert memory_id not in held, "otherwise every completed task is re-read for ever"
+
+    # and it still answers searches, with its finish shown (21.1)
+    got = retrieval.retrieve(cur, "もう片付いた作業", actor="claude", scope_id=scope_id)
+    assert memory_id in [row["memory_id"] for row in got.active]

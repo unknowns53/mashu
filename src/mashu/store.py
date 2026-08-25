@@ -354,6 +354,83 @@ def tell_apart(
         )
 
 
+def pin_guard(cur: psycopg.Cursor, *, action: str, memory_id: UUID, actor: str) -> dict[str, Any]:
+    """Put one adopted memory in front of one kind of action (30.1).
+
+    The action is a plain name rather than a tool identifier, because the same
+    judgement is reached through different tools in different CLIs and it is
+    the judgement being guarded. Which tool maps to which name is the hook's
+    business and belongs at the edge.
+    """
+    entity = get_entity(cur, memory_id)
+    if not entity["active_version"]:
+        raise MashuError(
+            f"nothing adopted on {entity['title']}, so there is nothing to put in front"
+        )
+    cur.execute(
+        """
+        INSERT INTO action_guard (action, memory_id, created_by)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (action, memory_id) DO NOTHING
+        RETURNING guard_id
+        """,
+        (action.strip(), memory_id, actor),
+    )
+    row = cur.fetchone()
+    events.record(
+        cur,
+        EventType.GUARD_PINNED,
+        actor,
+        memory_id=memory_id,
+        detail={"action": action.strip(), "already": row is None},
+    )
+    return {"action": action.strip(), "memory_id": memory_id, "added": row is not None}
+
+
+def unpin_guard(cur: psycopg.Cursor, *, action: str, memory_id: UUID, actor: str) -> bool:
+    cur.execute(
+        "DELETE FROM action_guard WHERE action = %s AND memory_id = %s RETURNING guard_id",
+        (action.strip(), memory_id),
+    )
+    gone = cur.fetchone() is not None
+    if gone:
+        events.record(
+            cur,
+            EventType.GUARD_PINNED,
+            actor,
+            memory_id=memory_id,
+            detail={"action": action.strip(), "removed": True},
+        )
+    return gone
+
+
+#: What a guard hands over. The short form when there is one, because this is
+#: read at the moment of a decision rather than during a sitting, and a wall of
+#: text at that moment is a wall somebody presses through.
+GUARD_SQL = """
+SELECT g.action, e.memory_id, e.type, e.title,
+       coalesce(v.directive, v.content) AS content,
+       v.directive IS NOT NULL AS shortened
+FROM action_guard g
+JOIN memory_entity e ON e.memory_id = g.memory_id
+JOIN memory_version v ON v.version_id = e.active_version
+WHERE e.status = 'active'
+  AND (%(action)s::text IS NULL OR g.action = %(action)s::text)
+ORDER BY g.action, e.title
+"""
+
+
+def guard_for(cur: psycopg.Cursor, *, action: str | None = None) -> list[dict[str, Any]]:
+    """What has to be read before this kind of action runs.
+
+    A memory whose entity stopped being active drops out on its own. Nothing
+    is pinned to a version, so rewriting the memory changes what the guard
+    says without anybody having to remember this table exists.
+    """
+    cur.execute(GUARD_SQL, {"action": action})
+    return cur.fetchall()
+
+
 def set_active(
     cur: psycopg.Cursor,
     *,

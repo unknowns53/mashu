@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import pathlib
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -51,7 +51,7 @@ from mashu import (
 )
 from mashu.db import transaction
 from mashu.errors import DuplicateProposalError, MashuError
-from mashu.models import EventType, ProposalOperation, SourceType
+from mashu.models import EventType, MemoryType, ProposalOperation, SourceType
 
 #: A session with fewer real user turns than this, nothing in its scratch,
 #: nothing that reads as an instruction to remember, and less than
@@ -185,6 +185,7 @@ class Outcome:
     updates_filed: int = 0
     retirements_filed: int = 0
     confirmations_filed: int = 0
+    state_filed: bool = False
     refused: list[str] = field(default_factory=list)
 
     def line(self) -> str:
@@ -192,6 +193,7 @@ class Outcome:
             f"{self.proposals_filed} new, {self.updates_filed} update(s), "
             f"{self.retirements_filed} retirement(s), "
             f"{self.confirmations_filed} confirmed"
+            f"{', state rewritten' if self.state_filed else ''}"
         )
         return f"{str(self.run_id)[:8]}  {self.state:<9} {counts}  {self.note}".rstrip()
 
@@ -339,6 +341,7 @@ def land(cur: psycopg.Cursor, plan: Plan, answer: str, *, extractor: extract.Ext
     )
     _file_retirements(cur, result, outcome=outcome, session_id=plan.session_id)
     _file_confirmations(cur, result, outcome=outcome)
+    _file_state(cur, result, scope_id=plan.scope_id, outcome=outcome, session_id=plan.session_id)
 
     usage = getattr(extractor, "usage", {}) or {}
     runs.spend(
@@ -958,6 +961,85 @@ def _file_retirements(
         outcome.retirements_filed += 1
 
 
+def _file_state(
+    cur: psycopg.Cursor,
+    result: extract.Extraction,
+    *,
+    scope_id: UUID,
+    outcome: Outcome,
+    session_id: UUID,
+) -> None:
+    """Rewrite the scope's current state, as a proposal like any other (14, 30.1).
+
+    The one output of this module that replaces rather than accumulates. A
+    scope holds one state, so this adds a Version to the entity already there
+    instead of putting a rival beside it, and the store's size does not move
+    when it lands.
+
+    It goes to review because 17 puts state on the candidate line, and that is
+    left alone: what this fixes is that nothing was writing the document, not
+    that a person was in the way. Review is measurably keeping up.
+
+    Nothing is created when the scope has no state yet and the model gave no
+    title, and nothing is written when two exist — that is a merge somebody has
+    to decide, and guessing which one to extend would make the split worse.
+    """
+    draft = result.state
+    if draft is None:
+        return
+    cur.execute(
+        "SELECT memory_id, title, latest_version FROM memory_entity "
+        "WHERE scope_id = %s AND type = 'state' AND status <> 'merged'",
+        (scope_id,),
+    )
+    existing = cur.fetchall()
+    if len(existing) > 1:
+        outcome.refused.append(f"{len(existing)} current states in this scope; merge them first")
+        return
+
+    payload = {
+        "content": draft.content,
+        "source_type": str(SourceType.AGENT),
+        "evidence": [str(m) for m in draft.evidence],
+    }
+    try:
+        if existing:
+            target = existing[0]
+            proposals.propose(
+                cur,
+                actor=WORKER_ACTOR,
+                operation=ProposalOperation.UPDATE_VERSION,
+                payload=payload,
+                target_memory=target["memory_id"],
+                based_on_version=target["latest_version"],
+                session_id=session_id,
+            )
+        else:
+            proposals.propose(
+                cur,
+                actor=WORKER_ACTOR,
+                operation=ProposalOperation.CREATE,
+                payload=dict(
+                    payload,
+                    scope_id=str(scope_id),
+                    type=str(MemoryType.STATE),
+                    title=_STATE_TITLE,
+                ),
+                session_id=session_id,
+                allow_similar=True,
+            )
+    except MashuError as failure:
+        outcome.refused.append(f"state: {failure}")
+        return
+    outcome.state_filed = True
+
+
+#: What a scope's state is called when the worker is the one creating it.
+#: Fixed rather than invented per scope: there is one of these per scope and
+#: it is found by type, so a title that varies is a title nobody can predict.
+_STATE_TITLE = "この Scope の現在の状態"
+
+
 def _file_confirmations(
     cur: psycopg.Cursor,
     result: extract.Extraction,
@@ -1148,9 +1230,14 @@ def sweep(
     Deliberately does not read them. Whether a transcript is worth a model is
     the worker's judgement, made once, in one place; a sweeper that also
     decided would be a second copy of that rule that nobody keeps in step.
+
+    Walks from where it last got to rather than from a fixed number of days
+    ago. A window is a promise that nothing goes wrong for longer than the
+    window, and the failure this guards against — the hook stops enqueueing and
+    nobody notices — is exactly the one that lasts longer than that. since_days
+    is the reach of the first sweep only, before there is a mark to walk from.
     """
     roots = roots or TRANSCRIPT_ROOTS
-    cutoff = (datetime.now() - timedelta(days=since_days)).timestamp()
     workdir = str(extract.workdir())
     found: list[dict[str, Any]] = []
 
@@ -1158,9 +1245,20 @@ def sweep(
         base = pathlib.Path(root).expanduser()
         if not base.exists():
             continue
+        with transaction(dsn) as cur:
+            mark = runs.swept_to(cur, cli)
+        cutoff = (
+            mark.timestamp()
+            if mark is not None
+            else (datetime.now() - timedelta(days=since_days)).timestamp()
+        )
+        seen = 0
+        newest = cutoff
         for path in sorted(base.rglob("*.jsonl"), key=lambda p: -p.stat().st_mtime)[:limit]:
             if path.stat().st_mtime < cutoff:
                 break
+            seen += 1
+            newest = max(newest, path.stat().st_mtime)
             if any(part in NOT_A_SESSION for part in path.parts):
                 continue
             try:
@@ -1187,6 +1285,17 @@ def sweep(
                     cwd=session.cwd,
                 )
             found.append(run)
+
+        # Written whether or not anything was enqueued. A quiet sweep is the
+        # ordinary case and it is still evidence that the sweeper is alive,
+        # which is the whole reason health reads this.
+        with transaction(dsn) as cur:
+            runs.mark_swept(
+                cur,
+                source_cli=cli,
+                swept_to=datetime.fromtimestamp(newest, UTC),
+                files_seen=seen,
+            )
     return found
 
 
