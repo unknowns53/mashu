@@ -98,7 +98,9 @@ MCP ツールは 6 つ。
 | `trace_put` | 調べて分かったことを一行残す |
 | `trace_search` | 痕跡の検索。日付つき・未検証の印で返る |
 | `memory_list` | 指定 Scope の active な記憶の列挙 |
-| `temporary_put` | 期限つき条件の記録（14 日まで） |
+| `memory_nominate` | 会話中の User の記録指示を候補として運ぶ。pending 止まりで、確定は人 |
+
+期限つき条件（Temporary Context）を書けるのは User だけ（`mashu remember --until`）。Agent が観測した期限つきの条件は `trace_put` で痕跡に残す。
 
 Agent 名は `--agent` または環境変数 `MASHU_AGENT` で渡す。
 
