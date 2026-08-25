@@ -21,6 +21,23 @@ RULE = "keep the deployment order in the runbook rather than in anyone's head"
 QUOTA = "the shared queue resets its quota at midnight, not at the hour"
 WITHDRAWN_RULE = "compile the extension against the vendored headers, never the system ones"
 CARRIED = "prefer the smaller of two equivalent schemas when both are already written"
+NAMED = "hold the terminal wide open while a long import prints, or watch it wrap badly"
+TWIN = "wipe the scratch directory between two runs of the packager, always"
+EVIDENCED = "apply a migration on the standby first; the primary is not the rehearsal"
+LISTED = "spell out the timezone in every scheduled job, even when it looks obvious"
+SCOPED = "reach for the vendored toolchain in this checkout, not whatever is on PATH"
+PREVENTED = "read the exporter's manifest before trusting the row count it prints"
+
+#: A hexadecimal string no printed id can begin with: the ninth character of a
+#: UUID is always a dash, so twelve hexadecimal digits match nothing, whatever
+#: the store happens to hold.
+NOWHERE = "ffffffffffff"
+
+#: Two ids that agree for four characters and part at the fifth. Real ids are
+#: random, so a collision cannot be arranged by writing rows through the
+#: command line; these are seeded directly to get one.
+TWIN_A = "abcd0001-0000-4000-8000-00000000000a"
+TWIN_B = "abcd0002-0000-4000-8000-00000000000b"
 
 
 @pytest.fixture
@@ -162,4 +179,142 @@ def test_a_refusal_leaves_by_the_error_channel_with_a_failing_code(run):
     code, out, err = run("retire", "not-a-uuid", "--reason", "whatever")
     assert code == 1
     assert out == ""
-    assert "invalid UUID" in err
+    assert "not an id" in err
+
+
+def test_the_short_id_that_is_printed_is_the_one_that_can_be_typed_back(run):
+    """Everything here prints eight characters, so eight characters must work."""
+    _, out, _ = run("remember", NAMED)
+    memory_id = remembered_id(out)
+    short = memory_id[:8]
+
+    code, out, _ = run("show", short)
+    assert code == 0
+    assert memory_id in out
+    assert NAMED in out
+
+    code, out, _ = run("deliver", short, "always")
+    assert code == 0 and out.startswith("delivery")
+
+    code, _, err = run("show", "abc")
+    assert code == 1 and "too short" in err
+
+    code, _, err = run("retire", NOWHERE, "--reason", "there is no such row")
+    assert code == 1 and "no memory begins with" in err
+
+    code, _, err = run("show", NOWHERE)
+    assert code == 1 and "nothing here answers to" in err
+
+
+def test_a_prefix_two_rows_answer_to_is_refused_with_both_of_them(run, committing_dsn):
+    """An ambiguous reference is a question, and guessing an answer loses rows."""
+    import psycopg
+
+    with psycopg.connect(committing_dsn, autocommit=True) as conn:
+        ledger_id = conn.execute(
+            "INSERT INTO ledger (kind, what, prevention, created_by) "
+            "VALUES ('explicit', 'seeded for the collision', %s, 'test') RETURNING ledger_id",
+            (TWIN,),
+        ).fetchone()[0]
+        for memory_id in (TWIN_A, TWIN_B):
+            conn.execute(
+                "INSERT INTO memory "
+                "(memory_id, content, delivery, guard_action, evidence, created_by) "
+                "VALUES (%s, %s, 'guard', 'TwinAct', %s, 'test')",
+                (memory_id, TWIN, [ledger_id]),
+            )
+
+    code, _, err = run("retire", "abcd", "--reason", "whichever it is")
+    assert code == 1
+    assert "names more than one memory" in err
+    assert "abcd0001" in err and "abcd0002" in err
+
+    code, _, err = run("show", "abcd")
+    assert code == 1
+    assert "names more than one row" in err
+    assert err.count("memory") == 2
+
+    code, out, _ = run("show", TWIN_A)
+    assert code == 0 and TWIN_A in out
+
+
+def test_what_a_memory_rests_on_can_still_be_read_after_it_is_admitted(run):
+    """The evidence is the point of the standard, so it has to stay legible."""
+    code, out, _ = run(
+        "pain",
+        "--kind",
+        "incident",
+        "--what",
+        "ran the migration on the primary first",
+        "--prevention",
+        EVIDENCED,
+    )
+    assert code == 0
+    ledger_short = out.splitlines()[0].split()[1]
+
+    _, out, _ = run("review", "--list")
+    nomination_id = pending_id(out, EVIDENCED)
+
+    code, out, _ = run("show", nomination_id[:8])
+    assert code == 0
+    assert "pending" in out
+    assert EVIDENCED in out
+
+    code, out, _ = run("review", "--admit", nomination_id[:8])
+    assert code == 0
+    memory_id = out.split()[1]
+
+    code, out, _ = run("show", memory_id)
+    assert code == 0
+    assert f"prevention  {EVIDENCED}" in out
+    assert ledger_short in out
+    assert "tokens" in out
+
+    code, out, _ = run("show", ledger_short)
+    assert code == 0
+    assert f"prevention  {EVIDENCED}" in out
+    assert "cited by" in out
+    assert memory_id[:8] in out
+
+
+def test_the_memories_listing_holds_the_active_set_and_can_be_narrowed(run):
+    _, out, _ = run("remember", LISTED)
+    memory_id = remembered_id(out)
+
+    run("scope", "--add", "listing scope", "--about", "a scope to list against")
+    run("remember", SCOPED, "--scope", "listing scope")
+
+    code, out, _ = run("memories")
+    assert code == 0
+    assert out.splitlines()[0].startswith("id")
+    assert LISTED in out and SCOPED in out
+    assert memory_id[:8] in out
+
+    code, out, _ = run("memories", "--scope", "listing scope")
+    assert code == 0
+    assert SCOPED in out and LISTED not in out
+
+    run("retire", memory_id[:8], "--reason", "the scheduler grew a timezone column")
+
+    code, out, _ = run("memories")
+    assert code == 0 and LISTED not in out
+
+    code, out, _ = run("memories", "--retired")
+    assert code == 0
+    assert LISTED in out
+    assert "the scheduler grew a timezone column" in out
+
+
+def test_the_ledger_listing_shows_the_sentence_the_matching_runs_on(run):
+    run(
+        "pain",
+        "--kind",
+        "friction",
+        "--what",
+        "counted the exported rows by hand again",
+        "--prevention",
+        PREVENTED,
+    )
+    code, out, _ = run("ledger", "--limit", "5")
+    assert code == 0
+    assert f"    prevention  {PREVENTED}" in out

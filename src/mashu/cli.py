@@ -26,6 +26,7 @@ from mashu import (
     routing,
     scopes,
     temporary,
+    tokens,
 )
 from mashu import (
     ledger as ledger_domain,
@@ -42,6 +43,26 @@ ACTOR = "user"
 GUARD_HOLD = 2
 _DAYS = re.compile(r"^(\d+(?:\.\d+)?)(?:d)?$")
 
+#: What a reference may be made of when it is not a whole id: the characters a
+#: UUID prints as, so that pasting any front portion of a displayed id works.
+_HEX_REF = re.compile(r"[0-9a-f][0-9a-f-]*")
+
+#: Short enough to type from a listing, long enough that a collision is news
+#: rather than routine. Below this the prefix is refused instead of resolved,
+#: because a reference that names half the store is not a reference.
+_MIN_PREFIX = 4
+
+#: How many colliding ids an ambiguity refusal will name before it stops. The
+#: list is there to be re-typed from, and a screenful of them is not.
+_AMBIGUITY_LIMIT = 10
+
+#: The tables `show` reaches into, in the order it reports collisions.
+_REFERENCE_TABLES = (
+    ("memory", "memory_id"),
+    ("nomination", "nomination_id"),
+    ("ledger", "ledger_id"),
+)
+
 
 def _plain(value: Any) -> Any:
     if isinstance(value, UUID):
@@ -55,11 +76,61 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def _uuid(value: str) -> UUID:
+def _lookup(cur: Any, ref: str, *, table: str, id_col: str, extra_where: str = "") -> list[UUID]:
+    """Every id in one table that this reference could be naming.
+
+    Everything this command line prints is an eight-character prefix, so
+    everything it accepts has to be one. A whole id is matched as itself; a
+    prefix is matched against the printed form of the id, which is the form
+    the person is copying from.
+    """
+    text = (ref or "").strip().lower()
     try:
-        return UUID(value)
-    except (ValueError, AttributeError) as error:
-        raise MashuError(f"invalid UUID: {value}") from error
+        exact: str | None = str(UUID(text))
+    except (ValueError, AttributeError):
+        exact = None
+    if exact is None:
+        if not _HEX_REF.fullmatch(text):
+            raise MashuError(f"'{ref}' is not an id, nor the front of one")
+        if len(text) < _MIN_PREFIX:
+            raise MashuError(
+                f"'{ref}' is too short to name a row: give at least {_MIN_PREFIX} characters"
+            )
+    clause = f"{id_col} = %(exact)s::uuid" if exact else f"{id_col}::text LIKE %(prefix)s || '%%'"
+    if extra_where:
+        clause = f"{clause} AND {extra_where}"
+    cur.execute(
+        f"SELECT {id_col} AS found FROM {table} WHERE {clause} ORDER BY {id_col} LIMIT %(limit)s",
+        {"exact": exact, "prefix": text, "limit": _AMBIGUITY_LIMIT},
+    )
+    return [row["found"] for row in cur.fetchall()]
+
+
+def _resolve(
+    cur: Any, ref: str, *, table: str, id_col: str, label: str, extra_where: str = ""
+) -> UUID:
+    """The one row this reference names, or a refusal saying why it is not one.
+
+    A whole id passes straight through without a lookup: the command that
+    receives it will say soon enough if there is no such row, and its sentence
+    is the better one. Only a prefix has to be resolved here, and an ambiguous
+    one is refused with its candidates rather than settled arbitrarily.
+    """
+    try:
+        return UUID((ref or "").strip())
+    except (ValueError, AttributeError):
+        pass
+    found = _lookup(cur, ref, table=table, id_col=id_col, extra_where=extra_where)
+    if not found:
+        raise MashuError(f"no {label} begins with '{ref}'")
+    if len(found) > 1:
+        named = "  ".join(_short(value) for value in found)
+        raise MashuError(f"'{ref}' names more than one {label}: {named}")
+    return found[0]
+
+
+def _memory_ref(cur: Any, ref: str) -> UUID:
+    return _resolve(cur, ref, table="memory", id_col="memory_id", label="memory")
 
 
 def _scope(cur: Any, name: str | None) -> UUID | None:
@@ -77,6 +148,14 @@ def _routed_scope(cur: Any) -> tuple[UUID | None, str | None, bool]:
 
 def _short(value: Any) -> str:
     return str(value)[:8]
+
+
+def _date(value: Any) -> str:
+    return value.date().isoformat() if hasattr(value, "date") else str(value)[:10]
+
+
+def _field(label: str, value: Any) -> None:
+    print(f"{label:<10}  {value}")
 
 
 def _editor_text(content: str) -> str:
@@ -214,21 +293,22 @@ def cmd_remember(args: argparse.Namespace) -> int:
 
 def cmd_retire(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
-        row = memories.retire(cur, _uuid(args.memory_id), reason=args.reason, actor=ACTOR)
+        memory_id = _memory_ref(cur, args.memory_id)
+        row = memories.retire(cur, memory_id, reason=args.reason, actor=ACTOR)
     _gate_warnings(row)
     print(f"retired  {row['memory_id']}")
     return 0
 
 
 def cmd_revise(args: argparse.Namespace) -> int:
-    memory_id = _uuid(args.memory_id)
     content = args.content
+    with db.transaction(args.dsn) as cur:
+        memory_id = _memory_ref(cur, args.memory_id)
+        current = memories.get_memory(cur, memory_id)
+    if current is None:
+        raise MashuError(f"memory '{memory_id}' not found")
     if content is None:
-        with db.transaction(args.dsn) as cur:
-            row = memories.get_memory(cur, memory_id)
-        if row is None:
-            raise MashuError(f"memory '{memory_id}' not found")
-        content = _editor_text(row["content"])
+        content = _editor_text(current["content"])
     with db.transaction(args.dsn) as cur:
         row = memories.revise(cur, memory_id, content=content, actor=ACTOR)
     print(f"revised  {row['memory_id']}")
@@ -272,9 +352,179 @@ def cmd_ledger(args: argparse.Namespace) -> int:
         )
     print("id        kind       date        what")
     for row in rows:
-        created = row.get("created_at")
-        date_text = created.date().isoformat() if hasattr(created, "date") else str(created)[:10]
-        print(f"{_short(row['ledger_id']):8}  {row['kind']:<9}  {date_text}  {row['what']}")
+        print(
+            f"{_short(row['ledger_id']):8}  {row['kind']:<9}  "
+            f"{_date(row.get('created_at'))}  {row['what']}"
+        )
+        # The prevention is the sentence the matching runs on, so a listing
+        # that hides it shows the half of each row that decides nothing.
+        print(f"    prevention  {row['prevention']}")
+    return 0
+
+
+def _ledger_rows(cur: Any, ids: list[UUID]) -> list[dict[str, Any]]:
+    """The named ledger rows, in the order they were cited."""
+    if not ids:
+        return []
+    cur.execute(
+        """
+        SELECT l.*, s.name AS scope_name
+        FROM ledger l LEFT JOIN scope s ON s.scope_id = l.scope_id
+        WHERE l.ledger_id = ANY(%s)
+        """,
+        (list(ids),),
+    )
+    by_id = {row["ledger_id"]: row for row in cur.fetchall()}
+    return [by_id[item] for item in ids if item in by_id]
+
+
+def _print_evidence(cur: Any, evidence: list[UUID] | None) -> None:
+    """The pains a row rests on, opened out.
+
+    Ids alone answer nothing here. What makes a memory readable after the fact
+    is the prevention sentence it was admitted against, which is also the
+    sentence a later pain will collide with. The id still leads the line, so
+    the ledger row itself can be opened from what is printed.
+    """
+    print("evidence")
+    for row in _ledger_rows(cur, list(evidence or [])):
+        print(
+            f"  {_short(row['ledger_id'])}  {row['kind']}  "
+            f"{_date(row['created_at'])}  {row['what']}"
+        )
+        print(f"    prevention  {row['prevention']}")
+        print(f"    source      {row['source'] or '-'}")
+
+
+def _show_memory(cur: Any, memory_id: UUID) -> None:
+    cur.execute(
+        """
+        SELECT m.*, s.name AS scope_name
+        FROM memory m LEFT JOIN scope s ON s.scope_id = m.scope_id
+        WHERE m.memory_id = %s
+        """,
+        (memory_id,),
+    )
+    row = cur.fetchone()
+    _field("memory", row["memory_id"])
+    if row["status"] == "retired":
+        _field("status", f"retired  {row['retire_reason']}")
+    else:
+        _field("status", row["status"])
+    delivery = row["delivery"]
+    _field("delivery", f"guard  {row['guard_action']}" if delivery == "guard" else delivery)
+    _field("scope", row["scope_name"] or "-")
+    _field("created", f"{_date(row['created_at'])}  {row['created_by']}")
+    _field("tokens", tokens.pushed_cost([row["content"]]))
+    print("content")
+    print(f"  {row['content']}")
+    _print_evidence(cur, row["evidence"])
+    cur.execute(
+        """
+        SELECT content, created_at FROM memory_revision
+        WHERE memory_id = %s ORDER BY created_at, revision_id
+        """,
+        (memory_id,),
+    )
+    print("revisions")
+    for revision in cur.fetchall():
+        print(f"  {_date(revision['created_at'])}  {revision['content']}")
+
+
+def _show_nomination(cur: Any, nomination_id: UUID) -> None:
+    cur.execute(
+        """
+        SELECT n.*, s.name AS scope_name
+        FROM nomination n LEFT JOIN scope s ON s.scope_id = n.scope_id
+        WHERE n.nomination_id = %s
+        """,
+        (nomination_id,),
+    )
+    row = cur.fetchone()
+    _field("nomination", row["nomination_id"])
+    _field("kind", row["kind"])
+    _field("status", row["status"])
+    _field("scope", row["scope_name"] or "-")
+    print("content")
+    print(f"  {row['content']}")
+    _print_evidence(cur, row["evidence"])
+    if row["status"] == "declined":
+        _field("declined", row["decision_reason"] or "-")
+
+
+def _show_ledger(cur: Any, ledger_id: UUID) -> None:
+    row = _ledger_rows(cur, [ledger_id])[0]
+    _field("ledger", row["ledger_id"])
+    _field("kind", row["kind"])
+    _field("created", f"{_date(row['created_at'])}  {row['created_by']}")
+    _field("scope", row["scope_name"] or "-")
+    _field("what", row["what"])
+    _field("prevention", row["prevention"])
+    _field("source", row["source"] or "-")
+    # Which candidates and memories this pain was spent on. Without it the
+    # ledger reads as a complaints file, and whether anything came of a pain
+    # is exactly what a person reading one back wants to know.
+    cur.execute(
+        """
+        SELECT 'nomination' AS held_in, nomination_id AS row_id, status, created_at
+        FROM nomination WHERE %(ledger)s::uuid = ANY(evidence)
+        UNION ALL
+        SELECT 'memory', memory_id, status, created_at
+        FROM memory WHERE %(ledger)s::uuid = ANY(evidence)
+        ORDER BY created_at, row_id
+        """,
+        {"ledger": ledger_id},
+    )
+    print("cited by")
+    for cite in cur.fetchall():
+        print(f"  {cite['held_in']:<10}  {_short(cite['row_id'])}  {cite['status']}")
+
+
+_SHOW = {"memory": _show_memory, "nomination": _show_nomination, "ledger": _show_ledger}
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    """One row, whichever of the three tables it lives in, opened in full."""
+    with db.transaction(args.dsn) as cur:
+        found = [
+            (table, value)
+            for table, id_col in _REFERENCE_TABLES
+            for value in _lookup(cur, args.ref, table=table, id_col=id_col)
+        ]
+        if not found:
+            raise MashuError(f"nothing here answers to '{args.ref}'")
+        if len(found) > 1:
+            listed = "\n".join(f"  {table}  {_short(value)}" for table, value in found)
+            raise MashuError(f"'{args.ref}' names more than one row:\n{listed}")
+        table, value = found[0]
+        _SHOW[table](cur, value)
+    return 0
+
+
+def cmd_memories(args: argparse.Namespace) -> int:
+    status = "retired" if args.retired else "active"
+    with db.transaction(args.dsn) as cur:
+        scope_id = _scope(cur, args.scope) if args.scope else None
+        cur.execute(
+            """
+            SELECT m.*, s.name AS scope_name
+            FROM memory m LEFT JOIN scope s ON s.scope_id = m.scope_id
+            WHERE m.status = %(status)s
+              AND (%(scope)s::uuid IS NULL OR m.scope_id = %(scope)s::uuid)
+            ORDER BY m.delivery, s.name, m.created_at
+            """,
+            {"status": status, "scope": scope_id},
+        )
+        rows = cur.fetchall()
+    print("id        delivery  scope                 tokens  content")
+    for row in rows:
+        print(
+            f"{_short(row['memory_id']):8}  {row['delivery']:<8}  "
+            f"{(row['scope_name'] or '-')[:20]:20}  "
+            f"{tokens.pushed_cost([row['content']]):6}  {row['content']}"
+        )
+        if status == "retired":
+            print(f"    retired  {row['retire_reason']}")
     return 0
 
 
@@ -291,7 +541,14 @@ def cmd_trace(args: argparse.Namespace) -> int:
 
 
 def _pending_by_id(cur: Any, value: str) -> dict[str, Any]:
-    wanted = _uuid(value)
+    wanted = _resolve(
+        cur,
+        value,
+        table="nomination",
+        id_col="nomination_id",
+        label="pending nomination",
+        extra_where="status = 'pending'",
+    )
     for row in nominations.pending_nominations(cur):
         if row["nomination_id"] == wanted:
             return row
@@ -352,7 +609,7 @@ def cmd_deliver(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
         row = memories.set_delivery(
             cur,
-            _uuid(args.memory_id),
+            _memory_ref(cur, args.memory_id),
             delivery=args.delivery,
             actor=ACTOR,
             guard_action=args.action,
@@ -366,7 +623,7 @@ def cmd_guard(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
         memory_ref = args.pin or args.unpin
         if memory_ref:
-            memory_id = _uuid(memory_ref)
+            memory_id = _memory_ref(cur, memory_ref)
             current = memories.get_memory(cur, memory_id)
             if current is None:
                 raise MashuError(f"memory '{memory_ref}' not found")
@@ -478,95 +735,145 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+#: Said wherever an id is taken. Every listing prints a short id, so every
+#: command that takes one has to accept the short id back.
+_REF_HELP = "the row's id, or the first four or more characters of it"
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="mashu")
+    parser = argparse.ArgumentParser(
+        prog="mashu",
+        description="The knowledge state that keeps only what forgetting has cost something.",
+    )
     parser.add_argument("--dsn", default=None, help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("status").set_defaults(func=cmd_status)
-    sub.add_parser("bootstrap").set_defaults(func=cmd_bootstrap)
+    sub.add_parser("status", help="stock, seats used, pending count, recent ledger").set_defaults(
+        func=cmd_status
+    )
+    sub.add_parser(
+        "bootstrap", help="what a session in this directory is pushed, and its token cost"
+    ).set_defaults(func=cmd_bootstrap)
 
-    remember = sub.add_parser("remember")
-    remember.add_argument("body")
-    remember.add_argument("--scope")
-    remember.add_argument("--delivery", choices=("always", "scope", "guard"))
-    remember.add_argument("--action")
-    remember.add_argument("--until")
+    remember = sub.add_parser(
+        "remember", help="write a rule straight into the active set (the only immediate path)"
+    )
+    remember.add_argument("body", help="the rule, written as a short sentence")
+    remember.add_argument("--scope", help="deliver it to this scope only")
+    remember.add_argument(
+        "--delivery",
+        choices=("always", "scope", "guard"),
+        help="where it is delivered (default: scope with --scope, otherwise always)",
+    )
+    remember.add_argument("--action", help="the tool the rule stands in front of, for guard")
+    remember.add_argument(
+        "--until", help="record a dated condition expiring in N days instead (at most 14)"
+    )
     remember.set_defaults(func=cmd_remember)
 
-    retire = sub.add_parser("retire")
-    retire.add_argument("memory_id")
-    retire.add_argument("--reason", required=True)
+    retire = sub.add_parser("retire", help="withdraw a memory, leaving the reason as its tombstone")
+    retire.add_argument("memory_id", help=_REF_HELP)
+    retire.add_argument("--reason", required=True, help="why it is wrong; later matches read this")
     retire.set_defaults(func=cmd_retire)
 
-    revise = sub.add_parser("revise")
-    revise.add_argument("memory_id")
-    revise.add_argument("--content")
+    revise = sub.add_parser("revise", help="rewrite a memory's body, keeping the old one on file")
+    revise.add_argument("memory_id", help=_REF_HELP)
+    revise.add_argument("--content", help="the new body; without it, an editor opens on the old")
     revise.set_defaults(func=cmd_revise)
 
-    pain = sub.add_parser("pain")
-    pain.add_argument("--kind", choices=("incident", "friction"), required=True)
-    pain.add_argument("--what", required=True)
-    pain.add_argument("--prevention", required=True)
-    pain.add_argument("--scope")
+    show = sub.add_parser("show", help="one memory, candidate, or ledger row in full")
+    show.add_argument("ref", help=f"{_REF_HELP}, in any of the three tables")
+    show.set_defaults(func=cmd_show)
+
+    memories_parser = sub.add_parser("memories", help="list the memories held")
+    memories_parser.add_argument("--scope", help="only the memories belonging to this scope")
+    memories_parser.add_argument(
+        "--retired", action="store_true", help="list the withdrawn ones, with their reasons"
+    )
+    memories_parser.set_defaults(func=cmd_memories)
+
+    pain = sub.add_parser("pain", help="record a pain in the ledger and see what it resembles")
+    pain.add_argument(
+        "--kind",
+        choices=("incident", "friction"),
+        required=True,
+        help="wrong work done (incident), or the same thing looked up again (friction)",
+    )
+    pain.add_argument("--what", required=True, help="what went wrong")
+    pain.add_argument(
+        "--prevention", required=True, help="what would have had to be known; the matching key"
+    )
+    pain.add_argument("--scope", help="the scope it happened in")
     pain.set_defaults(func=cmd_pain)
 
-    ledger = sub.add_parser("ledger")
-    ledger.add_argument("--limit", type=int, default=20)
-    ledger.add_argument("--scope")
+    ledger = sub.add_parser("ledger", help="read the pain ledger, newest first")
+    ledger.add_argument("--limit", type=int, default=20, help="how many rows to show (default 20)")
+    ledger.add_argument("--scope", help="only the pains recorded in this scope")
     ledger.set_defaults(func=cmd_ledger)
 
-    trace = sub.add_parser("trace")
-    trace.add_argument("query", nargs="?")
-    trace.add_argument("--scope")
+    trace = sub.add_parser("trace", help="read and search the traces (dated, unreviewed, 30 days)")
+    trace.add_argument("query", nargs="?", help="text to match; without it, the recent traces")
+    trace.add_argument("--scope", help="only the traces left in this scope")
     trace.set_defaults(func=cmd_trace)
 
-    review = sub.add_parser("review")
+    review = sub.add_parser("review", help="decide the pending candidates, one at a time")
     review_group = review.add_mutually_exclusive_group()
-    review_group.add_argument("--list", action="store_true")
-    review_group.add_argument("--admit")
-    review_group.add_argument("--decline")
-    review.add_argument("--delivery", choices=("always", "scope", "guard"))
-    review.add_argument("--scope")
-    review.add_argument("--action")
-    review.add_argument("--reason")
+    review_group.add_argument("--list", action="store_true", help="print the queue and stop")
+    review_group.add_argument("--admit", metavar="REF", help=f"admit one candidate: {_REF_HELP}")
+    review_group.add_argument("--decline", metavar="REF", help=f"turn one down: {_REF_HELP}")
+    review.add_argument(
+        "--delivery",
+        choices=("always", "scope", "guard"),
+        help="where the admitted memory is delivered",
+    )
+    review.add_argument("--scope", help="the scope the admitted memory belongs to")
+    review.add_argument("--action", help="the tool it stands in front of, for guard")
+    review.add_argument("--reason", help="why it is turned down; required with --decline")
     review.set_defaults(func=cmd_review)
 
-    deliver = sub.add_parser("deliver")
-    deliver.add_argument("memory_id")
-    deliver.add_argument("delivery", choices=("always", "scope", "guard"))
-    deliver.add_argument("--action")
-    deliver.add_argument("--scope")
+    deliver = sub.add_parser("deliver", help="move a memory between the opening and the act gate")
+    deliver.add_argument("memory_id", help=_REF_HELP)
+    deliver.add_argument(
+        "delivery", choices=("always", "scope", "guard"), help="where it is delivered from now on"
+    )
+    deliver.add_argument("--action", help="the tool it stands in front of, for guard")
+    deliver.add_argument("--scope", help="the scope it belongs to, for scope")
     deliver.set_defaults(func=cmd_deliver)
 
-    guard = sub.add_parser("guard")
-    guard.add_argument("action")
+    guard = sub.add_parser("guard", help="the rules standing in front of one act")
+    guard.add_argument("action", help="the tool being guarded")
     guard_group = guard.add_mutually_exclusive_group()
-    guard_group.add_argument("--pin")
-    guard_group.add_argument("--unpin")
-    guard.add_argument("--json", action="store_true")
+    guard_group.add_argument("--pin", metavar="REF", help=f"pin a memory here: {_REF_HELP}")
+    guard_group.add_argument(
+        "--unpin", metavar="REF", help=f"return a memory to the opening: {_REF_HELP}"
+    )
+    guard.add_argument("--json", action="store_true", help="print as JSON, for the hook to read")
     guard.set_defaults(func=cmd_guard)
 
-    scope = sub.add_parser("scope")
-    scope.add_argument("--add")
-    scope.add_argument("--about")
+    scope = sub.add_parser("scope", help="the scope register")
+    scope.add_argument("--add", metavar="NAME", help="create a scope with this name")
+    scope.add_argument("--about", metavar="LINE", help="what the scope covers; required with --add")
     scope.set_defaults(func=cmd_scope)
 
-    route = sub.add_parser("route")
+    route = sub.add_parser("route", help="which working directory means which scope")
     route_group = route.add_mutually_exclusive_group()
-    route_group.add_argument("--add")
-    route_group.add_argument("--ignore")
-    route_group.add_argument("--remove")
-    route.add_argument("--scope")
+    route_group.add_argument("--add", metavar="PATH", help="route this path prefix to --scope")
+    route_group.add_argument(
+        "--ignore", metavar="PATH", help="record that this path prefix has no scope"
+    )
+    route_group.add_argument("--remove", metavar="PATH", help="drop the route for this path prefix")
+    route.add_argument("--scope", help="the scope to route to; required with --add")
     route.set_defaults(func=cmd_route)
 
-    serve = sub.add_parser("serve")
-    serve.add_argument("--agent")
+    serve = sub.add_parser("serve", help="run the MCP server on stdio")
+    serve.add_argument("--agent", help="the name writes are attributed to")
     serve.set_defaults(func=cmd_serve)
 
-    admin = sub.add_parser("admin")
+    admin = sub.add_parser("admin", help="store maintenance")
     admin_sub = admin.add_subparsers(dest="admin_command", required=True)
-    admin_sub.add_parser("migrate").set_defaults(func=cmd_migrate)
+    admin_sub.add_parser("migrate", help="apply the migrations not yet applied").set_defaults(
+        func=cmd_migrate
+    )
     return parser
 
 

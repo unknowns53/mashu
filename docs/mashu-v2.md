@@ -196,6 +196,8 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 | `mashu remember <body>` | User 明示。即時 active。唯一の即時経路 |
 | `mashu retire <id> --reason <r>` | 退役。理由必須 |
 | `mashu revise <id>` | 本文の改訂（User のみ） |
+| `mashu show <id>` | 記憶・候補・台帳エントリを 1 件、evidence と逆参照つきで全文表示 |
+| `mashu memories` | 記憶の一覧。既定は active、`--retired` で退役分と理由 |
 | `mashu pain` | 痛みの手動記録（CLI から） |
 | `mashu ledger` | 台帳の閲覧 |
 | `mashu trace [query]` | 痕跡の閲覧と検索 |
@@ -206,6 +208,10 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 | `mashu admin migrate` | migration 実行 |
 
 Review UI は「束の三段」を持たない。週数件なら 1 件ずつで足り、各決定はその場で確定する。
+
+id を取る引数は、表示される短縮 ID（先頭 8 文字）の前方一致で解決する。一覧が短縮 ID しか出さない以上、完全 UUID しか受け付けない引数は、人に画面外の値を打たせることになる。4 文字未満の前置きと、複数行に当たる前置きは、候補を挙げて拒否する。
+
+`show` が必要なのは、admission を過ぎた記憶の evidence を見る経路が他に無いためである。台帳参照は記憶が席を占める理由そのものであり、それが読めなければ、退役の判断は本文の印象だけで下されることになる。
 
 ## 9. スキーマ（9 表）
 

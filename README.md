@@ -69,6 +69,8 @@ ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
 | `mashu remember <body> --until 5d` | 期限つき条件（Temporary Context）。Review 不要、期限で消える |
 | `mashu retire <id> --reason <r>` | 退役。以後は照合で「何が、なぜ否定されたか」だけ返る |
 | `mashu revise <id>` | 本文の改訂（User のみ）。改訂履歴が残る |
+| `mashu show <id>` | 記憶・候補・台帳エントリを 1 件、全文で表示。根拠の台帳と改訂履歴、台帳なら採用先も出る |
+| `mashu memories [--scope <name>] [--retired]` | 記憶の一覧。既定は active、`--retired` で退役分と理由 |
 | `mashu pain --kind {incident,friction} --what <w> --prevention <p>` | 痛みの手動記録 |
 | `mashu ledger` | 台帳の閲覧 |
 | `mashu trace [query]` | 痕跡の閲覧と検索 |
@@ -80,6 +82,8 @@ ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
 | `mashu admin migrate` | 未適用の migration を実行 |
 
 Review で確定するとき delivery を選ぶ。件数は週数件のオーダーなので、1 件ごとに人が置き場を決める。
+
+id を取る引数はどれも、一覧が表示する短縮 ID（先頭 8 文字）をそのまま受け付ける。4 文字以上の前方一致で一意に決まればよく、複数に当たったときは候補を並べて拒否する。
 
 ## Agent から使う
 
