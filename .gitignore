@@ -34,3 +34,6 @@ data/
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Database dumps (v1 archive and any later backups)
+backups/
