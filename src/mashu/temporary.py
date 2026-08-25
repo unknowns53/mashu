@@ -18,7 +18,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import config, events, redact
+from mashu import capacity, config, events, redact
 from mashu.errors import RefusedError
 
 _TOO_LONG = (
@@ -43,6 +43,19 @@ def put_temporary(
     if not verdict.allowed:
         raise RefusedError(verdict.reason())
 
+    # A temporary context is pushed, so it takes a seat while it lasts (5.2).
+    # Expiring on its own is why it needs no review; it is not a reason to be
+    # weightless in an opening it is being carried in. An unscoped one reaches
+    # every session, which is what 'always' means here.
+    admission = capacity.check_admission(
+        cur,
+        content=content,
+        delivery="always" if scope_id is None else "scope",
+        scope_id=scope_id,
+    )
+    if not admission["ok"]:
+        raise RefusedError(admission["refusal"])
+
     cur.execute(
         """
         INSERT INTO temporary_context (content, scope_id, created_by, expires_at)
@@ -53,7 +66,10 @@ def put_temporary(
     )
     row = cur.fetchone()
     events.record(cur, "temporary_recorded", actor, detail={"days": days})
-    return {**row, "unchecked": verdict.unchecked}
+    report: dict[str, Any] = {**row, "unchecked": verdict.unchecked}
+    if verdict.malformed:
+        report["malformed"] = verdict.malformed
+    return report
 
 
 def active_temporary(cur: psycopg.Cursor, *, scope_id: UUID | None = None) -> list[dict[str, Any]]:

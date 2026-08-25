@@ -39,6 +39,27 @@ def test_dsn() -> str:
     return dsn
 
 
+@pytest.fixture(scope="session")
+def committing_dsn() -> str:
+    """A second database for tests that have to commit.
+
+    The CLI opens its own connection and commits, so its tests cannot be
+    wrapped in a transaction that is rolled back afterwards; neither can the
+    concurrency tests, where a second connection has to be able to see the row
+    the first one is competing for. Their rows therefore persist, and sharing a
+    database with the rolled-back tests would let committed rows turn up in
+    queries those tests expect to see only their own fixtures in. Separating
+    them keeps both kinds honest rather than making one defensive.
+    """
+    name = f"{TEST_DB}_committing"
+    with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
+        conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        conn.execute(f'CREATE DATABASE "{name}"')
+    dsn = f"dbname={name}"
+    migrate(dsn)
+    return dsn
+
+
 @pytest.fixture
 def cur(test_dsn: str) -> Iterator[psycopg.Cursor]:
     """A cursor whose transaction is rolled back when the test ends.

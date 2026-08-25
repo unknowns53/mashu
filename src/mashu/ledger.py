@@ -19,9 +19,14 @@ from uuid import UUID
 import psycopg
 
 from mashu import config, events, match, nominations, redact, traces
+from mashu.capacity import LOCK_NAMESPACE, LOCK_PAIN
 from mashu.errors import MashuError, RefusedError
 
 REPORTABLE_KINDS = ("incident", "friction")
+
+#: The kinds a person's own statement takes. Neither is a pain, so neither is
+#: reportable here and neither counts as the first half of a rederivation.
+STATED_KINDS = ("explicit", "claimed")
 
 
 def report_pain(
@@ -42,12 +47,19 @@ def report_pain(
     """
     if kind not in REPORTABLE_KINDS:
         raise MashuError(
-            f"kind must be one of {', '.join(REPORTABLE_KINDS)}; 'explicit' is reserved for "
-            "what a person records by their own hand (mashu remember)"
+            f"kind must be one of {', '.join(REPORTABLE_KINDS)}; 'explicit' and 'claimed' are "
+            "reserved for a person's own statement, written by mashu remember and by "
+            "memory_nominate respectively"
         )
     verdict = redact.check(what, prevention)
     if not verdict.allowed:
         raise RefusedError(verdict.reason())
+
+    # Before the insert and before any matching. Two reports of one hole
+    # arriving together would each match only what the other had not yet
+    # written, and both would nominate: one rule, two rows in a queue whose
+    # whole premise is that it holds a few items a week.
+    cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (LOCK_NAMESPACE, LOCK_PAIN))
 
     cur.execute(
         """
@@ -74,6 +86,8 @@ def report_pain(
         "nomination_existing": False,
         "tombstone_suppressed": False,
     }
+    if verdict.malformed:
+        result["malformed"] = verdict.malformed
 
     threshold = config.match_threshold()
 
@@ -130,11 +144,23 @@ def _best_prior(
 ) -> UUID | None:
     """The ledger row a second friction can point back at, if there is one.
 
+    Only a friction or a trace qualifies (4.1). An incident finished its own
+    nomination when it was reported, and 'explicit' and 'claimed' rows are
+    somebody stating a rule, not anybody having worked something out twice.
+    Counting those would let a single look-up next to an existing statement
+    call itself a re-derivation, which is the standard in section 3 being met
+    by paraphrase.
+
+    What is filtered is the choice, not the display: the caller still shows
+    every match, because a reporter deciding whether this is the same hole
+    wants to see the statement too.
+
     Ledger rows and traces compete on the same scale here. A trace that wins
     is frozen on the spot, because the candidate it supports will outlive the
     thirty days the trace has left.
     """
-    best_ledger = matches["ledger"][0] if matches["ledger"] else None
+    frictions = [row for row in matches["ledger"] if row["kind"] == "friction"]
+    best_ledger = frictions[0] if frictions else None
     best_trace = matches["traces"][0] if matches["traces"] else None
 
     candidates = [c for c in (best_ledger, best_trace) if c and c["score"] >= threshold]

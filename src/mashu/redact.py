@@ -42,6 +42,11 @@ class Verdict:
     #: True when no pattern file was found. The content is allowed through, and
     #: the caller is told the check did not run rather than told it passed.
     unchecked: bool = False
+    #: How many lines of the list would not compile. A partly broken guard
+    #: guards partly, and the difference is invisible from the outcome: content
+    #: passes either way. Counting them is what lets the caller say the list
+    #: needs fixing instead of reading a pass as a clean bill of health.
+    malformed: int = 0
 
     def reason(self) -> str:
         if self.unchecked:
@@ -63,12 +68,18 @@ def patterns_path() -> pathlib.Path | None:
     return None
 
 
-def load() -> list[re.Pattern[str]] | None:
-    """The compiled list, or nothing when the file is absent."""
+def load() -> tuple[list[re.Pattern[str]], int] | None:
+    """The compiled list and the count of lines that would not compile.
+
+    Nothing when the file is absent. The count is returned rather than logged
+    because the only symptom of a line that failed to compile is content
+    getting through, which is also what success looks like.
+    """
     path = patterns_path()
     if path is None:
         return None
     out = []
+    malformed = 0
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -78,19 +89,21 @@ def load() -> list[re.Pattern[str]] | None:
         except re.error:
             # A malformed line is a broken guard, not a reason to stop guarding
             # with the rest of the list.
+            malformed += 1
             continue
-    return out
+    return out, malformed
 
 
 def check(*texts: str | None) -> Verdict:
     """Whether these pieces of text may be written."""
-    compiled = load()
-    if compiled is None:
+    loaded = load()
+    if loaded is None:
         return Verdict(allowed=True, unchecked=True)
+    compiled, malformed = loaded
     for text in texts:
         if not text:
             continue
         for index, pattern in enumerate(compiled):
             if pattern.search(text):
-                return Verdict(allowed=False, pattern_index=index)
-    return Verdict(allowed=True)
+                return Verdict(allowed=False, pattern_index=index, malformed=malformed)
+    return Verdict(allowed=True, malformed=malformed)

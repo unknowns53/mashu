@@ -109,6 +109,24 @@ def _parse_days(value: str) -> float:
     return days
 
 
+def _gate_warnings(result: dict[str, Any]) -> None:
+    """Say when the entrance check did not run, or ran on a broken list.
+
+    Both states let content through, which is also what a clean pass looks
+    like, so nothing about the result distinguishes them. These go to stderr
+    so a caller reading stdout for an id is unaffected, and the person at the
+    terminal still sees that the gate was not what they assumed.
+    """
+    if result.get("unchecked"):
+        print("warning: banned-pattern list not found; nothing was checked", file=sys.stderr)
+    malformed = result.get("malformed") or 0
+    if malformed:
+        print(
+            f"warning: {malformed} banned-pattern line(s) could not be compiled",
+            file=sys.stderr,
+        )
+
+
 def _print_memory_rows(rows: list[dict[str, Any]], *, heading: str = "memories") -> None:
     print(heading)
     for row in rows:
@@ -174,6 +192,7 @@ def cmd_remember(args: argparse.Namespace) -> int:
         days = _parse_days(args.until)
         with db.transaction(args.dsn) as cur:
             row = temporary.put_temporary(cur, content=args.body, actor=ACTOR, days=days)
+        _gate_warnings(row)
         print(f"temporary  {_short(row['context_id'])}  {row['expires_at']}")
         return 0
 
@@ -188,6 +207,7 @@ def cmd_remember(args: argparse.Namespace) -> int:
             delivery=delivery,
             guard_action=args.action,
         )
+    _gate_warnings(row)
     print(f"remembered  {row['memory_id']}")
     return 0
 
@@ -195,6 +215,7 @@ def cmd_remember(args: argparse.Namespace) -> int:
 def cmd_retire(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
         row = memories.retire(cur, _uuid(args.memory_id), reason=args.reason, actor=ACTOR)
+    _gate_warnings(row)
     print(f"retired  {row['memory_id']}")
     return 0
 
@@ -224,6 +245,7 @@ def cmd_pain(args: argparse.Namespace) -> int:
             actor=ACTOR,
             scope_id=_scope(cur, args.scope),
         )
+    _gate_warnings(row)
     matches = row.get("matches", {})
     print(f"pain  {_short(row['ledger_id'])}")
     for name in ("ledger", "traces", "tombstones"):
@@ -429,7 +451,7 @@ def cmd_route(args: argparse.Namespace) -> int:
         if args.remove:
             if args.scope is not None:
                 raise MashuError("--remove cannot be combined with --scope")
-            removed = routing.remove_route(cur, path_prefix=args.remove)
+            removed = routing.remove_route(cur, path_prefix=args.remove, actor=ACTOR)
             print("removed" if removed else "not found")
             return 0
         rows = routing.all_routes(cur)

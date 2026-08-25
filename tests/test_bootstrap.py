@@ -8,6 +8,7 @@ from mashu.tokens import pushed_cost
 DISCIPLINE = "never report a run as finished without the output that proves it"
 LOCAL = "the migration runs before the local server starts"
 PINNED = "delegation goes to the reviewer, not to another writer"
+THIS_WEEK = "the licence server is offline until Thursday"
 
 
 def test_a_rule_for_every_session_reaches_every_session(cur, scope_id):
@@ -78,13 +79,17 @@ def test_the_opening_reports_what_it_cost_and_whether_it_fits(cur, scope_id, mon
     """Being over is a fact about the store, not a reason to serve less of it.
 
     Trimming would drop exactly the standing rules the session was opened
-    with, so the opening says so and stays whole.
+    with, so the opening says so and stays whole. The count covers the
+    temporary contexts too: they are pushed in this same opening, and a total
+    that leaves them out reports an opening smaller than the one being sent.
     """
     memories.remember(cur, content=DISCIPLINE, actor="user")
     memories.remember(cur, content=LOCAL, actor="user", scope_id=scope_id, delivery="scope")
 
+    temporary.put_temporary(cur, content=THIS_WEEK, actor="user", days=3)
+
     got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
-    assert got["tokens"] == pushed_cost([DISCIPLINE, LOCAL])
+    assert got["tokens"] == pushed_cost([DISCIPLINE, LOCAL, THIS_WEEK])
     assert got["capacity"] == 2000
     assert got["over_budget"] is False
 

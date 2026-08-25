@@ -40,7 +40,12 @@ def session_bootstrap(
     cur.execute("SELECT count(*) AS n FROM nomination WHERE status = 'pending'")
     pending = cur.fetchone()["n"]
 
-    tokens = pushed_cost([row["content"] for row in always + scoped])
+    # Everything the session is handed, temporary contexts included (5.2).
+    # Counting only the memories would report an opening smaller than the one
+    # actually sent, which is the number the seat count exists to keep honest.
+    pushed = [row["content"] for row in always + scoped]
+    pushed += [row["content"] for row in contexts]
+    tokens = pushed_cost(pushed)
     ceiling = config.capacity()
 
     events.record(

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from mashu import scopes, temporary
+from mashu import capacity, scopes, temporary
 from mashu.errors import RefusedError
+from mashu.tokens import pushed_cost
 
 WINDOW = "the shared queue is down for maintenance until Friday"
 
@@ -44,6 +45,41 @@ def test_a_scoped_session_still_sees_the_conditions_that_apply_everywhere(cur, s
 
     unrouted = [r["context_id"] for r in temporary.active_temporary(cur)]
     assert unrouted == [anywhere["context_id"]]
+
+
+def test_a_condition_takes_a_seat_while_it_lasts(cur, monkeypatch):
+    """Expiring on its own is why it needs no review, not why it is weightless.
+
+    It is pushed in the same opening as the memories, so leaving it out of the
+    count made the ceiling report a smaller opening than the one being sent.
+    """
+    monkeypatch.setenv("MASHU_CAPACITY", "30")
+    first = temporary.put_temporary(cur, content=WINDOW, actor="user", days=3)
+    assert capacity.bootstrap_totals(cur)["always"] == pushed_cost([WINDOW])
+
+    with pytest.raises(RefusedError, match="seats 30 tokens"):
+        temporary.put_temporary(
+            cur, content="the licence server is offline this week", actor="user", days=3
+        )
+
+    cur.execute("SELECT count(*) AS n FROM temporary_context")
+    assert cur.fetchone()["n"] == 1
+    assert first["context_id"] is not None
+
+
+def test_a_scoped_condition_weighs_on_that_scope(cur, scope_id, monkeypatch):
+    monkeypatch.setenv("MASHU_CAPACITY", "400")
+    temporary.put_temporary(cur, content=WINDOW, actor="user", days=3, scope_id=scope_id)
+    totals = capacity.bootstrap_totals(cur)
+    assert totals["always"] == 0
+    assert totals["scopes"] == {scope_id: pushed_cost([WINDOW])}
+
+
+def test_an_expired_condition_stops_taking_up_room(cur, monkeypatch):
+    monkeypatch.setenv("MASHU_CAPACITY", "400")
+    temporary.put_temporary(cur, content=WINDOW, actor="user", days=3)
+    cur.execute("UPDATE temporary_context SET expires_at = now() - INTERVAL '1 hour'")
+    assert capacity.bootstrap_totals(cur)["always"] == 0
 
 
 def test_a_banned_pattern_is_refused_here_too(cur):

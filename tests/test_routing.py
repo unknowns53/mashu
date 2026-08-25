@@ -50,9 +50,24 @@ def test_routing_a_directory_again_replaces_the_earlier_answer(cur, scope_id):
 
 def test_a_removed_route_leaves_the_directory_unmapped(cur, scope_id):
     routing.add_route(cur, path_prefix="/work/project", scope_id=scope_id, actor="user")
-    assert routing.remove_route(cur, path_prefix="/work/project") is True
-    assert routing.remove_route(cur, path_prefix="/work/project") is False
+    assert routing.remove_route(cur, path_prefix="/work/project", actor="user") is True
+    assert routing.remove_route(cur, path_prefix="/work/project", actor="user") is False
     assert routing.resolve(cur, "/work/project") == (None, False)
+
+
+def test_the_removal_is_filed_under_whoever_removed_it(cur, scope_id):
+    """Reading created_by off the deleted row named the one person who did not.
+
+    The log's job is to say who changed the map, and the author of a route is
+    exactly the party a removal is evidence against.
+    """
+    routing.add_route(cur, path_prefix="/work/project", scope_id=scope_id, actor="the author")
+    routing.remove_route(cur, path_prefix="/work/project", actor="somebody else")
+
+    cur.execute("SELECT actor, detail FROM event_log WHERE event_type = 'route_removed'")
+    row = cur.fetchone()
+    assert row["actor"] == "somebody else"
+    assert row["detail"]["path_prefix"] == "/work/project"
 
 
 def test_one_spelling_per_directory(cur, scope_id):

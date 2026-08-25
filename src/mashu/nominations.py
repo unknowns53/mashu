@@ -19,10 +19,42 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import capacity, events, redact
+from mashu import capacity, config, events, match, redact
 from mashu.errors import MashuError, RefusedError
 
 KINDS = ("incident", "rederivation", "user_explicit")
+
+#: What the ledger records when an agent carries an instruction in (5.1). The
+#: wording is aimed at the person reviewing it: what is on file is that an
+#: agent said this was asked for, which is a different fact from its having
+#: been asked for.
+CLAIMED_WHAT = "a user instruction carried by an agent; confirm before it stands"
+
+_TOMBSTONE_NOTE = (
+    "a retired memory already covers this; its retire reason is the answer. "
+    "No nomination was created. If the retirement itself is wrong, that is a "
+    "human decision to make with the reason in view (mashu remember)."
+)
+
+
+def validate_evidence(cur: psycopg.Cursor, evidence: list[UUID]) -> None:
+    """Refuse evidence that names nothing, in Python before the trigger does.
+
+    The database enforces this too, and that is the enforcement that counts.
+    Doing it here as well is only so a caller gets a sentence naming the
+    missing ids instead of a raised plpgsql exception with a transaction
+    already poisoned behind it.
+    """
+    if not evidence:
+        raise MashuError("a nomination without evidence is a suggestion, and those are not kept")
+    if any(item is None for item in evidence):
+        raise MashuError("evidence contains a NULL element")
+    cur.execute("SELECT ledger_id FROM ledger WHERE ledger_id = ANY(%s)", (list(evidence),))
+    present = {row["ledger_id"] for row in cur.fetchall()}
+    missing = [item for item in evidence if item not in present]
+    if missing:
+        named = ", ".join(str(item) for item in missing)
+        raise MashuError(f"evidence names ledger rows that do not exist: {named}")
 
 
 def create_nomination(
@@ -37,8 +69,7 @@ def create_nomination(
     """File a candidate. The evidence array is why it is allowed to be one."""
     if kind not in KINDS:
         raise MashuError(f"unknown nomination kind '{kind}' (expected one of {', '.join(KINDS)})")
-    if not evidence:
-        raise MashuError("a nomination without evidence is a suggestion, and those are not kept")
+    validate_evidence(cur, list(evidence))
     cur.execute(
         """
         INSERT INTO nomination (content, scope_id, kind, evidence, created_by)
@@ -56,6 +87,78 @@ def create_nomination(
         detail={"kind": kind, "evidence": [str(e) for e in evidence]},
     )
     return row
+
+
+def nominate_user_explicit(
+    cur: psycopg.Cursor, *, content: str, actor: str, scope_id: UUID | None = None
+) -> dict[str, Any]:
+    """Carry an instruction an agent says it was given, as far as the queue.
+
+    The third admission path (5.1), and it stops here. An agent reporting that
+    the user asked for something cannot distinguish that sentence from one
+    printed in a document it happened to be reading, and neither can this
+    layer, so the claim is filed as a claim: a 'claimed' ledger row naming the
+    agent that carried it, and a candidate a person still has to confirm. The
+    only route that skips the queue is somebody typing `mashu remember`.
+    """
+    verdict = redact.check(content)
+    if not verdict.allowed:
+        raise RefusedError(verdict.reason())
+
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(%s, %s)", (capacity.LOCK_NAMESPACE, capacity.LOCK_PAIN)
+    )
+
+    result: dict[str, Any] = {
+        "ledger_id": None,
+        "nomination": None,
+        "nomination_existing": False,
+        "tombstone_suppressed": False,
+        "unchecked": verdict.unchecked,
+    }
+    if verdict.malformed:
+        result["malformed"] = verdict.malformed
+
+    threshold = config.match_threshold()
+
+    # Retired knowledge outranks a relayed instruction, the same way it
+    # outranks a reported pain. Letting this path through would be the way
+    # round the refutation: an agent that read the withdrawn claim somewhere
+    # can put it back in front of a reviewer with the reason left behind.
+    tombstones = match.similar_tombstones(cur, content)
+    if tombstones and tombstones[0]["score"] >= threshold:
+        result["tombstone_suppressed"] = True
+        result["matches"] = {"tombstones": tombstones}
+        result["note"] = _TOMBSTONE_NOTE
+        return result
+
+    waiting = match.similar_pending_nominations(cur, content, limit=1)
+    if waiting and waiting[0]["score"] >= threshold:
+        result["nomination"] = waiting[0]
+        result["nomination_existing"] = True
+        return result
+
+    cur.execute(
+        """
+        INSERT INTO ledger (kind, what, prevention, scope_id, created_by)
+        VALUES ('claimed', %s, %s, %s, %s)
+        RETURNING ledger_id
+        """,
+        (CLAIMED_WHAT, content, scope_id, actor),
+    )
+    ledger_id = cur.fetchone()["ledger_id"]
+    events.record(cur, "pain_recorded", actor, ledger_id=ledger_id, detail={"kind": "claimed"})
+
+    result["ledger_id"] = ledger_id
+    result["nomination"] = create_nomination(
+        cur,
+        content=content,
+        kind="user_explicit",
+        evidence=[ledger_id],
+        actor=actor,
+        scope_id=scope_id,
+    )
+    return result
 
 
 def pending_nominations(cur: psycopg.Cursor) -> list[dict[str, Any]]:
@@ -93,13 +196,27 @@ def _evidence_rows(cur: psycopg.Cursor, evidence: list[UUID]) -> list[dict[str, 
     return [by_id[e] for e in evidence if e in by_id]
 
 
+#: What both decision paths say when the row moved under them. The message is
+#: one string because the two ways of losing the race — reading a decided row,
+#: and updating a row somebody decided in between — are the same event to
+#: whoever pressed the key.
+NOT_PENDING = "nomination is no longer pending"
+
+
 def _require_pending(cur: psycopg.Cursor, nomination_id: UUID) -> dict[str, Any]:
-    cur.execute("SELECT * FROM nomination WHERE nomination_id = %s", (nomination_id,))
+    """The row, locked for this transaction, or an error saying it is decided.
+
+    FOR UPDATE because admitting and declining both read the row, act on what
+    they read, and write. Two reviewers on the same nomination would otherwise
+    both see 'pending': one admits, the other declines, and the queue ends up
+    holding a decision nobody made in full.
+    """
+    cur.execute("SELECT * FROM nomination WHERE nomination_id = %s FOR UPDATE", (nomination_id,))
     row = cur.fetchone()
     if row is None:
         raise MashuError(f"no nomination {nomination_id}")
     if row["status"] != "pending":
-        raise MashuError(f"nomination {nomination_id} was already {row['status']}")
+        raise MashuError(f"{NOT_PENDING}: it was already {row['status']}")
     return row
 
 
@@ -157,10 +274,12 @@ def admit(
         """
         UPDATE nomination
         SET status = 'admitted', memory_id = %s, decided_by = %s, decided_at = now()
-        WHERE nomination_id = %s
+        WHERE nomination_id = %s AND status = 'pending'
         """,
         (memory["memory_id"], actor, nomination_id),
     )
+    if cur.rowcount != 1:
+        raise MashuError(NOT_PENDING)
 
     events.record(
         cur,
@@ -194,11 +313,13 @@ def decline(cur: psycopg.Cursor, nomination_id: UUID, *, actor: str, reason: str
         """
         UPDATE nomination
         SET status = 'declined', decision_reason = %s, decided_by = %s, decided_at = now()
-        WHERE nomination_id = %s
+        WHERE nomination_id = %s AND status = 'pending'
         RETURNING *
         """,
         (reason, actor, nomination_id),
     )
+    if cur.rowcount != 1:
+        raise MashuError(NOT_PENDING)
     row = cur.fetchone()
     events.record(
         cur,

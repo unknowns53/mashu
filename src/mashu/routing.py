@@ -56,13 +56,18 @@ def add_route(
     return row
 
 
-def remove_route(cur: psycopg.Cursor, *, path_prefix: str) -> bool:
+def remove_route(cur: psycopg.Cursor, *, path_prefix: str, actor: str) -> bool:
+    """Unmap a directory, recording who unmapped it.
+
+    The actor is the remover, not the row's author. Reading the deleted row's
+    created_by back into the event filed the removal under whoever wrote the
+    route, which is the one name the log can be sure did not do this.
+    """
     prefix = normalise(path_prefix)
-    cur.execute("DELETE FROM route WHERE path_prefix = %s RETURNING created_by", (prefix,))
-    row = cur.fetchone()
-    if row is None:
+    cur.execute("DELETE FROM route WHERE path_prefix = %s", (prefix,))
+    if cur.rowcount == 0:
         return False
-    events.record(cur, "route_removed", row["created_by"], detail={"path_prefix": prefix})
+    events.record(cur, "route_removed", actor, detail={"path_prefix": prefix})
     return True
 
 

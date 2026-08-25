@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from mashu import match, memories, scopes
-from mashu.errors import MashuError
+from mashu.errors import MashuError, RefusedError
 
 RULE = "never report a run as finished without the output that proves it"
 REVISED = "never report a run as finished without pasting the output that proves it"
@@ -36,6 +36,44 @@ def test_retiring_needs_a_reason_because_the_reason_is_all_that_survives(cur):
     assert retired["status"] == "retired"
     assert retired["retire_reason"] == WITHDRAWN
     assert retired["retired_at"] is not None
+
+
+def test_a_reason_carrying_a_banned_pattern_does_not_retire_anything(cur):
+    """The reason is the one field here that is delivered.
+
+    It comes back from every later match against this tombstone, so an
+    identifier written into it travels further than one written into the
+    content it replaces — and until now it was the only text entering the
+    store without passing the gate.
+    """
+    memory = memories.remember(cur, content=RULE, actor="user")
+    with pytest.raises(RefusedError):
+        memories.retire(
+            cur, memory["memory_id"], reason="superseded by SECRETMARKER9", actor="user"
+        )
+
+    assert memories.get_memory(cur, memory["memory_id"])["status"] == "active"
+    assert match.similar_tombstones(cur, RULE) == []
+
+
+def test_the_gate_says_when_it_did_not_run(cur, monkeypatch, tmp_path):
+    """A missing list is not a pass, and a broken line in one is not either.
+
+    Both states let content through, which is exactly what a clean check looks
+    like from the outside, so the result has to carry the difference.
+    """
+    memory = memories.remember(cur, content=RULE, actor="user")
+    assert memory["unchecked"] is False
+    assert "malformed" not in memory
+
+    broken = tmp_path / "broken-patterns"
+    broken.write_text("SECRETMARKER\\d+\n(unclosed\n", encoding="utf-8")
+    monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(broken))
+    retired = memories.retire(cur, memory["memory_id"], reason=WITHDRAWN, actor="user")
+    assert retired["malformed"] == 1
+
+    monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(tmp_path / "absent"))
+    assert memories.remember(cur, content=REVISED, actor="user")["unchecked"] is True
 
 
 def test_a_retired_rule_answers_with_why_it_was_withdrawn_and_never_with_itself(cur):

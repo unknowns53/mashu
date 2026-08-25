@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mashu import ledger
+from mashu import ledger, memories, nominations
 from mashu.errors import MashuError, RefusedError
 
 # Near-identical text is how the suite says "the same hole"; text with no
@@ -48,6 +48,35 @@ def test_the_second_friction_cites_both_times(cur):
     nomination = second["nomination"]
     assert nomination["kind"] == "rederivation"
     assert nomination["evidence"] == [first["ledger_id"], second["ledger_id"]]
+
+
+def test_a_statement_is_not_the_other_half_of_a_rederivation(cur):
+    """Only a friction or a trace can be the prior (4.1).
+
+    An explicit or claimed row is somebody stating a rule, not anybody having
+    worked something out twice. Counting them would let a single look-up next
+    to an existing statement call itself a second derivation, which is the
+    standard in section 3 being satisfied by paraphrase. The rule matters most
+    where the statement is alive: the memory here is active, so there is no
+    tombstone doing the refusing.
+    """
+    memories.remember(cur, content=HOLE, actor="user")
+    got = report(cur, "friction", SAME_HOLE)
+
+    assert got["nomination"] is None
+    assert got["tombstone_suppressed"] is False
+    # The statement is still shown; only the choice of prior is narrowed.
+    assert [row["kind"] for row in got["matches"]["ledger"]] == ["explicit"]
+
+    # The same holds for a claimed row. Its own candidate is taken out of the
+    # queue first, so what is left to match against is the statement alone.
+    claimed = nominations.nominate_user_explicit(cur, content=OTHER_HOLE, actor="agent")
+    nominations.decline(
+        cur, claimed["nomination"]["nomination_id"], actor="user", reason="said in passing"
+    )
+    again = report(cur, "friction", OTHER_HOLE)
+    assert again["nomination"] is None
+    assert [row["kind"] for row in again["matches"]["ledger"]] == ["claimed"]
 
 
 def test_a_different_friction_is_still_a_first_time(cur):

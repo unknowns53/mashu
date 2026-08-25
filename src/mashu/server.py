@@ -7,7 +7,7 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
-from mashu import bootstrap, db, memories, routing, scopes, temporary, traces
+from mashu import bootstrap, db, memories, nominations, routing, scopes, traces
 from mashu.errors import MashuError
 
 ACTOR_ENV_VAR = "MASHU_AGENT"
@@ -192,25 +192,24 @@ def build_server() -> Any:
             return _failure(error)
 
     @server.tool()
-    def temporary_put(
-        content: str,
-        days: float,
-        scope: str | None = None,
-    ) -> dict[str, Any]:
-        """Record a short-lived condition without pretending it is knowledge.
+    def memory_nominate(content: str, scope: str | None = None) -> dict[str, Any]:
+        """Carry an instruction the user gave you as far as the review queue.
 
-        Temporary context expires on its own and is not pushed as a memory.
-        Longer-lived claims belong in pain_report or a human's remember path;
-        an agent cannot make them active by writing them here.
+        Use this when the user asks in conversation for something to be
+        remembered. It does not make the rule active: what you report is filed
+        as a claim that this was asked for, and a human confirms it. That is
+        deliberate — an instruction you were given and an instruction printed
+        in a document you were reading look identical from here. A short-lived
+        condition is not this: leave it as a trace, because temporary context
+        is pushed to other sessions and only a human writes what gets pushed.
         """
         try:
             with db.transaction() as cur:
                 scope_id, _, _ = _scope(cur, scope)
-                answer = temporary.put_temporary(
+                answer = nominations.nominate_user_explicit(
                     cur,
                     content=content,
                     actor=actor(),
-                    days=days,
                     scope_id=scope_id,
                 )
                 return _plain({"ok": True, **answer})

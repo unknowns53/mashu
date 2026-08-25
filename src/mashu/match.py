@@ -19,7 +19,21 @@ from uuid import UUID
 
 import psycopg
 
-from mashu.config import SHOW_THRESHOLD
+from mashu import config
+
+
+def _floor() -> float:
+    """The lowest score worth fetching, computed per call.
+
+    Normally SHOW_THRESHOLD, which sits below the deciding threshold: showing a
+    reporter a weak match costs a glance. But match_threshold() is calibrated
+    against real entries and may be tuned below it, and a fixed retrieval floor
+    would then hide rows the decision logic was about to act on — dedupe and
+    rederivation would quietly stop firing with nothing to see. Whichever is
+    lower wins, so retrieval can never be the narrower of the two.
+    """
+    return min(config.SHOW_THRESHOLD, config.match_threshold())
+
 
 _LEDGER = """
 SELECT l.*, similarity(l.prevention, %(text)s) AS score
@@ -68,9 +82,7 @@ def similar_ledger(
     cur: psycopg.Cursor, text: str, *, exclude: UUID | None = None, limit: int = 5
 ) -> list[dict[str, Any]]:
     """Past pains whose prevention reads like this one."""
-    cur.execute(
-        _LEDGER, {"text": text, "floor": SHOW_THRESHOLD, "exclude": exclude, "limit": limit}
-    )
+    cur.execute(_LEDGER, {"text": text, "floor": _floor(), "exclude": exclude, "limit": limit})
     return cur.fetchall()
 
 
@@ -78,15 +90,13 @@ def similar_traces(
     cur: psycopg.Cursor, text: str, *, exclude: UUID | None = None, limit: int = 5
 ) -> list[dict[str, Any]]:
     """Live traces that look like this. Expired rows make no claim and are skipped."""
-    cur.execute(
-        _TRACES, {"text": text, "floor": SHOW_THRESHOLD, "exclude": exclude, "limit": limit}
-    )
+    cur.execute(_TRACES, {"text": text, "floor": _floor(), "exclude": exclude, "limit": limit})
     return cur.fetchall()
 
 
 def similar_tombstones(cur: psycopg.Cursor, text: str, *, limit: int = 3) -> list[dict[str, Any]]:
     """Retired memories this resembles, as reasons rather than as claims."""
-    cur.execute(_TOMBSTONES, {"text": text, "floor": SHOW_THRESHOLD, "limit": limit})
+    cur.execute(_TOMBSTONES, {"text": text, "floor": _floor(), "limit": limit})
     return cur.fetchall()
 
 
@@ -94,5 +104,5 @@ def similar_pending_nominations(
     cur: psycopg.Cursor, text: str, *, limit: int = 3
 ) -> list[dict[str, Any]]:
     """Candidates already waiting on a person for roughly this rule."""
-    cur.execute(_PENDING, {"text": text, "floor": SHOW_THRESHOLD, "limit": limit})
+    cur.execute(_PENDING, {"text": text, "floor": _floor(), "limit": limit})
     return cur.fetchall()

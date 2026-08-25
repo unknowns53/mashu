@@ -24,22 +24,53 @@ from mashu import config
 from mashu.errors import MashuError
 from mashu.tokens import pushed_cost
 
+#: The advisory lock namespace this module and the pain pipeline share. Two
+#: classes, taken for the whole transaction so they hold until the write they
+#: guard commits.
+LOCK_NAMESPACE = 271828
+#: Serialises the seat check against every other seat check. Without it two
+#: sessions read the same totals, both find room for the last seat, and both
+#: sit down: the ceiling is checked twice and enforced never.
+LOCK_ADMISSION = 1
+#: Serialises the pain pipeline: ledger insert, matching, and the nomination
+#: that may follow. Held by ledger.report_pain and by the agent-carried
+#: instruction path, which are the two writers that read the queue to decide
+#: whether to add to it.
+LOCK_PAIN = 2
+
 _PUSHED = """
 SELECT delivery, scope_id, content FROM memory
 WHERE status = 'active' AND delivery IN ('always', 'scope')
   AND (%(exclude)s::uuid IS NULL OR memory_id <> %(exclude)s::uuid)
 """
 
+# Temporary contexts ride in the same opening (7, 5.2). Expiring on their own
+# is a reason they need no review, not a reason they are weightless while they
+# are being pushed. An unscoped one reaches every session, so it lands in the
+# always bucket by the same rule the memories use.
+_PUSHED_TEMPORARY = """
+SELECT scope_id, content FROM temporary_context WHERE expires_at > now()
+"""
+
 
 def _totals(cur: psycopg.Cursor, exclude: UUID | None) -> dict[str, Any]:
-    cur.execute(_PUSHED, {"exclude": exclude})
     always: list[str] = []
     scoped: dict[Any, list[str]] = {}
+
+    cur.execute(_PUSHED, {"exclude": exclude})
     for row in cur.fetchall():
         if row["delivery"] == "always":
             always.append(row["content"])
         else:
             scoped.setdefault(row["scope_id"], []).append(row["content"])
+
+    cur.execute(_PUSHED_TEMPORARY)
+    for row in cur.fetchall():
+        if row["scope_id"] is None:
+            always.append(row["content"])
+        else:
+            scoped.setdefault(row["scope_id"], []).append(row["content"])
+
     scopes = {scope_id: pushed_cost(contents) for scope_id, contents in scoped.items()}
     always_cost = pushed_cost(always)
     return {
@@ -85,6 +116,13 @@ def check_admission(
     every edit to a full store would be refused for the space it already
     occupies.
     """
+    # Before reading anything. The gap between deciding there is room and
+    # taking it is where two writers both fit into one seat, and every write
+    # that changes the opening comes through here inside the caller's single
+    # transaction, so holding until commit closes the gap rather than narrowing
+    # it.
+    cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (LOCK_NAMESPACE, LOCK_ADMISSION))
+
     cost = pushed_cost([content])
     ceiling = config.capacity()
     totals = _totals(cur, exclude_memory_id)

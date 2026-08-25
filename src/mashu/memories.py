@@ -19,7 +19,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import capacity, events, redact
+from mashu import capacity, events, nominations, redact
 from mashu.errors import MashuError, RefusedError
 
 DELIVERIES = ("always", "scope", "guard")
@@ -74,6 +74,7 @@ def remember(
     ledger_id = cur.fetchone()["ledger_id"]
     events.record(cur, "pain_recorded", actor, ledger_id=ledger_id, detail={"kind": "explicit"})
 
+    nominations.validate_evidence(cur, [ledger_id])
     cur.execute(
         """
         INSERT INTO memory (content, scope_id, delivery, guard_action, evidence, created_by)
@@ -95,7 +96,21 @@ def remember(
         ledger_id=ledger_id,
         detail={"delivery": delivery},
     )
-    return {**memory, "unchecked": verdict.unchecked}
+    return {**memory, **_gate_report(verdict)}
+
+
+def _gate_report(verdict: redact.Verdict) -> dict[str, Any]:
+    """What the caller is told about the gate itself, beside the result.
+
+    'unchecked' always travels, because a missing list is not a pass. The
+    malformed count only appears when there is one, so a clean run stays
+    silent and a broken line in the list is not something the reader has to
+    notice the absence of.
+    """
+    report: dict[str, Any] = {"unchecked": verdict.unchecked}
+    if verdict.malformed:
+        report["malformed"] = verdict.malformed
+    return report
 
 
 def get_memory(cur: psycopg.Cursor, memory_id: UUID) -> dict[str, Any] | None:
@@ -118,10 +133,18 @@ def retire(cur: psycopg.Cursor, memory_id: UUID, *, reason: str, actor: str) -> 
     The reason is required because it is the whole of what a later reader
     gets. Section 5.3 hands back why the claim was withdrawn and never the
     claim itself, so a retirement with no reason silently deletes the warning.
+
+    The reason goes through the gate for the same reason: it is the one field
+    here that is delivered, coming back from every later match against this
+    tombstone, so an identifier written into it travels further than one
+    written into the content it replaces.
     """
     _require_active(cur, memory_id)
     if not reason or not reason.strip():
         raise MashuError("retiring needs a reason: the reason is what later readers are given")
+    verdict = redact.check(reason)
+    if not verdict.allowed:
+        raise RefusedError(verdict.reason())
     cur.execute(
         """
         UPDATE memory
@@ -133,7 +156,7 @@ def retire(cur: psycopg.Cursor, memory_id: UUID, *, reason: str, actor: str) -> 
     )
     row = cur.fetchone()
     events.record(cur, "memory_retired", actor, memory_id=memory_id, detail={"reason": reason})
-    return row
+    return {**row, **_gate_report(verdict)}
 
 
 def revise(

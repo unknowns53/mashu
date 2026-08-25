@@ -23,10 +23,13 @@ CREATE TABLE route (
 );
 
 -- One row per pain (4.1). Append-only: evidence that has been cited must
--- keep existing, so nothing here is ever updated or deleted.
+-- keep existing, so nothing here is ever updated or deleted. 'explicit' is a
+-- person recording by their own hand and 'claimed' is an agent relaying an
+-- instruction it says it was given; both are statements rather than pains,
+-- which is why 4.1 keeps them out of the rederivation match.
 CREATE TABLE ledger (
     ledger_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    kind       TEXT NOT NULL CHECK (kind IN ('incident', 'friction', 'explicit')),
+    kind       TEXT NOT NULL CHECK (kind IN ('incident', 'friction', 'explicit', 'claimed')),
     what       TEXT NOT NULL,
     prevention TEXT NOT NULL,
     scope_id   UUID REFERENCES scope(scope_id),
@@ -128,6 +131,38 @@ CREATE TABLE event_log (
     detail        JSONB,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Evidence is checked where it is written, not where it is read. The array is
+-- an untyped UUID[] rather than a foreign key because one row cites several
+-- pains, so nothing in the column definition stops a fabricated or NULL id
+-- from being stored. A row whose evidence points at nothing looks exactly like
+-- a properly supported one until somebody opens it, which is the point at
+-- which the support was supposed to be checked. The ledger is append-only and
+-- never deleted, so an id that exists at write time exists for good.
+CREATE FUNCTION validate_evidence() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    absent BIGINT;
+BEGIN
+    IF array_position(NEW.evidence, NULL) IS NOT NULL THEN
+        RAISE EXCEPTION 'evidence contains a NULL element';
+    END IF;
+    SELECT count(*) INTO absent
+    FROM unnest(NEW.evidence) AS cited(ledger_id)
+    WHERE NOT EXISTS (
+        SELECT 1 FROM ledger l WHERE l.ledger_id = cited.ledger_id
+    );
+    IF absent > 0 THEN
+        RAISE EXCEPTION 'evidence names % ledger row(s) that do not exist', absent;
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE TRIGGER nomination_evidence_exists
+    BEFORE INSERT OR UPDATE ON nomination
+    FOR EACH ROW EXECUTE FUNCTION validate_evidence();
+CREATE TRIGGER memory_evidence_exists
+    BEFORE INSERT OR UPDATE ON memory
+    FOR EACH ROW EXECUTE FUNCTION validate_evidence();
 
 -- Append-only is enforced by the database, not promised by the code.
 CREATE FUNCTION refuse_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
