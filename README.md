@@ -123,6 +123,29 @@ Agent 名は `--agent` または環境変数 `MASHU_AGENT` で渡す。
 
 蔵に届かないときは通す。接続できないことは、いま下そうとしている判断についての証拠ではない。
 
+発火は行為ごとに一度だが、数え直しの単位はセッションではなく**圧縮の世代**である。圧縮を跨ぐと session_id は変わらないまま、門が書き込んだ文脈のほうが落ちる。マーカーだけが残って門が閉じたままになるので、`transcript_path` の中の `isCompactSummary` を数えて世代を鍵に混ぜている。
+
+### 圧縮のあとに配り直す
+
+`tools/sessionstart_guard.py` を SessionStart フックの `compact` matcher に入れると、圧縮で落ちた開始時の配信が戻る。
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [{"type": "command", "command": "/path/to/mashu/tools/sessionstart_guard.py"}]
+      }
+    ]
+  }
+}
+```
+
+これが要るのは、再配信する経路が他に無いからである。`session_bootstrap` は契約上セッションに一度しか呼ばれず、圧縮しても session_id は変わらず、v2 には探しに行くための検索が無い。つまり圧縮後のセッションは知識を持たず、持っていないことにも気づけない。
+
+scope の側は作業ディレクトリから解決されるので、フックは payload の `cwd` へ移ってから引く。継承した cwd のまま引くと、always だけが戻って `scoped` が空になり、その出力は「この scope には何も無い」と読める。黙って半分だけ配り直すほうが、配り直さないより悪い。
+
 ## 書き込みの規律
 
 - 個人識別情報（本名、所属、ホームディレクトリを含む絶対パス）を含む書き込みは入口で拒否される。パターン一覧は commit hook と共用のリポジトリ外ファイル（`MASHU_BANNED_PATTERNS` で指定可）。一覧が見つからないときは「合格」ではなく「検査できなかった」と報告される

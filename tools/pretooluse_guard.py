@@ -13,11 +13,13 @@ came hours later with an answer already in hand from a file that is always in
 context and never says it is out of date. What is in context and what is in
 front of a judgement are different things.
 
-Fires once per session per action. Every occurrence would be a gate nobody
-reads, which is the failure 16.3 and 20.3 both name in their own screens, and
-the second delegation of a session is taken with the first one's answer still
-close. Every firing is logged by `mashu guard`, so how often this is right is
-a question the ledger can answer rather than one to reason about.
+Fires once per action per compaction generation. Every occurrence would be a
+gate nobody reads, which is the failure 16.3 and 20.3 both name in their own
+screens, and the second delegation of a session is taken with the first one's
+answer still close. But "still close" is exactly what a compaction ends, so
+the count restarts there rather than running to the end of the session id.
+Every firing is logged by `mashu guard`, so how often this is right is a
+question the ledger can answer rather than one to reason about.
 """
 
 from __future__ import annotations
@@ -39,6 +41,37 @@ ACTIONS = {
 
 MARKERS = pathlib.Path(os.environ.get("TMPDIR", "/tmp")) / "mashu-guard"
 
+#: What a completed compaction leaves in the transcript. Matched as a raw
+#: substring: the line is one JSON object per transcript entry and this key is
+#: written without spaces, so parsing every line to find it would cost the
+#: whole file for one boolean.
+COMPACTED = '"isCompactSummary":true'
+
+
+def generation(transcript: str | None) -> int:
+    """How many times this session has been compacted.
+
+    Firing once per session assumes the first firing is still in the context
+    when the second decision arrives. Compaction is exactly where that stops
+    being true: the session id does not change, so the marker survives, while
+    the conversation the guard wrote into is dropped. The gate then stays shut
+    over a context that no longer holds what it said, which is the failure
+    this hook exists to prevent, reintroduced by its own bookkeeping.
+
+    Counting compactions turns the marker into one per generation. A session
+    that has never been compacted is generation 0 and behaves as before.
+    """
+    if not transcript:
+        return 0
+    try:
+        with open(transcript, encoding="utf-8", errors="replace") as handle:
+            return sum(1 for line in handle if COMPACTED in line)
+    except OSError:
+        # An unreadable transcript is not evidence that nothing was dropped,
+        # but neither is it grounds to fire on every call. Hold generation 0
+        # and behave as this hook did before.
+        return 0
+
 
 def main() -> int:
     try:
@@ -51,7 +84,7 @@ def main() -> int:
         return 0
 
     session = str(event.get("session_id") or "unknown")
-    marker = MARKERS / f"{session}.{action}"
+    marker = MARKERS / f"{session}.{action}.{generation(event.get('transcript_path'))}"
     if marker.exists():
         return 0
 
