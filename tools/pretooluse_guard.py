@@ -81,7 +81,6 @@ def main() -> int:
 
     lines = [f"Mashu holds this about {action}. Read it, then decide again.", ""]
     for row in pinned:
-        lines.append(f"[{row['type']}] {row['title']}")
         lines.append(row["content"])
         lines.append("")
     lines.append(
