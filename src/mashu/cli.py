@@ -1031,12 +1031,14 @@ def cmd_bootstrap(args) -> int:
     for label, rows in (("pushed at session start", got.startup), ("for this scope", got.scoped)):
         print(f"\n{label} ({len(rows)})")
         for row in rows:
-            body = row["content"] if row["content"] is not None else "(trimmed; use memory_get)"
-            print(f"  {str(row['memory_id'])[:8]}  {row['title']}")
+            cut = row["content"] is None
+            line = row["title"] if cut else row["content"]
+            mark = "  (trimmed; use memory_get)" if cut else ""
+            print(f"  {_short(row['memory_id'])}{mark}")
+            print(_wrap(line, indent="      "))
             note = _pending_note(row)
             if note:
                 print(_wrap(note, indent="      "))
-            print(f"      {body}")
 
     for name, part in (("capture", got.health), ("review", got.review), ("upkeep", got.upkeep)):
         if part.get("warning"):

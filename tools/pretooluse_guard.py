@@ -84,7 +84,9 @@ def main() -> int:
         lines.append(f"[{row['type']}] {row['title']}")
         lines.append(row["content"])
         lines.append("")
-    lines.append("If it still points the same way, make the same call again and it will go through.")
+    lines.append(
+        "If it still points the same way, make the same call again and it will go through."
+    )
 
     print(
         json.dumps(

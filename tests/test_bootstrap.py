@@ -112,7 +112,7 @@ def test_the_startup_pack_ignores_the_scope_filter(cur, scope_id, push):
     push(MemoryType.PREFERENCE, "reply language", "answer in Japanese")
     elsewhere = store.create_scope(cur, name="another scope", actor="user")
     got = bootstrap.session_bootstrap(cur, actor="claude", scopes=[elsewhere])
-    assert [row["title"] for row in got.startup] == ["reply language"]
+    assert [row["content"] for row in got.startup] == ["answer in Japanese"]
 
 
 def test_a_memory_with_no_current_truth_is_not_pushed(cur, scope_id, write):
@@ -153,7 +153,38 @@ def test_the_push_takes_the_directive_and_leaves_the_reasons_behind(cur, push):
 def test_without_a_directive_the_whole_content_is_pushed(cur, push):
     push(MemoryType.PREFERENCE, "reply language", "answer in Japanese")
     got = bootstrap.session_bootstrap(cur, actor="claude")
-    assert got.startup[0]["shortened"] is False
+    assert got.startup[0]["content"] == "answer in Japanese"
+    assert "shortened" not in got.startup[0]
+
+
+def test_a_pushed_row_carries_only_the_keys_that_say_something(cur, push):
+    """Two thirds of the opening was scaffolding, and the ceiling is a gate.
+
+    Thirteen keys were going out around one sentence: three UUIDs, two fields
+    holding the same value on every row of the pack, and five nulls. Because
+    21.2 spends this budget deciding which standing rules a session is told,
+    scaffolding does not merely cost — it crowds out the rules themselves.
+    """
+    push(
+        MemoryType.PREFERENCE,
+        "measurement discipline",
+        "Say what each branch will lead to before starting, and why.",
+        directive="Say what each branch will lead to before starting.",
+    )
+    row = bootstrap.session_bootstrap(cur, actor="claude").startup[0]
+
+    assert set(row) == {"memory_id", "content", "shortened"}
+    # The title said the same thing as the directive and was sent beside it.
+    assert "title" not in row
+
+
+def test_a_row_whose_body_was_trimmed_keeps_its_title_to_be_named_by(cur, push):
+    """The title's job in the payload is to stand in for a content that is gone."""
+    push(MemoryType.PREFERENCE, "reply language", "answer in Japanese " * 40)
+    got = bootstrap.session_bootstrap(cur, actor="claude", budget=300)
+    assert got.trimmed
+    assert got.startup[0]["content"] is None
+    assert got.startup[0]["title"] == "reply language"
 
 
 # --------------------------------------------------------------------------
@@ -206,7 +237,7 @@ def test_the_scoped_material_gives_up_its_body_before_the_startup_pack(cur, scop
     push(MemoryType.PREFERENCE, "reply language", "answer in Japanese " * 40)
     state, _ = write(MemoryType.STATE, "where the analysis stands", "the third run " * 40)
 
-    got = bootstrap.session_bootstrap(cur, actor="claude", scopes=[scope_id], budget=650)
+    got = bootstrap.session_bootstrap(cur, actor="claude", scopes=[scope_id], budget=500)
     assert state in got.trimmed
     assert all(row["memory_id"] not in got.trimmed for row in got.startup)
 
