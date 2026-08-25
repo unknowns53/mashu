@@ -1,9 +1,9 @@
 """Connection handling.
 
-One rule holds throughout the layer: a knowledge state change and the event_log
-rows that describe it belong to the same transaction (specification 26). So the
-store takes a cursor rather than opening its own connection, and the caller
-decides where the transaction boundary sits.
+One rule holds throughout the layer: a change and the event_log rows that
+describe it belong to the same transaction. So every module takes a cursor
+rather than opening its own connection, and the caller decides where the
+transaction boundary sits.
 """
 
 from __future__ import annotations
@@ -33,8 +33,8 @@ def connect(conninfo: str | None = None) -> psycopg.Connection:
 def transaction(conninfo: str | None = None) -> Iterator[psycopg.Cursor]:
     """Yield a cursor inside one transaction, committing on a clean exit.
 
-    Any exception rolls the whole thing back, which is what keeps a partially
-    switched pointer or an event row without its change from ever landing.
+    Any exception rolls the whole thing back, which is what keeps a memory
+    without its revision, or an event row without its change, from landing.
     """
     with connect(conninfo) as conn, conn.transaction(), conn.cursor() as cur:
         yield cur

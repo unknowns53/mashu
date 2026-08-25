@@ -1,17 +1,13 @@
 [project]
 name = "mashu"
-version = "0.0.1"
-description = "Shared agent memory layer: a version-managed external knowledge state for AI agents"
+version = "2.0.0"
+description = "Shared agent knowledge state that keeps only what forgetting has provably cost"
 requires-python = ">=3.11"
 dependencies = [
     "psycopg[binary]>=3.2",
-    "pydantic>=2.9",
 ]
 
 [project.optional-dependencies]
-embed = [
-    "sentence-transformers>=3.0",
-]
 mcp = [
     "mcp>=1.2",
 ]

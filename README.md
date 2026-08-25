@@ -1,333 +1,117 @@
 # Mashu（摩周）
 
-Mashu は、複数の AI Agent が共有する外部 Knowledge State だ。知識は Version ごとに管理する。
+Mashu は、複数の AI Agent が共有する外部 Knowledge State だ。v2 の入口はひとつしかない。**忘れたことに実際の損害が出た、と実証されたものだけが知識になる。**「覚えておくと便利そう」なものは入らない。
 
-Agent の長期記憶は外に置く。Agent は各セッションで Mashu から知識を読む。
+名前は北海道の摩周湖に由来する。設計判断とその理由は [`docs/mashu-v2.md`](docs/mashu-v2.md) にまとめている。v1 の設計と撤回の記録は [`docs/mashu-mvp.md`](docs/mashu-mvp.md) が保持する。この README は機能と使い方を説明する。
 
-名前は北海道の摩周湖に由来する。設計判断とその理由は [`docs/mashu-mvp.md`](docs/mashu-mvp.md) にまとめている。この README では、機能と使い方を説明する。
-
-## 解決対象
-
-- 古い情報が現在情報として利用される
-- 終了済み Task が未完了として扱われる
-- 棄却された仮説が再利用される
-- Agent ごとに認識状態が分かれる
-- 過去の判断理由を追跡できない
-
-## 知識の形
+## 仕組み
 
 ```
-Scope（作業の領域。作成は User のみ）
-  └ Memory Entity（概念。type と title を持つ）
-      └ Memory Version（内容。不変。status と由来を持つ）
+痛み（事故・調べ直し）── pain_report ──▶ 事故台帳（ledger）
+調べて分かったこと ──── trace_put ────▶ 痕跡（trace、30 日で失効）
+                                          │ 照合（pg_trgm）
+                                          ▼
+                                   昇格候補（nomination）
+                                          │ 人が 1 キーで確定
+                                          ▼
+                                   記憶（memory）── 全量 push ──▶ 各セッション
 ```
 
-有効な知識は `entity.active_version` が指す Version 一つだけ。Version は書き換えない。訂正時は新しい Version を作り、active を新しい Version に移す。
+- **実証は三つ。** 事故（誤った作業が出た）は 1 回で、再導出（同じことを調べ直した）は 2 回目で昇格候補になる。User の明示（`mashu remember`）は即時に active になる
+- **再導出の 1 回目は痛みとして自覚されない。** だから走行中の Agent は調べて分かったことを `trace_put` で一行残す。痕跡は知識ではなく、Review も配信もされず 30 日で失効する。2 回目の `pain_report` がそれと照合されたとき、初めて「二度目」が証明される
+- **読む経路はすべて push。** 検索で知識を返すツールは無い。在庫には定員（既定 2000 token）があり、満席での昇格は退役か guard への格下げとセットでないと通らない。定員があるから全量 push が成立する
+- **Agent の書き込みが、人の確定なしに他のセッションへ届く経路は存在しない**
 
-Version の status は 6 種類ある。
+## 配信の三経路
 
-| status | 意味 |
-|---|---|
-| `candidate` | 提案済みだが Review 未通過 |
-| `superseded` | 新しい Version に置き換わった |
-| `disproven` | 誤りだと判明した |
-| `dormant` | 現在は使わないが、将来再評価できる |
-| `rejected` | Review が通さなかった。Agent からは提案できない status |
-| `completed` | Task が終わった |
-
-上は **Version の status** である。Proposal 自身の status は `pending` / `approved` / `declined` / `auto_committed` で、別の語彙を使う。**Version の `rejected` は「その内容は通らなかった」という知識の側の読み**で Layer 3 から返り、**Proposal の `declined` は「その提案は決着した」という手続きの記録**で Review の列に出る。v0.13 まで後者も `rejected` を名乗っており、どちらの表を見ているか分からないと意味が定まらなかった。
-
-## 書き込み
-
-Agent は知識を直接書けない。すべて Proposal として出し、Commit Gate が処理する。
-
-| 区分 | 対象 |
-|---|---|
-| Auto Commit | User が明示した変更（type を問わない）、単純な Task 完了 |
-| Candidate Commit | fact、interpretation、hypothesis、state、および User が明示していない preference |
-| Human Review Required | Active の切替、Disproven 化、Restore、Merge、type の訂正、類似度超過時の Entity 作成 |
-
-User が述べた preference は Auto Commit になる。それ以外の preference は Candidate Commit になる。
-
-## 読み出し
-
-検索結果は三層で返る。
-
-| 層 | 対象 | 渡すもの |
+| delivery | 誰に | いつ |
 |---|---|---|
-| Layer 1 Active | active_version | 本文 |
-| Layer 2 Unreviewed | 未審査の candidate | 本文と `unreviewed` タグ |
-| Layer 3 Retired | superseded を除く退役 Version | title、status、reason。本文は返さない |
+| `always` | 全セッション | 開始時（bootstrap） |
+| `scope` | route が当たるセッション | 開始時（bootstrap） |
+| `guard:<action>` | その行為に至ったセッション | 行為の直前（PreToolUse フック） |
 
-Layer 1 の項目に退役の提案があるときは、本文と一緒に提案者、status、理由も返る。
-
-未審査の候補もタグ付きで本文を渡す。Review が遅れても知識を使える。Layer 2 の上限は合計 1500 token。先頭 1 件だけは上限を超えても通す。
-
-セッション開始時に渡す内容は delivery で決まる。type は使わない。
-
-| delivery | いつ渡すか |
-|---|---|
-| `startup_required` | 全セッションに渡す |
-| `scope_required` | Scope が決まったら渡す |
-| `pull_only` | 検索されたときだけ返す |
-
-渡す内容は、その Version の directive（短形）があれば directive、なければ本文全体。短形は `mashu directive` で後から書ける。書けるのは User だけ。
-
-一件が載せるのは id とその一行だけ。題は本文が上限で削られたときにだけ添える。題と directive はたいてい同じことを言うので、両方送ると二度言うことになる。上限は請求書ではなく門なので、何も言っていない欄が予算を食うと、削られるのは規則そのものになる。
-
-delivery を上げる操作は admission control を通る。上限は 2000 token。超える変更は拒否される。測定対象は、そのセッションが実際に受け取る内容だ。startup と Scope の内容を合算する。
+scope は「どこで」を絞り、guard は「いつ」を絞る。guard は該当ツールの呼び出しを一度拒否して留めた内容を突きつけ、読んだうえで同じ判断ならもう一度呼べば通る。発火はセッションにつき行為ごとに一度。
 
 ## 必要なもの
 
-- PostgreSQL と [pgvector](https://github.com/pgvector/pgvector)（HNSW を使う）。PostgreSQL 17.11 と pgvector 0.8.6 で動作確認済み
-- Python 3.13 と [uv](https://docs.astral.sh/uv/)
-- 埋め込みモデル `intfloat/multilingual-e5-large`（1024 次元）
+- PostgreSQL と pg_trgm（標準の contrib。PostgreSQL 17 で動作確認）
+- Python 3.11+ と [uv](https://docs.astral.sh/uv/)
+
+埋め込みモデルは使わない。照合はすべてトライグラム類似で行う。
 
 ## 用意する
 
 ```bash
-uv sync --extra embed --extra mcp
+uv sync --extra mcp
 createdb mashu
 uv run mashu admin migrate
 ```
 
-`migrate` は `CREATE EXTENSION vector` から実行する。pgvector が入っていれば、追加の準備は要らない。接続先の既定値は `dbname=mashu`。`MASHU_DATABASE_URL` で変更できる。
-
-新しく clone したら git hook を入れる。
+接続先の既定値は `dbname=mashu`。`MASHU_DATABASE_URL` で変更できる。新しく clone したら git hook を入れる。
 
 ```bash
 ./hooks/install.sh
 ```
 
-どこからでも `mashu` と打てるようにするには、PATH の通ったところへ symlink を張る。console script のシバンは venv の python を絶対パスで指しているので、これで動く。CLI は作業ディレクトリを一切見ない（`os.getcwd()` を読むのは MCP server の scope routing だけ）から、どこから叩いても結果は同じになる。
+どこからでも `mashu` と打てるようにするには、PATH の通ったところへ symlink を張る。
 
 ```bash
 ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
 ```
 
-置き先が PATH に入っているかは、置く前に対話シェルで確かめる。`echo $PATH` を別の環境（エディタの統合端末など）で見ると、そちらが足しているものが混ざる。
-
-```bash
-zsh -ic 'echo $PATH | tr ":" "\n" | grep local/bin'
-```
-
-入っていなければ `~/.zshrc` に足す。
-
-```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
-```
-
-shell の alias にしない理由は、alias は対話シェルにしか効かず、スクリプトや launchd から呼べないためである。
-
 ## 使う
 
 | コマンド | 内容 |
 |---|---|
-| `mashu status` | 捕捉の稼働状態、queue の遅延、開始時の内容を表示 |
-| `mashu review` | 待っている束を古い順に開き、キー 1 打で承認、却下、編集、先送り |
-| `mashu find <query>` | 三層を通して検索 |
-| `mashu inspect <id>` / `mashu inspect --bundle <id>` | 1 件または束を表示 |
-| `mashu remember <body>` | User が述べた知識を記録。Review を待たず active になる |
-| `mashu retire <id> {completed,disproven,dormant} --reason <reason>` | 完了や反証を User が直接記録 |
-| `mashu active --scope <name>` | Scope が真として持つものをすべて表示 |
-| `mashu scope` | Scope ごとの採用済み件数と未審査件数を表示 |
-| `mashu scope --add <name> --about <line>` | Scope を作成。`--route` で対応づけも実行 |
-| `mashu route --add <path> --scope <name>` | 作業ディレクトリを Scope に対応づける |
-| `mashu route --ignore <path>` | そのディレクトリを捕捉対象から外す |
-| `mashu directive <id> <short>` | 渡す短形を書く。本文を省くと今の分量と上限を出して一行で聞く |
-| `mashu deliver <id> <delivery>` | push と pull の間で切り替える |
-| `mashu bootstrap` | セッション開始時に渡す内容と token を表示 |
-| `mashu stale` | 点検期日の来た知識と、採用済みの重複を順に見て、キー 1 打で決める |
-| `mashu guard` | 行為の直前に読ませるものを留める・外す・引く |
-| `mashu incident --cause <cause> --note <note>` | 事故を原因つきで記録。無引数で集計を表示 |
+| `mashu status` | 在庫と定員、pending 件数、台帳と痕跡の状況 |
+| `mashu review` | 昇格候補を 1 件ずつ、根拠の台帳エントリと並べて 1 キーで確定・却下 |
+| `mashu remember <body>` | User 明示。即時 active。唯一の即時経路 |
+| `mashu remember <body> --until 5d` | 期限つき条件（Temporary Context）。Review 不要、期限で消える |
+| `mashu retire <id> --reason <r>` | 退役。以後は照合で「何が、なぜ否定されたか」だけ返る |
+| `mashu revise <id>` | 本文の改訂（User のみ）。改訂履歴が残る |
+| `mashu pain --kind {incident,friction} --what <w> --prevention <p>` | 痛みの手動記録 |
+| `mashu ledger` | 台帳の閲覧 |
+| `mashu trace [query]` | 痕跡の閲覧と検索 |
+| `mashu guard <action> [--pin <id>] [--unpin <id>]` | 行為の門への留めつけ・照会 |
+| `mashu deliver <id> {always,scope,guard}` | 配信経路の変更 |
+| `mashu scope [--add <name> --about <line>]` | Scope 台帳（作成は User のみ） |
+| `mashu route [--add <path> --scope <name>] [--ignore <path>]` | 作業ディレクトリと Scope の対応 |
+| `mashu bootstrap` | このディレクトリのセッションが受け取る内容と token |
+| `mashu admin migrate` | 未適用の migration を実行 |
 
-### Review の進め方
+Review で確定するとき delivery を選ぶ。件数は週数件のオーダーなので、1 件ごとに人が置き場を決める。
 
-`mashu review` は待っているものを三段で見せる。**束の一覧 → 束の目次 → 項目**。`⏎` で降り、`←` で上がる。矢印で選び、キー 1 打で決める。
+## Agent から使う
 
-```
-mashu admin queue                 待っている束の一覧
-mashu inspect --bundle <id>       束の中身を読む（何も変わらない）
-mashu review                      束の一覧から選んで決める
-mashu review --bundle <id>        その束だけ
-```
-
-最初に出るのは**束の一覧**。Scope、件数、滞留日数、先頭の題名が並ぶので、重い束を避けて軽いものから片付けられる。束が 1 つしかないときは一覧を飛ばして中へ入る。
-
-| 束の一覧で | 意味 |
-|---|---|
-| `↑` `↓` | 束を選ぶ |
-| `⏎` | その束の目次へ |
-| `a` | 開かずに束ごと承認 |
-| `s` | 開かずに束ごと先送り。理由を聞かれる |
-| `q` | 抜ける |
-
-**束の目次**は題名が 1 行ずつ。ここで `a` を押せば読まずに束が通る。仕様 18.1 節が普通はこれで済むと見ている形。
-
-| 束の目次で | 意味 |
-|---|---|
-| `↑` `↓` | 項目を選ぶ |
-| `⏎` | その項目を開く |
-| `a` | 未決を全部承認 |
-| `s` | 束ごと先送り。理由を聞かれる |
-| `←` | 束の一覧へ戻る |
-| `q` | 抜ける |
-
-**項目**は本文と、置き換える先の本文を並べて出す。根拠として引いている Memory があればそれも、同じ Scope に近い Entity があればそれも併記する。題名が完全一致するものは `the same title` と出る。
-
-| 項目で | 意味 |
-|---|---|
-| `y` | 承認して次へ |
-| `r` | 却下。理由を聞かれる |
-| `e` | 本文をエディタで直し、自分の名義で承認 |
-| `s` | 先送り。理由を聞かれる |
-| `space` | 本文が画面に収まらないとき次の画面へ。末尾まで来たら次の項目へ |
-| `b` | 本文の先頭へ戻る |
-| `↑` `↓` | 決めずに前後の項目へ |
-| `←` | 目次へ戻る |
-| `a` | 残り全部を承認 |
-| `?` | それぞれのキーが何をするか |
-| `q` | 抜ける |
-
-どの画面も端末の高さに収まる分だけ出す。入りきらない分は `↓ N more` のように件数で言う。横幅も端末に合わせて折る。キー表示は 1 行に収め、それぞれが何をするかは `?` の側に置いてある。読んでいるものと説明が場所を取り合わないようにするため。
-
-決めた分はその場で確定するので、途中で `q` を押しても手前は残る。次の `review` は残りから開く。1 つの束が終わると一覧へ戻り、その束の結果が下に出る。
-
-**一度決めたものは決め直せない。**Proposal の status は記録であってスイッチではないので、却下したものをその場で承認し直すことはできない。内容のほうを残したくなったら `mashu remember` で自分の名義に書く。断られても sitting は続くから、その場で読んで次へ進める。
-
-先送りした項目は次の `review` に出てこない。`--all` で戻る。
-
-`e` が開くエディタは `MASHU_EDITOR`、`VISUAL`、`EDITOR` の順に見て、どれも無ければ `nano`、`micro`、`vi` のうち入っているものを使う。開く前に、どれを開くか・どのキーで保存して抜けるかを 1 行出す。
-
-2000 token の上限に当たったときは `mashu directive <id>` を本文なしで実行すると、今の内容と分量、上限を出したうえで短形を一行で聞く。エディタは開かない。
-
-端末が無いところ（パイプ、スクリプト、テスト）では束を一気に印字して `--batch` の文字列で決める。
-
-```
-mashu review --bundle <id> --batch "all; r 2 根拠が薄い; s 3 明日確かめる"
-```
-
-| `--batch` に書くもの | 意味 |
-|---|---|
-| `all` | この束の未決を全部承認 |
-| `r N 理由` | N 番を却下。理由は必須 |
-| `e N` | N 番を直して承認 |
-| `s N 理由` | N 番を先送り。理由は必須 |
-| `q` | 何も決めない |
-
-`;` で区切って一度に渡せる。`all` は他の指定と併せると「残り全部」の意味になるので、`r 3 古い; all` は 3 番だけ却下して残りを承認する。
-
-### 腐るものを掃き出す
-
-仕様 13.1 節は、期限の無い知識だけを Memory に置くと定める。ところが transcript から来るものはその区別を持たない。worker がセッションを読んで「この作業が残っている」と書けば、それはそのセッションについてだけ真で、その後については何も言っていない。**放っておいて期限が切れる仕組みは無い。**
-
-`mashu stale` はそれを順に見せる。四つの読みで拾う。
-
-| 拾う理由 | 例 |
-|---|---|
-| 型が寿命を持つ | `task` は終われば終わり、`state` は次が書かれれば終わり |
-| 書き方が日付を含む | 題名や directive に `2026-07` や `時点で` がある |
-| 題名が「終わった」と言っているのにまだ立っている | 完了の記録が task として入っている形 |
-| **誰も点検していない期間が、その型の期間を超えた** | 「採用している版は 3 系」が半年放置されている |
-
-四つ目が他の三つと違うのは、**文面から読めないものを拾う**点にある。`fact`・`observation`・`interpretation` は日付を名乗らないまま古くなるので、上の三つはどれも当たらない。実在庫では 226 件のうち 46 件がこの状態だった。
-
-型ごとの期間はこう置いてある。
-
-| type | 期間 |
-|---|---|
-| `task`, `state` | 0 日（常に載る） |
-| `hypothesis`, `interpretation` | 60 日 |
-| `observation`, `fact` | 180 日 |
-| `decision`, `preference` | 365 日 |
-
-**これは時計であって判断ではない。**載ったことが言うのは「誰も見ていない」で、「誤っている」ではない。
-
-#### 期日に答えるのは、たいてい人ではない
-
-抽出は既にその Scope の Active を全部読んでいるので、期日を過ぎたものに印が付いていれば、**セッション中にその内容が現に成り立った裏付けを見た Agent がそのまま確認を書ける**。人へ届くのは、どのセッションも何も言えなかったものだけになる。
-
-Agent の確認は Proposal を通らない。version も status も動かず、変わるのは次に人へ聞く日だけだからである。代わりに上限がある。**Agent の確認が続いても、最後に人が何かを決めた日から 365 日を超えて期日を延ばせない。**根拠の弱い確認が毎晩繰り返されても、買えるのは一年であって永遠ではない。
-
-確認は退役と逆向きの非対称で扱う。退役は迷ったら出す、確認は迷ったら出さない。出し損ねた損は人が一度読むだけで済み、根拠なく出した損はその項目が期日まで人の目から消えることだから。
-
-`review` と同じ手つきで、`↑↓` で動いて `⏎` で開き、キー 1 打で退役させる。
-
-一覧に出ているものの多くは、まだ真である。だから既定の操作は退役ではなく `s`。
-
-| キー | 何をするか |
-|---|---|
-| `s` | **まだ真だと記録して、次に聞く時期を決める。**知識は何も変わらない |
-
-`s` は「いつまた聞くか」を尋ねる（空欄で 30 日）。その間は一覧に出ない。**記録するのは知識ではなく読んだ側の事実**、つまりある日に人が読んで退役させなかったという事実なので、version も status も動かない。event_log に `still_stands` として残る。
-
-確認は**読んだ version に結び付く**ので、本文を書き直せば確認は切れて次の掃き出しに戻ってくる。時刻で比べていないのは、PostgreSQL の `now()` がトランザクション内で凍るため。同じトランザクションで確認と書き直しをすると同じ時刻になり、区別できなくなる。
-
-`s` が無いと、**何かを一覧から消す唯一の手段が退役になる**。「今は違う」のつもりで押された退役が、後のセッションには知識についての判断として渡ってしまう。
-
-#### 採用済みどうしの重複
-
-期日の一覧を抜けると、`mashu stale` は**採用済みの中で同じことを言っている対**を見せる。
-
-仕様 20 節の類似チェックは Proposal を書く時点で走るので、Review の頃には使い切られている。Review は 1 件ずつ開く画面で、既存の 200 件と突き合わせるのは読み手の記憶の仕事になる。そこを通り抜けたものは採用され、以後どこからも測られない。実在庫では、ある Scope の 77 件のうち 10 件が相手を隣に持っていた。
-
-| キー | 何をするか |
-|---|---|
-| `1` / `2` | 残すほうを選ぶ。もう片方はそこへ畳まれる（Merge）。理由を先に聞く |
-| `k` | **二つである**と記録する。何も変わらないが、その対は二度と出てこない |
-
-`k` が要るのは、記録しないと同じ対が次も同じ点数で戻ってくるからで、終われない画面は読み飛ばす習慣を教える。
-
-三つの退役は程度の違いではなく、**そのあと検索でどう返るかが違う**。
-
-| キー | status | そのあとどう返るか | 取り消し |
-|---|---|---|---|
-| `c` | `completed` | **Layer 1 に残る。**本文つきで、`finished` の印と完了理由が添う | superseded / disproven へは動かせる |
-| `d` | `dormant` | **Layer 1 から消える。**Layer 3 に題名・status・理由だけ。本文は返らない | 一方通行 |
-| `x` | `disproven` | 同上。理由が「もう一度導くな」の根拠として返る | 一方通行 |
-
-迷ったら `s`。押さずに見送るのとの違いは、次にいつ出てくるかだけである。
-
-`c` が本文ごと残るのは意図的で、仕様 1 節が「終了済み Task が未完了として扱われる」を解くべき問題に挙げているため。**終わったことを見つけられなくしたら解けない。**だから答え続けて、終わったことのほうを見せる。
-
-`d` と `x` は仕様 12 節で吸収状態なので、戻る道は「新しい Version として書き直す」だけになる。**理由が必須なのは、Layer 3 が本文を返さないから。**後の読み手が受け取るのは、そこで打った理由の全部である。
-
-| その他のキー | 意味 |
-|---|---|
-| `space` `b` | 本文の頁送りと先頭へ |
-| `↑` `↓` | 決めずに前後へ |
-| `←` | 一覧へ戻る |
-| `?` | それぞれのキーが何をするか |
-| `q` | 抜ける |
-
-**見送ったものは立ったまま残る。**「見たけれど残す」の記録は持たないので、次も出てくる。それでいい。まだ真であることと、いつまでも真であることは別だから。
-
-`--list` で一覧だけ印字する。端末が無いところでも同じ。
-
-### 行為の前に読ませる
-
-蔵にあって引かれなかった知識は、無い知識と変わらない。実際にそれで事故が起きた。委譲先を選ぶ場面で、正しい規則が採用済みで層1 に類似度 0.847 で返る状態だったのに、常設指示ファイルの既定値だけで決めて誤った宛先へ投げた。`session_bootstrap` は正常に発火していて、Scope 索引にはその語も入っていた。**文脈にあることと、判断の前にあることは違う。**
-
-`mashu guard` は採用済みの Memory を行為の種類に留める。
+Claude Code に登録する場合。
 
 ```bash
-mashu guard delegate --pin 1916b14c
+claude mcp add mashu --scope user --env MASHU_DATABASE_URL=dbname=mashu -- /path/to/mashu/.venv/bin/mashu serve --agent claude
 ```
 
-留めたあと、その行為の名前で引くと中身が出て、**終了コード 2 で返る**。
+MCP ツールは 6 つ。
 
-```bash
-mashu guard delegate
-```
+| Tool | 役割 |
+|---|---|
+| `session_bootstrap` | セッション開始時に一度。always と現在 Scope の記憶、期限つき条件、pending 件数 |
+| `pain_report` | 痛みを台帳へ記録し、類似の台帳エントリ・痕跡・退役理由を返す。二度目なら候補を生成 |
+| `trace_put` | 調べて分かったことを一行残す |
+| `trace_search` | 痕跡の検索。日付つき・未検証の印で返る |
+| `memory_list` | 指定 Scope の active な記憶の列挙 |
+| `temporary_put` | 期限つき条件の記録（14 日まで） |
 
-`tools/pretooluse_guard.py` を PreToolUse フックに入れると、委譲系のツールが走る直前にこれが呼ばれ、**呼び出しが一度拒否されて**留めた内容が返る。読んだうえで同じ判断をするなら、もう一度呼べば通る。
+Agent 名は `--agent` または環境変数 `MASHU_AGENT` で渡す。
+
+### 行為の門を張る
+
+`tools/pretooluse_guard.py` を PreToolUse フックに入れると、留めた記憶が該当ツールの実行直前に出る。
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Task|mcp__codex-async__codex_start",
+        "matcher": "Task|Agent|mcp__codex-async__codex_start",
         "hooks": [{"type": "command", "command": "/path/to/mashu/tools/pretooluse_guard.py"}]
       }
     ]
@@ -335,204 +119,12 @@ mashu guard delegate
 }
 ```
 
-発火は 1 セッションにつき行為ごとに一度。毎回出る門は読まれない門になる。発火はすべて event_log に残るので、頻度が適切かは後から数えられる。
+蔵に届かないときは通す。接続できないことは、いま下そうとしている判断についての証拠ではない。
 
-蔵に届かないときは通す。**接続できないことは、いま下そうとしている判断についての証拠ではない。**
+## 書き込みの規律
 
-### Review を通さずに書く
-
-`remember` と `retire` は User 発話が出どころなので Auto Commit で反映される。仕様 17 節。
-
-```
-mashu remember <本文> --scope <名前> --type <型> --title <題>
-mashu remember <本文> --until 5d
-mashu retire <id> completed --reason <理由>
-```
-
-`--scope --type --title` は必須で、`--until` を付けたときだけ三つとも不要になる。`--until` で書いたものは Temporary Context になり、Review も退役も要らず期限で消える。仕様 25.2 節。`--kind` は既定が `fact` で、規律として書くなら `preference` を渡す。
-
-### 機械が実行する操作
-
-次の 3 つを MCP 設定と launch agent から呼ぶ。
-
-| コマンド | 内容 |
-|---|---|
-| `mashu serve` | MCP Server を stdio で起動 |
-| `mashu sweep` | hook が取り落とした transcript を台帳へ積む |
-| `mashu work` | 抽出 worker を queue に対して実行 |
-
-### 保守、移植、評価
-
-保守、移植、評価の操作は `admin` の下にある。
-
-| コマンド | 内容 |
-|---|---|
-| `mashu admin queue` | Review 待ちをセッション束ごとに表示 |
-| `mashu admin approve <id>` / `mashu admin approve --bundle <id>` | 承認。`--skip` で束から外す |
-| `mashu admin reject <id> --reason <reason>` | 却下。理由は必須 |
-| `mashu admin state <file> --scope <name>` | references 付きの Current State を提案 |
-| `mashu admin evidence <id>` | 依拠先と依拠している項目を表示 |
-| `mashu admin retype <id> --to <type> --reason <reason>` | Entity の type を訂正 |
-| `mashu admin merge <id> --into <id> --reason <reason>` | Entity を統合 |
-| `mashu admin preview <query> --scope <name>` | 上限なしで順位だけ表示 |
-| `mashu admin import <file.json> --scope <name>` | JSON を candidate として取り込む |
-| `mashu admin backfill` | 埋め込みがない行を後から埋める |
-| `mashu admin enqueue` | transcript を抽出用に台帳へ積む |
-| `mashu admin runs` | 捕捉台帳の生の行（`status` の元）を表示 |
-| `mashu admin stale` | 自分で期限を持つ Active を抽出 |
-| `mashu admin thresholds` | 実在庫から類似度分布を測定 |
-| `mashu admin eval-retire` | worker の退役候補を marker と照合 |
-| `mashu admin migrate` | 未適用の migration を実行 |
-
-移行前の名前を実行すると、移行先が表示される。`search` は `find`、`queue` は `admin queue` に移行した。
-
-## Agent から使う
-
-Claude Code に登録する場合は次を実行する。
-
-```bash
-claude mcp add mashu --scope user --env MASHU_DATABASE_URL=dbname=mashu -- /path/to/mashu/.venv/bin/mashu serve --agent claude
-```
-
-ツールを 9 つ公開する。
-
-`session_bootstrap` / `memory_search` / `memory_get` / `scope_list` / `entity_resolve` / `memory_propose` / `scratch_put` / `scratch_get` / `context_put`
-
-Agent 名は `--agent` または環境変数 `MASHU_AGENT` で渡す。既定値は `agent`。Agent ごとに異なる名前を設定する。
-
-## 捕捉
-
-書き込みは、人または Agent が明示的に操作したときだけ発生する。捕捉層はセッション終了後の記録を処理する。
-
-各 CLI の SessionEnd hook（`tools/session_end_hook.sh`）は transcript を台帳へ積んで終了する。常駐 worker が後から読み、Proposal を作る。hook 側ではモデルを実行しない。hook が取り落とした分は `mashu sweep` がディスクと台帳を照合して拾う。
-
-worker の出力はすべて Agent 由来として扱う。User 由来の経路は `mashu remember` だけである。
-
-worker が停止しても読み取りは続く。停止中は新しい Proposal が増えない。
-
-worker は Scope を推測しない。`mashu route` で対応づけていない作業ディレクトリの transcript は保留され、`status` の警告に載る。
-
-```bash
-uv run mashu route --add /path/to/project --scope <scope name>
-uv run mashu work --limit 4
-```
-
-### モデルの差し替え
-
-`MASHU_EXTRACTOR` には `api`、`cli:codex`、`cli:claude`、`auto`（既定）を指定できる。`api` には `ANTHROPIC_API_KEY` が必要。`auto` は鍵があれば API、なければ CLI を使う。CLI では codex を先に試す。
-
-CLI の選択で費用と請求枠が変わる。別の CLI に処理を回せば、鍵がなくても抽出費用を会話とは別の枠に置ける。
-
-モデルは `MASHU_EXTRACTOR_MODEL` で指定できる。省略時の既定値は CLI ごとに異なる。
-
-| extractor | 既定のモデル |
-|---|---|
-| `cli:codex` | `gpt-5.6-luna` |
-| `cli:claude` | `claude-haiku-4-5` |
-| `api` | `claude-haiku-4-5` |
-
-### 動かし続ける
-
-`mashu work` は 1 回で終了する。定期的に実行するユニットが必要になる。
-
-```bash
-./tools/launchd/install.sh
-```
-
-このスクリプトは `~/Library/LaunchAgents/` にユニットを置くだけで、読み込まない。読み込むと毎晩モデルの枠を使い始める。読み込み用のコマンドは最後に表示される。
-
-同梱のユニットは 4:30 に動く。`StartCalendarInterval` は cron と異なり、指定時刻に Mac がスリープしていても発火を捨てない。起床時に動く。複数回分の実行時刻を過ぎていても 1 回にまとまる。夜間スリープする Mac で夜中に動かす場合は、`pmset` で wake を予約する。
-
-セッション終了 hook を各 CLI の設定に登録すると、transcript の終了時に台帳へ載る。登録しなくても `sweep` がディスクから拾う。反映が遅れるだけで、記録は失われない。
-
-### 一晩の費用
-
-日次の入力予算を設定している。既定値は 40 万 token。超過分は捨てず、翌日に回して理由を台帳へ書く。
-
-抽出プロンプトの大きさは、セッションの記録と、その Scope が Active として持つ全項目で決まる。退役の洗い出しでは、Scope の Active 全件を順位も上限も付けずに読み込む。
-
-一晩の費用は在庫とともに増える。退役は知識状態の管理と費用の抑制に関わる。
-
-## 測る
-
-```bash
-uv run mashu status
-```
-
-`mashu status` は捕捉の稼働状態と queue の遅延を表示する。点検期日の来ている件数と採用済みの類似対、Scope ごとの未審査の割合、渡した文脈に占めるタグ付き項目の割合、セッション開始時の内容と上限の差も確認できる。
-
-待ち行列は三つあって、詰まったときの直し方がそれぞれ違う。**捕捉**が止まれば新しいものが入ってこない。**Review** が滞れば入ったものの確度が上がらない。**点検**が滞れば、既に入っているものが古いまま配られる。三つとも `session_bootstrap` が運ぶので、次に来るセッションが必ず気づく。
-
-出所のない指標は、値を表示せず名前だけ表示する。
-
-```bash
-uv run mashu incident --cause <cause> --note "何が起きたか"
-```
-
-事故は件数と原因で記録する。原因は次の 2 種類に分かれる。
-
-| kind | cause | 意味 |
-|---|---|---|
-| `missed` | `bootstrap` | 渡すべき項目が入っていなかった |
-| `missed` | `pull` | 索引はあったが検索しなかった |
-| `missed` | `capture` | そもそも書かれていなかった |
-| `stale` | `filter` | 期限つきの条件が期限を越えて残った |
-| `stale` | `inventory` | 寿命のある規則が indefinite 側に書かれていた |
-| `stale` | `marker` | User の完了宣言を拾えなかった |
-
-理由のない記録は受け付けない。
-
-```bash
-uv run mashu admin eval-retire --sample 5
-```
-
-worker の退役候補を、人が述べた退役（marker）と照合する。採点対象は、marker が終了済みかつ抽出済みのセッションに入っている場合だけ。まだ読まれていない log を失敗として数えない。
-
-## 切替
-
-CLI が持っている元の記憶機構を止めて、Mashu だけで 2 週間運用する。この切替は Mashu の機能ではない。**別のプログラムの設定を変える作業**であり、Mashu 側にできるのは窓の開始を記録して、その中で起きた事故を数えることだけである。
-
-手順は四つ。
-
-**① 自動書き込みを止める。** CLI が会話から勝手に記憶を書き足す機能を切る。Claude Code なら `~/.claude/settings.json` の `autoMemoryEnabled` を `false` にする。
-
-**② 古い記憶層を指す指示を外す。** 自動書き込みを切っても、CLI の常設指示（Claude Code の `CLAUDE.md`、Codex の `AGENTS.md`）が「memory ディレクトリを読め」と書いていれば Agent はそこを読む。その記述を外す。**①だけでは切り替わらない。**
-
-**③ 窓を開ける。**
-
-```bash
-uv run mashu trial --open --note "何を止めたか"
-```
-
-**④ 窓の中で起きた事故を記録する。** `mashu incident` で、原因つきで書く。判定は体感でしない。「Mashu に Active として在る内容を Agent が取得できないまま作業し、誤った前提で進んだ」場合を 1 件と数える。
-
-読むときと閉じるとき。
-
-```bash
-uv run mashu trial            # 開いてからの日数と、窓の中の事故
-uv run mashu trial --close --note "2 週間経過"
-```
-
-窓を開けずに数えた件数は、いつからの件数か言えない。集計の意味は窓が与える。
-
-## 配置
-
-```
-docs/mashu-mvp.md              実装仕様書。設計判断とその理由の正本
-docs/prompts/                  Session End Extraction のプロンプト
-migrations/                    連番の SQL。mashu admin migrate が順に実行
-src/mashu/                     実装
-src/mashu/metrics.py           指標。既存の行を読み直すだけで、計測機構を追加しない
-src/mashu/incidents.py         事故の記録と原因の切り分け
-src/mashu/thresholds.py        類似度分布の実測
-tests/                         実 PostgreSQL に対して実行。harness/ は仕様 28 節のシナリオ
-tools/session_end_hook.sh      SessionEnd hook。台帳へ積むだけで終了
-tools/launchd/                 常駐ユニット。install.sh は置くだけで読み込まない
-tools/condense_session.py      セッションログの圧縮
-hooks/                         pre-commit / commit-msg
-```
-
-仕様を変える場合は、コードと `docs/mashu-mvp.md` を一緒に更新する。撤回した設計は削除しない。何を撤回したか、理由、誤りと分かる条件を仕様書に残す。
+- 個人識別情報（本名、所属、ホームディレクトリを含む絶対パス）を含む書き込みは入口で拒否される。パターン一覧は commit hook と共用のリポジトリ外ファイル（`MASHU_BANNED_PATTERNS` で指定可）。一覧が見つからないときは「合格」ではなく「検査できなかった」と報告される
+- 台帳・改訂履歴・event_log は append-only で、DB のトリガが書き換えを拒否する
 
 ## 開発
 
@@ -543,4 +135,16 @@ uv run ruff check src tests --fix && uv run ruff format src tests
 
 テストは実 PostgreSQL に対して実行する。テスト用データベースは実行ごとに作り直す。既定値は `mashu_test`。`MASHU_TEST_DB` で変更できる。
 
-テスト中の埋め込みはハッシュで代用する。モデル自体の数値は `mashu admin thresholds` で測定する。
+仕様を変える場合は、コードと `docs/mashu-v2.md` を一緒に更新する。撤回した設計は削除せず、何を撤回したか、理由、誤りと分かる条件を仕様書に残す。
+
+## 配置
+
+```
+docs/mashu-v2.md      実装仕様書。設計判断とその理由の正本
+docs/mashu-mvp.md     v1 の仕様書。撤回の記録として保持
+migrations/           連番の SQL。mashu admin migrate が順に実行
+src/mashu/            実装
+tests/                実 PostgreSQL に対して実行
+tools/pretooluse_guard.py   行為の門の PreToolUse フック
+hooks/                pre-commit / commit-msg
+```

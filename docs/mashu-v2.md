@@ -50,7 +50,7 @@ append-only の記録。1 エントリが一度の痛みに対応する。
 
 | フィールド | 内容 |
 |---|---|
-| kind | `incident`（誤った作業が出た）/ `friction`（調べ直し・訂正で時間を失った） |
+| kind | `incident`（誤った作業が出た）/ `friction`（調べ直し・訂正で時間を失った）/ `explicit`（User 明示の記録。5.1 節の即時経路が evidence として残す） |
 | what | 何が起きたか |
 | prevention | 何を知っていれば防げたか。**照合のキーになる本文** |
 | scope_id | 起きた Scope |
@@ -87,7 +87,7 @@ v1 の投機的捕捉との関係。セッションから安く残すという�
 | フィールド | 内容 |
 |---|---|
 | content | push される全文。短い規則文の形で書く |
-| scope_id | 所属 Scope。全域規則は専用 Scope に置く |
+| scope_id | 所属 Scope。無指定は全域を意味する（delivery = `always` の規則と、全セッションで発火する guard がこれに当たる） |
 | delivery | `always` / `scope` / `guard:<action>` |
 | evidence | 根拠となる台帳エントリへの参照（1 件以上、必須） |
 | status | `active` / `retired` |

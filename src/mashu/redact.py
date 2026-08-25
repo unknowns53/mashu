@@ -1,20 +1,20 @@
 """What must never enter the knowledge state, whoever wrote it.
 
-The store is not a private notebook. Its contents are handed to agents on every
-session and travel outward from there into whatever those agents produce, so a
-personal identifier that lands here has been published slowly rather than not
-at all. Nothing downstream is going to catch it: review reads for whether a
-claim is true, not for whether a home directory is spelled out in the middle of
-a path.
+The store is not a private notebook. Its contents are handed to agents on
+every session and travel outward from there into whatever those agents
+produce, so a personal identifier that lands here has been published slowly
+rather than not at all. Nothing downstream is going to catch it: review reads
+for whether a claim is true, not for whether a home directory is spelled out
+in the middle of a path.
 
-The patterns are held outside the repository — the same file the git hooks read
-— because a list of the things that must not be committed is itself a list of
-those things. When the file is absent the check does not silently pass: it
-reports that it could not run, and the caller decides.
+The patterns are held outside the repository — the same file the git hooks
+read — because a list of the things that must not be committed is itself a
+list of those things. When the file is absent the check does not silently
+pass: it reports that it could not run, and the caller decides.
 
 Deliberately not a redactor. It refuses rather than rewrites. Editing content
-on its way in would leave a version whose text nobody chose, which is exactly
-the provenance this layer exists to keep honest.
+on its way in would leave text nobody chose, which is exactly the provenance
+this layer exists to keep honest.
 """
 
 from __future__ import annotations
