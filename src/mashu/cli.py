@@ -467,6 +467,17 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    # The MCP client's own configuration is where the agent identity comes
+    # from; --agent is the flag that configuration passes.
+    if args.agent:
+        os.environ["MASHU_AGENT"] = args.agent
+    from mashu import server
+
+    server.main()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mashu")
     parser.add_argument("--dsn", default=None, help=argparse.SUPPRESS)
@@ -548,6 +559,10 @@ def build_parser() -> argparse.ArgumentParser:
     route_group.add_argument("--remove")
     route.add_argument("--scope")
     route.set_defaults(func=cmd_route)
+
+    serve = sub.add_parser("serve")
+    serve.add_argument("--agent")
+    serve.set_defaults(func=cmd_serve)
 
     admin = sub.add_parser("admin")
     admin_sub = admin.add_subparsers(dest="admin_command", required=True)

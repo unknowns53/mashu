@@ -145,7 +145,9 @@ guard は scope と直交する。`guard:<action>` の記憶が scope を持つ�
 
 ### 6.1 session_bootstrap
 
-セッション開始時に一度呼ぶ。返すもの。
+セッション開始時に一度呼ぶ。**呼び出し規律の置き場所は MCP server の instructions である。** v1 の 6.1 節は「各 CLI の指示ファイルに書く」を第一段としたが、これは常設指示ファイルに Mashu の節を要求し、指示ファイルを痩せさせる方針と衝突する。server の instructions は接続した CLI へ自動で届くので、規律（開始時に一度 bootstrap、調べたら trace_put、痛んだら pain_report、User の記録指示は memory_nominate）はそこが運び、指示ファイル側には何も書かない。
+
+返すもの。
 
 - delivery = `always` の記憶（全文）
 - 現在 Scope の記憶（全文）。Scope は route（cwd 対応表）か引数で決まる

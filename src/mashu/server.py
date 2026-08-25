@@ -51,11 +51,30 @@ def build_server() -> Any:
     """Build the six-tool MCP server used by an agent session."""
     from mcp.server import MCPServer
 
+    # These instructions reach every connected CLI automatically, which makes
+    # them the one place the calling discipline lives. No standing instruction
+    # file needs a Mashu section, and none should carry one: a rule written
+    # twice drifts twice.
     server = MCPServer(
         name="mashu",
         instructions=(
-            "Knowledge is pushed, not searched. Call session_bootstrap once at "
-            "the start of a session; traces are dated observations, not knowledge."
+            "Mashu keeps only knowledge whose absence has provably cost "
+            "something; everything merely useful was deliberately left out. "
+            "Call session_bootstrap once, first, at the start of every "
+            "session: knowledge is pushed, there is no search for it, and a "
+            "session that skips the call works blind without knowing it. "
+            "Then two habits while you work. trace_put one line for anything "
+            "you had to look up or derive — a dated observation that lets a "
+            "later repeat be proven. pain_report when missing or stale "
+            "knowledge actually cost something: wrong work (incident) or a "
+            "repeated lookup (friction); the second time is what turns a "
+            "pain into a candidate. If the user explicitly says to remember "
+            "something, carry it with memory_nominate — it waits for their "
+            "confirmation. Temporary, expiring conditions are recorded by "
+            "the user's own hand (mashu remember --until), not by agents. "
+            "Nothing you write becomes knowledge without a human decision, "
+            "and retired knowledge answers with the reason it was retired: "
+            "bring new grounds rather than re-deriving it."
         ),
     )
 
