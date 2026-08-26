@@ -25,10 +25,10 @@ question the ledger can answer rather than one to reason about.
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 
 #: Which tools carry out which judgement. The mapping lives here rather than in
 #: the store because the same judgement is reached through different tools in
@@ -39,7 +39,7 @@ ACTIONS = {
     "mcp__codex-async__codex_start": "delegate",
 }
 
-MARKERS = pathlib.Path(os.environ.get("TMPDIR", "/tmp")) / "mashu-guard"
+MARKERS = pathlib.Path(tempfile.gettempdir()) / "mashu-guard"
 
 #: What a completed compaction leaves in the transcript. Matched as a raw
 #: substring: the line is one JSON object per transcript entry and this key is

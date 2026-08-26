@@ -24,11 +24,13 @@ survived a compaction.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import subprocess
 import sys
 
-MASHU = pathlib.Path(__file__).resolve().parent.parent / ".venv" / "bin" / "mashu"
+_VENV = pathlib.Path(__file__).resolve().parent.parent / ".venv"
+MASHU = _VENV / "Scripts" / "mashu.exe" if os.name == "nt" else _VENV / "bin" / "mashu"
 
 PREAMBLE = (
     "Mashu: 直前の圧縮で、セッション開始時に配信された知識が文脈から落ちた。"
