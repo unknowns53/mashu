@@ -84,8 +84,8 @@ def search_traces(
     if query:
         cur.execute(
             f"""
-            SELECT t.*, similarity(t.content, %(query)s) AS score
-            FROM trace t
+            SELECT t.*, s.name AS scope_name, similarity(t.content, %(query)s) AS score
+            FROM trace t LEFT JOIN scope s ON s.scope_id = t.scope_id
             WHERE t.expires_at > now()
               AND similarity(t.content, %(query)s) >= %(floor)s
               {scope_clause}
@@ -97,7 +97,8 @@ def search_traces(
     else:
         cur.execute(
             f"""
-            SELECT t.* FROM trace t
+            SELECT t.*, s.name AS scope_name
+            FROM trace t LEFT JOIN scope s ON s.scope_id = t.scope_id
             WHERE t.expires_at > now()
               {scope_clause}
             ORDER BY t.created_at DESC

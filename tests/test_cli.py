@@ -13,6 +13,7 @@ import json
 import pytest
 
 from mashu import cli, db, nominations
+from mashu import traces as trace_domain
 
 # Each test writes to a database the others also write to, so the strings are
 # kept mutually dissimilar: a trigram match across tests would make one test's
@@ -348,3 +349,68 @@ def test_the_ledger_listing_shows_the_sentence_the_matching_runs_on(run):
     code, out, _ = run("ledger", "--limit", "5")
     assert code == 0
     assert f"    prevention  {PREVENTED}" in out
+
+
+#: Japanese on purpose, and without a single space: the wrapping has to break
+#: it by cell width, because textwrap would have kept it as one line.
+TRACED = (
+    "混合溶媒中の凝集判定は動径分布関数の第一ピークだけでは決められず、"
+    "配位数の積分範囲を第一極小で切ったうえで両成分の温度依存を並べて初めて向きが読める。"
+    "積分範囲を固定値で切った比較は範囲の選び方そのものを結論に持ち込む。"
+)
+
+
+def test_a_trace_is_shown_dated_named_and_wrapped_instead_of_as_one_long_line(run, committing_dsn):
+    """A trace is a long dated observation, and one unwrapped line buries it."""
+    with db.transaction(committing_dsn) as cur:
+        left = trace_domain.put_trace(cur, content=TRACED, actor="agent")
+    code, out, _ = run("trace")
+    assert code == 0
+
+    lines = out.splitlines()
+    where = next(i for i, line in enumerate(lines) if line.startswith(str(left["trace_id"])[:8]))
+    assert "  until " in lines[where]
+    body = []
+    for line in lines[where + 1 :]:
+        if not line or not line.startswith("  "):
+            break
+        body.append(line)
+    # Wrapped into several indented rows, none of it lost at the seams.
+    assert len(body) >= 3
+    assert "".join(line.strip() for line in body) == TRACED
+
+    code, out, _ = run("trace", TRACED[:30])
+    assert code == 0
+    where = next(i for i, line in enumerate(out.splitlines()) if "match 0." in line)
+    assert out.splitlines()[where].startswith(str(left["trace_id"])[:8])
+
+
+#: Japanese with spaced Latin identifiers threaded through it, the mixture the
+#: real traces hold. A space that is not the seam itself has to survive the
+#: wrap, or two identifiers fuse into one that exists nowhere.
+MIXED = (
+    "実装完了と報告したが盤の声の立ち絵が一枚も無く、この検査は器の側で通っていた。"
+    "verify_board も verify_story も立ち絵を測っていなかったのが原因で、"
+    "gmx_rdf の -norm と InterRDF の norm 引数の食い違いと同じ形の見落としである。"
+)
+
+
+def test_wrapping_keeps_the_spaces_that_are_not_the_seam_itself(run):
+    """Words may move to the next row, but no two of them fuse at a seam.
+
+    Swept across every width rather than one, because the fusion only happens
+    when a space lands exactly on the overflow after an earlier cut, and a
+    single width either hits that geometry or silently proves nothing.
+    """
+    for width in range(40, 89):
+        lines = cli._flow(MIXED, width=width).splitlines()
+        # Aligned against the original: each row must read on from where the
+        # last one stopped, and only the seam itself may stand for a space.
+        pos = 0
+        for line in lines:
+            chunk = line[2:]
+            assert MIXED.startswith(chunk, pos), f"width {width}: {chunk!r} does not follow"
+            pos += len(chunk)
+            if pos < len(MIXED) and MIXED[pos] == " ":
+                pos += 1
+        assert pos == len(MIXED), f"width {width}: ends {len(MIXED) - pos} character(s) short"

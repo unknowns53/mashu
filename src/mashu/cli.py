@@ -7,9 +7,11 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -156,6 +158,47 @@ def _date(value: Any) -> str:
 
 def _field(label: str, value: Any) -> None:
     print(f"{label:<10}  {value}")
+
+
+def _flow(text: str, indent: str = "  ", width: int | None = None) -> str:
+    """Wrap a long body for reading, counting double-width characters as two.
+
+    Not textwrap: that breaks at spaces, and much of what is stored here is
+    Japanese, which has none. Measured in cells instead, a line breaks where
+    the terminal would have wrapped it anyway — at a space when one is near,
+    mid-run when there is none — and the indent marks where a record's body
+    ends and the next record begins.
+    """
+    if width is None:
+        width = min(88, max(40, shutil.get_terminal_size((88, 24)).columns))
+    out: list[str] = []
+    for line in text.splitlines() or [""]:
+        line = line.strip()
+        if not line:
+            out.append("")
+            continue
+        row, used = indent, len(indent)
+        for ch in line:
+            cost = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+            if used + cost > width:
+                cut = row.rfind(" ", len(indent) + 1)
+                if cut > len(indent):
+                    out.append(row[:cut].rstrip())
+                    row = indent + row[cut + 1 :]
+                else:
+                    out.append(row)
+                    row = indent
+                used = len(indent) + sum(
+                    2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in row[len(indent) :]
+                )
+                # A space is dropped only when it is the seam itself; carried
+                # text keeps the spaces between its own words.
+                if ch == " " and row == indent:
+                    continue
+            row += ch
+            used += cost
+        out.append(row)
+    return "\n".join(out)
 
 
 def _editor_text(content: str) -> str:
@@ -535,8 +578,20 @@ def cmd_trace(args: argparse.Namespace) -> int:
             query=args.query,
             scope_id=_scope(cur, args.scope),
         )
-    for row in rows:
-        print(f"{_short(row['trace_id']):8}  {row['created_at']}  {row['content']}")
+    if not rows:
+        print("nothing matches" if args.query else "no unexpired traces")
+        return 0
+    for number, row in enumerate(rows):
+        if number:
+            print()
+        head = (
+            f"{_short(row['trace_id'])}  {_date(row['created_at'])}  "
+            f"{row.get('scope_name') or '-'}  until {_date(row['expires_at'])}"
+        )
+        if row.get("score") is not None:
+            head += f"  match {row['score']:.2f}"
+        print(head)
+        print(_flow(row["content"]))
     return 0
 
 
