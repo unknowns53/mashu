@@ -561,6 +561,8 @@ def _print_pending(rows: list[dict[str, Any]]) -> None:
     for row in rows:
         print(f"{row['nomination_id']}  {row['kind']}  {row.get('scope_name') or '-'}")
         print(f"  {row['content']}")
+        if row.get("deferred_at"):
+            print(f"  deferred: {row.get('defer_reason') or ''}")
         for evidence in row.get("evidence_rows", []):
             print(
                 f"  evidence {evidence['kind']} {evidence.get('created_at', '')}: "
@@ -571,7 +573,7 @@ def _print_pending(rows: list[dict[str, Any]]) -> None:
 def cmd_review(args: argparse.Namespace) -> int:
     if args.list:
         with db.transaction(args.dsn) as cur:
-            rows = nominations.pending_nominations(cur)
+            rows = nominations.pending_nominations(cur, include_deferred=args.all)
         _print_pending(rows)
         return 0
     if args.admit:
@@ -602,7 +604,7 @@ def cmd_review(args: argparse.Namespace) -> int:
 
     from mashu import review_ui
 
-    return review_ui.run(args.dsn)
+    return review_ui.run(args.dsn, show_deferred=args.all)
 
 
 def cmd_deliver(args: argparse.Namespace) -> int:
@@ -829,6 +831,9 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--scope", help="the scope the admitted memory belongs to")
     review.add_argument("--action", help="the tool it stands in front of, for guard")
     review.add_argument("--reason", help="why it is turned down; required with --decline")
+    review.add_argument(
+        "--all", action="store_true", help="include the candidates that were put off"
+    )
     review.set_defaults(func=cmd_review)
 
     deliver = sub.add_parser("deliver", help="move a memory between the opening and the act gate")

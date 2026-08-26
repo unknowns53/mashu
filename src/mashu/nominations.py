@@ -161,18 +161,26 @@ def nominate_user_explicit(
     return result
 
 
-def pending_nominations(cur: psycopg.Cursor) -> list[dict[str, Any]]:
+def pending_nominations(
+    cur: psycopg.Cursor, *, include_deferred: bool = True
+) -> list[dict[str, Any]]:
     """The queue, oldest first, each candidate carrying the pains it rests on.
 
     The evidence is expanded here rather than left as ids because the decision
     being asked for is whether these particular pains justify a permanent
     seat, and an id answers nothing.
+
+    A deferred candidate is still pending and is still counted as such, so the
+    default returns it. Only the sitting asks for the queue without it: what
+    was put off is what the reader has already looked at and decided not to
+    decide, and leading with it again is how a queue stops being read.
     """
     cur.execute(
-        """
+        f"""
         SELECT n.*, s.name AS scope_name
         FROM nomination n LEFT JOIN scope s ON s.scope_id = n.scope_id
         WHERE n.status = 'pending'
+        {"" if include_deferred else "AND n.deferred_at IS NULL"}
         ORDER BY n.created_at, n.nomination_id
         """
     )
@@ -180,6 +188,19 @@ def pending_nominations(cur: psycopg.Cursor) -> list[dict[str, Any]]:
     for row in rows:
         row["evidence_rows"] = _evidence_rows(cur, row["evidence"])
     return rows
+
+
+def deferred_count(cur: psycopg.Cursor) -> int:
+    """How many pending candidates the sitting is holding back.
+
+    The number is worth a line on the queue screen: a reader who put three
+    things off a fortnight ago and sees an empty queue has been told the wrong
+    thing about their own store.
+    """
+    cur.execute(
+        "SELECT count(*) AS n FROM nomination WHERE status = 'pending' AND deferred_at IS NOT NULL"
+    )
+    return cur.fetchone()["n"]
 
 
 def _evidence_rows(cur: psycopg.Cursor, evidence: list[UUID]) -> list[dict[str, Any]]:
@@ -324,6 +345,42 @@ def decline(cur: psycopg.Cursor, nomination_id: UUID, *, actor: str, reason: str
     events.record(
         cur,
         "nomination_declined",
+        actor,
+        nomination_id=nomination_id,
+        detail={"reason": reason},
+    )
+    return row
+
+
+def defer(cur: psycopg.Cursor, nomination_id: UUID, *, actor: str, reason: str) -> dict[str, Any]:
+    """Put a candidate off, on the record, without deciding it.
+
+    The reason is required for the same cause declining needs one, and a
+    sharper one: nothing here is settled, so the note is the whole of what the
+    next reader inherits. "Not now" without it is a candidate that sank for no
+    stated cause, which is indistinguishable from one nobody ever read.
+
+    Deferring again overwrites, because what is wanted is the current reason
+    for it still waiting, not the history of a decision that was never made.
+    """
+    _require_pending(cur, nomination_id)
+    if not reason or not reason.strip():
+        raise MashuError("putting a candidate off needs a reason: it is all the next reader gets")
+    cur.execute(
+        """
+        UPDATE nomination
+        SET deferred_at = now(), defer_reason = %s
+        WHERE nomination_id = %s AND status = 'pending'
+        RETURNING *
+        """,
+        (reason, nomination_id),
+    )
+    if cur.rowcount != 1:
+        raise MashuError(NOT_PENDING)
+    row = cur.fetchone()
+    events.record(
+        cur,
+        "nomination_deferred",
         actor,
         nomination_id=nomination_id,
         detail={"reason": reason},

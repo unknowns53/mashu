@@ -125,6 +125,41 @@ def test_a_decided_candidate_leaves_the_queue(cur):
     assert nominations.pending_nominations(cur) == []
 
 
+def test_putting_a_candidate_off_needs_a_reason_and_does_not_decide_it(cur):
+    """The note is all the next reader inherits, because nothing was settled."""
+    _, _, nomination = two_pains(cur)
+    with pytest.raises(MashuError, match="reason"):
+        nominations.defer(cur, nomination["nomination_id"], actor="user", reason="   ")
+
+    deferred = nominations.defer(
+        cur, nomination["nomination_id"], actor="user", reason="the other team owns this call"
+    )
+    assert deferred["status"] == "pending"
+    assert deferred["deferred_at"] is not None
+    assert deferred["defer_reason"] == "the other team owns this call"
+
+    again = nominations.defer(
+        cur, nomination["nomination_id"], actor="user", reason="still waiting on them"
+    )
+    assert again["defer_reason"] == "still waiting on them"
+
+
+def test_a_candidate_put_off_still_counts_as_pending_but_stops_leading_the_queue(cur):
+    _, _, nomination = two_pains(cur)
+    nominations.defer(cur, nomination["nomination_id"], actor="user", reason="not this week")
+
+    assert len(nominations.pending_nominations(cur)) == 1
+    assert nominations.pending_nominations(cur, include_deferred=False) == []
+    assert nominations.deferred_count(cur) == 1
+
+
+def test_a_decided_candidate_cannot_be_put_off_afterwards(cur):
+    _, _, nomination = two_pains(cur)
+    nominations.decline(cur, nomination["nomination_id"], actor="user", reason="not worth a seat")
+    with pytest.raises(MashuError, match=nominations.NOT_PENDING):
+        nominations.defer(cur, nomination["nomination_id"], actor="user", reason="too late")
+
+
 def test_the_queue_hands_over_the_pains_and_not_their_ids(cur):
     """The decision being asked for is whether these pains justify a seat.
 

@@ -64,7 +64,7 @@ ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
 | コマンド | 内容 |
 |---|---|
 | `mashu status` | 在庫と定員、pending 件数、台帳と痕跡の状況 |
-| `mashu review` | 昇格候補を 1 件ずつ、根拠の台帳エントリと並べて 1 キーで確定・却下 |
+| `mashu review [--all]` | 昇格候補の一覧から 1 件を開き、根拠の台帳エントリと並べて 1 キーで確定・却下・保留 |
 | `mashu remember <body>` | User 明示。即時 active。唯一の即時経路 |
 | `mashu remember <body> --until 5d` | 期限つき条件（Temporary Context）。Review 不要、期限で消える |
 | `mashu retire <id> --reason <r>` | 退役。以後は照合で「何が、なぜ否定されたか」だけ返る |
@@ -81,7 +81,11 @@ ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
 | `mashu bootstrap` | このディレクトリのセッションが受け取る内容と token |
 | `mashu admin migrate` | 未適用の migration を実行 |
 
-Review で確定するとき delivery を選ぶ。件数は週数件のオーダーなので、1 件ごとに人が置き場を決める。
+`mashu review` は二画面。待っている候補の一覧（↑↓ / j k で移動、⏎ で開く）と、1 件の全文・token 見積り・根拠の台帳エントリを並べた個別画面（`←` で一覧へ戻る）である。個別画面のキーは `y` 確定、`e` エディタで本文を直してから確定、`r` 理由を付けて却下、`s` 理由を付けて保留、`space` で続きを読む、`?` でキーの説明、`q` で退出。
+
+確定するとき delivery を選ぶ（空 Enter で既定、`g ACTION` で行為の門）。件数は週数件のオーダーなので、1 件ごとに人が置き場を決める。まとめて承認するキーは置いていない。
+
+決定は 1 件ずつその場で確定するので、途中で `q` を押しても後ろは残り、次の `mashu review` は残りから始まる。`s` の保留は決定ではなく、pending のまま理由と一緒に脇へ置くだけで、`mashu review --all` と `mashu review --list --all` で戻ってくる。
 
 id を取る引数はどれも、一覧が表示する短縮 ID（先頭 8 文字）をそのまま受け付ける。4 文字以上の前方一致で一意に決まればよく、複数に当たったときは候補を並べて拒否する。
 

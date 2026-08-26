@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from mashu import cli
+from mashu import cli, db, nominations
 
 # Each test writes to a database the others also write to, so the strings are
 # kept mutually dissimilar: a trigram match across tests would make one test's
@@ -27,6 +27,7 @@ EVIDENCED = "apply a migration on the standby first; the primary is not the rehe
 LISTED = "spell out the timezone in every scheduled job, even when it looks obvious"
 SCOPED = "reach for the vendored toolchain in this checkout, not whatever is on PATH"
 PREVENTED = "read the exporter's manifest before trusting the row count it prints"
+DEFERRED = "name the branch after the ticket, so a stale checkout tells on itself"
 
 #: A hexadecimal string no printed id can begin with: the ninth character of a
 #: UUID is always a dash, so twelve hexadecimal digits match nothing, whatever
@@ -137,6 +138,35 @@ def test_a_candidate_can_be_turned_down_and_needs_a_reason_to_be(run):
 
     _, out, _ = run("review", "--list")
     assert nomination_id not in out
+
+
+def test_a_candidate_put_off_is_out_of_the_listing_until_all_asks_for_it(run, committing_dsn):
+    """Deferral is written by the sitting, so the listing is what is checked here."""
+    run("pain", "--kind", "incident", "--what", "guessed at it", "--prevention", DEFERRED)
+    _, out, _ = run("review", "--list")
+    nomination_id = pending_id(out, DEFERRED)
+
+    with db.transaction(committing_dsn) as cur:
+        nominations.defer(
+            cur,
+            cli._resolve(
+                cur, nomination_id, table="nomination", id_col="nomination_id", label="candidate"
+            ),
+            actor="user",
+            reason="the owner of that runbook is away",
+        )
+
+    _, out, _ = run("review", "--list")
+    assert nomination_id not in out
+
+    _, out, _ = run("review", "--list", "--all")
+    assert nomination_id in out
+    assert "deferred: the owner of that runbook is away" in out
+
+    # Naming it directly still works: putting something off is not a decision,
+    # so it does not put the candidate out of reach.
+    code, out, _ = run("review", "--decline", nomination_id, "--reason", "answered elsewhere")
+    assert code == 0 and out.startswith("declined")
 
 
 def test_a_dated_condition_is_written_by_the_command_line_and_nowhere_else(run):
