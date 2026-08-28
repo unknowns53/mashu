@@ -414,3 +414,26 @@ def test_wrapping_keeps_the_spaces_that_are_not_the_seam_itself(run):
             if pos < len(MIXED) and MIXED[pos] == " ":
                 pos += 1
         assert pos == len(MIXED), f"width {width}: ends {len(MIXED) - pos} character(s) short"
+
+
+def test_the_route_listing_keeps_the_tail_that_tells_two_routes_apart(run):
+    """A route is identified by its end, and a Japanese one prints twice as wide.
+
+    Cutting the listing at a fixed column printed every route under one tree
+    as the same row, which is the one reading a person consults this table to
+    settle. Padding by character count is the same mistake reached from the
+    other side: the scope beside a Japanese path stepped out of its column.
+    """
+    run("scope", "--add", "the listing", "--about", "routes printed side by side")
+    deep = "/listing/investigation/results/first-pass"
+    wide = "/listing/調査/結果/一回目"
+    run("route", "--add", deep, "--scope", "the listing")
+    run("route", "--add", wide, "--scope", "the listing")
+
+    _, out, _ = run("route")
+
+    assert deep in out
+    assert wide in out
+    rows = [line for line in out.splitlines() if line.endswith("  the listing")]
+    assert len(rows) == 2
+    assert len({cli._cells(row) for row in rows}) == 1, out
