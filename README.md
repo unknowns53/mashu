@@ -129,7 +129,7 @@ Agent 名は `--agent` または環境変数 `MASHU_AGENT` で渡す。MCP ツ�
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Task|Agent|mcp__codex-async__codex_start",
+        "matcher": "Task|Agent|mcp__codex-async__codex_start|Bash",
         "hooks": [{"type": "command", "command": "/path/to/mashu/tools/pretooluse_guard.py"}]
       }
     ]
@@ -140,6 +140,8 @@ Agent 名は `--agent` または環境変数 `MASHU_AGENT` で渡す。MCP ツ�
 DB に接続できないときはブロックせず通す。接続できないことは、いま下そうとしている判断についての証拠ではない。
 
 発火は行為ごとに一度だが、数え直しの単位はセッションではなく圧縮の世代である。圧縮を跨ぐと session_id は変わらないまま、フックが書き込んだ文脈のほうが落ちる。発火済みの印だけが残って guard が二度と出なくなるので、`transcript_path` の中の `isCompactSummary` を数えて世代を鍵に混ぜている。
+
+ツールと行為の対応は `ACTIONS` にある。行為は判断の名前であって、ツールの名前ではない。`Task` / `Agent` / `codex_start` はどれも `delegate`、`Bash` は `shell`。何も留めていない行為では `mashu guard` が空で返り、フックは印も残さず通すので、対応を足すこと自体に費用は無い。逆に、留めた記憶は最初のその行為で出る。それが些細な呼び出しであっても出る。
 
 ### 圧縮のあとに配り直す（SessionStart フック）
 

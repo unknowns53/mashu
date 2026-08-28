@@ -33,10 +33,20 @@ import tempfile
 #: Which tools carry out which judgement. The mapping lives here rather than in
 #: the store because the same judgement is reached through different tools in
 #: different CLIs, and a store keyed by tool name would need a row per client.
+#:
+#: A judgement is named for what the caller is about to decide, not for the
+#: tool. "shell" covers running a command somewhere the store may hold the
+#: shape of that somewhere: which interpreter exists there, which of a
+#: command's flags reports live state and which reports a cached snapshot.
+#: Fires on the first shell call of a generation whatever that call is, so
+#: the reading can land ahead of a trivial one; the alternative is keying the
+#: gate on the command text, which would put the store in the business of
+#: matching strings and would miss the paraphrase.
 ACTIONS = {
     "Task": "delegate",
     "Agent": "delegate",
     "mcp__codex-async__codex_start": "delegate",
+    "Bash": "shell",
 }
 
 MARKERS = pathlib.Path(tempfile.gettempdir()) / "mashu-guard"
