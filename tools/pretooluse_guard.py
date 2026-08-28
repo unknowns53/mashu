@@ -33,31 +33,22 @@ import subprocess
 import sys
 import tempfile
 
-#: Which tools carry out which judgement. The mapping lives here rather than in
-#: the store because the same judgement is reached through different tools in
-#: different CLIs, and a store keyed by tool name would need a row per client.
+#: Which judgement a tool carries out, for the tools the client itself ships.
+#: A tool reached through an MCP server names an installation, not a client,
+#: and belongs in the file below.
 ACTIONS = {
     "Task": "delegate",
     "Agent": "delegate",
-    "mcp__codex-async__codex_start": "delegate",
 }
 
-#: Tools whose judgement its own name is too coarse to state. Running a command
-#: is not one judgement: listing a directory and submitting a job to a shared
-#: cluster arrive through the same tool and have nothing in common, so the name
-#: of the tool cannot say which is about to happen.
-BY_COMMAND = {"Bash"}
-
-#: Where the command table is read from. Outside the repository, like the
-#: banned-pattern list and for the same reason turned around: that file holds
-#: what must never be published, this one holds what only one installation
-#: knows. Which tools a client offers is the same everywhere that client runs,
-#: so ACTIONS ships. Which command reaches which cluster, scheduler or wrapper
-#: is true of one site only, and a copy of it committed here would be both
-#: wrong for the next reader and a standing description of this reader's
-#: machines.
+#: The rest of the table, kept outside the repository the way the
+#: banned-pattern list is: it names this installation's servers, hosts and
+#: wrappers.
 ACTIONS_FILE = ".mashu-guard-actions"
 ACTIONS_ENV_VAR = "MASHU_GUARD_ACTIONS"
+
+#: A tool is matched whole, a command searched.
+SUBJECTS = ("tool", "command")
 
 
 def actions_path() -> pathlib.Path | None:
@@ -72,35 +63,36 @@ def actions_path() -> pathlib.Path | None:
     return None
 
 
-def command_actions() -> list[tuple[re.Pattern[str], str]]:
-    """What a command has to look like to be a given judgement, in reading order.
+def rules() -> list[tuple[str, str, str]]:
+    """The configured rules as (subject, expression, judgement), in reading order.
 
-    One rule per line, the judgement first and the rest of the line its regular
-    expression; blank lines and lines opening with # are passed over. A line
-    that will not compile is passed over too. Absent or empty, no command
-    carries a judgement and the gate stands only where ACTIONS puts it, which
-    is where it stood before this file existed -- an unconfigured gate is the
-    tool's earlier behaviour rather than a hole in a new one.
+    One rule per line: judgement, subject, expression. A broken line is one
+    rule missing rather than a table refused. With no file the gate stands
+    where ACTIONS puts it, which is where it stood before the file existed.
     """
     path = actions_path()
     if path is None:
         return []
-    out: list[tuple[re.Pattern[str], str]] = []
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
+    out: list[tuple[str, str, str]] = []
     for line in lines:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        named, _, expression = line.partition(" ")
-        if not expression.strip():
+        named, _, rest = line.partition(" ")
+        subject, _, expression = rest.strip().partition(" ")
+        expression = expression.strip()
+        if subject not in SUBJECTS or not expression:
             continue
-        try:
-            out.append((re.compile(expression.strip()), named))
-        except re.error:
-            continue
+        if subject == "command":
+            try:
+                re.compile(expression)
+            except re.error:
+                continue
+        out.append((subject, expression, named))
     return out
 
 
@@ -141,18 +133,24 @@ def generation(transcript: str | None) -> int:
 def action_for(event: dict) -> str | None:
     """The judgement this call carries out, or nothing if it carries none.
 
-    A tool that stands for one judgement answers by its name. A tool that
-    stands for many is read by what it was handed, and reading nothing out of
-    it is the ordinary answer rather than a failure: most commands are not a
-    judgement the store holds anything about, and firing on them anyway is how
-    a gate stops being read.
+    The tool answers first; the command only for tools whose name is too
+    coarse, where listing a directory and submitting a cluster job arrive the
+    same way. Nothing is the ordinary answer: firing on calls the store holds
+    nothing about is how a gate stops being read.
     """
     tool = event.get("tool_name", "")
-    if tool not in BY_COMMAND:
-        return ACTIONS.get(tool)
+    configured = rules()
+    if tool:
+        if tool in ACTIONS:
+            return ACTIONS[tool]
+        for subject, expression, named in configured:
+            if subject == "tool" and expression == tool:
+                return named
     command = (event.get("tool_input") or {}).get("command") or ""
-    for pattern, named in command_actions():
-        if pattern.search(command):
+    if not command:
+        return None
+    for subject, expression, named in configured:
+        if subject == "command" and re.search(expression, command):
             return named
     return None
 
