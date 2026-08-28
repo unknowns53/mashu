@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+
+import pytest
+
 from mashu import routing, scopes
 
 
@@ -75,3 +79,20 @@ def test_one_spelling_per_directory(cur, scope_id):
     routing.add_route(cur, path_prefix="/work/project/", scope_id=scope_id, actor="user")
     assert routing.all_routes(cur)[0]["path_prefix"] == "/work/project"
     assert routing.normalise("/work/project//") == "/work/project"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the spellings being reconciled are Windows ones")
+def test_a_windows_route_covers_the_tree_below_it(cur, scope_id):
+    """A route is typed by hand; the directory it has to match comes from os.getcwd().
+
+    Backslashes carry no segment boundary for the match and the same tree
+    answers to either case, so unless both sides are spelled once the route
+    hits on an exact equality alone and every subdirectory below it reads as
+    unmapped, which is the one wrong answer that arrives looking right.
+    """
+    routing.add_route(cur, path_prefix="C:/Work/Project", scope_id=scope_id, actor="user")
+
+    assert routing.resolve(cur, "C:\\Work\\Project") == (scope_id, True)
+    assert routing.resolve(cur, "C:\\Work\\Project\\md\\run-01") == (scope_id, True)
+    assert routing.resolve(cur, "c:/work/project/dft") == (scope_id, True)
+    assert routing.resolve(cur, "C:\\Work\\Project-old") == (None, False)
