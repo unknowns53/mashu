@@ -22,8 +22,22 @@ from mashu import events
 
 
 def normalise(path: str) -> str:
-    """One spelling per directory, so two routes cannot both look like the match."""
+    """One spelling per directory, so two routes cannot both look like the match.
+
+    Separator and case are part of the spelling. A working directory arrives
+    from os.getcwd(), and where that is spelled with backslashes it shares no
+    segment boundary with a route typed by hand, so resolution below reads one
+    long segment and only an exact equality can hit. Case is the same problem
+    reached from the other side: the same tree is reachable as C:\\Users and
+    c:/users, and either may be what a client hands over.
+
+    The failure both produce is a subdirectory answering "no route", which is
+    not visibly wrong from the far end. The opening still arrives; its scoped
+    half is empty, and an empty scoped half reads as a scope holding nothing.
+    """
     expanded = os.path.expanduser(str(path).strip())
+    if os.name == "nt":
+        return pathlib.PureWindowsPath(expanded).as_posix().rstrip("/").lower() or "/"
     return str(pathlib.PurePosixPath(expanded)).rstrip("/") or "/"
 
 

@@ -160,6 +160,11 @@ def _field(label: str, value: Any) -> None:
     print(f"{label:<10}  {value}")
 
 
+def _cells(text: str) -> int:
+    """How wide a string prints, counting double-width characters as two."""
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
 def _flow(text: str, indent: str = "  ", width: int | None = None) -> str:
     """Wrap a long body for reading, counting double-width characters as two.
 
@@ -188,9 +193,7 @@ def _flow(text: str, indent: str = "  ", width: int | None = None) -> str:
                 else:
                     out.append(row)
                     row = indent
-                used = len(indent) + sum(
-                    2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in row[len(indent) :]
-                )
+                used = len(indent) + _cells(row[len(indent) :])
                 # A space is dropped only when it is the seam itself; carried
                 # text keeps the spaces between its own words.
                 if ch == " " and row == indent:
@@ -772,9 +775,18 @@ def cmd_route(args: argparse.Namespace) -> int:
             print("removed" if removed else "not found")
             return 0
         rows = routing.all_routes(cur)
-    print("path_prefix                    scope")
+    # A route is told apart by its tail, so a fixed column cutting the end
+    # printed every path under one tree as the same row. The column is taken
+    # from the longest route instead, measured in cells: a route through a
+    # Japanese directory name spends two of them per character, and counting
+    # characters left the scope beside it stepping in and out.
+    header = "path_prefix"
+    width = max([_cells(header), *(_cells(row["path_prefix"]) for row in rows)])
+    print(f"{header}{' ' * (width - _cells(header))}  scope")
     for row in rows:
-        print(f"{row['path_prefix'][:28]:28}  {row.get('scope_name') or '(ignored)'}")
+        prefix = row["path_prefix"]
+        pad = " " * (width - _cells(prefix))
+        print(f"{prefix}{pad}  {row.get('scope_name') or '(ignored)'}")
     return 0
 
 

@@ -129,7 +129,7 @@ Agent 名は `--agent` または環境変数 `MASHU_AGENT` で渡す。MCP ツ�
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Task|Agent|mcp__codex-async__codex_start",
+        "matcher": "Task|Agent|Bash",
         "hooks": [{"type": "command", "command": "/path/to/mashu/tools/pretooluse_guard.py"}]
       }
     ]
@@ -140,6 +140,18 @@ Agent 名は `--agent` または環境変数 `MASHU_AGENT` で渡す。MCP ツ�
 DB に接続できないときはブロックせず通す。接続できないことは、いま下そうとしている判断についての証拠ではない。
 
 発火は行為ごとに一度だが、数え直しの単位はセッションではなく圧縮の世代である。圧縮を跨ぐと session_id は変わらないまま、フックが書き込んだ文脈のほうが落ちる。発火済みの印だけが残って guard が二度と出なくなるので、`transcript_path` の中の `isCompactSummary` を数えて世代を鍵に混ぜている。
+
+行為は判断の名前であって、ツールの名前ではない。ツールが先に引かれ、名前で判断が決まらないとき（`Bash` のように、ディレクトリの一覧と共有クラスタへの投入が同じツールを通るとき）だけコマンドを読む。どちらにも当たらなければ行為は無く、門は立たない。
+
+対応表のうち、クライアント自身が備えるツールだけを同梱する（`ACTIONS`）。MCP サーバ越しのツール名と、どのコマンドがどのクラスタ・ラッパー・スケジューラに届くかは、ひとつのインストールでしか正しくないのでリポジトリの外に置く。禁止パターンの一覧と同じ置き方で、既定は `.mashu-guard-actions`（gitignore 済み）、`MASHU_GUARD_ACTIONS` で場所を変えられる。
+
+```
+# 1 行 1 規則: 行為、読む対象（tool か command）、式
+delegate     tool     mcp__some-server__start_task
+remote-shell command  \b(cluster-wrapper|scheduler-cmd)\b
+```
+
+表が無いときは `ACTIONS` の分だけが残る。壊れた行はその 1 行だけを落とす。文字列で見ている以上、コマンドがその語を実行ではなく引用として含むときも門は立つ。読んでもう一度呼べば通るので、当たらないより当たりすぎるほうを選んでいる。
 
 ### 圧縮のあとに配り直す（SessionStart フック）
 

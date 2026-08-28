@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Put what the store holds in front of an action, before the action runs (30.1).
 
-A PreToolUse hook. It reads the tool about to run, asks `mashu guard` whether
-anything is pinned to the kind of judgement that tool carries out, and refuses
-the call once with what came back.
+A PreToolUse hook. It reads what is about to run -- the tool, and for a tool
+that stands for more than one judgement the command it was handed -- asks
+`mashu guard` whether anything is pinned to that judgement, and refuses the
+call once with what came back.
 
 Refusing rather than appending is the whole point. Section 6.1 put the read
 guarantee at session start and called its own first stage a pseudo-push
@@ -25,19 +26,75 @@ question the ledger can answer rather than one to reason about.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
 
-#: Which tools carry out which judgement. The mapping lives here rather than in
-#: the store because the same judgement is reached through different tools in
-#: different CLIs, and a store keyed by tool name would need a row per client.
+#: Which judgement a tool carries out, for the tools the client itself ships.
+#: A tool reached through an MCP server names an installation, not a client,
+#: and belongs in the file below.
 ACTIONS = {
     "Task": "delegate",
     "Agent": "delegate",
-    "mcp__codex-async__codex_start": "delegate",
 }
+
+#: The rest of the table, kept outside the repository the way the
+#: banned-pattern list is: it names this installation's servers, hosts and
+#: wrappers.
+ACTIONS_FILE = ".mashu-guard-actions"
+ACTIONS_ENV_VAR = "MASHU_GUARD_ACTIONS"
+
+#: A tool is matched whole, a command searched.
+SUBJECTS = ("tool", "command")
+
+
+def actions_path() -> pathlib.Path | None:
+    override = os.environ.get(ACTIONS_ENV_VAR)
+    if override:
+        path = pathlib.Path(override).expanduser()
+        return path if path.exists() else None
+    for parent in pathlib.Path(__file__).resolve().parents:
+        candidate = parent / ACTIONS_FILE
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def rules() -> list[tuple[str, str, str]]:
+    """The configured rules as (subject, expression, judgement), in reading order.
+
+    One rule per line: judgement, subject, expression. A broken line is one
+    rule missing rather than a table refused. With no file the gate stands
+    where ACTIONS puts it, which is where it stood before the file existed.
+    """
+    path = actions_path()
+    if path is None:
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out: list[tuple[str, str, str]] = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        named, _, rest = line.partition(" ")
+        subject, _, expression = rest.strip().partition(" ")
+        expression = expression.strip()
+        if subject not in SUBJECTS or not expression:
+            continue
+        if subject == "command":
+            try:
+                re.compile(expression)
+            except re.error:
+                continue
+        out.append((subject, expression, named))
+    return out
+
 
 MARKERS = pathlib.Path(tempfile.gettempdir()) / "mashu-guard"
 
@@ -73,13 +130,38 @@ def generation(transcript: str | None) -> int:
         return 0
 
 
+def action_for(event: dict) -> str | None:
+    """The judgement this call carries out, or nothing if it carries none.
+
+    The tool answers first; the command only for tools whose name is too
+    coarse, where listing a directory and submitting a cluster job arrive the
+    same way. Nothing is the ordinary answer: firing on calls the store holds
+    nothing about is how a gate stops being read.
+    """
+    tool = event.get("tool_name", "")
+    configured = rules()
+    if tool:
+        if tool in ACTIONS:
+            return ACTIONS[tool]
+        for subject, expression, named in configured:
+            if subject == "tool" and expression == tool:
+                return named
+    command = (event.get("tool_input") or {}).get("command") or ""
+    if not command:
+        return None
+    for subject, expression, named in configured:
+        if subject == "command" and re.search(expression, command):
+            return named
+    return None
+
+
 def main() -> int:
     try:
         event = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         return 0
 
-    action = ACTIONS.get(event.get("tool_name", ""))
+    action = action_for(event)
     if not action:
         return 0
 
