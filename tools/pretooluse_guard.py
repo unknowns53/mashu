@@ -26,6 +26,7 @@ question the ledger can answer rather than one to reason about.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -47,17 +48,61 @@ ACTIONS = {
 #: of the tool cannot say which is about to happen.
 BY_COMMAND = {"Bash"}
 
-#: What a command has to look like to be a given judgement. Read in order,
-#: first match wins, and a command matching none of them carries no judgement
-#: this gate has anything to say about.
-#:
-#: The table lives beside ACTIONS for the reason ACTIONS gives, and it is the
-#: same table one level finer: what the caller is about to decide, read off
-#: what they are about to run. Keying the gate on the tool alone put five
-#: memories about a remote cluster in front of the session's first `ls`, which
-#: is the failure 16.3 names -- a gate nobody reads -- arrived at by being
-#: right about the tool and wrong about the judgement.
-COMMAND_ACTIONS = ((re.compile(r"\b(rccs-run|ccfep|jobinfo|jsub|jdel|waitest)\b"), "remote-shell"),)
+#: Where the command table is read from. Outside the repository, like the
+#: banned-pattern list and for the same reason turned around: that file holds
+#: what must never be published, this one holds what only one installation
+#: knows. Which tools a client offers is the same everywhere that client runs,
+#: so ACTIONS ships. Which command reaches which cluster, scheduler or wrapper
+#: is true of one site only, and a copy of it committed here would be both
+#: wrong for the next reader and a standing description of this reader's
+#: machines.
+ACTIONS_FILE = ".mashu-guard-actions"
+ACTIONS_ENV_VAR = "MASHU_GUARD_ACTIONS"
+
+
+def actions_path() -> pathlib.Path | None:
+    override = os.environ.get(ACTIONS_ENV_VAR)
+    if override:
+        path = pathlib.Path(override).expanduser()
+        return path if path.exists() else None
+    for parent in pathlib.Path(__file__).resolve().parents:
+        candidate = parent / ACTIONS_FILE
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def command_actions() -> list[tuple[re.Pattern[str], str]]:
+    """What a command has to look like to be a given judgement, in reading order.
+
+    One rule per line, the judgement first and the rest of the line its regular
+    expression; blank lines and lines opening with # are passed over. A line
+    that will not compile is passed over too. Absent or empty, no command
+    carries a judgement and the gate stands only where ACTIONS puts it, which
+    is where it stood before this file existed -- an unconfigured gate is the
+    tool's earlier behaviour rather than a hole in a new one.
+    """
+    path = actions_path()
+    if path is None:
+        return []
+    out: list[tuple[re.Pattern[str], str]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        named, _, expression = line.partition(" ")
+        if not expression.strip():
+            continue
+        try:
+            out.append((re.compile(expression.strip()), named))
+        except re.error:
+            continue
+    return out
+
 
 MARKERS = pathlib.Path(tempfile.gettempdir()) / "mashu-guard"
 
@@ -106,7 +151,7 @@ def action_for(event: dict) -> str | None:
     if tool not in BY_COMMAND:
         return ACTIONS.get(tool)
     command = (event.get("tool_input") or {}).get("command") or ""
-    for pattern, named in COMMAND_ACTIONS:
+    for pattern, named in command_actions():
         if pattern.search(command):
             return named
     return None

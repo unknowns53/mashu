@@ -17,6 +17,10 @@ build/
 # Local banned-pattern list: must never be committed
 .git-banned-patterns
 
+# Local command-to-judgement table for the PreToolUse gate: names this
+# installation's hosts, wrappers and schedulers, so it stays out of the repo
+.mashu-guard-actions
+
 # Data and intermediates
 data/
 *.dump
