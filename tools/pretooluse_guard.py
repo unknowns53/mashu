@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Put what the store holds in front of an action, before the action runs (30.1).
 
-A PreToolUse hook. It reads the tool about to run, asks `mashu guard` whether
-anything is pinned to the kind of judgement that tool carries out, and refuses
-the call once with what came back.
+A PreToolUse hook. It reads what is about to run -- the tool, and for a tool
+that stands for more than one judgement the command it was handed -- asks
+`mashu guard` whether anything is pinned to that judgement, and refuses the
+call once with what came back.
 
 Refusing rather than appending is the whole point. Section 6.1 put the read
 guarantee at session start and called its own first stage a pseudo-push
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -33,21 +35,29 @@ import tempfile
 #: Which tools carry out which judgement. The mapping lives here rather than in
 #: the store because the same judgement is reached through different tools in
 #: different CLIs, and a store keyed by tool name would need a row per client.
-#:
-#: A judgement is named for what the caller is about to decide, not for the
-#: tool. "shell" covers running a command somewhere the store may hold the
-#: shape of that somewhere: which interpreter exists there, which of a
-#: command's flags reports live state and which reports a cached snapshot.
-#: Fires on the first shell call of a generation whatever that call is, so
-#: the reading can land ahead of a trivial one; the alternative is keying the
-#: gate on the command text, which would put the store in the business of
-#: matching strings and would miss the paraphrase.
 ACTIONS = {
     "Task": "delegate",
     "Agent": "delegate",
     "mcp__codex-async__codex_start": "delegate",
-    "Bash": "shell",
 }
+
+#: Tools whose judgement its own name is too coarse to state. Running a command
+#: is not one judgement: listing a directory and submitting a job to a shared
+#: cluster arrive through the same tool and have nothing in common, so the name
+#: of the tool cannot say which is about to happen.
+BY_COMMAND = {"Bash"}
+
+#: What a command has to look like to be a given judgement. Read in order,
+#: first match wins, and a command matching none of them carries no judgement
+#: this gate has anything to say about.
+#:
+#: The table lives beside ACTIONS for the reason ACTIONS gives, and it is the
+#: same table one level finer: what the caller is about to decide, read off
+#: what they are about to run. Keying the gate on the tool alone put five
+#: memories about a remote cluster in front of the session's first `ls`, which
+#: is the failure 16.3 names -- a gate nobody reads -- arrived at by being
+#: right about the tool and wrong about the judgement.
+COMMAND_ACTIONS = ((re.compile(r"\b(rccs-run|ccfep|jobinfo|jsub|jdel|waitest)\b"), "remote-shell"),)
 
 MARKERS = pathlib.Path(tempfile.gettempdir()) / "mashu-guard"
 
@@ -83,13 +93,32 @@ def generation(transcript: str | None) -> int:
         return 0
 
 
+def action_for(event: dict) -> str | None:
+    """The judgement this call carries out, or nothing if it carries none.
+
+    A tool that stands for one judgement answers by its name. A tool that
+    stands for many is read by what it was handed, and reading nothing out of
+    it is the ordinary answer rather than a failure: most commands are not a
+    judgement the store holds anything about, and firing on them anyway is how
+    a gate stops being read.
+    """
+    tool = event.get("tool_name", "")
+    if tool not in BY_COMMAND:
+        return ACTIONS.get(tool)
+    command = (event.get("tool_input") or {}).get("command") or ""
+    for pattern, named in COMMAND_ACTIONS:
+        if pattern.search(command):
+            return named
+    return None
+
+
 def main() -> int:
     try:
         event = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         return 0
 
-    action = ACTIONS.get(event.get("tool_name", ""))
+    action = action_for(event)
     if not action:
         return 0
 
