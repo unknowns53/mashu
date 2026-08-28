@@ -274,7 +274,10 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     active = "  ".join(f"{key}={counts.get(key, 0)}" for key in ("always", "scope", "guard"))
     print(f"active  {active}")
-    print(f"tokens  worst={totals['worst']}  capacity={config.capacity()}")
+    print(
+        f"tokens  always={totals['always']}/{config.always_capacity()}  "
+        f"worst={totals['worst']}/{config.capacity()}"
+    )
     print(f"pending {len(pending)}")
     print(f"traces  unexpired={trace_count}")
     print(f"ledger  last_30_days={ledger_count}")

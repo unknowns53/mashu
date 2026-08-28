@@ -13,6 +13,11 @@ import os
 #: refused unless something else retires or steps down to guard.
 DEFAULT_CAPACITY = 2000
 
+#: Hard ceiling on the always layer alone, inside the whole-opening one above
+#: (5.2). What it protects is the scopes' share: every token delivered to every
+#: session is one no scope can ever use.
+DEFAULT_ALWAYS_CAPACITY = 800
+
 #: Similarity at which two pains count as the same hole (4.1). Conservative
 #: on purpose; calibrated against real entries once there are any.
 DEFAULT_MATCH_THRESHOLD = 0.45
@@ -29,6 +34,10 @@ TEMPORARY_MAX_DAYS = 14
 
 def capacity() -> int:
     return int(os.environ.get("MASHU_CAPACITY") or DEFAULT_CAPACITY)
+
+
+def always_capacity() -> int:
+    return int(os.environ.get("MASHU_ALWAYS_CAPACITY") or DEFAULT_ALWAYS_CAPACITY)
 
 
 def match_threshold() -> float:

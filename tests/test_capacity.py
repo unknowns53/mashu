@@ -119,3 +119,47 @@ def test_the_totals_separate_what_every_session_pays_from_what_one_scope_does(
     assert totals["always"] == pushed_cost([NEW_RULE])
     assert totals["scopes"] == {scope_id: pushed_cost(RULES[:2])}
     assert totals["worst"] == totals["always"] + pushed_cost(RULES[:2])
+
+
+def test_the_always_layer_has_a_lower_ceiling_of_its_own(cur, scope_id, monkeypatch):
+    """It can have room in the opening and still be refused.
+
+    Without this the layer never overflows: it spends the headroom the scopes
+    were going to need, and they find the room gone without having been
+    refused anything.
+    """
+    monkeypatch.setenv("MASHU_CAPACITY", "400")
+    monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", str(pushed_cost(RULES[:1])))
+    memories.remember(cur, content=RULES[0], actor="user")
+
+    got = capacity.check_admission(cur, content=NEW_RULE, delivery="always")
+    assert got["ok"] is False
+    assert got["capacity"] == config.always_capacity()
+    assert got["projected"] == pushed_cost(RULES[:1]) + pushed_cost([NEW_RULE])
+    # The whole opening had room for it; the layer is what refused.
+    assert got["projected"] < config.capacity()
+
+    # The same rule, told which one place it governs, fits.
+    assert (
+        capacity.check_admission(cur, content=NEW_RULE, delivery="scope", scope_id=scope_id)["ok"]
+        is True
+    )
+
+
+def test_the_layer_refusal_names_the_door_a_scope_rule_does_not_have(cur, monkeypatch):
+    monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", "10")
+    got = capacity.check_admission(cur, content=NEW_RULE, delivery="always")
+    assert got["ok"] is False
+    assert "the always layer seats 10 tokens" in got["refusal"]
+    assert "mashu deliver <id> scope" in got["refusal"]
+
+    with pytest.raises(RefusedError, match="the always layer seats"):
+        memories.remember(cur, content=NEW_RULE, actor="user")
+
+
+def test_a_scope_rule_is_not_weighed_against_the_layer_ceiling(cur, scope_id, monkeypatch):
+    """The lower ceiling is about what every session pays, not about size."""
+    monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", "1")
+    got = capacity.check_admission(cur, content=NEW_RULE, delivery="scope", scope_id=scope_id)
+    assert got["ok"] is True
+    assert got["capacity"] == config.capacity()

@@ -10,7 +10,14 @@ rides with one scope's sessions, so it competes with that scope. An always
 rule rides with every session in turn, including the session that opens in the
 heaviest scope, so the fullest scope is what it has to fit alongside. A guard
 rule rides with neither: it is not in the opening at all, which is why
-stepping down to guard is one of the two ways out a refusal names.
+stepping down to guard is one of the ways out a refusal names.
+
+The always layer answers to a second, lower ceiling of its own. Left with only
+the shared one it never overflows; it quietly spends the whole store's headroom
+on rules that most sessions did not need, and the scopes find the room gone
+without anything having refused them. Counting rows was the earlier shorthand
+for this and it drifted: the rows came out shorter than the estimate they stood
+in for, so the count held the layer near half the size it was meant to have.
 """
 
 from __future__ import annotations
@@ -85,6 +92,23 @@ def bootstrap_totals(cur: psycopg.Cursor) -> dict[str, Any]:
     return _totals(cur, None)
 
 
+def _room(projected: int, cost: int) -> str:
+    """The arithmetic both refusals open with."""
+    return (
+        f"this would take it to {projected} "
+        f"({cost} for this content on top of {projected - cost} already pushed). "
+    )
+
+
+#: The door out that every refusal names: a rule that has stopped earning its seat.
+_RETIRE = "`mashu retire <id> --reason <why>` for a rule that has stopped earning its seat"
+#: The door only guard offers, and the reason it is never itself full.
+_GUARD = (
+    "`mashu deliver <id> guard --action <act>` to move one out of the opening "
+    "and in front of the act it governs"
+)
+
+
 def _refusal(projected: int, cost: int, ceiling: int) -> str:
     """A refusal that names the numbers and both doors out.
 
@@ -93,11 +117,25 @@ def _refusal(projected: int, cost: int, ceiling: int) -> str:
     real commands, not advice.
     """
     return (
-        f"the opening seats {ceiling} tokens and this would take it to {projected} "
-        f"({cost} for this content on top of {projected - cost} already pushed). "
-        "Make room first: `mashu retire <id> --reason <why>` for a rule that has "
-        "stopped earning its seat, or `mashu deliver <id> guard --action <act>` to "
-        "move one out of the opening and in front of the act it governs."
+        f"the opening seats {ceiling} tokens and "
+        + _room(projected, cost)
+        + f"Make room first: {_RETIRE}, or {_GUARD}."
+    )
+
+
+def _refusal_always(projected: int, cost: int, ceiling: int) -> str:
+    """The same refusal, plus the door only a rule in this layer has.
+
+    A rule refused here is not too big for the store; it is too big for the
+    part of the store every session pays for. So the way out a scope rule
+    does not have is the useful one: if it governs one place, say which.
+    """
+    return (
+        f"the always layer seats {ceiling} tokens and "
+        + _room(projected, cost)
+        + f"Make room first: {_RETIRE}, "
+        "`mashu deliver <id> scope --scope <name>` for one that only governs "
+        f"one place, or {_GUARD}."
     )
 
 
@@ -137,7 +175,21 @@ def check_admission(
             "refusal": None,
         }
     if delivery == "always":
-        projected = totals["always"] + cost + max(totals["scopes"].values(), default=0)
+        # Two ceilings, checked nearest first so the refusal names the one that
+        # actually bites. A rule can clear the layer and still not clear the
+        # opening it shares with the heaviest scope; the reverse is what the
+        # layer ceiling exists to catch.
+        layer = totals["always"] + cost
+        layer_ceiling = config.always_capacity()
+        if layer > layer_ceiling:
+            return {
+                "ok": False,
+                "tokens": cost,
+                "projected": layer,
+                "capacity": layer_ceiling,
+                "refusal": _refusal_always(layer, cost, layer_ceiling),
+            }
+        projected = layer + max(totals["scopes"].values(), default=0)
     elif delivery == "scope":
         projected = totals["always"] + totals["scopes"].get(scope_id, 0) + cost
     else:
