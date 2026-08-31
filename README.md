@@ -60,9 +60,9 @@ ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
 
 | コマンド | 内容 |
 |---|---|
-| `mashu status` | 在庫と定員、pending 件数、台帳と痕跡の状況 |
+| `mashu status` | 在庫と定員、pending 件数、台帳と痕跡の状況、配信失敗の疑い件数 |
 | `mashu review [--all]` | 昇格候補を 1 件ずつ確定・却下・保留する TUI（次節） |
-| `mashu remember <body> [--until 5d]` | User 明示。唯一の即時経路。`--until` を付けると期限つき条件（Temporary Context）になり、Review 不要で期限に消える |
+| `mashu remember <body> [--until 5d]` | User 明示。唯一の即時経路。退役済みの記憶と衝突すると退役理由を出して確認する（`--force` で無条件）。`--until` を付けると期限つき条件（Temporary Context）になり、Review 不要で期限に消える |
 | `mashu pain --kind {incident,friction} --what <w> --prevention <p>` | 痛みの手動記録 |
 
 ### mashu review
@@ -112,11 +112,13 @@ Agent 名は `--agent` または環境変数 `MASHU_AGENT` で渡す。MCP ツ�
 | Tool | 役割 |
 |---|---|
 | `session_bootstrap` | セッション開始時に一度。always と現在 Scope の記憶、期限つき条件、pending 件数 |
-| `pain_report` | 痛みを台帳へ記録し、類似の台帳エントリ・痕跡・退役理由を返す。二度目なら候補を生成 |
+| `pain_report` | 痛みを台帳へ記録し、類似の台帳エントリ・痕跡・退役理由・配信中の記憶を返す。二度目なら候補を生成 |
 | `trace_put` | 調べて分かったことを一行残す |
 | `trace_search` | 痕跡の検索。日付つき・未検証の印で返る |
 | `memory_list` | 指定 Scope の active な記憶の列挙 |
 | `memory_nominate` | 会話中の User の記録指示を候補として運ぶ。pending 止まりで、確定は人 |
+
+候補は同じ規則につき一つしか並ばない。似た痛みが再び報告されたときは新しい候補を作らず、その台帳行を待っている候補の根拠に足す。何回起きたかは席を渡すかどうかの判断そのものなので、二度目・三度目を捨てずに一つの候補の下へ積む。保留していた候補はこのとき一覧に戻る。
 
 期限つき条件（Temporary Context）を書けるのは User だけ（`mashu remember --until`）。Agent が観測した期限つきの条件は `trace_put` で痕跡に残す。
 
@@ -153,16 +155,16 @@ remote-shell command  \b(cluster-wrapper|scheduler-cmd)\b
 
 表が無いときは `ACTIONS` の分だけが残る。壊れた行はその 1 行だけを落とす。文字列で見ている以上、コマンドがその語を実行ではなく引用として含むときも門は立つ。読んでもう一度呼べば通るので、当たらないより当たりすぎるほうを選んでいる。
 
-### 圧縮のあとに配り直す（SessionStart フック）
+### 開始時の配信を harness に任せる（SessionStart フック）
 
-`tools/sessionstart_guard.py` を SessionStart フックの `compact` matcher に入れると、圧縮で落ちた開始時の配信が戻る。
+`tools/sessionstart_guard.py` を SessionStart フックに入れると、開始時の配信を harness が行う。`startup` と `resume` では配信そのもの、`compact` では圧縮で落ちた分の配り直しになる。
 
 ```json
 {
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "compact",
+        "matcher": "startup|resume|compact",
         "hooks": [{"type": "command", "command": "/path/to/mashu/tools/sessionstart_guard.py"}]
       }
     ]
@@ -170,14 +172,31 @@ remote-shell command  \b(cluster-wrapper|scheduler-cmd)\b
 }
 ```
 
-これが要るのは、再配信する経路が他に無いからである。`session_bootstrap` は契約上セッションに一度しか呼ばれず、圧縮しても session_id は変わらず、探しに行くための検索が無い。つまり圧縮後のセッションは知識を持たず、持っていないことにも気づけない。
+呼び出し規律は MCP server の instructions が運ぶが、`session_bootstrap` だけはそこに預けきらない。MCP の仕様が規定するのは instructions が client に届くことであって、client がそれをモデルに提示することではない。`trace_put` や `pain_report` が呼ばれなくても検出率が落ちるだけだが、`session_bootstrap` が呼ばれなければ **active な知識そのものが届かず、しかもセッションはそのことに気づけない**（探しに行くための検索が無い）。フックの入るクライアントでは、忘れようのない側に配信を移す。
 
-scope はフックが payload の `cwd` へ移ってから解決する。継承した cwd のまま引くと always だけが戻って scoped が空になり、その出力は Scope に何も無いのと見分けが付かない。黙って半分だけ配り直すほうが、配り直さないより悪い。
+圧縮も同じ失敗の第二の扉である。`session_bootstrap` は契約上セッションに一度しか呼ばれず、圧縮しても session_id は変わらず、push が書いた文脈のほうが落ちる。
+
+DB に届かないときは何も出力せずに終了する。だから「出たら呼ばない、出なければ自分で呼ぶ」が成り立ち、二重配信も無配信も起きない。
+
+scope はフックが payload の `cwd` へ移ってから解決する。継承した cwd のまま引くと always だけが戻って scoped が空になり、その出力は Scope に何も無いのと見分けが付かない。黙って半分だけ配るほうが、配らないより悪い。
+
+### フックの無いクライアント（指示ファイルの 2 行）
+
+Codex CLI のようにフック機構を持たないクライアントでは、常設指示ファイル（`AGENTS.md` / `CLAUDE.md`）に 2 行だけ置く。
+
+```markdown
+# Mashu（外部記憶）
+
+- Mashu MCP が接続されているセッションでは、開始時に一度 `session_bootstrap` を呼ぶ。呼ばないと常設の規律そのものが届かない。SessionStart フックが既に配信していれば不要
+```
+
+指示ファイルに Mashu の節を要求しない方針との衝突は、2 行という量で受け止めている。`trace_put` / `pain_report` / `memory_nominate` の規律は書かない。それらは server の instructions が運び、届かなくても検出が弱まるだけだからである。
 
 ## 書き込みの規律
 
 - 個人識別情報（本名、所属、ホームディレクトリを含む絶対パス）を含む書き込みは入口で拒否される。パターン一覧は commit hook と共用のリポジトリ外ファイル（`MASHU_BANNED_PATTERNS` で指定可）。一覧が見つからないときは合格ではなく、検査できなかったと報告される
 - 台帳・改訂履歴・event_log は append-only で、DB のトリガが書き換えを拒否する
+- 退役した記憶は、以後どの経路でも本文を返さない。返るのは「何が、なぜ否定されたか」だけである。同じ内容を書き直そうとすると、`memory_nominate` は候補に退役理由を積んで Review に出し、`mashu remember` は一度止まって理由を見せてから確認する。否定を踏み越えられるのは人だけだが、知らずに踏み越えられるならその保証は形だけになる
 
 ## 開発
 
@@ -198,6 +217,6 @@ migrations/           連番の SQL。mashu admin migrate が順に実行
 src/mashu/            実装
 tests/                実 PostgreSQL に対して実行
 tools/pretooluse_guard.py     guard 配信の PreToolUse フック
-tools/sessionstart_guard.py   圧縮後に配り直す SessionStart フック
+tools/sessionstart_guard.py   開始時と圧縮後に配信する SessionStart フック
 hooks/                pre-commit / commit-msg
 ```

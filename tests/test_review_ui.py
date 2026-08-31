@@ -185,3 +185,42 @@ def test_the_queue_names_every_candidate_before_any_of_them_is_opened(dsn, monke
     assert "2 waiting for review" in out
     assert str(first["nomination_id"])[:8] in out
     assert str(second["nomination_id"])[:8] in out
+
+
+def test_a_candidate_that_walks_back_a_retirement_says_so_above_its_evidence(
+    dsn, monkeypatch, capsys
+):
+    """The one thing on the page that can make the whole decision wrong.
+
+    A reader who admits a rule withdrawn last month, never having been shown
+    that it was, has been failed by the screen. The reason is printed; the
+    withdrawn body is not, because a tombstone answers with its reason (5.3).
+    """
+    withdrawn = "the server runs the migration on boot now"
+    with db.transaction(dsn) as cur:
+        from mashu import memories
+
+        kept = memories.remember(cur, content=OTHER, actor="user")
+        memories.retire(cur, kept["memory_id"], reason=withdrawn, actor="user")
+        # friction, so the report files nothing of its own: the only
+        # candidate on the queue has to be the one carrying the collision.
+        pain = ledger.report_pain(
+            cur, kind="friction", what="looked it up", prevention=RULE, actor="agent"
+        )
+        nominations.create_nomination(
+            cur,
+            content=RULE,
+            kind="user_explicit",
+            evidence=[pain["ledger_id"]],
+            actor="agent",
+            conflicts=[kept["memory_id"]],
+        )
+    keys(monkeypatch, "", "q")
+
+    assert review_ui.run(dsn) == 0
+
+    out = capsys.readouterr().out
+    assert "contradicts a retired memory" in out
+    assert withdrawn in out
+    assert OTHER not in out
+    assert out.index("contradicts a retired memory") < out.index("evidence")

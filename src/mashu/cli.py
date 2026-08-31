@@ -39,7 +39,7 @@ from mashu import (
 from mashu import (
     traces as trace_domain,
 )
-from mashu.errors import MashuError, RefusedError
+from mashu.errors import MashuError, RefusedError, RetiredConflictError
 
 ACTOR = "user"
 GUARD_HOLD = 2
@@ -272,6 +272,17 @@ def cmd_status(args: argparse.Namespace) -> int:
             "SELECT count(*) AS count FROM ledger WHERE created_at >= now() - interval '30 days'"
         )
         ledger_count = cur.fetchone()["count"]
+        # The specification's own falsification criterion, as a number on the
+        # screen a person actually opens (12). A pain that landed on a rule
+        # already being delivered says the push or the guard is not reaching
+        # the moment it is needed, and that reading is worthless if it only
+        # exists in a table nobody queries.
+        cur.execute(
+            "SELECT count(*) AS count FROM event_log "
+            "WHERE event_type = 'delivery_failure_suspected' "
+            "AND created_at >= now() - interval '30 days'"
+        )
+        suspect_count = cur.fetchone()["count"]
         pending = nominations.pending_nominations(cur)
         scope_rows = scopes.list_scopes(cur)
 
@@ -284,6 +295,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"pending {len(pending)}")
     print(f"traces  unexpired={trace_count}")
     print(f"ledger  last_30_days={ledger_count}")
+    print(f"delivery  suspected_failures_30d={suspect_count}")
     print("scopes")
     print("name                         active  push_tokens")
     for row in scope_rows:
@@ -315,8 +327,15 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
 def cmd_remember(args: argparse.Namespace) -> int:
     if args.until is not None:
-        if args.scope is not None or args.delivery is not None or args.action is not None:
-            raise MashuError("--until cannot be combined with --scope, --delivery, or --action")
+        if (
+            args.scope is not None
+            or args.delivery is not None
+            or args.action is not None
+            or args.force
+        ):
+            raise MashuError(
+                "--until cannot be combined with --scope, --delivery, --action, or --force"
+            )
         days = _parse_days(args.until)
         with db.transaction(args.dsn) as cur:
             row = temporary.put_temporary(cur, content=args.body, actor=ACTOR, days=days)
@@ -325,19 +344,63 @@ def cmd_remember(args: argparse.Namespace) -> int:
         return 0
 
     delivery = args.delivery or ("scope" if args.scope else "always")
-    with db.transaction(args.dsn) as cur:
-        scope_id = _scope(cur, args.scope)
-        row = memories.remember(
-            cur,
-            content=args.body,
-            actor=ACTOR,
-            scope_id=scope_id,
-            delivery=delivery,
-            guard_action=args.action,
-        )
+    override = bool(args.force)
+    while True:
+        try:
+            with db.transaction(args.dsn) as cur:
+                scope_id = _scope(cur, args.scope)
+                row = memories.remember(
+                    cur,
+                    content=args.body,
+                    actor=ACTOR,
+                    scope_id=scope_id,
+                    delivery=delivery,
+                    guard_action=args.action,
+                    override_retired=override,
+                )
+            break
+        except RetiredConflictError as conflict:
+            if not _confirm_override(conflict):
+                return 1
+            override = True
+
     _gate_warnings(row)
+    if row.get("overrides"):
+        print(f"overrode  {len(row['overrides'])} retirement(s)")
     print(f"remembered  {row['memory_id']}")
     return 0
+
+
+def _confirm_override(conflict: RetiredConflictError) -> bool:
+    """Show what was withdrawn and why, then ask whether to write it back.
+
+    Section 5.3 gives a person the right to overrule a retirement, and this is
+    the whole of what that right needs to mean something: the reason in front
+    of them at the moment they exercise it. Refusing outright would take the
+    right away, and writing silently would leave them exercising it without
+    knowing there was anything to exercise.
+
+    Nothing to type at means nothing to read either, so a non-interactive
+    caller is refused and told the flag that says the reason has been read
+    elsewhere.
+    """
+    print(str(conflict), file=sys.stderr)
+    for row in conflict.tombstones:
+        retired = row.get("retired_at")
+        when = retired.date().isoformat() if isinstance(retired, datetime) else str(retired or "")
+        print(f"  retired {_short(row['memory_id'])}  {when}", file=sys.stderr)
+        print(f"    reason: {row['retire_reason']}", file=sys.stderr)
+    if not sys.stdin.isatty():
+        print(
+            "refusing to write it back unasked; pass --force once you have read the reason above",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        answer = input("write it back anyway? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer in ("y", "yes")
 
 
 def cmd_retire(args: argparse.Namespace) -> int:
@@ -377,14 +440,20 @@ def cmd_pain(args: argparse.Namespace) -> int:
     _gate_warnings(row)
     matches = row.get("matches", {})
     print(f"pain  {_short(row['ledger_id'])}")
-    for name in ("ledger", "traces", "tombstones"):
+    for name in ("ledger", "traces", "tombstones", "memories"):
         print(f"{name}: {len(matches.get(name, []))}")
     if row.get("tombstone_suppressed"):
         print("nomination  withheld: retired knowledge already covers this")
         for stone in matches.get("tombstones", []):
             print(f"  retired {_short(stone['memory_id'])}: {stone['retire_reason']}")
+    elif row.get("delivery_suspect"):
+        print("nomination  withheld: this rule is already active; suspect the delivery")
+        for held in matches.get("memories", []):
+            print(f"  active {_short(held['memory_id'])} [{held['delivery']}]: {held['content']}")
     elif row.get("nomination_existing"):
-        print("nomination  existing")
+        nomination = row.get("nomination") or {}
+        held = len(nomination.get("evidence") or [])
+        print(f"nomination  existing {_short(nomination.get('nomination_id'))}, {held} evidence")
     elif row.get("nomination"):
         print(f"nomination  created {_short(row['nomination']['nomination_id'])}")
     else:
@@ -496,6 +565,12 @@ def _show_nomination(cur: Any, nomination_id: UUID) -> None:
     _field("scope", row["scope_name"] or "-")
     print("content")
     print(f"  {row['content']}")
+    # Before the evidence for the same reason the review screen puts it there:
+    # a candidate that walks back into a retirement is not something a reader
+    # should have to reach the bottom of the page to find out about.
+    for conflict in nominations.conflict_rows(cur, row["conflicts"]):
+        print(f"! contradicts retired {_short(conflict['memory_id'])}")
+        print(f"  retired because: {conflict['retire_reason']}")
     _print_evidence(cur, row["evidence"])
     if row["status"] == "declined":
         _field("declined", row["decision_reason"] or "-")
@@ -624,6 +699,12 @@ def _print_pending(rows: list[dict[str, Any]]) -> None:
         print(f"  {row['content']}")
         if row.get("deferred_at"):
             print(f"  deferred: {row.get('defer_reason') or ''}")
+        # Above the evidence here too. A collision that shows on the sitting
+        # and on `show` but not on the listing is a collision that hides on
+        # whichever screen the reader happened to use.
+        for conflict in row.get("conflict_rows", []):
+            print(f"  ! contradicts retired {_short(conflict['memory_id'])}")
+            print(f"    retired because: {conflict['retire_reason']}")
         for evidence in row.get("evidence_rows", []):
             print(
                 f"  evidence {evidence['kind']} {evidence.get('created_at', '')}: "
@@ -840,6 +921,11 @@ def build_parser() -> argparse.ArgumentParser:
     remember.add_argument("--action", help="the tool the rule stands in front of, for guard")
     remember.add_argument(
         "--until", help="record a dated condition expiring in N days instead (at most 14)"
+    )
+    remember.add_argument(
+        "--force",
+        action="store_true",
+        help="write it back over a retirement whose reason you have already read",
     )
     remember.set_defaults(func=cmd_remember)
 

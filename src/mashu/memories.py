@@ -19,8 +19,8 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import capacity, events, nominations, redact
-from mashu.errors import MashuError, RefusedError
+from mashu import capacity, config, events, match, nominations, redact
+from mashu.errors import MashuError, RefusedError, RetiredConflictError
 
 DELIVERIES = ("always", "scope", "guard")
 
@@ -44,6 +44,7 @@ def remember(
     scope_id: UUID | None = None,
     delivery: str = "always",
     guard_action: str | None = None,
+    override_retired: bool = False,
 ) -> dict[str, Any]:
     """Write a rule straight into the active set, with the writing as its evidence.
 
@@ -51,6 +52,14 @@ def remember(
     the act of recording is itself entered in the ledger. That is not
     bookkeeping theatre: a rule admitted this way is supported by a person
     having decided it, and the ledger row is where that decision is kept.
+
+    Section 5.3 makes this the one path that may overrule a retirement, and
+    `override_retired` is where the person says they are doing so. Without it
+    a collision stops the write and hands back the reason — not to forbid
+    anything, but because the reason a claim was withdrawn is precisely what
+    somebody re-entering it needs, and nothing else would have shown it to
+    them. A retirement stepped over knowingly is a decision; stepped over
+    unknowingly it is the refutation quietly failing to do its one job.
     """
     _check_delivery(delivery, scope_id, guard_action)
     if delivery != "guard":
@@ -59,6 +68,15 @@ def remember(
     verdict = redact.check(content)
     if not verdict.allowed:
         raise RefusedError(verdict.reason())
+
+    tombstones = match.similar_tombstones(cur, content)
+    overruled = [row for row in tombstones if row["score"] >= config.match_threshold()]
+    if overruled and not override_retired:
+        raise RetiredConflictError(
+            f"this repeats {len(overruled)} retired memory/memories; read why it was "
+            "withdrawn before writing it back",
+            overruled,
+        )
     admission = capacity.check_admission(cur, content=content, delivery=delivery, scope_id=scope_id)
     if not admission["ok"]:
         raise RefusedError(admission["refusal"])
@@ -88,15 +106,21 @@ def remember(
         "INSERT INTO memory_revision (memory_id, content, actor, note) VALUES (%s, %s, %s, %s)",
         (memory["memory_id"], content, actor, _EXPLICIT_WHAT),
     )
+    detail: dict[str, Any] = {"delivery": delivery}
+    if overruled:
+        # On the record, and deliberately on the memory's own creation event:
+        # a rule that stands because somebody set aside a refutation should
+        # say so at the place a later reader goes to ask where it came from.
+        detail["overrides"] = [str(row["memory_id"]) for row in overruled]
     events.record(
         cur,
         "memory_created",
         actor,
         memory_id=memory["memory_id"],
         ledger_id=ledger_id,
-        detail={"delivery": delivery},
+        detail=detail,
     )
-    return {**memory, **_gate_report(verdict)}
+    return {**memory, **_gate_report(verdict), "overrides": overruled}
 
 
 def _gate_report(verdict: redact.Verdict) -> dict[str, Any]:

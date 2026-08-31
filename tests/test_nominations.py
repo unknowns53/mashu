@@ -12,6 +12,7 @@ from mashu.errors import MashuError, RefusedError
 
 HOLE = "always run the migration before starting the local server"
 SAME_HOLE = "always run the migrations before starting the local server"
+OTHER_HOLE = "quotas on the shared queue reset at midnight every day"
 
 
 def two_pains(cur, scope_id=None):
@@ -211,23 +212,37 @@ def test_a_carried_instruction_reaches_the_queue_and_stops_there(cur, scope_id):
     assert cur.fetchone()["n"] == 0
 
 
-def test_the_same_instruction_carried_twice_does_not_queue_twice(cur):
+def test_the_same_instruction_carried_twice_queues_once_and_counts_twice(cur):
+    """One candidate, both tellings underneath it.
+
+    Two rows in the queue would cost two decisions and admit one rule. But the
+    second telling is not nothing either: how many times this was asked for is
+    part of what the reviewer is weighing, so it lands as evidence rather than
+    as a duplicate.
+    """
     first = nominations.nominate_user_explicit(cur, content=HOLE, actor="agent")
     second = nominations.nominate_user_explicit(cur, content=SAME_HOLE, actor="agent")
 
     assert second["nomination_existing"] is True
     assert second["nomination"]["nomination_id"] == first["nomination"]["nomination_id"]
-    assert second["ledger_id"] is None
+    assert second["ledger_id"] is not None
+    assert second["ledger_id"] in second["nomination"]["evidence"]
+    assert len(second["nomination"]["evidence"]) == 2
 
-    cur.execute("SELECT count(*) AS n FROM ledger WHERE kind = 'claimed'")
+    cur.execute("SELECT count(*) AS n FROM nomination WHERE status = 'pending'")
     assert cur.fetchone()["n"] == 1
+    cur.execute("SELECT count(*) AS n FROM ledger WHERE kind = 'claimed'")
+    assert cur.fetchone()["n"] == 2
 
 
-def test_a_carried_instruction_cannot_walk_a_retirement_back(cur):
-    """Otherwise this is the way round a refutation.
+def test_a_carried_instruction_reaches_the_queue_carrying_the_retirement_it_repeats(cur):
+    """The refutation travels with the candidate instead of eating it.
 
-    An agent that read the withdrawn claim somewhere could put it in front of
-    a reviewer again with the reason it was withdrawn for left behind.
+    Swallowing the request kept refuted wording off the review screen, and
+    kept the refutation off the user's screen with it: the person who asked
+    was never told the rule had been withdrawn, or why. Filing it with the
+    tombstone attached keeps "only a person overrules a retirement" true and
+    makes it mean something, since the person now sees there is one.
     """
     _, _, nomination = two_pains(cur)
     memory = nominations.admit(cur, nomination["nomination_id"], actor="user", delivery="always")
@@ -235,10 +250,17 @@ def test_a_carried_instruction_cannot_walk_a_retirement_back(cur):
     memories.retire(cur, memory["memory_id"], reason=withdrawn, actor="user")
 
     got = nominations.nominate_user_explicit(cur, content=SAME_HOLE, actor="agent")
-    assert got["tombstone_suppressed"] is True
-    assert got["nomination"] is None
-    assert got["ledger_id"] is None
+    assert got["tombstone_conflict"] is True
+    assert got["nomination"]["status"] == "pending"
+    assert got["ledger_id"] is not None
+    assert got["nomination"]["conflicts"] == [memory["memory_id"]]
     assert got["matches"]["tombstones"][0]["retire_reason"] == withdrawn
+
+    # And it is on the queue with the reason resolved, not just an id.
+    waiting = nominations.pending_nominations(cur)
+    assert [row["retire_reason"] for row in waiting[0]["conflict_rows"]] == [withdrawn]
+    # Never the withdrawn body itself: a tombstone answers with its reason.
+    assert all("content" not in row for row in waiting[0]["conflict_rows"])
 
 
 def test_a_banned_pattern_is_refused_before_anything_is_carried(cur):
@@ -285,3 +307,40 @@ def test_the_database_refuses_a_hole_in_the_evidence_array(cur, scope_id):
             "VALUES (%s, %s, 'scope', %s, 'user')",
             (HOLE, scope_id, [second["ledger_id"], None]),
         )
+
+
+def test_adding_the_same_pain_twice_does_not_lengthen_the_evidence(cur):
+    """Evidence is what happened, not how often the store was told about it."""
+    first = ledger.report_pain(
+        cur, kind="incident", what="wrong path", prevention=HOLE, actor="agent"
+    )
+    nomination_id = first["nomination"]["nomination_id"]
+
+    once = nominations.add_evidence(cur, nomination_id, first["ledger_id"], actor="agent")
+    assert once["evidence"] == [first["ledger_id"]]
+
+    cur.execute(
+        "SELECT count(*) AS n FROM event_log WHERE event_type = 'nomination_evidence_added'"
+    )
+    assert cur.fetchone()["n"] == 0
+
+
+def test_evidence_is_not_added_to_a_candidate_somebody_already_decided(cur):
+    """A reviewer can admit it between the caller's match and this write.
+
+    Admission holds a different lock, so the race is real. What it must not do
+    is raise: the pain being reported is still a fact, and losing it to a
+    timing accident would be the worst of the possible answers.
+    """
+    _, _, nomination = two_pains(cur)
+    nominations.admit(cur, nomination["nomination_id"], actor="user", delivery="always")
+    later = ledger.report_pain(
+        cur, kind="friction", what="looked it up", prevention=OTHER_HOLE, actor="agent"
+    )
+
+    assert (
+        nominations.add_evidence(
+            cur, nomination["nomination_id"], later["ledger_id"], actor="agent"
+        )
+        is None
+    )

@@ -161,3 +161,90 @@ def test_the_ledger_lists_the_scope_it_was_filtered_by(cur, scope_id):
     assert len(ledger.ledger_entries(cur)) == 2
     scoped = ledger.ledger_entries(cur, scope_id=scope_id)
     assert [row["prevention"] for row in scoped] == [HOLE]
+
+
+def test_a_pain_landing_on_a_rule_already_delivered_indicts_the_delivery(cur):
+    """The third occurrence falsifies the delivery, not the entrance (12).
+
+    A second seat for a sentence that already has one fixes nothing while
+    looking like a fix. The ledger row stays, because it is the evidence that
+    the push or the guard is not reaching the moment the rule is needed.
+    """
+    kept = memories.remember(cur, content=HOLE, actor="user")
+
+    got = report(cur, "incident", SAME_HOLE)
+
+    assert got["delivery_suspect"] is True
+    assert got["nomination"] is None
+    assert got["matches"]["memories"][0]["memory_id"] == kept["memory_id"]
+    assert "delivery" in got["note"]
+
+    cur.execute("SELECT count(*) AS n FROM nomination")
+    assert cur.fetchone()["n"] == 0
+    cur.execute(
+        "SELECT memory_id, ledger_id FROM event_log WHERE event_type = 'delivery_failure_suspected'"
+    )
+    seen = cur.fetchall()
+    assert [row["memory_id"] for row in seen] == [kept["memory_id"]]
+    assert [row["ledger_id"] for row in seen] == [got["ledger_id"]]
+
+
+def test_a_retirement_is_read_before_an_active_rule_is(cur):
+    """Both checks can match at once, and the refutation is the stronger answer.
+
+    A rule that was withdrawn is not a delivery that failed, so a pain landing
+    on both has to come back saying it was refuted rather than saying the push
+    is broken.
+    """
+    kept = memories.remember(cur, content=HOLE, actor="user")
+    memories.retire(cur, kept["memory_id"], reason="the step moved into the server", actor="user")
+
+    got = report(cur, "friction", SAME_HOLE)
+
+    assert got["tombstone_suppressed"] is True
+    assert got["delivery_suspect"] is False
+
+
+def test_a_third_pain_lands_under_the_candidate_instead_of_beside_it(cur):
+    """One rule, one seat to decide, and every occurrence under it.
+
+    Returning the waiting candidate untouched threw the new pain away as far
+    as the review screen was concerned: the reader was asked to weigh two
+    occurrences when three had happened.
+    """
+    first = report(cur, "friction", HOLE)
+    second = report(cur, "friction", SAME_HOLE)
+    third = report(cur, "friction", HOLE)
+
+    assert third["nomination_existing"] is True
+    nomination = third["nomination"]
+    assert nomination["nomination_id"] == second["nomination"]["nomination_id"]
+    assert nomination["evidence"] == [
+        first["ledger_id"],
+        second["ledger_id"],
+        third["ledger_id"],
+    ]
+
+    cur.execute("SELECT count(*) AS n FROM nomination")
+    assert cur.fetchone()["n"] == 1
+
+
+def test_a_candidate_put_off_comes_back_when_the_hole_reopens(cur):
+    """'Not now' was a judgement about the case as it stood.
+
+    The case has changed underneath it, so the candidate returns to the
+    default queue. The reason it was put off is kept: the reader deserves to
+    meet their own earlier sentence next to the new pain.
+    """
+    report(cur, "friction", HOLE)
+    second = report(cur, "friction", SAME_HOLE)
+    nomination_id = second["nomination"]["nomination_id"]
+    nominations.defer(cur, nomination_id, actor="user", reason="wording is not settled")
+    assert nominations.pending_nominations(cur, include_deferred=False) == []
+
+    report(cur, "friction", HOLE)
+
+    back = nominations.pending_nominations(cur, include_deferred=False)
+    assert [row["nomination_id"] for row in back] == [nomination_id]
+    assert back[0]["deferred_at"] is None
+    assert back[0]["defer_reason"] == "wording is not settled"
