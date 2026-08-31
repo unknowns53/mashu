@@ -18,11 +18,21 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import config, events, match, nominations, redact, traces
+from mashu import config, events, match, nominations, redact, tasks, traces
 from mashu.capacity import LOCK_NAMESPACE, LOCK_PAIN
 from mashu.errors import MashuError, RefusedError
 
 REPORTABLE_KINDS = ("incident", "friction")
+
+#: What shape the answer to a pain takes. A 'rule' is a sentence somebody has
+#: to be holding at the moment it applies, and it asks for a memory seat. A
+#: 'work' is a change made once, after which nothing has to be remembered —
+#: so it asks for nothing here, and belongs on a task instead (v3 9).
+#:
+#: The reporter chooses, and choosing 'work' is not a way of dodging review:
+#: the ledger row is written either way, and it is the ledger that counts what
+#: forgetting cost.
+PREVENTION_KINDS = ("rule", "work")
 
 #: The kinds a person's own statement takes. Neither is a pain, so neither is
 #: reportable here and neither counts as the first half of a rederivation.
@@ -38,18 +48,35 @@ def report_pain(
     actor: str,
     scope_id: UUID | None = None,
     source: str | None = None,
+    prevention_kind: str = "rule",
+    task_id: UUID | None = None,
 ) -> dict[str, Any]:
     """Record one pain, show what it resembles, and nominate when it is proven.
 
     `prevention` is the matching key throughout: what would have had to be
     known. Two reports of the same hole converge on that sentence long before
     they agree on what went wrong downstream of it.
+
+    `prevention_kind` says which shape that answer has. 'rule' is the v2 path
+    and the default, and it can end in a nomination. 'work' never nominates,
+    because there is no seat to ask for: what would have stopped the pain is a
+    change to make once, and the review desk has no verb for that. Where the
+    change goes instead is `task_id`, whose next actions it joins — and when
+    no task is named it goes nowhere, which the caller is told rather than
+    left to discover from an empty review queue.
     """
     if kind not in REPORTABLE_KINDS:
         raise MashuError(
             f"kind must be one of {', '.join(REPORTABLE_KINDS)}; 'explicit' and 'claimed' are "
             "reserved for a person's own statement, written by mashu remember and by "
             "memory_nominate respectively"
+        )
+    if prevention_kind not in PREVENTION_KINDS:
+        raise MashuError(f"prevention_kind must be one of {', '.join(PREVENTION_KINDS)}")
+    if task_id is not None and prevention_kind != "work":
+        raise MashuError(
+            "a task is where work is filed; a prevention that is a rule is filed by review, "
+            "so pass prevention_kind='work' or leave the task out"
         )
     verdict = redact.check(what, prevention)
     if not verdict.allowed:
@@ -61,13 +88,24 @@ def report_pain(
     # whole premise is that it holds a few items a week.
     cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (LOCK_NAMESPACE, LOCK_PAIN))
 
+    # Filing happens before the insert, because the ledger is append-only:
+    # where the work went is written into the row or it is not written at all.
+    # This is also the one place both advisory locks are held, and the order
+    # is pain then project state — nothing takes them the other way round.
+    filed_task, filing_note = (None, None)
+    if prevention_kind == "work":
+        filed_task, filing_note = _file_work(
+            cur, prevention=prevention, task_id=task_id, actor=actor
+        )
+
     cur.execute(
         """
-        INSERT INTO ledger (kind, what, prevention, scope_id, source, created_by)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO ledger (kind, what, prevention, scope_id, source, created_by,
+                            prevention_kind, filed_task)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING *
         """,
-        (kind, what, prevention, scope_id, source, actor),
+        (kind, what, prevention, scope_id, source, actor, prevention_kind, filed_task),
     )
     entry = cur.fetchone()
     ledger_id = entry["ledger_id"]
@@ -87,9 +125,27 @@ def report_pain(
         "nomination_existing": False,
         "tombstone_suppressed": False,
         "delivery_suspect": False,
+        "prevention_kind": prevention_kind,
+        "filed_task": filed_task,
     }
     if verdict.malformed:
         result["malformed"] = verdict.malformed
+
+    # Work leaves before the three branches below, all of which decide
+    # something about a nomination. What it resembles is still returned, since
+    # a fix worth making twice is worth seeing the first one, but none of the
+    # branches has anything to say about a row that is not asking for a seat.
+    if prevention_kind == "work":
+        result["note"] = filing_note
+        if filed_task is not None:
+            events.record(
+                cur,
+                "prevention_filed_as_work",
+                actor,
+                ledger_id=ledger_id,
+                detail={"task_id": str(filed_task)},
+            )
+        return result
 
     threshold = config.match_threshold()
 
@@ -173,6 +229,42 @@ def report_pain(
             scope_id=scope_id,
         )
     return result
+
+
+def _file_work(
+    cur: psycopg.Cursor, *, prevention: str, task_id: UUID | None, actor: str
+) -> tuple[UUID | None, str]:
+    """Put the change on the task that will make it, and say which happened.
+
+    Returns where it landed and the sentence the caller shows. A refusal from
+    the task side — closed, five next actions already, no room in the project
+    budget — must not take the pain down with it: the pain happened, and that
+    is the part a later reader cannot reconstruct. So the append runs inside a
+    savepoint and a refusal comes back as words, with the ledger row still to
+    be written behind it.
+    """
+    unseated = (
+        "recorded as work, so no nomination was created: a change made once is not a rule "
+        "to be admitted. "
+    )
+    if task_id is None:
+        return None, unseated + (
+            "It was filed nowhere, because no task was named — put it on one "
+            "(task_update / task_checkpoint) or it lives only in the ledger."
+        )
+    try:
+        with cur.connection.transaction():
+            appended = tasks.append_next_action(cur, task_id, prevention, actor=actor)
+    except MashuError as error:
+        return None, unseated + (
+            f"Filing it on the task failed: {error}. The ledger row stands; the fix still "
+            "needs a home."
+        )
+    return task_id, unseated + (
+        "It is on the task's next actions."
+        if appended["appended"]
+        else "The task's next actions already carried it."
+    )
 
 
 def _best_prior(

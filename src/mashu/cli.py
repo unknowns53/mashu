@@ -496,13 +496,21 @@ def cmd_pain(args: argparse.Namespace) -> int:
             prevention=args.prevention,
             actor=ACTOR,
             scope_id=_scope(cur, args.scope),
+            prevention_kind=args.prevention_kind,
+            task_id=_task_ref(cur, args.task) if args.task else None,
         )
     _gate_warnings(row)
     matches = row.get("matches", {})
     print(f"pain  {_short(row['ledger_id'])}")
     for name in ("ledger", "traces", "tombstones", "memories"):
         print(f"{name}: {len(matches.get(name, []))}")
-    if row.get("tombstone_suppressed"):
+    if row.get("prevention_kind") == "work":
+        filed = row.get("filed_task")
+        print(f"prevention  work, filed on task {_short(filed)}" if filed else
+              "prevention  work, filed nowhere")
+        if row.get("note"):
+            print(_flow(row["note"], indent="    "))
+    elif row.get("tombstone_suppressed"):
         print("nomination  withheld: retired knowledge already covers this")
         for stone in matches.get("tombstones", []):
             print(f"  retired {_short(stone['memory_id'])}: {stone['retire_reason']}")
@@ -536,7 +544,13 @@ def cmd_ledger(args: argparse.Namespace) -> int:
         )
         # The prevention is the sentence the matching runs on, so a listing
         # that hides it shows the half of each row that decides nothing.
-        print(f"    prevention  {row['prevention']}")
+        label = "prevention"
+        if row.get("prevention_kind") == "work":
+            # Naming where it went, or that it went nowhere, is the whole
+            # reason the column exists: an unfiled fix is invisible otherwise.
+            where = f"filed {_short(row['filed_task'])}" if row.get("filed_task") else "UNFILED"
+            label = f"prevention  (work, {where})"
+        print(f"    {label}  {row['prevention']}")
     return 0
 
 
@@ -1273,6 +1287,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--prevention", required=True, help="what would have had to be known; the matching key"
     )
     pain.add_argument("--scope", help="the scope it happened in")
+    pain.add_argument(
+        "--prevention-kind",
+        choices=ledger_domain.PREVENTION_KINDS,
+        default="rule",
+        help="a sentence to be held every time (rule, the default), or a change made once (work)",
+    )
+    pain.add_argument(
+        "--task",
+        help="for --prevention-kind work: the task whose next actions the change joins",
+    )
     pain.set_defaults(func=cmd_pain)
 
     ledger = sub.add_parser("ledger", help="read the pain ledger, newest first")

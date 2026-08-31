@@ -12,6 +12,11 @@ own history would be a work diary, and a work diary is the artefact v1 proved
 a reader's budget cannot survive. What happened instead is kept as history
 (checkpoint, attempt, decision), which is written but never delivered.
 
+`append_next_action` is the one write that adds instead of replacing, and it
+is bounded by the same ceilings as a replacement, so it cannot grow a state a
+replacement could not have written. It exists for the caller that has one
+thing to say and has not read the rest — see its own docstring.
+
 active and dormant are not stored. They are `open` compared against the lease
 at the moment somebody reads, so there is no transition to run and no race
 between the two: reactivating is the same act as extending, and silence is
@@ -57,6 +62,25 @@ TEXT_LIMITS = {"goal": 300, "approach": 500, "status_text": 500}
 LIST_FIELDS = ("open_questions", "blockers", "next_actions")
 LIST_MAX_ITEMS = 5
 LIST_MAX_CHARS = 300
+
+#: What each field is called wherever a state is delivered. The labels belong
+#: to the body rather than to a printer, because the MCP `states[].content`
+#: and the terminal carry the same string: a reader who cannot tell an open
+#: question from a next action may act on the wrong one, and only one of those
+#: two is an instruction. They cost tokens, which is the trade — a state that
+#: is cheap and ambiguous is not cheaper than one that is read correctly.
+#: The fields a caller writes, in the order a state is read. `_STATE_KEYS`
+#: is this plus the two the store stamps itself.
+EDITABLE_FIELDS = ("goal", "approach", "status_text", *LIST_FIELDS)
+
+STATE_LABELS = {
+    "goal": "goal",
+    "approach": "approach",
+    "status_text": "status",
+    "open_questions": "open questions",
+    "blockers": "blockers",
+    "next_actions": "next actions",
+}
 
 _STATE_KEYS = (
     "goal",
@@ -178,14 +202,19 @@ def state_text(name: str, state: dict[str, Any]) -> str:
 
     The name is counted with the state because a state arriving without the
     name of the work it belongs to is not deliverable, so the two are one row
-    on the wire and one row in the budget.
+    on the wire and one row in the budget. The field labels are counted with
+    it for the same reason: an unlabelled pile of paragraphs is delivered, but
+    it is not read as the state it is.
     """
     parts = [name]
     for field in ("goal", "approach", "status_text"):
         if state.get(field):
-            parts.append(state[field])
+            parts.append(f"{STATE_LABELS[field]}: {state[field]}")
     for field in LIST_FIELDS:
-        parts.extend(state.get(field) or [])
+        items = state.get(field) or []
+        if items:
+            parts.append(f"{STATE_LABELS[field]}:")
+            parts.extend(f"- {item}" for item in items)
     return "\n".join(parts)
 
 
@@ -640,6 +669,56 @@ def task_update(
         detail={"task_id": str(task_id), "tokens": state_cost(task["name"], state)},
     )
     return {**task_get(cur, task_id), **_gate_report(verdict)}
+
+
+def append_next_action(
+    cur: psycopg.Cursor, task_id: UUID, text: str, *, actor: str
+) -> dict[str, Any]:
+    """Add one next action, leaving every other field as it stands.
+
+    The only append in this module. It exists because the caller is a pain
+    being reported, not a session that has just read the state: a pain is
+    recorded by whoever was hurt at the moment it hurt, and asking that call
+    to carry the whole current state so it can replace it would mean the
+    report either invents the other five fields or does not happen.
+
+    There is no `expect_updated_at` because there is no version to be stale
+    against — this writes one item and reads none. The lock still serialises
+    it against a replacement, and the write moves `updated_at`, so a
+    replacement prepared before this ran is refused rather than silently
+    dropping what was appended.
+
+    Every entrance a replacement passes is passed here too: the gate, the list
+    ceiling, the project budget. An append that could overrun them would be
+    the way around them.
+    """
+    text = (text or "").strip()
+    if not text:
+        raise MashuError("a next action needs something in it")
+    _lock(cur)
+    task = _require_open(cur, task_id)
+    current = task_get(cur, task_id)
+    state = _state_of(**{field: current["state"][field] for field in EDITABLE_FIELDS})
+    if text in state["next_actions"]:
+        return {**current, "appended": False, "reason": "this next action is already on the task"}
+    state["next_actions"] = [*state["next_actions"], text]
+    _check_limits(state)
+    verdict = _gate(text)
+    _check_budget(cur, task_id=task_id, name=task["name"], state=state)
+
+    cur.execute(
+        "UPDATE task_state SET next_actions = %s, updated_at = clock_timestamp(), "
+        "updated_by = %s WHERE task_id = %s",
+        (state["next_actions"], actor, task_id),
+    )
+    _renew(cur, task_id)
+    events.record(
+        cur,
+        "task_next_action_appended",
+        actor,
+        detail={"task_id": str(task_id), "tokens": state_cost(task["name"], state)},
+    )
+    return {**task_get(cur, task_id), **_gate_report(verdict), "appended": True}
 
 
 def touch(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, Any]:
