@@ -437,3 +437,89 @@ def test_the_route_listing_keeps_the_tail_that_tells_two_routes_apart(run):
     rows = [line for line in out.splitlines() if line.endswith("  the listing")]
     assert len(rows) == 2
     assert len({cli._cells(row) for row in rows}) == 1, out
+
+
+#: Kept apart from every other string in this file for the same reason as the
+#: rest: these two tests turn on a trigram match, so a stray resemblance to
+#: another test's rule would decide them for the wrong reason.
+REVIVED = "vacuum the audit table on the replica, and never while an export is running"
+DELIVERED = "hold a lock across the whole rename, or a reader sees half of it applied"
+
+
+def test_writing_a_retired_rule_back_is_stopped_until_the_reason_has_been_read(run):
+    """Section 5.3 lets a person overrule a retirement, knowingly.
+
+    With nothing to type at, there is nothing to read at either, so the write
+    is refused and the flag that says the reason was read elsewhere is named.
+    """
+    _, out, _ = run("remember", REVIVED)
+    memory_id = remembered_id(out)
+    reason = "the replica lost its audit table in the last schema change"
+    run("retire", memory_id, "--reason", reason)
+
+    code, out, err = run("remember", REVIVED)
+    assert code == 1
+    assert out == ""
+    assert reason in err
+    assert "--force" in err
+
+    code, out, _ = run("remember", REVIVED, "--force")
+    assert code == 0
+    assert "overrode  1 retirement" in out
+    assert out.splitlines()[-1].startswith("remembered  ")
+
+
+def test_a_pain_on_a_rule_already_delivered_names_the_delivery_and_is_counted(run):
+    """The falsification criterion, on the screen a person opens (12)."""
+    _, out, _ = run("remember", DELIVERED)
+    memory_id = remembered_id(out)
+
+    code, out, _ = run(
+        "pain",
+        "--kind",
+        "incident",
+        "--what",
+        "a reader saw the rename half applied",
+        "--prevention",
+        DELIVERED,
+    )
+    assert code == 0
+    assert "already active" in out
+    assert f"active {memory_id[:8]} [always]" in out
+
+    _, out, _ = run("review", "--list")
+    assert DELIVERED not in out
+
+    _, out, _ = run("status")
+    suspected = next(line for line in out.splitlines() if line.startswith("delivery"))
+    assert int(suspected.split("=")[1]) >= 1
+
+
+#: Kept apart from the rest for the same trigram reason as the two above.
+CARRIED_BACK = "give the batch job its own credentials, never the operator's session token"
+
+
+def test_a_carried_instruction_that_repeats_a_retirement_says_so_in_the_listing(
+    run, committing_dsn
+):
+    """Every screen a candidate is read from has to carry the collision.
+
+    One that shows on the sitting and on `show` but not on the listing hides
+    on whichever screen the reader happened to open.
+    """
+    _, out, _ = run("remember", CARRIED_BACK)
+    memory_id = remembered_id(out)
+    reason = "the batch job runs unattended now and has no session to borrow"
+    run("retire", memory_id, "--reason", reason)
+
+    with db.transaction(committing_dsn) as cur:
+        carried = nominations.nominate_user_explicit(cur, content=CARRIED_BACK, actor="agent")
+    assert carried["tombstone_conflict"] is True
+
+    _, out, _ = run("review", "--list")
+    assert "contradicts retired" in out
+    assert reason in out
+
+    _, out, _ = run("show", str(carried["nomination"]["nomination_id"])[:8])
+    assert "contradicts retired" in out
+    assert reason in out

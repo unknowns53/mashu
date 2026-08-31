@@ -30,10 +30,15 @@ KINDS = ("incident", "rederivation", "user_explicit")
 #: been asked for.
 CLAIMED_WHAT = "a user instruction carried by an agent; confirm before it stands"
 
+#: What an agent is told when the instruction it is carrying repeats
+#: something already withdrawn. The candidate is filed rather than swallowed:
+#: the reviewer meets the retire reason beside the request and decides, which
+#: keeps "only a person steps over a retirement" true without also making it
+#: true that nobody was ever told there was one to step over.
 _TOMBSTONE_NOTE = (
-    "a retired memory already covers this; its retire reason is the answer. "
-    "No nomination was created. If the retirement itself is wrong, that is a "
-    "human decision to make with the reason in view (mashu remember)."
+    "this repeats a memory that was retired; the candidate carries the retire "
+    "reason to the review screen, where a person reads both. Tell the user "
+    "that the claim was withdrawn before, and why."
 )
 
 
@@ -65,6 +70,7 @@ def create_nomination(
     evidence: list[UUID],
     actor: str,
     scope_id: UUID | None = None,
+    conflicts: list[UUID] | None = None,
 ) -> dict[str, Any]:
     """File a candidate. The evidence array is why it is allowed to be one."""
     if kind not in KINDS:
@@ -72,11 +78,11 @@ def create_nomination(
     validate_evidence(cur, list(evidence))
     cur.execute(
         """
-        INSERT INTO nomination (content, scope_id, kind, evidence, created_by)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO nomination (content, scope_id, kind, evidence, conflicts, created_by)
+        VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING *
         """,
-        (content, scope_id, kind, list(evidence), actor),
+        (content, scope_id, kind, list(evidence), list(conflicts or []) or None, actor),
     )
     row = cur.fetchone()
     events.record(
@@ -84,9 +90,85 @@ def create_nomination(
         "nomination_created",
         actor,
         nomination_id=row["nomination_id"],
-        detail={"kind": kind, "evidence": [str(e) for e in evidence]},
+        detail={
+            "kind": kind,
+            "evidence": [str(e) for e in evidence],
+            "conflicts": [str(c) for c in conflicts or []],
+        },
     )
     return row
+
+
+def add_evidence(
+    cur: psycopg.Cursor,
+    nomination_id: UUID,
+    ledger_id: UUID,
+    *,
+    actor: str,
+    conflicts: list[UUID] | None = None,
+) -> dict[str, Any] | None:
+    """Put a fresh pain under a candidate that is already waiting for it.
+
+    Two rows in the queue saying the same thing cost a person two decisions
+    and admit one rule. But returning the existing candidate untouched, which
+    is what this replaced, throws the new pain away as far as the review
+    screen is concerned: the reader is asked to weigh one occurrence when
+    three have now happened, and the number of times something hurt is most
+    of what the decision is.
+
+    A candidate that was put off comes back to the queue, keeping the reason
+    it was put off. "Not now" was a judgement about the case as it stood, and
+    the case has changed underneath it.
+
+    Returns None if the row stopped being pending between the caller's match
+    and this write — a reviewer can admit it in that gap, since admission
+    holds a different lock. The caller then treats it as no candidate found,
+    which at worst files a duplicate somebody can decline.
+    """
+    cur.execute("SELECT * FROM nomination WHERE nomination_id = %s FOR UPDATE", (nomination_id,))
+    row = cur.fetchone()
+    if row is None or row["status"] != "pending":
+        return None
+
+    fresh_evidence = ledger_id not in (row["evidence"] or [])
+    known = set(row["conflicts"] or [])
+    fresh_conflicts = [c for c in (conflicts or []) if c not in known]
+    if not fresh_evidence and not fresh_conflicts:
+        return row
+
+    cur.execute(
+        """
+        UPDATE nomination
+        SET evidence  = CASE WHEN %(fresh)s
+                             THEN array_append(evidence, %(ledger)s) ELSE evidence END,
+            conflicts = CASE WHEN %(added)s::uuid[] = '{}'::uuid[] THEN conflicts
+                             ELSE coalesce(conflicts, '{}'::uuid[]) || %(added)s::uuid[] END,
+            deferred_at = NULL
+        WHERE nomination_id = %(id)s AND status = 'pending'
+        RETURNING *
+        """,
+        {
+            "fresh": fresh_evidence,
+            "ledger": ledger_id,
+            "added": fresh_conflicts,
+            "id": nomination_id,
+        },
+    )
+    if cur.rowcount != 1:
+        return None
+    updated = cur.fetchone()
+    events.record(
+        cur,
+        "nomination_evidence_added",
+        actor,
+        nomination_id=nomination_id,
+        ledger_id=ledger_id if fresh_evidence else None,
+        detail={
+            "evidence": len(updated["evidence"]),
+            "conflicts": [str(c) for c in fresh_conflicts],
+        },
+    )
+    return updated
 
 
 def nominate_user_explicit(
@@ -109,35 +191,13 @@ def nominate_user_explicit(
         "SELECT pg_advisory_xact_lock(%s, %s)", (capacity.LOCK_NAMESPACE, capacity.LOCK_PAIN)
     )
 
-    result: dict[str, Any] = {
-        "ledger_id": None,
-        "nomination": None,
-        "nomination_existing": False,
-        "tombstone_suppressed": False,
-        "unchecked": verdict.unchecked,
-    }
-    if verdict.malformed:
-        result["malformed"] = verdict.malformed
-
     threshold = config.match_threshold()
 
-    # Retired knowledge outranks a relayed instruction, the same way it
-    # outranks a reported pain. Letting this path through would be the way
-    # round the refutation: an agent that read the withdrawn claim somewhere
-    # can put it back in front of a reviewer with the reason left behind.
-    tombstones = match.similar_tombstones(cur, content)
-    if tombstones and tombstones[0]["score"] >= threshold:
-        result["tombstone_suppressed"] = True
-        result["matches"] = {"tombstones": tombstones}
-        result["note"] = _TOMBSTONE_NOTE
-        return result
-
-    waiting = match.similar_pending_nominations(cur, content, limit=1)
-    if waiting and waiting[0]["score"] >= threshold:
-        result["nomination"] = waiting[0]
-        result["nomination_existing"] = True
-        return result
-
+    # The ledger row is written before the matching rather than after it,
+    # because every branch below now needs something to point at. An
+    # instruction given twice is a fact about the instruction, and the branch
+    # that finds a candidate already waiting used to drop the second telling
+    # on the floor.
     cur.execute(
         """
         INSERT INTO ledger (kind, what, prevention, scope_id, created_by)
@@ -149,7 +209,39 @@ def nominate_user_explicit(
     ledger_id = cur.fetchone()["ledger_id"]
     events.record(cur, "pain_recorded", actor, ledger_id=ledger_id, detail={"kind": "claimed"})
 
-    result["ledger_id"] = ledger_id
+    result: dict[str, Any] = {
+        "ledger_id": ledger_id,
+        "nomination": None,
+        "nomination_existing": False,
+        "tombstone_conflict": False,
+        "unchecked": verdict.unchecked,
+    }
+    if verdict.malformed:
+        result["malformed"] = verdict.malformed
+
+    # A retirement is not a veto on this path, it is something the reviewer
+    # has to be looking at. Swallowing the request kept refuted content off
+    # the review screen and kept the refutation off the user's screen with it:
+    # the person who asked was never told their rule had been withdrawn, or
+    # why. So the collision rides along on the candidate instead, and the
+    # decision is taken by the one party allowed to overrule a retirement.
+    tombstones = match.similar_tombstones(cur, content)
+    conflicts = [row["memory_id"] for row in tombstones if row["score"] >= threshold]
+    if conflicts:
+        result["tombstone_conflict"] = True
+        result["matches"] = {"tombstones": tombstones}
+        result["note"] = _TOMBSTONE_NOTE
+
+    waiting = match.similar_pending_nominations(cur, content, limit=1)
+    if waiting and waiting[0]["score"] >= threshold:
+        existing = add_evidence(
+            cur, waiting[0]["nomination_id"], ledger_id, actor=actor, conflicts=conflicts
+        )
+        if existing is not None:
+            result["nomination"] = existing
+            result["nomination_existing"] = True
+            return result
+
     result["nomination"] = create_nomination(
         cur,
         content=content,
@@ -157,6 +249,7 @@ def nominate_user_explicit(
         evidence=[ledger_id],
         actor=actor,
         scope_id=scope_id,
+        conflicts=conflicts,
     )
     return result
 
@@ -187,6 +280,7 @@ def pending_nominations(
     rows = cur.fetchall()
     for row in rows:
         row["evidence_rows"] = _evidence_rows(cur, row["evidence"])
+        row["conflict_rows"] = conflict_rows(cur, row["conflicts"])
     return rows
 
 
@@ -215,6 +309,28 @@ def _evidence_rows(cur: psycopg.Cursor, evidence: list[UUID]) -> list[dict[str, 
     )
     by_id = {row["ledger_id"]: row for row in cur.fetchall()}
     return [by_id[e] for e in evidence if e in by_id]
+
+
+def conflict_rows(cur: psycopg.Cursor, conflicts: list[UUID] | None) -> list[dict[str, Any]]:
+    """The retirements this candidate walks back into, as reasons only.
+
+    Four columns, and content is not among them, exactly as in the tombstone
+    match itself (`match._TOMBSTONES`). A reviewer deciding whether to
+    re-admit a withdrawn rule is reading the candidate's own body already;
+    printing the retired one beside it would put the refuted wording back into
+    circulation on the one screen where the two are hardest to tell apart.
+    """
+    if not conflicts:
+        return []
+    cur.execute(
+        """
+        SELECT memory_id, retire_reason, retired_at, delivery
+        FROM memory WHERE memory_id = ANY(%s)
+        """,
+        (list(conflicts),),
+    )
+    by_id = {row["memory_id"]: row for row in cur.fetchall()}
+    return [by_id[c] for c in conflicts if c in by_id]
 
 
 #: What both decision paths say when the row moved under them. The message is

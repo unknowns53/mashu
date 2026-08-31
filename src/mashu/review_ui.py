@@ -423,7 +423,23 @@ def _item_text(row: dict[str, Any], place: int, total: int) -> str:
     ]
     if row.get("deferred_at"):
         lines.extend([_wrap(f"(put off earlier: {row.get('defer_reason') or ''})"), ""])
-    lines.extend([_wrap(row["content"]), "", "  evidence"])
+    lines.extend([_wrap(row["content"]), ""])
+
+    # Above the evidence, not below it. This is the one thing on the page that
+    # can make the whole candidate the wrong decision, and a reader who admits
+    # a rule that was withdrawn last month, without ever being shown that it
+    # was, has been failed by the screen rather than by their own judgement.
+    # The retired body is not printed: the reason is what a tombstone answers
+    # with (5.3), and the wording beside it here is the candidate's own.
+    for conflict in row.get("conflict_rows", []):
+        retired = conflict.get("retired_at")
+        when = retired.date().isoformat() if isinstance(retired, datetime) else str(retired or "")
+        lines.append(f"  ! contradicts a retired memory  {_short(conflict['memory_id'])}  {when}")
+        lines.append(_wrap(f"retired because: {conflict['retire_reason']}", indent="      "))
+    if row.get("conflict_rows"):
+        lines.append("")
+
+    lines.append("  evidence")
     for evidence in row.get("evidence_rows", []):
         created = evidence.get("created_at")
         when = created.date().isoformat() if isinstance(created, datetime) else str(created or "")

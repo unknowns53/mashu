@@ -77,6 +77,23 @@ ORDER BY score DESC, n.created_at
 LIMIT %(limit)s
 """
 
+# The body is returned here, unlike the tombstones above, and the difference
+# is not an inconsistency. A retired memory's content is a claim that was
+# withdrawn; an active one is being pushed into every session that matches it
+# right now. Handing it back to somebody reporting that they were hurt by not
+# knowing it tells them what they were supposed to have been holding — which
+# is the whole of what makes the collision readable as a delivery failure
+# rather than as one more pain.
+_ACTIVE = """
+SELECT m.memory_id, m.content, m.delivery, m.guard_action, m.scope_id,
+       similarity(m.content, %(text)s) AS score
+FROM memory m
+WHERE m.status = 'active'
+  AND similarity(m.content, %(text)s) >= %(floor)s
+ORDER BY score DESC, m.created_at
+LIMIT %(limit)s
+"""
+
 
 def similar_ledger(
     cur: psycopg.Cursor, text: str, *, exclude: UUID | None = None, limit: int = 5
@@ -105,4 +122,19 @@ def similar_pending_nominations(
 ) -> list[dict[str, Any]]:
     """Candidates already waiting on a person for roughly this rule."""
     cur.execute(_PENDING, {"text": text, "floor": _floor(), "limit": limit})
+    return cur.fetchall()
+
+
+def similar_active_memories(
+    cur: psycopg.Cursor, text: str, *, limit: int = 3
+) -> list[dict[str, Any]]:
+    """Rules already being delivered that say roughly this.
+
+    A pain landing here is the third occurrence the specification says
+    falsifies the entrance standard rather than confirming it (12): the rule
+    was admitted, it is being pushed, and it did not arrive. Section 4.1 is
+    about proving a second pain; this is about noticing that a proven one did
+    not stay fixed.
+    """
+    cur.execute(_ACTIVE, {"text": text, "floor": _floor(), "limit": limit})
     return cur.fetchall()

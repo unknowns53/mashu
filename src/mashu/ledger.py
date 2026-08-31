@@ -77,6 +77,7 @@ def report_pain(
         "ledger": match.similar_ledger(cur, prevention, exclude=ledger_id),
         "traces": match.similar_traces(cur, prevention),
         "tombstones": match.similar_tombstones(cur, prevention),
+        "memories": match.similar_active_memories(cur, prevention),
     }
     result: dict[str, Any] = {
         "ledger_id": ledger_id,
@@ -85,6 +86,7 @@ def report_pain(
         "nomination": None,
         "nomination_existing": False,
         "tombstone_suppressed": False,
+        "delivery_suspect": False,
     }
     if verdict.malformed:
         result["malformed"] = verdict.malformed
@@ -106,14 +108,48 @@ def report_pain(
         )
         return result
 
+    # A pain that lands on a rule already being delivered is not the standard
+    # in section 3 being met once more; it is the specification's own
+    # falsification criterion firing (12). The rule was admitted, it is being
+    # pushed, and it still did not reach the moment it was needed — so the
+    # thing to fix is the delivery, and a second seat for the same sentence
+    # would fix nothing while looking like a fix. The ledger row stays, since
+    # that is the evidence the delivery is failing.
+    delivered = matches["memories"][0] if matches["memories"] else None
+    if delivered and delivered["score"] >= threshold:
+        result["delivery_suspect"] = True
+        result["note"] = (
+            "this rule is already active and being delivered as "
+            f"'{delivered['delivery']}'. No nomination was created: a third "
+            "occurrence indicts the delivery, not the entrance standard. Ask "
+            "whether it should move to a guard on the act where it is needed, "
+            "or whether the wording is not recognisable at the moment it "
+            "applies."
+        )
+        events.record(
+            cur,
+            "delivery_failure_suspected",
+            actor,
+            memory_id=delivered["memory_id"],
+            ledger_id=ledger_id,
+            detail={"delivery": delivered["delivery"], "score": float(delivered["score"])},
+        )
+        return result
+
     # A candidate already waiting for this rule is not a second candidate.
     # Two rows in the queue saying the same thing cost a person two decisions
-    # and admit one rule, and the duplicate is invisible until it is read.
+    # and admit one rule, and the duplicate is invisible until it is read. The
+    # new pain goes underneath the waiting one instead, because how many times
+    # this has now happened is most of what the reviewer is weighing.
     waiting = match.similar_pending_nominations(cur, prevention, limit=1)
     if waiting and waiting[0]["score"] >= threshold:
-        result["nomination"] = waiting[0]
-        result["nomination_existing"] = True
-        return result
+        existing = nominations.add_evidence(
+            cur, waiting[0]["nomination_id"], ledger_id, actor=actor
+        )
+        if existing is not None:
+            result["nomination"] = existing
+            result["nomination_existing"] = True
+            return result
 
     if kind == "incident":
         result["nomination"] = nominations.create_nomination(

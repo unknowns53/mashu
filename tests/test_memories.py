@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from mashu import match, memories, scopes
-from mashu.errors import MashuError, RefusedError
+from mashu.errors import MashuError, RefusedError, RetiredConflictError
 
 RULE = "never report a run as finished without the output that proves it"
 REVISED = "never report a run as finished without pasting the output that proves it"
@@ -73,7 +73,12 @@ def test_the_gate_says_when_it_did_not_run(cur, monkeypatch, tmp_path):
     assert retired["malformed"] == 1
 
     monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(tmp_path / "absent"))
-    assert memories.remember(cur, content=REVISED, actor="user")["unchecked"] is True
+    # REVISED is a rewording of the rule just retired, so the retirement check
+    # stands in front of the gate check this test is about. Stepping over it
+    # explicitly is what a person at the terminal does, and it leaves the
+    # gate's own report as the only thing still under test.
+    rewritten = memories.remember(cur, content=REVISED, actor="user", override_retired=True)
+    assert rewritten["unchecked"] is True
 
 
 def test_a_retired_rule_answers_with_why_it_was_withdrawn_and_never_with_itself(cur):
@@ -194,3 +199,47 @@ def test_listing_a_scope_shows_what_lives_there_by_whatever_route(cur, scope_id)
     assert [row["memory_id"] for row in memories.scope_push_memories(cur, scope_id)] == [
         pushed["memory_id"]
     ]
+
+
+def test_writing_a_retired_rule_back_stops_to_show_why_it_was_withdrawn(cur):
+    """Section 5.3 gives a person the right to overrule a retirement.
+
+    The right is worth nothing if it can be exercised without knowing there
+    was anything to exercise, so the collision halts the write and hands back
+    the reason. It is a halt, not a refusal: saying so again carries it
+    through, and the override is on the record.
+    """
+    kept = memories.remember(cur, content=RULE, actor="user")
+    memories.retire(cur, kept["memory_id"], reason=WITHDRAWN, actor="user")
+
+    with pytest.raises(RetiredConflictError) as raised:
+        memories.remember(cur, content=REVISED, actor="user")
+    assert [row["memory_id"] for row in raised.value.tombstones] == [kept["memory_id"]]
+    assert raised.value.tombstones[0]["retire_reason"] == WITHDRAWN
+    # The withdrawn body is not handed back with its own tombstone.
+    assert "content" not in raised.value.tombstones[0]
+
+    cur.execute("SELECT count(*) AS n FROM memory WHERE status = 'active'")
+    assert cur.fetchone()["n"] == 0
+
+    written = memories.remember(cur, content=REVISED, actor="user", override_retired=True)
+    assert written["status"] == "active"
+    assert [row["memory_id"] for row in written["overrides"]] == [kept["memory_id"]]
+
+    cur.execute(
+        "SELECT detail FROM event_log WHERE event_type = 'memory_created' AND memory_id = %s",
+        (written["memory_id"],),
+    )
+    assert cur.fetchone()["detail"]["overrides"] == [str(kept["memory_id"])]
+
+
+def test_an_unrelated_rule_is_not_stopped_by_somebody_elses_retirement(cur):
+    """The halt is a collision, not a mood: only a match holds anything up."""
+    kept = memories.remember(cur, content=RULE, actor="user")
+    memories.retire(cur, kept["memory_id"], reason=WITHDRAWN, actor="user")
+
+    written = memories.remember(
+        cur, content="quotas on the shared queue reset at midnight every day", actor="user"
+    )
+    assert written["status"] == "active"
+    assert written["overrides"] == []
