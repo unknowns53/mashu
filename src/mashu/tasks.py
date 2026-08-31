@@ -536,9 +536,23 @@ def _check_budget(
     Nothing is trimmed and nothing falls through to search. The overflow is
     resolved at the entrance, as it is for memories: something else shrinks,
     goes quiet, or gets closed by the person who owns it.
+
+    A store can be over the ceiling without any write having put it there —
+    the ceiling is configuration, and what a state costs is computed from how
+    it is delivered, so both can move underneath rows nobody has touched. From
+    there a flat refusal is a trap rather than an entrance: if the other
+    active tasks already exceed the ceiling on their own, emptying this one
+    entirely still lands over, and the refusal would be telling the caller to
+    do the one thing it is refusing. So a write that leaves the store smaller
+    than it found it goes through even while the total is still over. It
+    cannot be used to grow anything — a smaller state is the direction the
+    ceiling wants — and every other write stays refused until the store is
+    back inside it.
     """
     cost = state_cost(name, state)
-    others = [row for row in active_state_costs(cur) if row["task_id"] != task_id]
+    seated = active_state_costs(cur)
+    others = [row for row in seated if row["task_id"] != task_id]
+    was = next((row["tokens"] for row in seated if row["task_id"] == task_id), None)
     breakdown = sorted(
         [*others, {"task_id": task_id, "name": name, "tokens": cost}],
         key=lambda row: row["tokens"],
@@ -548,11 +562,14 @@ def _check_budget(
     ceiling = config.project_capacity()
     if total <= ceiling:
         return
+    if was is not None and cost < was:
+        return
     raise ProjectBudgetError(
         f"the project state seats {ceiling} tokens and this would take it to {total} "
         f"({cost} for '{name}' on top of {total - cost} already pushed by "
-        f"{len(others)} active task(s)). Make room first: shrink another task's state, "
-        "leave one alone until its lease runs out, or ask the user to close one "
+        f"{len(others)} active task(s)). A write that makes this task's own state "
+        "smaller is allowed through even from here, so shrink this one; otherwise "
+        "leave a task alone until its lease runs out, or ask the user to close one "
         "(`mashu task close <id>`).",
         breakdown,
     )
@@ -689,8 +706,14 @@ def append_next_action(
     dropping what was appended.
 
     Every entrance a replacement passes is passed here too: the gate, the list
-    ceiling, the project budget. An append that could overrun them would be
-    the way around them.
+    ceiling, the project budget — over the whole state, not just the new item,
+    so this cannot carry a state a replacement would have been refused.
+
+    Reading the state back through `_state_of` normalises it, so an existing
+    item with surrounding whitespace is trimmed and an empty one is dropped.
+    The database allows both; nothing that writes through this module produces
+    them, and a state that has been through here is the state a replacement
+    would have written.
     """
     text = (text or "").strip()
     if not text:
@@ -703,7 +726,7 @@ def append_next_action(
         return {**current, "appended": False, "reason": "this next action is already on the task"}
     state["next_actions"] = [*state["next_actions"], text]
     _check_limits(state)
-    verdict = _gate(text)
+    verdict = _gate(*_texts(state))
     _check_budget(cur, task_id=task_id, name=task["name"], state=state)
 
     cur.execute(

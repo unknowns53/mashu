@@ -88,7 +88,7 @@ ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
 mashu pain --kind incident --what "..." --prevention "..." --prevention-kind work --task 803ee8c3
 ```
 
-こう書くと候補は作られず、`--prevention` の文が Task の next_actions に入る。`--task` を省いても記録は通り、「どこにも提出されていない」と返る。台帳側は `filed_task` が空のまま残るので、後から未提出の作業を数えられる。台帳行はどちらの形でも書かれる。忘却が何を払わせたかを数えるのは台帳であって、Review 卓ではない。
+こう書くと候補は作られず、`--prevention` の文が Task の next_actions に入る。Task が閉じている・next_actions が既に 5 件ある・枠に余りが無いといった理由で入らないこともあり、そのときは提出先が空のまま「まだ行き先が無い」と返る。`--task` を省いた場合も同じで、記録そのものは通る。台帳側は `filed_task` が空のまま残るので、後から未提出の作業を数えられる。台帳行はどちらの形でも書かれる。忘却が何を払わせたかを数えるのは台帳であって、Review 卓ではない。
 
 ### 管理・閲覧
 

@@ -628,3 +628,60 @@ def test_an_append_makes_a_replacement_prepared_before_it_stale(cur, task):
         tasks.task_update(
             cur, task_id, actor="agent", expect_updated_at=read_at, status_text="carrying on"
         )
+
+
+def test_a_store_over_its_ceiling_can_still_be_shrunk(cur, project, monkeypatch):
+    """The ceiling is an entrance, not a trap.
+
+    A store can be over without any write having put it there: the ceiling is
+    configuration and the cost is computed from how a state is delivered, so
+    both move underneath rows nobody touched. From there a flat refusal would
+    tell the caller to shrink a task while refusing every shrink, because the
+    other active tasks already exceed the ceiling on their own.
+    """
+    for n in ("alpha", "beta", "gamma"):
+        tasks.task_create(
+            cur, project=project["project_id"], name=f"task {n}", actor="agent",
+            status_text="x" * 240,
+        )
+    seated = tasks.active_state_costs(cur)
+    monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(min(row["tokens"] for row in seated)))
+
+    target = seated[0]
+    at = tasks.task_get(cur, target["task_id"])["state"]["updated_at"]
+    got = tasks.task_update(
+        cur, target["task_id"], actor="agent", expect_updated_at=at, status_text="tiny"
+    )
+
+    assert got["state"]["status_text"] == "tiny"
+
+
+def test_being_over_the_ceiling_is_not_a_licence_to_grow(cur, project, monkeypatch):
+    """Only the direction the ceiling wants is let through."""
+    other = tasks.task_create(
+        cur, project=project["project_id"], name="task beta", actor="agent",
+        status_text="x" * 240,
+    )
+    monkeypatch.setenv("MASHU_PROJECT_CAPACITY", "1")
+
+    at = tasks.task_get(cur, other["task"]["task_id"])["state"]["updated_at"]
+    with pytest.raises(ProjectBudgetError):
+        tasks.task_update(
+            cur, other["task"]["task_id"], actor="agent", expect_updated_at=at,
+            status_text="x" * 240, goal="and now a goal as well",
+        )
+
+
+def test_the_append_gates_the_whole_state_not_only_the_new_item(cur, project):
+    """Its docstring says the same entrances as a replacement, so prove it."""
+    made = tasks.task_create(
+        cur, project=project["project_id"], name="task with a secret", actor="agent",
+    )
+    task_id = made["task"]["task_id"]
+    cur.execute(
+        "UPDATE task_state SET status_text = %s WHERE task_id = %s",
+        ("SECRETMARKER42 slipped in under an older rule", task_id),
+    )
+
+    with pytest.raises(RefusedError):
+        tasks.append_next_action(cur, task_id, "a perfectly clean action", actor="agent")

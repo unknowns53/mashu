@@ -336,3 +336,58 @@ def test_a_rule_is_not_filed_on_a_task(cur, work_task):
 def test_an_unknown_prevention_kind_is_refused(cur):
     with pytest.raises(MashuError):
         report(cur, "incident", FIX, prevention_kind="maybe")
+
+
+def test_a_work_friction_can_still_be_the_prior_half_of_a_rederivation(cur, work_task):
+    """Work nominates nothing itself. It does not vanish from the ledger.
+
+    That somebody worked the same thing out twice is a fact about the hole.
+    Whether the answer is a rule or a change is the reporter's view of the
+    answer, and the second reporter is entitled to their own.
+    """
+    first = report(cur, "friction", HOLE, prevention_kind="work",
+                   task_id=work_task["task"]["task_id"])
+    assert first["nomination"] is None
+
+    second = report(cur, "friction", SAME_HOLE)
+
+    assert second["nomination"]["kind"] == "rederivation"
+    assert second["nomination"]["evidence"] == [first["ledger_id"], second["ledger_id"]]
+
+
+def test_a_full_task_refuses_the_filing_and_keeps_the_pain(cur, work_task):
+    """The other refusal path: five next actions already on the task."""
+    from mashu import tasks
+
+    task_id = work_task["task"]["task_id"]
+    at = tasks.task_get(cur, task_id)["state"]["updated_at"]
+    tasks.task_update(
+        cur, task_id, actor="agent", expect_updated_at=at,
+        next_actions=[f"action {n}" for n in range(tasks.LIST_MAX_ITEMS)],
+    )
+
+    got = report(cur, "incident", FIX, prevention_kind="work", task_id=task_id)
+
+    assert got["filed_task"] is None
+    assert "still needs a home" in got["note"]
+    assert ledger.ledger_entries(cur)[0]["prevention"] == FIX
+
+
+def test_a_rule_row_can_never_carry_a_filing(cur, work_task):
+    """The schema holds it, not only the service layer (0006).
+
+    Written as an INSERT because the table is append-only: there is no UPDATE
+    to catch, which is exactly why the contradiction has to be refused at the
+    entrance — a row that landed wrong could not be corrected afterwards.
+    """
+    import psycopg.errors
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        cur.execute(
+            """
+            INSERT INTO ledger (kind, what, prevention, created_by,
+                                prevention_kind, filed_task)
+            VALUES ('incident', 'w', 'p', 'agent', 'rule', %s)
+            """,
+            (work_task["task"]["task_id"],),
+        )

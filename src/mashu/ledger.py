@@ -242,6 +242,12 @@ def _file_work(
     is the part a later reader cannot reconstruct. So the append runs inside a
     savepoint and a refusal comes back as words, with the ledger row still to
     be written behind it.
+
+    What is caught is a refusal, not a fault. A psycopg error from underneath
+    — a constraint nothing checked first, a trigger — is left to propagate and
+    take the transaction with it, because a store that answered a broken write
+    with 'the fix still needs a home' would be reporting the wrong thing in
+    the one case worth interrupting for.
     """
     unseated = (
         "recorded as work, so no nomination was created: a change made once is not a rule "
@@ -272,8 +278,15 @@ def _best_prior(
 ) -> UUID | None:
     """The ledger row a second friction can point back at, if there is one.
 
-    Only a friction or a trace qualifies (4.1). An incident finished its own
-    nomination when it was reported, and 'explicit' and 'claimed' rows are
+    Only a friction or a trace qualifies (4.1). A friction reported as work
+    qualifies too: what it recorded is that somebody worked the same thing out
+    a second time, which is what a re-derivation is, and the reporter's view
+    that the answer was a code change is a view about the answer rather than
+    about whether the hole is real. It nominates nothing itself; it can be the
+    prior half of somebody else's.
+
+    An incident finished its own nomination when it was reported, and
+    'explicit' and 'claimed' rows are
     somebody stating a rule, not anybody having worked something out twice.
     Counting those would let a single look-up next to an existing statement
     call itself a re-derivation, which is the standard in section 3 being met
