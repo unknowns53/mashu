@@ -248,3 +248,146 @@ def test_a_candidate_put_off_comes_back_when_the_hole_reopens(cur):
     assert [row["nomination_id"] for row in back] == [nomination_id]
     assert back[0]["deferred_at"] is None
     assert back[0]["defer_reason"] == "wording is not settled"
+
+
+# --------------------------------------------------------------------------
+# a prevention that is work, not a rule (v3 9)
+# --------------------------------------------------------------------------
+
+FIX = "have session_bootstrap name the migrations that have not been applied"
+
+
+@pytest.fixture
+def work_task(cur):
+    from mashu import projects, tasks
+
+    project = projects.create_project(cur, name="mashu", actor="user")
+    return tasks.task_create(
+        cur,
+        project=project["project_id"],
+        name="put v3 into service",
+        next_actions=["apply the migrations"],
+        actor="agent",
+    )
+
+
+def test_work_never_asks_for_a_seat(cur, work_task):
+    """An incident proves a hole; it does not prove the hole wants a rule.
+
+    The review desk decides what is worth knowing, and 'do it' is not one of
+    the decisions available there. A change made once leaves the queue alone.
+    """
+    got = report(cur, "incident", FIX, prevention_kind="work",
+                 task_id=work_task["task"]["task_id"])
+
+    assert got["nomination"] is None
+    assert got["prevention_kind"] == "work"
+    assert nominations.pending_nominations(cur) == []
+
+
+def test_work_lands_on_the_task_that_will_make_it(cur, work_task):
+    from mashu import tasks
+
+    task_id = work_task["task"]["task_id"]
+    got = report(cur, "incident", FIX, prevention_kind="work", task_id=task_id)
+
+    assert got["filed_task"] == task_id
+    assert tasks.task_get(cur, task_id)["state"]["next_actions"] == [
+        "apply the migrations",
+        FIX,
+    ]
+    assert ledger.ledger_entries(cur)[0]["filed_task"] == task_id
+
+
+def test_work_with_no_task_says_so_instead_of_going_quiet(cur):
+    """The pain is still recorded. What is missing is said, not implied."""
+    got = report(cur, "incident", FIX, prevention_kind="work")
+
+    assert got["nomination"] is None
+    assert got["filed_task"] is None
+    assert "filed nowhere" in got["note"]
+    assert ledger.ledger_entries(cur)[0]["prevention"] == FIX
+
+
+def test_a_refused_filing_does_not_take_the_pain_down_with_it(cur, work_task):
+    """The ledger row is the part that must survive.
+
+    Whether the fix found a home today is this week's problem; what forgetting
+    cost is the thing a later reader cannot reconstruct.
+    """
+    from mashu import tasks
+
+    task_id = work_task["task"]["task_id"]
+    tasks.close(cur, task_id, outcome="completed", actor="user")
+
+    got = report(cur, "incident", FIX, prevention_kind="work", task_id=task_id)
+
+    assert got["filed_task"] is None
+    assert "still needs a home" in got["note"]
+    assert ledger.ledger_entries(cur)[0]["prevention"] == FIX
+
+
+def test_a_rule_is_not_filed_on_a_task(cur, work_task):
+    """The two paths do not blend: review files a rule, a task files work."""
+    with pytest.raises(MashuError):
+        report(cur, "incident", FIX, task_id=work_task["task"]["task_id"])
+
+
+def test_an_unknown_prevention_kind_is_refused(cur):
+    with pytest.raises(MashuError):
+        report(cur, "incident", FIX, prevention_kind="maybe")
+
+
+def test_a_work_friction_can_still_be_the_prior_half_of_a_rederivation(cur, work_task):
+    """Work nominates nothing itself. It does not vanish from the ledger.
+
+    That somebody worked the same thing out twice is a fact about the hole.
+    Whether the answer is a rule or a change is the reporter's view of the
+    answer, and the second reporter is entitled to their own.
+    """
+    first = report(cur, "friction", HOLE, prevention_kind="work",
+                   task_id=work_task["task"]["task_id"])
+    assert first["nomination"] is None
+
+    second = report(cur, "friction", SAME_HOLE)
+
+    assert second["nomination"]["kind"] == "rederivation"
+    assert second["nomination"]["evidence"] == [first["ledger_id"], second["ledger_id"]]
+
+
+def test_a_full_task_refuses_the_filing_and_keeps_the_pain(cur, work_task):
+    """The other refusal path: five next actions already on the task."""
+    from mashu import tasks
+
+    task_id = work_task["task"]["task_id"]
+    at = tasks.task_get(cur, task_id)["state"]["updated_at"]
+    tasks.task_update(
+        cur, task_id, actor="agent", expect_updated_at=at,
+        next_actions=[f"action {n}" for n in range(tasks.LIST_MAX_ITEMS)],
+    )
+
+    got = report(cur, "incident", FIX, prevention_kind="work", task_id=task_id)
+
+    assert got["filed_task"] is None
+    assert "still needs a home" in got["note"]
+    assert ledger.ledger_entries(cur)[0]["prevention"] == FIX
+
+
+def test_a_rule_row_can_never_carry_a_filing(cur, work_task):
+    """The schema holds it, not only the service layer (0006).
+
+    Written as an INSERT because the table is append-only: there is no UPDATE
+    to catch, which is exactly why the contradiction has to be refused at the
+    entrance — a row that landed wrong could not be corrected afterwards.
+    """
+    import psycopg.errors
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        cur.execute(
+            """
+            INSERT INTO ledger (kind, what, prevention, created_by,
+                                prevention_kind, filed_task)
+            VALUES ('incident', 'w', 'p', 'agent', 'rule', %s)
+            """,
+            (work_task["task"]["task_id"],),
+        )

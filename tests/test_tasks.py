@@ -534,3 +534,154 @@ def test_the_history_refuses_to_be_deleted(cur, task, table, insert, params, rew
 def test_the_history_refuses_to_be_emptied(cur, table):
     with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
         cur.execute(f"TRUNCATE {table}")
+
+
+# --------------------------------------------------------------------------
+# what a delivered state says about itself (v3 5.3, 8)
+# --------------------------------------------------------------------------
+
+
+def test_a_delivered_state_names_the_field_each_line_belongs_to(cur, task):
+    """An unlabelled pile of paragraphs is delivered, but it is not read.
+
+    The labels live in the body rather than in a printer because the MCP
+    caller and the terminal are handed the same string, and the two fields a
+    reader is likeliest to confuse — a question nobody has answered and an
+    action somebody should take — differ in whether acting on them is right.
+    """
+    text = tasks.state_text(task["task"]["name"], task["state"])
+
+    assert text.splitlines()[0] == SCHEMA
+    assert "goal: ship migration 0004 with the seven tables" in text
+    assert "next actions:" in text
+    assert "- write the migration" in text
+    assert "approach:" not in text  # a field with nothing in it is not labelled
+
+
+def test_the_labels_are_counted_in_what_the_state_costs(cur, task):
+    """The trade is paid at the entrance, not hidden from the budget."""
+    state = task["state"]
+    name = task["task"]["name"]
+    assert tasks.state_cost(name, state) == tasks.pushed_cost([tasks.state_text(name, state)])
+
+
+# --------------------------------------------------------------------------
+# the one append (v3 5.3, and ledger's work path)
+# --------------------------------------------------------------------------
+
+
+def test_an_append_adds_one_action_and_disturbs_nothing_else(cur, task):
+    got = tasks.append_next_action(cur, task["task"]["task_id"], "add the check", actor="agent")
+
+    assert got["appended"] is True
+    assert got["state"]["next_actions"] == [
+        "write the migration",
+        "write the services",
+        "add the check",
+    ]
+    assert got["state"]["goal"] == "ship migration 0004 with the seven tables"
+
+
+def test_an_append_does_not_repeat_what_the_task_already_carries(cur, task):
+    got = tasks.append_next_action(
+        cur, task["task"]["task_id"], "write the migration", actor="agent"
+    )
+
+    assert got["appended"] is False
+    assert got["state"]["next_actions"] == ["write the migration", "write the services"]
+
+
+def test_an_append_is_refused_past_the_ceiling_a_replacement_would_meet(cur, task):
+    """The append cannot grow a state the replacement path could not write."""
+    task_id = task["task"]["task_id"]
+    current = tasks.task_get(cur, task_id)
+    tasks.task_update(
+        cur,
+        task_id,
+        actor="agent",
+        expect_updated_at=current["state"]["updated_at"],
+        next_actions=[f"action {n}" for n in range(tasks.LIST_MAX_ITEMS)],
+    )
+
+    with pytest.raises(OverLimitError):
+        tasks.append_next_action(cur, task_id, "one too many", actor="agent")
+
+
+def test_an_append_is_refused_on_a_task_a_person_closed(cur, task):
+    tasks.close(cur, task["task"]["task_id"], outcome="completed", actor="user")
+
+    with pytest.raises(ClosedTaskError):
+        tasks.append_next_action(cur, task["task"]["task_id"], "too late", actor="agent")
+
+
+def test_an_append_makes_a_replacement_prepared_before_it_stale(cur, task):
+    """Appending is not a way around the optimistic check, it is a write.
+
+    A session that read the state, then had an action appended underneath it,
+    must not be able to replace the state and drop that action silently.
+    """
+    task_id = task["task"]["task_id"]
+    read_at = tasks.task_get(cur, task_id)["state"]["updated_at"]
+    tasks.append_next_action(cur, task_id, "add the check", actor="agent")
+
+    with pytest.raises(StaleStateError):
+        tasks.task_update(
+            cur, task_id, actor="agent", expect_updated_at=read_at, status_text="carrying on"
+        )
+
+
+def test_a_store_over_its_ceiling_can_still_be_shrunk(cur, project, monkeypatch):
+    """The ceiling is an entrance, not a trap.
+
+    A store can be over without any write having put it there: the ceiling is
+    configuration and the cost is computed from how a state is delivered, so
+    both move underneath rows nobody touched. From there a flat refusal would
+    tell the caller to shrink a task while refusing every shrink, because the
+    other active tasks already exceed the ceiling on their own.
+    """
+    for n in ("alpha", "beta", "gamma"):
+        tasks.task_create(
+            cur, project=project["project_id"], name=f"task {n}", actor="agent",
+            status_text="x" * 240,
+        )
+    seated = tasks.active_state_costs(cur)
+    monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(min(row["tokens"] for row in seated)))
+
+    target = seated[0]
+    at = tasks.task_get(cur, target["task_id"])["state"]["updated_at"]
+    got = tasks.task_update(
+        cur, target["task_id"], actor="agent", expect_updated_at=at, status_text="tiny"
+    )
+
+    assert got["state"]["status_text"] == "tiny"
+
+
+def test_being_over_the_ceiling_is_not_a_licence_to_grow(cur, project, monkeypatch):
+    """Only the direction the ceiling wants is let through."""
+    other = tasks.task_create(
+        cur, project=project["project_id"], name="task beta", actor="agent",
+        status_text="x" * 240,
+    )
+    monkeypatch.setenv("MASHU_PROJECT_CAPACITY", "1")
+
+    at = tasks.task_get(cur, other["task"]["task_id"])["state"]["updated_at"]
+    with pytest.raises(ProjectBudgetError):
+        tasks.task_update(
+            cur, other["task"]["task_id"], actor="agent", expect_updated_at=at,
+            status_text="x" * 240, goal="and now a goal as well",
+        )
+
+
+def test_the_append_gates_the_whole_state_not_only_the_new_item(cur, project):
+    """Its docstring says the same entrances as a replacement, so prove it."""
+    made = tasks.task_create(
+        cur, project=project["project_id"], name="task with a secret", actor="agent",
+    )
+    task_id = made["task"]["task_id"]
+    cur.execute(
+        "UPDATE task_state SET status_text = %s WHERE task_id = %s",
+        ("SECRETMARKER42 slipped in under an older rule", task_id),
+    )
+
+    with pytest.raises(RefusedError):
+        tasks.append_next_action(cur, task_id, "a perfectly clean action", actor="agent")

@@ -134,9 +134,13 @@ next_actions    最大 5 件 × 300 chars
 
 初期値であり、実測後に変更してよい。長文が必要なら原典を Artifact Reference に置く。
 
+**追記は一箇所だけ許す。**`append_next_action` は next_actions に 1 件足すだけで他の欄に触れない。呼び出すのは痛みの記録（9 節の `work`）であって、state を読み終えたセッションではない。痛みは痛かった当人がその場で書くものなので、置換のために state 全体を持って来いと要求すれば、報告は他の 5 欄を捏造するか、行われないかのどちらかになる。上限・入口拒否・予算判定は置換とまったく同じものを通すので、追記で書ける state は置換でも書けた state に限られる。追記も `updated_at` を動かすため、追記前に読んだ置換は楽観チェックで拒否される。
+
 **並行する置換は楽観チェックで受ける。**複数セッションが同じ Task を同時に更新しうる。`task_update` は読み取り時の `updated_at` を添えて置換し、不一致なら拒否して現在の state を返す。黙って last-writer-wins にすると、並行セッションの一方の作業が痕跡なく消える。
 
-**予算境界の挙動も store が持つ。**`task_update` の結果、active な Current State の合計が Project State 枠（8 節）を超えるなら、書き込みを拒否し、現在の内訳と出口（他 Task の縮約・User による close）を返す。溢れたぶんを黙って切り詰めたり検索へ落としたりしない。v2 の定員が Memory admission でしていることと同じ扱いである。
+**予算境界の挙動も store が持つ。**`task_update` の結果、active な Current State の合計が Project State 枠（8 節）を超えるなら、書き込みを拒否し、現在の内訳と出口を返す。溢れたぶんを黙って切り詰めたり検索へ落としたりしない。v2 の定員が Memory admission でしていることと同じ扱いである。
+
+ただし**その Task 自身の state を小さくする書き込みは、枠を超えている状態からでも通す**。枠は設定値であり、state の重さは配信の形から計算されるので、どちらも誰も触っていない行の下で動きうる。つまり書き込みを経ずに枠を超えた状態が成立する。そこで一律に拒否すると、他の active Task だけで枠を超えている場合、対象を空にしても総量が枠を割らないため拒否され、「他を縮めろ」と言いながらその縮約自体を拒む閉じた輪になる。入口拒否の思想は保ったまま、枠が求めている向きの書き込みだけを通す。
 
 ### 5.4 Attempt / Decision
 
@@ -230,6 +234,8 @@ dormant な Task は bootstrap に載らず、履歴は保持され、明示検�
 
 Attempt / Decision / Checkpoint / Trace / Ledger / dormant / closed は載らない。
 
+Current State は**欄の名前を本文に含めて**配信する。MCP の `states[].content` と端末が同じ文字列を運ぶので、ラベルを描画側に置くと片方だけが読める形になる。特に open_questions と next_actions は、読み手が取り違えたときに「着手すべきでないものに着手する」形で外へ出る。ラベルは token を食うが、安く配って誤読される state は安くない。
+
 初期 hard cap は次のとおりで、実測較正する。既存の `MASHU_CAPACITY`（2000）/ `MASHU_ALWAYS_CAPACITY`（800）と同じ環境変数方式で構成する。
 
 ```text
@@ -255,6 +261,19 @@ User が覚えてと言った     → memory_nominate
 ```
 
 attempt_record と decision_record は「失敗した試行の結末」「後から理由を失うと高くつく判断」に限る補助動詞であり、毎ターン打つものではない。
+
+**痛みの答えには二つの形がある。**v2 では、痛みを防いだはずのものはすべて「誰かが毎回持っているべき一文」＝規則の形をしていた。それ以外の置き場が無かったので、そう書くしかなかったのである。Project State ができた以上その前提は無くなる。一度直せば以後は何も覚えなくてよい変更 ＝ 作業は、規則ではない。
+
+```text
+毎回持っていないと再発する    → prevention_kind=rule（既定）。候補になり、人が席を決める
+一度直せば終わる              → prevention_kind=work。候補にならず、task の next_actions へ入る
+```
+
+`prevention_kind=work` は review を回避する経路ではない。台帳行はどちらでも書かれ、忘却が何を払わせたかを数えるのは台帳だからである。変わるのは、Review 卓に何を載せるかだけである。Review 卓の動詞は確定・却下・保留の三つで、そこに「やる」は無い。作業をそこへ載せると、決められない項目が席を待ち続ける。
+
+正確には、`work` は**自分では候補を作らない**のであって、台帳から消えるわけではない。同じ文面が後日 `rule` として報告されたとき、`work` の friction 行は再導出の前半として数えられる。二度調べたという事実は事実であり、答えが規則か作業かという報告者の見立ては、穴が実在するかどうかとは別の話だからである。
+
+`task_id` を伴わない `work` は拒否せず記録し、**「どこにも提出されていない」と名指しして返す**。台帳側は `filed_task` が NULL のまま残るので、後から未提出の作業を数えられる。Task を立てていない場面で痛みの記録そのものが失敗する方が高くつく、という判断である。
 
 記録漏れは起こる前提で設計する。checkpoint が打たれなかったセッションの被害は「次のセッションが古い日付の state を見て、裏を取りに行く」であり（3.1 節）、誤情報の自動生成より安全側にある。記録率は instructions と hooks（Stop フックでの促し等）で改善するが、記録の強制はしない。
 
@@ -292,7 +311,7 @@ v3 実装のマージ時に、`docs/mashu-v2.md` の次の箇所へ注記を入�
 
 ### 13.1 MCP Tool（既存 6 + 追加 9）
 
-既存の `session_bootstrap` / `pain_report` / `trace_put` / `trace_search` / `memory_list` / `memory_nominate` は変更しない（bootstrap の返却内容の拡張を除く）。追加は
+既存 6 つのうち `trace_put` / `trace_search` / `memory_list` / `memory_nominate` は変更しない。`session_bootstrap` は返却内容が広がり、`pain_report` は 9 節の二つの形を受けるため `prevention_kind`（`rule` 既定 / `work`）と `task_id` を取る。追加は
 
 | Tool | 役割 |
 |---|---|
@@ -312,6 +331,8 @@ mashu task list [--dormant] [--closed]
 mashu task show <id>            state・履歴・artifacts を全文
 mashu task create / touch <id>
 mashu task close <id> [--outcome ...] / reopen <id>
+
+mashu pain --prevention-kind {rule,work} [--task <id>]   9 節の二つの形
 ```
 
 短縮 ID の解決は既存の規則（表示される先頭 8 文字、4 文字未満と多重一致は候補を挙げて拒否）を共用する。
@@ -322,7 +343,7 @@ mashu task close <id> [--outcome ...] / reopen <id>
 
 ## 14. スキーマ
 
-既存 9 表に 7 表を足して 16 表。migration は 0004 から追加し、0001–0003 には触れない。
+既存 9 表に 7 表を足して 16 表。migration は 0004 から追加する。0001–0003 の内容には触れないが、`ledger` には 0005 で 2 列を足し（`prevention_kind`、`filed_task`。9 節）、0006 で両者を結ぶ CHECK を張る（`filed_task` が非 NULL なら `prevention_kind='work'`）。台帳行そのものは append-only のままで、**提出先は行が書かれる前に決まり、後から書き込むことはできない**。矛盾した行を後から直す手段が無いことが、規約ではなく制約で持つ理由である。
 
 ```text
 既存: scope route ledger trace memory memory_revision

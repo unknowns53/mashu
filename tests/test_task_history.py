@@ -141,6 +141,11 @@ def test_a_stale_checkpoint_leaves_no_frozen_row(cur, task):
 
 
 def test_a_budget_refusal_leaves_no_frozen_row(cur, task, monkeypatch):
+    """The write has to grow the state, because that is what a refusal is for.
+
+    A ceiling already exceeded lets a shrinking write through, so a checkpoint
+    that dropped fields would be admitted and prove nothing about the freeze.
+    """
     tasks.task_create(cur, project="history", name="another active task", actor="agent")
     monkeypatch.setenv("MASHU_PROJECT_CAPACITY", "1")
 
@@ -151,7 +156,9 @@ def test_a_budget_refusal_leaves_no_frozen_row(cur, task, monkeypatch):
             actor="agent",
             what_changed="would exceed the project state share",
             expect_updated_at=task["state"]["updated_at"],
-            status_text="this state cannot fit",
+            goal=task["state"]["goal"],
+            next_actions=task["state"]["next_actions"],
+            status_text="this state cannot fit, and it is larger than the one it replaces",
         )
 
     cur.execute("SELECT count(*) AS n FROM task_checkpoint")

@@ -63,7 +63,7 @@ ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
 | `mashu status` | 在庫と定員（memory / project state / 期限つき条件の三枠）、pending 件数、台帳と痕跡の状況、配信失敗の疑い件数 |
 | `mashu review [--all]` | 昇格候補を 1 件ずつ確定・却下・保留する TUI（次節） |
 | `mashu remember <body> [--until 5d]` | User 明示。唯一の即時経路。退役済みの記憶と衝突すると退役理由を出して確認する（`--force` で無条件）。`--until` を付けると期限つき条件（Temporary Context）になり、Review 不要で期限に消える |
-| `mashu pain --kind {incident,friction} --what <w> --prevention <p>` | 痛みの手動記録 |
+| `mashu pain --kind {incident,friction} --what <w> --prevention <p>` | 痛みの手動記録。`--prevention-kind work --task <id>` を付けると、候補を作らず Task の next_actions へ入る（次節） |
 
 ### mashu review
 
@@ -80,13 +80,23 @@ ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
 
 決定は 1 件ずつその場で確定する。途中で `q` を押しても済んだ分は残り、次の `mashu review` は残りから始まる。`s` の保留は決定ではなく、pending のまま理由と一緒に脇へ置くだけで、`--all` を付けると戻ってくる。まとめて承認するキーは無い。件数は週数件のオーダーなので、1 件ごとに人が置き場を決める。
 
+### 規則と作業
+
+痛みを防いだはずのものには二つの形がある。片方は「毎回持っていないと再発する一文」で、これは席を求めるので候補になり、`mashu review` で人が決める。もう片方は「一度直せば以後は何も覚えなくてよい変更」で、こちらは席を求めない。Review 卓の動詞は確定・却下・保留の三つしかなく、そこに「やる」は無いからである。
+
+```bash
+mashu pain --kind incident --what "..." --prevention "..." --prevention-kind work --task 803ee8c3
+```
+
+こう書くと候補は作られず、`--prevention` の文が Task の next_actions に入る。Task が閉じている・next_actions が既に 5 件ある・枠に余りが無いといった理由で入らないこともあり、そのときは提出先が空のまま「まだ行き先が無い」と返る。`--task` を省いた場合も同じで、記録そのものは通る。台帳側は `filed_task` が空のまま残るので、後から未提出の作業を数えられる。台帳行はどちらの形でも書かれる。忘却が何を払わせたかを数えるのは台帳であって、Review 卓ではない。
+
 ### 管理・閲覧
 
 | コマンド | 内容 |
 |---|---|
 | `mashu show <id>` | 記憶・候補・台帳エントリを 1 件、全文で表示。根拠の台帳と改訂履歴、台帳なら採用先も出る |
 | `mashu memories [--scope <name>] [--retired]` | 記憶の一覧。既定は active、`--retired` で退役分と理由 |
-| `mashu ledger` | 台帳の閲覧 |
+| `mashu ledger` | 台帳の閲覧。作業として記録された予防は提出先を、まだどこにも出していなければ `UNFILED` を出す |
 | `mashu trace [query]` | 痕跡の閲覧と検索 |
 | `mashu retire <id> --reason <r>` | 退役。以後は照合で、何が、なぜ否定されたかだけ返る |
 | `mashu revise <id>` | 本文の改訂（User のみ）。改訂履歴が残る |
@@ -119,7 +129,7 @@ Agent 名は `--agent` または環境変数 `MASHU_AGENT` で渡す。MCP ツ�
 | Tool | 役割 |
 |---|---|
 | `session_bootstrap` | セッション開始時に一度。always と現在 Scope の記憶、active な Task の現在状態（最終確認日を本文に含む）、期限つき条件、pending 件数 |
-| `pain_report` | 痛みを台帳へ記録し、類似の台帳エントリ・痕跡・退役理由・配信中の記憶を返す。二度目なら候補を生成 |
+| `pain_report` | 痛みを台帳へ記録し、類似の台帳エントリ・痕跡・退役理由・配信中の記憶を返す。二度目なら候補を生成。`prevention_kind="work"` なら候補を作らず、`task_id` の next_actions へ入れる |
 | `trace_put` | 調べて分かったことを一行残す |
 | `trace_search` | 痕跡の検索。日付つき・未検証の印で返る |
 | `memory_list` | 指定 Scope の active な記憶の列挙 |

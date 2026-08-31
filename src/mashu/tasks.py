@@ -12,6 +12,11 @@ own history would be a work diary, and a work diary is the artefact v1 proved
 a reader's budget cannot survive. What happened instead is kept as history
 (checkpoint, attempt, decision), which is written but never delivered.
 
+`append_next_action` is the one write that adds instead of replacing, and it
+is bounded by the same ceilings as a replacement, so it cannot grow a state a
+replacement could not have written. It exists for the caller that has one
+thing to say and has not read the rest — see its own docstring.
+
 active and dormant are not stored. They are `open` compared against the lease
 at the moment somebody reads, so there is no transition to run and no race
 between the two: reactivating is the same act as extending, and silence is
@@ -57,6 +62,25 @@ TEXT_LIMITS = {"goal": 300, "approach": 500, "status_text": 500}
 LIST_FIELDS = ("open_questions", "blockers", "next_actions")
 LIST_MAX_ITEMS = 5
 LIST_MAX_CHARS = 300
+
+#: What each field is called wherever a state is delivered. The labels belong
+#: to the body rather than to a printer, because the MCP `states[].content`
+#: and the terminal carry the same string: a reader who cannot tell an open
+#: question from a next action may act on the wrong one, and only one of those
+#: two is an instruction. They cost tokens, which is the trade — a state that
+#: is cheap and ambiguous is not cheaper than one that is read correctly.
+#: The fields a caller writes, in the order a state is read. `_STATE_KEYS`
+#: is this plus the two the store stamps itself.
+EDITABLE_FIELDS = ("goal", "approach", "status_text", *LIST_FIELDS)
+
+STATE_LABELS = {
+    "goal": "goal",
+    "approach": "approach",
+    "status_text": "status",
+    "open_questions": "open questions",
+    "blockers": "blockers",
+    "next_actions": "next actions",
+}
 
 _STATE_KEYS = (
     "goal",
@@ -178,14 +202,19 @@ def state_text(name: str, state: dict[str, Any]) -> str:
 
     The name is counted with the state because a state arriving without the
     name of the work it belongs to is not deliverable, so the two are one row
-    on the wire and one row in the budget.
+    on the wire and one row in the budget. The field labels are counted with
+    it for the same reason: an unlabelled pile of paragraphs is delivered, but
+    it is not read as the state it is.
     """
     parts = [name]
     for field in ("goal", "approach", "status_text"):
         if state.get(field):
-            parts.append(state[field])
+            parts.append(f"{STATE_LABELS[field]}: {state[field]}")
     for field in LIST_FIELDS:
-        parts.extend(state.get(field) or [])
+        items = state.get(field) or []
+        if items:
+            parts.append(f"{STATE_LABELS[field]}:")
+            parts.extend(f"- {item}" for item in items)
     return "\n".join(parts)
 
 
@@ -507,9 +536,23 @@ def _check_budget(
     Nothing is trimmed and nothing falls through to search. The overflow is
     resolved at the entrance, as it is for memories: something else shrinks,
     goes quiet, or gets closed by the person who owns it.
+
+    A store can be over the ceiling without any write having put it there —
+    the ceiling is configuration, and what a state costs is computed from how
+    it is delivered, so both can move underneath rows nobody has touched. From
+    there a flat refusal is a trap rather than an entrance: if the other
+    active tasks already exceed the ceiling on their own, emptying this one
+    entirely still lands over, and the refusal would be telling the caller to
+    do the one thing it is refusing. So a write that leaves the store smaller
+    than it found it goes through even while the total is still over. It
+    cannot be used to grow anything — a smaller state is the direction the
+    ceiling wants — and every other write stays refused until the store is
+    back inside it.
     """
     cost = state_cost(name, state)
-    others = [row for row in active_state_costs(cur) if row["task_id"] != task_id]
+    seated = active_state_costs(cur)
+    others = [row for row in seated if row["task_id"] != task_id]
+    was = next((row["tokens"] for row in seated if row["task_id"] == task_id), None)
     breakdown = sorted(
         [*others, {"task_id": task_id, "name": name, "tokens": cost}],
         key=lambda row: row["tokens"],
@@ -519,11 +562,14 @@ def _check_budget(
     ceiling = config.project_capacity()
     if total <= ceiling:
         return
+    if was is not None and cost < was:
+        return
     raise ProjectBudgetError(
         f"the project state seats {ceiling} tokens and this would take it to {total} "
         f"({cost} for '{name}' on top of {total - cost} already pushed by "
-        f"{len(others)} active task(s)). Make room first: shrink another task's state, "
-        "leave one alone until its lease runs out, or ask the user to close one "
+        f"{len(others)} active task(s)). A write that makes this task's own state "
+        "smaller is allowed through even from here, so shrink this one; otherwise "
+        "leave a task alone until its lease runs out, or ask the user to close one "
         "(`mashu task close <id>`).",
         breakdown,
     )
@@ -640,6 +686,62 @@ def task_update(
         detail={"task_id": str(task_id), "tokens": state_cost(task["name"], state)},
     )
     return {**task_get(cur, task_id), **_gate_report(verdict)}
+
+
+def append_next_action(
+    cur: psycopg.Cursor, task_id: UUID, text: str, *, actor: str
+) -> dict[str, Any]:
+    """Add one next action, leaving every other field as it stands.
+
+    The only append in this module. It exists because the caller is a pain
+    being reported, not a session that has just read the state: a pain is
+    recorded by whoever was hurt at the moment it hurt, and asking that call
+    to carry the whole current state so it can replace it would mean the
+    report either invents the other five fields or does not happen.
+
+    There is no `expect_updated_at` because there is no version to be stale
+    against — this writes one item and reads none. The lock still serialises
+    it against a replacement, and the write moves `updated_at`, so a
+    replacement prepared before this ran is refused rather than silently
+    dropping what was appended.
+
+    Every entrance a replacement passes is passed here too: the gate, the list
+    ceiling, the project budget — over the whole state, not just the new item,
+    so this cannot carry a state a replacement would have been refused.
+
+    Reading the state back through `_state_of` normalises it, so an existing
+    item with surrounding whitespace is trimmed and an empty one is dropped.
+    The database allows both; nothing that writes through this module produces
+    them, and a state that has been through here is the state a replacement
+    would have written.
+    """
+    text = (text or "").strip()
+    if not text:
+        raise MashuError("a next action needs something in it")
+    _lock(cur)
+    task = _require_open(cur, task_id)
+    current = task_get(cur, task_id)
+    state = _state_of(**{field: current["state"][field] for field in EDITABLE_FIELDS})
+    if text in state["next_actions"]:
+        return {**current, "appended": False, "reason": "this next action is already on the task"}
+    state["next_actions"] = [*state["next_actions"], text]
+    _check_limits(state)
+    verdict = _gate(*_texts(state))
+    _check_budget(cur, task_id=task_id, name=task["name"], state=state)
+
+    cur.execute(
+        "UPDATE task_state SET next_actions = %s, updated_at = clock_timestamp(), "
+        "updated_by = %s WHERE task_id = %s",
+        (state["next_actions"], actor, task_id),
+    )
+    _renew(cur, task_id)
+    events.record(
+        cur,
+        "task_next_action_appended",
+        actor,
+        detail={"task_id": str(task_id), "tokens": state_cost(task["name"], state)},
+    )
+    return {**task_get(cur, task_id), **_gate_report(verdict), "appended": True}
 
 
 def touch(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, Any]:

@@ -148,6 +148,8 @@ def build_server() -> Any:
         what: str,
         prevention: str,
         scope: str | None = None,
+        prevention_kind: str = "rule",
+        task_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Record a real pain and show the evidence that may make it count.
 
@@ -155,6 +157,14 @@ def build_server() -> Any:
         trace into durable evidence, and an incident can create a nomination;
         neither path bypasses human admission. This is how forgetting gets
         counted, not a way to write knowledge directly.
+
+        Ask which shape the answer has before you call. If what would have
+        stopped this is a sentence somebody has to be holding every time,
+        leave prevention_kind as 'rule'. If it is a change you make once and
+        then never think about again, pass prevention_kind='work' with the
+        task_id it belongs to: it is filed on that task's next actions and
+        never becomes a candidate, because the review desk decides what is
+        worth knowing and has no verb for work.
         """
         try:
             with db.transaction() as cur:
@@ -168,6 +178,8 @@ def build_server() -> Any:
                     prevention=prevention,
                     actor=actor(),
                     scope_id=scope_id,
+                    prevention_kind=prevention_kind,
+                    task_id=task_id,
                 )
                 return _plain({"ok": True, **answer})
         except MashuError as error:
@@ -364,7 +376,12 @@ def build_server() -> Any:
         blockers: list[str] | None = None,
         next_actions: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Replace a task's current state against the version just read."""
+        """Replace a task's current state against the version just read.
+
+        A replacement, not a patch: every field you leave out is cleared. Send
+        the whole state you want the task to have, which is the state you just
+        read with your changes in it.
+        """
         try:
             with db.transaction() as cur:
                 answer = tasks.task_update(
@@ -396,7 +413,12 @@ def build_server() -> Any:
         next_actions: list[str] | None = None,
         evidence: list[UUID] | None = None,
     ) -> dict[str, Any]:
-        """Replace current state and freeze that replacement as a checkpoint."""
+        """Replace current state and freeze that replacement as a checkpoint.
+
+        A replacement, not a patch: every field you leave out is cleared. Send
+        the whole state you want the task to have, which is the state you just
+        read with your changes in it.
+        """
         try:
             with db.transaction() as cur:
                 answer = task_history.checkpoint(
