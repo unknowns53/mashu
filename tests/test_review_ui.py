@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import io
 import os
-import stat
+import pathlib
+import sys
 
 import psycopg
 import pytest
@@ -157,10 +158,19 @@ def test_editing_before_admitting_keeps_the_wording_that_was_written(
 ):
     """e admits what the reader wrote, not what the agent proposed."""
     a_candidate(dsn, RULE)
-    editor = tmp_path / "append-a-line"
-    editor.write_text('#!/bin/sh\nprintf "and check the standby first\\n" >> "$1"\n')
-    editor.chmod(editor.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setenv("EDITOR", str(editor))
+    # The stand-in editor is a Python script run by the interpreter at hand,
+    # because a shebang script cannot be executed on Windows, and the paths go
+    # through shlex.split in posix mode, which eats backslashes.
+    editor = tmp_path / "append_a_line.py"
+    editor.write_text(
+        "import pathlib, sys\n"
+        "path = pathlib.Path(sys.argv[1])\n"
+        "path.write_text(path.read_text(encoding='utf-8')"
+        " + 'and check the standby first\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    interpreter = pathlib.Path(sys.executable).as_posix()
+    monkeypatch.setenv("EDITOR", f'"{interpreter}" "{editor.as_posix()}"')
     monkeypatch.delenv("VISUAL", raising=False)
     keys(monkeypatch, "", "e", "")
 
