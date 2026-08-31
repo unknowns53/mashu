@@ -12,6 +12,13 @@ heaviest scope, so the fullest scope is what it has to fit alongside. A guard
 rule rides with neither: it is not in the opening at all, which is why
 stepping down to guard is one of the ways out a refusal names.
 
+What it counts is the memories, and only those. v2 weighed the temporary
+contexts here as well, on the ground that they are pushed in the same opening;
+v3 8 keeps the arithmetic and moves it, because one subsystem quietly spending
+another's room is the failure the split ceilings exist to prevent — a fortnight
+of expiring conditions could refuse a rule admitted against evidence. Each
+share is now refused at its own entrance and none of them borrows.
+
 The always layer answers to a second, lower ceiling of its own. Left with only
 the shared one it never overflows; it quietly spends the whole store's headroom
 on rules that most sessions did not need, and the scopes find the room gone
@@ -51,14 +58,6 @@ WHERE status = 'active' AND delivery IN ('always', 'scope')
   AND (%(exclude)s::uuid IS NULL OR memory_id <> %(exclude)s::uuid)
 """
 
-# Temporary contexts ride in the same opening (7, 5.2). Expiring on their own
-# is a reason they need no review, not a reason they are weightless while they
-# are being pushed. An unscoped one reaches every session, so it lands in the
-# always bucket by the same rule the memories use.
-_PUSHED_TEMPORARY = """
-SELECT scope_id, content FROM temporary_context WHERE expires_at > now()
-"""
-
 
 def _totals(cur: psycopg.Cursor, exclude: UUID | None) -> dict[str, Any]:
     always: list[str] = []
@@ -67,13 +66,6 @@ def _totals(cur: psycopg.Cursor, exclude: UUID | None) -> dict[str, Any]:
     cur.execute(_PUSHED, {"exclude": exclude})
     for row in cur.fetchall():
         if row["delivery"] == "always":
-            always.append(row["content"])
-        else:
-            scoped.setdefault(row["scope_id"], []).append(row["content"])
-
-    cur.execute(_PUSHED_TEMPORARY)
-    for row in cur.fetchall():
-        if row["scope_id"] is None:
             always.append(row["content"])
         else:
             scoped.setdefault(row["scope_id"], []).append(row["content"])

@@ -25,8 +25,11 @@ from mashu import (
     events,
     memories,
     nominations,
+    projects,
     routing,
     scopes,
+    task_history,
+    tasks,
     temporary,
     tokens,
 )
@@ -39,7 +42,7 @@ from mashu import (
 from mashu import (
     traces as trace_domain,
 )
-from mashu.errors import MashuError, RefusedError, RetiredConflictError
+from mashu.errors import DuplicateTaskError, MashuError, RefusedError, RetiredConflictError
 
 ACTOR = "user"
 GUARD_HOLD = 2
@@ -135,6 +138,26 @@ def _memory_ref(cur: Any, ref: str) -> UUID:
     return _resolve(cur, ref, table="memory", id_col="memory_id", label="memory")
 
 
+def _task_ref(cur: Any, ref: str) -> UUID:
+    return _resolve(cur, ref, table="task", id_col="task_id", label="task")
+
+
+def _project_ref(cur: Any, ref: str) -> UUID:
+    """A project by the name it was opened under, or by the front of its id.
+
+    The name first, because that is what a person calls a project and what
+    every other entrance to this subsystem takes. Falling through to the id
+    only for something shaped like one keeps a mistyped name answered by the
+    refusal that lists the open projects, rather than by 'not an id'.
+    """
+    row = projects.get_project(cur, ref)
+    if row is not None:
+        return row["project_id"]
+    if _HEX_REF.fullmatch((ref or "").strip().lower()):
+        return _resolve(cur, ref, table="project", id_col="project_id", label="project")
+    return projects.require_project(cur, ref)["project_id"]
+
+
 def _scope(cur: Any, name: str | None) -> UUID | None:
     return scopes.require_scope(cur, name)["scope_id"] if name is not None else None
 
@@ -163,6 +186,11 @@ def _field(label: str, value: Any) -> None:
 def _cells(text: str) -> int:
     """How wide a string prints, counting double-width characters as two."""
     return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
+def _pad(text: str, width: int) -> str:
+    """Left-justify to a printed width, so a Japanese name keeps its column."""
+    return text + " " * max(0, width - _cells(text))
 
 
 def _flow(text: str, indent: str = "  ", width: int | None = None) -> str:
@@ -258,6 +286,21 @@ def _print_memory_rows(rows: list[dict[str, Any]], *, heading: str = "memories")
         print(f"{_short(row['memory_id']):8}  {row['content']}")
 
 
+def _print_state_rows(rows: list[dict[str, Any]]) -> None:
+    """The work that is current, each state under the date it was last confirmed.
+
+    The heading leads the row rather than trailing it, because it is what
+    tells the reader whether to trust the lines beneath before reading them
+    (v3 3.1). The body is flowed rather than printed raw: a state carries
+    several fields and one of them running off the right edge would take the
+    next with it.
+    """
+    print("project state")
+    for row in rows:
+        print(f"{row['task']:8}  {row['heading']}")
+        print(_flow(row["content"], indent="          "))
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
         cur.execute(
@@ -285,6 +328,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         suspect_count = cur.fetchone()["count"]
         pending = nominations.pending_nominations(cur)
         scope_rows = scopes.list_scopes(cur)
+        # The other two shares of the opening, read the same way their own
+        # entrances read them (v3 8): the active tasks across every project,
+        # and the conditions standing at their heaviest.
+        states = tasks.active_state_costs(cur)
+        temporary_totals = temporary.pushed_totals(cur)
 
     active = "  ".join(f"{key}={counts.get(key, 0)}" for key in ("always", "scope", "guard"))
     print(f"active  {active}")
@@ -292,6 +340,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"tokens  always={totals['always']}/{config.always_capacity()}  "
         f"worst={totals['worst']}/{config.capacity()}"
     )
+    print(
+        f"state   active={len(states)}  "
+        f"tokens={sum(row['tokens'] for row in states)}/{config.project_capacity()}"
+    )
+    print(f"temporary  tokens={temporary_totals['worst']}/{config.temporary_capacity()}")
     print(f"pending {len(pending)}")
     print(f"traces  unexpired={trace_count}")
     print(f"ledger  last_30_days={ledger_count}")
@@ -317,10 +370,17 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     print(f"scope     {answer.get('scope') or '-'}  routed={routed_text}")
     _print_memory_rows(answer.get("always", []), heading="always")
     _print_memory_rows(answer.get("scoped", []), heading="scoped")
+    _print_state_rows(answer.get("states", []))
     print("temporary")
     for row in answer.get("temporary", []):
         print(f"  {row['content']}  (expires {row['expires_at']})")
-    print(f"tokens    {answer.get('tokens', 0)}/{answer.get('capacity', config.capacity())}")
+    print(
+        f"tokens    {answer.get('tokens', 0)}/"
+        f"{answer.get('capacity', config.total_capacity())}  "
+        f"memory={answer.get('memory_tokens', 0)}  "
+        f"state={answer.get('project_tokens', 0)}  "
+        f"temporary={answer.get('temporary_tokens', 0)}"
+    )
     print(f"pending   {answer.get('pending', 0)}")
     return 0
 
@@ -871,6 +931,257 @@ def cmd_route(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_task_rows(rows: list[dict[str, Any]], *, project: bool = True) -> None:
+    """Each task named on its own line, with its state under its heading.
+
+    The heading leads the state line here for the reason it leads the opening
+    (v3 3.1): what tells a reader whether to trust a line is how old it is,
+    and a date printed after the line it qualifies is read too late. The row
+    is kept to two lines because a listing answers "what is going on", and
+    everything a task holds is one `task show` away.
+    """
+    for row in rows:
+        task, state = row["task"], row["state"]
+        head = f"{_short(task['task_id']):8}  {task['name']}"
+        if project:
+            head += f"  ({task['project_name']})"
+        print(head)
+        summary = state["status_text"] or state["goal"] or ""
+        print(_flow(f"{row['heading']}  {summary}".rstrip(), indent="          "))
+
+
+def cmd_project_list(args: argparse.Namespace) -> int:
+    with db.transaction(args.dsn) as cur:
+        rows = projects.list_projects(cur)
+    width = max([_cells("name"), *(_cells(row["name"]) for row in rows)])
+    print(f"{_pad('name', width)}  scope                 active  dormant  closed")
+    for row in rows:
+        print(
+            f"{_pad(row['name'], width)}  {(row['scope_name'] or '-')[:20]:20}  "
+            f"{row['n_active']:6}  {row['n_dormant']:7}  {row['n_closed']:6}"
+        )
+    return 0
+
+
+def cmd_project_create(args: argparse.Namespace) -> int:
+    with db.transaction(args.dsn) as cur:
+        row = projects.create_project(
+            cur,
+            name=args.name,
+            actor=ACTOR,
+            scope_id=_scope(cur, args.scope) if args.scope else None,
+        )
+    print(f"created  {_short(row['project_id'])}  {row['name']}")
+    return 0
+
+
+def cmd_project_show(args: argparse.Namespace) -> int:
+    with db.transaction(args.dsn) as cur:
+        row = projects.show_project(cur, _project_ref(cur, args.ref))
+        open_tasks = tasks.task_list(cur, project=row["project_id"], activity="open")
+        _field("project", row["project_id"])
+        _field("name", row["name"])
+        _field("scope", row["scope_name"] or "-")
+        _field("created", _date(row["created_at"]))
+        if row["archived_at"] is not None:
+            _field("archived", _date(row["archived_at"]))
+        _field(
+            "tasks",
+            f"active={row['n_active']}  dormant={row['n_dormant']}  closed={row['n_closed']}",
+        )
+        print("open tasks")
+        _print_task_rows(open_tasks, project=False)
+    return 0
+
+
+def cmd_task_list(args: argparse.Namespace) -> int:
+    """The tasks in one activity, active unless another set is asked for."""
+    activity = "dormant" if args.dormant else "closed" if args.closed else "active"
+    with db.transaction(args.dsn) as cur:
+        project_id = _project_ref(cur, args.project) if args.project else None
+        rows = tasks.task_list(cur, project=project_id, activity=activity)
+    if not rows:
+        print(f"no {activity} tasks")
+        return 0
+    print(f"{activity} tasks")
+    _print_task_rows(rows)
+    return 0
+
+
+def _print_state_fields(state: dict[str, Any]) -> None:
+    for label, field in (("goal", "goal"), ("approach", "approach"), ("status", "status_text")):
+        if state.get(field):
+            print(label)
+            print(_flow(state[field]))
+    for field in tasks.LIST_FIELDS:
+        items = state.get(field) or []
+        if not items:
+            continue
+        print(field.replace("_", " "))
+        for item in items:
+            print(_flow(f"- {item}"))
+
+
+def cmd_task_show(args: argparse.Namespace) -> int:
+    """One task in full: what it is now, and the history that got it there.
+
+    The history is pulled whole rather than by flag. It is never delivered to
+    a session (v3 5.4), so this screen is the only place a person reads it,
+    and an account split across four commands is one nobody assembles.
+    """
+    with db.transaction(args.dsn) as cur:
+        row = task_history.expanded_task(
+            cur,
+            _task_ref(cur, args.ref),
+            attempts=True,
+            decisions=True,
+            artifacts=True,
+            checkpoints=True,
+        )
+    task, state = row["task"], row["state"]
+    _field("task", task["task_id"])
+    _field("name", task["name"])
+    _field("project", task["project_name"])
+    if task["status"] == "closed":
+        closed = f"closed  {task['outcome']}"
+        if task["close_reason"]:
+            closed += f": {task['close_reason']}"
+        _field("status", closed)
+    else:
+        _field("status", f"open  {row['activity']}  (lease to {_date(task['active_until'])})")
+    _field("created", f"{_date(task['created_at'])}  {task['created_by']}")
+    print(f"{row['heading']}  {state['updated_by']}")
+    _print_state_fields(state)
+
+    # The locators are the point of the artifact rows: Mashu holds the
+    # reference and never the body (v3 4), so a screen that printed only the
+    # ids would leave the original unreachable from the only place it is named.
+    artifacts = {artifact["reference_id"]: artifact for artifact in row["artifacts"]}
+    print("artifacts")
+    for artifact in row["artifacts"]:
+        label = f"  {artifact['label']}" if artifact["label"] else ""
+        print(
+            f"  {_short(artifact['reference_id'])}  {_date(artifact['created_at'])}  "
+            f"{artifact['kind']:<10}  {artifact['locator']}{label}"
+        )
+    print("checkpoints")
+    for point in row["checkpoints"]:
+        print(f"  {_date(point['created_at'])}  {point['created_by']}  {point['what_changed']}")
+        for reference_id in point["evidence"]:
+            cited = artifacts.get(reference_id)
+            if cited is None:
+                print(f"    evidence  {_short(reference_id)}")
+            else:
+                print(f"    evidence  {cited['kind']}  {cited['locator']}")
+    print("attempts")
+    for attempt in row["attempts"]:
+        print(f"  {_date(attempt['created_at'])}  {attempt['created_by']}  {attempt['attempt']}")
+        for label in ("result", "reason", "next"):
+            if attempt[label]:
+                print(f"    {label:<8}  {attempt[label]}")
+    print("decisions")
+    for decision in row["decisions"]:
+        print(
+            f"  {_date(decision['created_at'])}  {decision['created_by']}  {decision['decision']}"
+        )
+        if decision["reason"]:
+            print(f"    reason      {decision['reason']}")
+        if decision["supersedes_id"]:
+            print(f"    supersedes  {_short(decision['supersedes_id'])}")
+    return 0
+
+
+def _task_project(cur: Any, given: str | None) -> UUID:
+    """The project named, or the one this working directory already belongs to.
+
+    A task filed under the wrong project splits one body of work state in two,
+    so nothing is guessed here: the route table's scope answers only when it
+    holds exactly one project, and every other case is asked about by name.
+    """
+    if given:
+        return _project_ref(cur, given)
+    scope_id, scope_name, _ = _routed_scope(cur)
+    if scope_id is not None:
+        cur.execute(
+            "SELECT project_id, name FROM project "
+            "WHERE scope_id = %s AND archived_at IS NULL ORDER BY name",
+            (scope_id,),
+        )
+        rows = cur.fetchall()
+        if len(rows) == 1:
+            return rows[0]["project_id"]
+        if len(rows) > 1:
+            named = ", ".join(row["name"] for row in rows)
+            raise MashuError(
+                f"scope '{scope_name}' holds more than one project ({named}): "
+                "say which with --project"
+            )
+    cur.execute("SELECT name FROM project WHERE archived_at IS NULL ORDER BY name")
+    known = ", ".join(row["name"] for row in cur.fetchall()) or "none yet"
+    raise MashuError(f"say which project this task belongs to with --project (open: {known})")
+
+
+def cmd_task_create(args: argparse.Namespace) -> int:
+    """Open a task, unless one that reads like it is already open (v3 5.2)."""
+    try:
+        with db.transaction(args.dsn) as cur:
+            row = tasks.task_create(
+                cur,
+                project=_task_project(cur, args.project),
+                name=args.name,
+                actor=ACTOR,
+                goal=args.goal,
+                force=args.force,
+            )
+    except DuplicateTaskError as clash:
+        # The candidates rather than the count, because continuing one of them
+        # is the right answer nine times in ten and that needs their ids.
+        print(str(clash), file=sys.stderr)
+        for candidate in clash.candidates:
+            found = candidate["task"]
+            print(
+                f"  {_short(found['task_id'])}  {candidate['heading']}  {found['name']}",
+                file=sys.stderr,
+            )
+        print("pass --force to open a second task for the same work anyway", file=sys.stderr)
+        return 1
+    _gate_warnings(row)
+    print(f"task  {_short(row['task']['task_id'])}  {row['task']['name']}")
+    return 0
+
+
+def cmd_task_touch(args: argparse.Namespace) -> int:
+    with db.transaction(args.dsn) as cur:
+        task_id = _task_ref(cur, args.ref)
+        row = tasks.touch(cur, task_id, actor=ACTOR)
+    print(f"touched  {_short(task_id)}  active to {_date(row['task']['active_until'])}")
+    return 0
+
+
+def cmd_task_close(args: argparse.Namespace) -> int:
+    """End a task. Only a person reaches this, and only with an outcome (v3 6)."""
+    if not args.outcome:
+        raise MashuError(
+            f"close requires --outcome ({', '.join(tasks.OUTCOMES)}): 'closed' on its own "
+            "says only that nobody is working on this, which the lease already says and "
+            "says reversibly"
+        )
+    with db.transaction(args.dsn) as cur:
+        task_id = _task_ref(cur, args.ref)
+        row = tasks.close(cur, task_id, outcome=args.outcome, actor=ACTOR, reason=args.reason)
+    _gate_warnings(row)
+    print(f"closed  {_short(task_id)}  {row['task']['outcome']}")
+    return 0
+
+
+def cmd_task_reopen(args: argparse.Namespace) -> int:
+    with db.transaction(args.dsn) as cur:
+        task_id = _task_ref(cur, args.ref)
+        row = tasks.reopen(cur, task_id, actor=ACTOR)
+    print(f"reopened  {_short(task_id)}  active to {_date(row['task']['active_until'])}")
+    return 0
+
+
 def cmd_migrate(args: argparse.Namespace) -> int:
     for filename in migration.migrate(args.dsn):
         print(f"applied: {filename}")
@@ -1025,6 +1336,64 @@ def build_parser() -> argparse.ArgumentParser:
     route_group.add_argument("--remove", metavar="PATH", help="drop the route for this path prefix")
     route.add_argument("--scope", help="the scope to route to; required with --add")
     route.set_defaults(func=cmd_route)
+
+    project = sub.add_parser("project", help="the projects work state is filed under")
+    project_sub = project.add_subparsers(dest="project_command", required=True)
+    project_sub.add_parser(
+        "list", help="every project, and how many tasks it is carrying"
+    ).set_defaults(func=cmd_project_list)
+    project_create = project_sub.add_parser("create", help="open a project (User only)")
+    project_create.add_argument("name", help="what its tasks are filed under")
+    project_create.add_argument("--scope", help="the scope this project's sessions run in")
+    project_create.set_defaults(func=cmd_project_create)
+    project_show = project_sub.add_parser("show", help="one project and the tasks still open in it")
+    project_show.add_argument("ref", help=f"the project's name, or {_REF_HELP}")
+    project_show.set_defaults(func=cmd_project_show)
+
+    task = sub.add_parser("task", help="the work that is current, and how current it is")
+    task_sub = task.add_subparsers(dest="task_command", required=True)
+
+    task_listing = task_sub.add_parser("list", help="the tasks, each under its own date")
+    task_which = task_listing.add_mutually_exclusive_group()
+    task_which.add_argument(
+        "--dormant", action="store_true", help="the open tasks whose lease has run out"
+    )
+    task_which.add_argument(
+        "--closed", action="store_true", help="the tasks somebody has already ended"
+    )
+    task_listing.add_argument("--project", help="only the tasks filed under this project")
+    task_listing.set_defaults(func=cmd_task_list)
+
+    task_show = task_sub.add_parser("show", help="one task in full, with its history and artifacts")
+    task_show.add_argument("ref", help=_REF_HELP)
+    task_show.set_defaults(func=cmd_task_show)
+
+    task_create = task_sub.add_parser("create", help="open a task, matched against the open ones")
+    task_create.add_argument("name", help="the work, named as the duplicate match will read it")
+    task_create.add_argument(
+        "--project", help="where it is filed; without it, the project this directory routes to"
+    )
+    task_create.add_argument("--goal", help="what finishing it would mean")
+    task_create.add_argument(
+        "--force", action="store_true", help="open it even though one already reads like it"
+    )
+    task_create.set_defaults(func=cmd_task_create)
+
+    task_touch = task_sub.add_parser("touch", help="say the work is still current, nothing more")
+    task_touch.add_argument("ref", help=_REF_HELP)
+    task_touch.set_defaults(func=cmd_task_touch)
+
+    task_close = task_sub.add_parser("close", help="end a task (User only), on a chosen outcome")
+    task_close.add_argument("ref", help=_REF_HELP)
+    task_close.add_argument(
+        "--outcome", choices=tasks.OUTCOMES, help="whether it was finished, given up, or replaced"
+    )
+    task_close.add_argument("--reason", help="what a later reader would want to know about the end")
+    task_close.set_defaults(func=cmd_task_close)
+
+    task_reopen = task_sub.add_parser("reopen", help="take back a closure (User only)")
+    task_reopen.add_argument("ref", help=_REF_HELP)
+    task_reopen.set_defaults(func=cmd_task_reopen)
 
     serve = sub.add_parser("serve", help="run the MCP server on stdio")
     serve.add_argument("--agent", help="the name writes are attributed to")

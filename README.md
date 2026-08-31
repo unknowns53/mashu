@@ -60,7 +60,7 @@ ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
 
 | コマンド | 内容 |
 |---|---|
-| `mashu status` | 在庫と定員、pending 件数、台帳と痕跡の状況、配信失敗の疑い件数 |
+| `mashu status` | 在庫と定員（memory / project state / 期限つき条件の三枠）、pending 件数、台帳と痕跡の状況、配信失敗の疑い件数 |
 | `mashu review [--all]` | 昇格候補を 1 件ずつ確定・却下・保留する TUI（次節） |
 | `mashu remember <body> [--until 5d]` | User 明示。唯一の即時経路。退役済みの記憶と衝突すると退役理由を出して確認する（`--force` で無条件）。`--until` を付けると期限つき条件（Temporary Context）になり、Review 不要で期限に消える |
 | `mashu pain --kind {incident,friction} --what <w> --prevention <p>` | 痛みの手動記録 |
@@ -95,6 +95,13 @@ ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
 | `mashu scope [--add <name> --about <line>]` | Scope 台帳（作成は User のみ） |
 | `mashu route [--add <path> --scope <name>] [--ignore <path>]` | 作業ディレクトリと Scope の対応 |
 | `mashu bootstrap` | このディレクトリのセッションが受け取る内容と token |
+| `mashu project list` / `create <name> [--scope <s>]` / `show <id>` | プロジェクト台帳（作成は User のみ）。Task の所属単位で、Scope とは別 |
+| `mashu task list [--dormant] [--closed] [--project <p>]` | Task の一覧。既定は active のみ。どの行の状態も最終確認日を見出しに持つ |
+| `mashu task show <id>` | Task 1 件を全文で。現在状態と checkpoint・attempt・decision・成果物の参照先 |
+| `mashu task create <name> [--project <p>] [--goal <g>]` | Task を起こす。既に似た Task が開いていれば候補を挙げて拒否（`--force` で強行） |
+| `mashu task touch <id>` | まだ現在の作業だと言う。lease の延長で、dormant からの復帰も同じ操作 |
+| `mashu task close <id> --outcome {completed,abandoned,superseded}` | Task の終了（User のみ）。outcome は必須 |
+| `mashu task reopen <id>` | 終了の取り消し（User のみ） |
 | `mashu admin migrate` | 未適用の migration を実行 |
 
 id を取る引数はどれも、一覧が表示する短縮 ID（先頭 8 文字）をそのまま受け付ける。4 文字以上の前方一致で一意に決まればよく、複数に当たったときは候補を並べて拒否する。
@@ -107,16 +114,27 @@ Claude Code に登録する場合。
 claude mcp add mashu --scope user --env MASHU_DATABASE_URL=dbname=mashu -- /path/to/mashu/.venv/bin/mashu serve --agent claude
 ```
 
-Agent 名は `--agent` または環境変数 `MASHU_AGENT` で渡す。MCP ツールは 6 つ。
+Agent 名は `--agent` または環境変数 `MASHU_AGENT` で渡す。MCP ツールは 15。知識を扱う 6 つと、作業状態（Project State）を扱う 9 つである。
 
 | Tool | 役割 |
 |---|---|
-| `session_bootstrap` | セッション開始時に一度。always と現在 Scope の記憶、期限つき条件、pending 件数 |
+| `session_bootstrap` | セッション開始時に一度。always と現在 Scope の記憶、active な Task の現在状態（最終確認日を本文に含む）、期限つき条件、pending 件数 |
 | `pain_report` | 痛みを台帳へ記録し、類似の台帳エントリ・痕跡・退役理由・配信中の記憶を返す。二度目なら候補を生成 |
 | `trace_put` | 調べて分かったことを一行残す |
 | `trace_search` | 痕跡の検索。日付つき・未検証の印で返る |
 | `memory_list` | 指定 Scope の active な記憶の列挙 |
 | `memory_nominate` | 会話中の User の記録指示を候補として運ぶ。pending 止まりで、確定は人 |
+| `project_list` | プロジェクトと、その下の active / dormant / closed の件数 |
+| `task_create` | Task を起こす。同じプロジェクトに名前・goal の似た open な Task があれば作らず候補を返す |
+| `task_get` | Task 1 件。`attempts` / `decisions` / `artifacts` / `checkpoints` は指定した分だけ展開する |
+| `task_search` | Task の検索。返る行には active / dormant と最終確認日が必ず付く |
+| `task_update` | 現在状態の置換。読んだときの `updated_at` を添える。文字上限と枠を超える置換は拒否される |
+| `task_checkpoint` | 置換と履歴の凍結を一度に行う。作業の区切りで打つのはこれ 1 本でよい |
+| `attempt_record` | 試したことと、その結末の追記 |
+| `decision_record` | 後から理由を失うと高くつく判断の追記（差し替えは `supersedes_id` を張った新しい行で） |
+| `artifact_link` | 成果物の原典（commit・ファイル・文書）への参照。本文は複製しない |
+
+`task_close` は無い。Task を終えられるのは User だけで、経路は `mashu task close` である（`mashu task reopen` も同じ）。Agent が「実装は完了したと思われる」と判断しても closed にはできない。沈黙も完了ではなく、lease（既定 14 日）が切れた Task は bootstrap から外れるだけで、履歴も検索も残る。
 
 候補は同じ規則につき一つしか並ばない。似た痛みが再び報告されたときは新しい候補を作らず、その台帳行を待っている候補の根拠に足す。何回起きたかは席を渡すかどうかの判断そのものなので、二度目・三度目を捨てずに一つの候補の下へ積む。保留していた候補はこのとき一覧に戻る。
 

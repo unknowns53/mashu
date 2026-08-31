@@ -7,8 +7,24 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
-from mashu import bootstrap, db, memories, nominations, routing, scopes, traces
-from mashu.errors import MashuError
+from mashu import (
+    bootstrap,
+    db,
+    memories,
+    nominations,
+    projects,
+    routing,
+    scopes,
+    task_history,
+    tasks,
+    traces,
+)
+from mashu.errors import (
+    DuplicateTaskError,
+    MashuError,
+    ProjectBudgetError,
+    StaleStateError,
+)
 
 ACTOR_ENV_VAR = "MASHU_AGENT"
 DEFAULT_ACTOR = "agent"
@@ -31,7 +47,14 @@ def _plain(value: Any) -> Any:
 
 
 def _failure(error: MashuError) -> dict[str, Any]:
-    return {"ok": False, "error": str(error)}
+    answer: dict[str, Any] = {"ok": False, "error": str(error)}
+    if isinstance(error, DuplicateTaskError):
+        answer["candidates"] = error.candidates
+    elif isinstance(error, StaleStateError):
+        answer["current"] = error.current
+    elif isinstance(error, ProjectBudgetError):
+        answer["breakdown"] = error.breakdown
+    return _plain(answer)
 
 
 def _scope(cur: Any, name: str | None) -> tuple[UUID | None, str | None, bool]:
@@ -48,7 +71,7 @@ def _scope(cur: Any, name: str | None) -> tuple[UUID | None, str | None, bool]:
 
 
 def build_server() -> Any:
-    """Build the six-tool MCP server used by an agent session."""
+    """Build the fifteen-tool MCP server used by an agent session."""
     from mcp.server import MCPServer
 
     # These instructions reach every connected CLI automatically, which makes
@@ -74,7 +97,16 @@ def build_server() -> Any:
             "the user's own hand (mashu remember --until), not by agents. "
             "Nothing you write becomes knowledge without a human decision, "
             "and retired knowledge answers with the reason it was retired: "
-            "bring new grounds rather than re-deriving it."
+            "bring new grounds rather than re-deriving it. Four work verbs "
+            "keep Project State small: if you looked something up, trace_put; "
+            "if it hurt, pain_report; if the user said remember, "
+            "memory_nominate; at a break in the work, task_checkpoint. Use "
+            "attempt_record for the outcome of a failed try and decision_record "
+            "for a judgement whose reason would be costly to re-derive. A task "
+            "state is what was last confirmed on its date, not current truth; "
+            "when that date is old, verify it against the repository and its "
+            "artifacts before working from it. Task completion is never the "
+            "agent's call: closing is the user's, via the CLI."
         ),
     )
 
@@ -230,6 +262,224 @@ def build_server() -> Any:
                     content=content,
                     actor=actor(),
                     scope_id=scope_id,
+                )
+                return _plain({"ok": True, **answer})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def project_list(include_archived: bool = False) -> dict[str, Any]:
+        """List projects and the task counts they currently carry."""
+        try:
+            with db.transaction() as cur:
+                found = projects.list_projects(cur, include_archived=include_archived)
+                return _plain({"ok": True, "projects": found})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def task_create(
+        project: UUID | str,
+        name: str,
+        goal: str | None = None,
+        approach: str | None = None,
+        status_text: str | None = None,
+        open_questions: list[str] | None = None,
+        blockers: list[str] | None = None,
+        next_actions: list[str] | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Create a task, returning similar open tasks when one already exists."""
+        try:
+            with db.transaction() as cur:
+                answer = tasks.task_create(
+                    cur,
+                    project=project,
+                    name=name,
+                    actor=actor(),
+                    goal=goal,
+                    approach=approach,
+                    status_text=status_text,
+                    open_questions=open_questions,
+                    blockers=blockers,
+                    next_actions=next_actions,
+                    force=force,
+                )
+                return _plain({"ok": True, **answer})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def task_get(
+        task_id: UUID,
+        attempts: bool = False,
+        decisions: bool = False,
+        artifacts: bool = False,
+        checkpoints: bool = False,
+    ) -> dict[str, Any]:
+        """Get a task and only the requested history expansions."""
+        try:
+            with db.transaction() as cur:
+                answer = task_history.expanded_task(
+                    cur,
+                    task_id,
+                    attempts=attempts,
+                    decisions=decisions,
+                    artifacts=artifacts,
+                    checkpoints=checkpoints,
+                )
+                return _plain({"ok": True, **answer})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def task_search(
+        query: str,
+        project: UUID | str | None = None,
+        include_closed: bool = False,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Search task names and current state, including closed tasks on request."""
+        try:
+            with db.transaction() as cur:
+                found = tasks.task_search(
+                    cur,
+                    query,
+                    project=project,
+                    include_closed=include_closed,
+                    limit=limit,
+                )
+                return _plain({"ok": True, "tasks": found})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def task_update(
+        task_id: UUID,
+        expect_updated_at: datetime,
+        goal: str | None = None,
+        approach: str | None = None,
+        status_text: str | None = None,
+        open_questions: list[str] | None = None,
+        blockers: list[str] | None = None,
+        next_actions: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Replace a task's current state against the version just read."""
+        try:
+            with db.transaction() as cur:
+                answer = tasks.task_update(
+                    cur,
+                    task_id,
+                    actor=actor(),
+                    expect_updated_at=expect_updated_at,
+                    goal=goal,
+                    approach=approach,
+                    status_text=status_text,
+                    open_questions=open_questions,
+                    blockers=blockers,
+                    next_actions=next_actions,
+                )
+                return _plain({"ok": True, **answer})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def task_checkpoint(
+        task_id: UUID,
+        what_changed: str,
+        expect_updated_at: datetime,
+        goal: str | None = None,
+        approach: str | None = None,
+        status_text: str | None = None,
+        open_questions: list[str] | None = None,
+        blockers: list[str] | None = None,
+        next_actions: list[str] | None = None,
+        evidence: list[UUID] | None = None,
+    ) -> dict[str, Any]:
+        """Replace current state and freeze that replacement as a checkpoint."""
+        try:
+            with db.transaction() as cur:
+                answer = task_history.checkpoint(
+                    cur,
+                    task_id,
+                    actor=actor(),
+                    what_changed=what_changed,
+                    expect_updated_at=expect_updated_at,
+                    goal=goal,
+                    approach=approach,
+                    status_text=status_text,
+                    open_questions=open_questions,
+                    blockers=blockers,
+                    next_actions=next_actions,
+                    evidence=evidence,
+                )
+                return _plain({"ok": True, **answer})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def attempt_record(
+        task_id: UUID,
+        attempt: str,
+        result: str | None = None,
+        reason: str | None = None,
+        next: str | None = None,
+    ) -> dict[str, Any]:
+        """Record the outcome and next step of a failed try."""
+        try:
+            with db.transaction() as cur:
+                answer = task_history.attempt_record(
+                    cur,
+                    task_id,
+                    actor=actor(),
+                    attempt=attempt,
+                    result=result,
+                    reason=reason,
+                    next=next,
+                )
+                return _plain({"ok": True, **answer})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def decision_record(
+        task_id: UUID,
+        decision: str,
+        reason: str | None = None,
+        supersedes_id: UUID | None = None,
+    ) -> dict[str, Any]:
+        """Record a judgement whose reason would be costly to re-derive."""
+        try:
+            with db.transaction() as cur:
+                answer = task_history.decision_record(
+                    cur,
+                    task_id,
+                    actor=actor(),
+                    decision=decision,
+                    reason=reason,
+                    supersedes_id=supersedes_id,
+                )
+                return _plain({"ok": True, **answer})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def artifact_link(
+        task_id: UUID,
+        kind: str,
+        locator: str,
+        label: str | None = None,
+    ) -> dict[str, Any]:
+        """Link a task to the external source of an artifact."""
+        try:
+            with db.transaction() as cur:
+                answer = task_history.artifact_link(
+                    cur,
+                    task_id,
+                    actor=actor(),
+                    kind=kind,
+                    locator=locator,
+                    label=label,
                 )
                 return _plain({"ok": True, **answer})
         except MashuError as error:
