@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from mashu import capacity, scopes, temporary
+from mashu import capacity, memories, scopes, temporary
 from mashu.errors import RefusedError
 from mashu.tokens import pushed_cost
 
 WINDOW = "the shared queue is down for maintenance until Friday"
+RULE = "name the timezone in every scheduled job"
 
 
 def test_a_window_longer_than_the_ceiling_is_a_permanent_claim_in_disguise(cur):
@@ -47,39 +48,79 @@ def test_a_scoped_session_still_sees_the_conditions_that_apply_everywhere(cur, s
     assert unrouted == [anywhere["context_id"]]
 
 
-def test_a_condition_takes_a_seat_while_it_lasts(cur, monkeypatch):
+def test_a_condition_takes_room_in_its_own_share_while_it_lasts(cur, monkeypatch):
     """Expiring on its own is why it needs no review, not why it is weightless.
 
-    It is pushed in the same opening as the memories, so leaving it out of the
-    count made the ceiling report a smaller opening than the one being sent.
+    It is pushed in the same opening as the memories, so it is weighed before
+    it is written. What it is weighed against is the temporary share, which
+    v3 8 gives it apart from the seats; the refusal therefore names the only
+    exits there are here, neither of which is a retirement.
     """
-    monkeypatch.setenv("MASHU_CAPACITY", "30")
+    monkeypatch.setenv("MASHU_TEMPORARY_CAPACITY", "30")
     first = temporary.put_temporary(cur, content=WINDOW, actor="user", days=3)
-    assert capacity.bootstrap_totals(cur)["always"] == pushed_cost([WINDOW])
+    assert temporary.pushed_totals(cur)["always"] == pushed_cost([WINDOW])
 
-    with pytest.raises(RefusedError, match="seats 30 tokens"):
+    with pytest.raises(RefusedError, match="the temporary share seats 30 tokens") as refused:
         temporary.put_temporary(
             cur, content="the licence server is offline this week", actor="user", days=3
         )
+    assert "lapses" in str(refused.value)
 
     cur.execute("SELECT count(*) AS n FROM temporary_context")
     assert cur.fetchone()["n"] == 1
     assert first["context_id"] is not None
 
 
-def test_a_scoped_condition_weighs_on_that_scope(cur, scope_id, monkeypatch):
-    monkeypatch.setenv("MASHU_CAPACITY", "400")
+def test_a_condition_does_not_spend_the_memory_seats(cur, monkeypatch):
+    """v2 counted it inside the seat count; v3 8 stops the two borrowing.
+
+    A fortnight of outages must not be able to refuse a rule that cost
+    something to learn, and the seats must not leave this week's outage
+    nowhere to go either.
+    """
+    monkeypatch.setenv("MASHU_CAPACITY", "40")
+    monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", "40")
+    temporary.put_temporary(cur, content=WINDOW, actor="user", days=3)
+
+    assert capacity.bootstrap_totals(cur)["always"] == 0
+    memories.remember(cur, content=RULE, actor="user")
+    assert capacity.bootstrap_totals(cur)["always"] == pushed_cost([RULE])
+
+
+def test_a_scoped_condition_weighs_on_that_scope(cur, scope_id):
     temporary.put_temporary(cur, content=WINDOW, actor="user", days=3, scope_id=scope_id)
-    totals = capacity.bootstrap_totals(cur)
+    totals = temporary.pushed_totals(cur)
     assert totals["always"] == 0
     assert totals["scopes"] == {scope_id: pushed_cost([WINDOW])}
+    assert totals["worst"] == pushed_cost([WINDOW])
 
 
-def test_an_expired_condition_stops_taking_up_room(cur, monkeypatch):
-    monkeypatch.setenv("MASHU_CAPACITY", "400")
+def test_a_condition_for_everywhere_is_weighed_against_the_heaviest_scope(
+    cur, scope_id, monkeypatch
+):
+    """It rides with every session, including the session already carrying most."""
+    monkeypatch.setenv("MASHU_TEMPORARY_CAPACITY", "30")
+    temporary.put_temporary(cur, content=WINDOW, actor="user", days=3, scope_id=scope_id)
+
+    with pytest.raises(RefusedError, match="the temporary share seats 30 tokens"):
+        temporary.put_temporary(
+            cur, content="the licence server is offline this week", actor="user", days=3
+        )
+
+
+def test_a_condition_too_big_for_the_empty_share_is_not_told_to_wait(cur, monkeypatch):
+    """There is nothing standing to lapse, and waiting for it would be forever."""
+    monkeypatch.setenv("MASHU_TEMPORARY_CAPACITY", "5")
+    with pytest.raises(RefusedError, match="say this one shorter") as refused:
+        temporary.put_temporary(cur, content=WINDOW, actor="user", days=3)
+    assert "lapses" not in str(refused.value)
+
+
+def test_an_expired_condition_stops_taking_up_room(cur):
     temporary.put_temporary(cur, content=WINDOW, actor="user", days=3)
     cur.execute("UPDATE temporary_context SET expires_at = now() - INTERVAL '1 hour'")
-    assert capacity.bootstrap_totals(cur)["always"] == 0
+    totals = temporary.pushed_totals(cur)
+    assert totals["always"] == 0 and totals["count"] == 0
 
 
 def test_a_banned_pattern_is_refused_here_too(cur):

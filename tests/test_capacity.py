@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from mashu import capacity, config, memories, scopes
+from mashu import capacity, config, memories, scopes, temporary
 from mashu.errors import RefusedError
 from mashu.tokens import pushed_cost
 
@@ -17,6 +17,8 @@ from mashu.tokens import pushed_cost
 # below can be read without running it.
 RULES = [f"keep the first rule about ordering ok {i}" for i in range(5)]
 NEW_RULE = "keep another rule about ordering here okay"
+CONDITION = "the shared queue is down for maintenance until Friday"
+CONDITION_EVERYWHERE = "the licence server is offline this week"
 
 
 def fill(cur, scope_id, count):
@@ -155,6 +157,25 @@ def test_the_layer_refusal_names_the_door_a_scope_rule_does_not_have(cur, monkey
 
     with pytest.raises(RefusedError, match="the always layer seats"):
         memories.remember(cur, content=NEW_RULE, actor="user")
+
+
+def test_a_dated_condition_is_not_weighed_against_the_seats(cur, scope_id, monkeypatch):
+    """The seats count memories now, and nothing else (v3 8).
+
+    v2 weighed the temporary contexts here on the ground that they are pushed
+    in the same opening. The arithmetic was right and the room was wrong: a
+    fortnight of outages could refuse a rule that had cost something to learn,
+    which is one subsystem spending another's share.
+    """
+    monkeypatch.setenv("MASHU_CAPACITY", "400")
+    temporary.put_temporary(cur, content=CONDITION, actor="user", days=3, scope_id=scope_id)
+    temporary.put_temporary(cur, content=CONDITION_EVERYWHERE, actor="user", days=3)
+
+    totals = capacity.bootstrap_totals(cur)
+    assert totals == {"always": 0, "scopes": {}, "worst": 0}
+
+    monkeypatch.setenv("MASHU_CAPACITY", str(pushed_cost([NEW_RULE])))
+    assert capacity.check_admission(cur, content=NEW_RULE, delivery="always")["ok"] is True
 
 
 def test_a_scope_rule_is_not_weighed_against_the_layer_ceiling(cur, scope_id, monkeypatch):

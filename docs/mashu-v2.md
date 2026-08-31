@@ -29,7 +29,7 @@ v1 は運用実測で破綻した。原因は個々の機構ではなく、入�
 
 この原理には既に存在証明がある。ユーザーの常設指示ファイル（CLAUDE.md / AGENTS.md）は、繰り返された実害から生まれた規則だけを持ち、小さいから毎セッション確実に読まれ、実際に機能している。v2 は「常設指示の一行が実害から生まれる過程」を、複数 CLI が共有できる形で制度化するものである。
 
-置き場の分担も明確になる。便利メモ・作業状態・プロジェクトの経緯は Mashu の対象外であり、各プロジェクトのドキュメントか Obsidian が持つ。Mashu が持つのは、忘れると損害が出ることが実証された規則と事実だけである。
+置き場の分担も明確になる。便利メモは Mashu の対象外であり、各プロジェクトのドキュメントか Obsidian が持つ。Memory が持つのは、忘れると損害が出ることが実証された規則と事実だけである。作業状態とプロジェクトの経緯は v2 では同じく対象外としていたが、v3 で Mashu 内の別身分（Project State）へ移した。置き場は `docs/mashu-v3.md` 2 節である。
 
 ## 3. 実証の定義
 
@@ -115,7 +115,7 @@ v1 の投機的捕捉との関係。セッションから安く残すという�
 2. `pain_report` の incident（自動生成）
 3. Agent が会話中の User の記録指示を運ぶ場合（`memory_nominate`。指示は kind = `claimed` の台帳エントリとして残り、それが evidence になる。created_by は Agent なので、誰が運んだかは Review の画面に出る）
 
-いずれも pending であり、User が 1 キーで確定するまで active にならない。**Agent の書き込みが人の確定なしに他セッションへ届く経路は、v2 には一つも存在しない。** v1 が Layer 2 で許していた「未審査の本文の配信」は廃止する。
+いずれも pending であり、User が 1 キーで確定するまで active にならない。**Memory については、Agent の書き込みが人の確定なしに他セッションへ届く経路は、v2 には一つも存在しない。** v1 が Layer 2 で許していた「未審査の本文の配信」は廃止する。この保証を意図的に緩和するのは v3 の Current State だけであり、緩和の理由と、それを size / 時間 / 提示の三方向で bound する仕方は `docs/mashu-v3.md` 3.1 節にある。
 
 3 の経路が即時 active にならないのは、Agent の自己申告する「User がこう言った」が、外部から貼り付けられた文書内の指示と区別できないためである（v1 16.3 節と同じ論理）。**即時 active になる唯一の経路は、人が自分の手で打つ CLI（`mashu remember`）である。**
 
@@ -139,7 +139,9 @@ bootstrap で push される合計に硬い天井（当初 2000 token）を置�
 
 これは v1 の admission control と似た形だが、意味が違う。v1 では溢れた分が検索へ落ちた。v2 には検索が無いので、**定員は「全量 push が成立するサイズに在庫を保つ」ことそのものを強制する**。定員があるから push が成立し、push が成立するから「読むべきタイミングで読まない」問題が消える。
 
-定員が数えるのは押し込まれるものすべてであり、Temporary Context も含む。期限で消えるからといって、押し込まれている間だけ定員の外に居られる理由にはならない。
+押し込まれるものが定員の外に居られないのは、期限つきであっても同じである。期限で消えるからといって、押し込まれている間だけ重さを免れる理由にはならない。
+
+**ただし v3 で、この 2000 token が数えるのは memory だけになった。**Temporary Context は v2 ではこの定員の内側にあったが、v3 8 節で自分の枠（400 token）へ移した。subsystem が互いの枠を暗黙に借りないためである（2 週間分の期限つき条件が、実証を経た規則の昇格を拒否できてはいけない）。それぞれが自分の入口で拒否され、押し込まれる総量（4000 token）は Mashu が一元管理する。
 
 **always 層には、その内側にもう一段低い天井（当初 800 token）を置く。**always の 1 token は、どの scope も使えない 1 token である。共有の天井だけを持たせると always 層は決して溢れない。溢れる代わりに、scope が必要とするはずの余地を、大半のセッションには要らなかった規則で静かに使い切る。scope の側は何一つ拒否されないまま枠だけが無くなるので、どこにも失敗が現れない。
 
@@ -190,6 +192,7 @@ guard は scope と直交する。`guard:<action>` の記憶が scope を持つ�
 
 - delivery = `always` の記憶（全文）
 - 現在 Scope の記憶（全文）。Scope は route（cwd 対応表）か引数で決まる
+- active な Task の Current State（v3 8 節で追加。各行に最終確認日時が本文として付く。dormant / closed は載らない）
 - 有効な Temporary Context
 - pending の候補件数（1 件でもあれば一行で知らせる）
 
@@ -223,6 +226,8 @@ bootstrap は「セッションの前提」を、guard は「判断の直前」�
 | `trace_search` | 痕跡の検索。日付と未検証の印を付けて返す |
 | `memory_list` | 指定 Scope の active な記憶を列挙する。知識を明示的に見にいく唯一の読み口 |
 | `memory_nominate` | 会話中の User の記録指示を候補として運ぶ（5.1 節の経路 3）。pending 止まりで、確定は人。退役済みと衝突する場合は候補に理由を積んで運ぶ |
+
+**v3 でこの 6 つに Project State 系の Tool が加わる（`docs/mashu-v3.md` 13.1 節）。**6 つ自体は変わらない。変わるのは `session_bootstrap` の返却内容だけで、それは 6.1 節に書いてある。
 
 v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` / `memory_propose` は対応する機構ごと廃止する。`scratch_put` / `scratch_get` は `trace_put` / `trace_search` が継ぐが、身分が変わる（4.2 節）。`context_put` に後継は居ない。Temporary Context は User 専用になり（7 節）、Agent の期限つき観測は痕跡が受ける。
 
@@ -291,7 +296,7 @@ pgvector は使わない。拡張は pg_trgm のみ。埋め込みモデルへ�
 | Entity / Version / Proposal の三層スキーマ | memory + revision + nomination に縮退 |
 | Scratch（セッション限りの作業状態） | 痕跡（4.2 節）が後継。知識候補の入力から、実証の検出器の部品へ身分が変わる |
 | directive / delivery の admission control | content 自体を短く書く。定員（5.2 節）が代替 |
-| Current State（type = state） | 作業状態は Mashu の対象外。プロジェクト側の文書が持つ |
+| Current State（type = state） | 作業状態は Mashu の対象外。プロジェクト側の文書が持つ（v3 で身分を分けたうえで Project State として戻した。理由は `docs/mashu-v3.md` 1 節） |
 | type 体系（8 種） | 実証で入るものに分類は要らない。必要になったら足す |
 
 撤回した設計の記録は v1 文書（`docs/mashu-mvp.md`）が保持する。削除しない。

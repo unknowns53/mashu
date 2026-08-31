@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from mashu import cli, db, nominations
+from mashu import cli, config, db, nominations, projects, task_history, tasks
 from mashu import traces as trace_domain
 
 # Each test writes to a database the others also write to, so the strings are
@@ -29,6 +29,7 @@ LISTED = "spell out the timezone in every scheduled job, even when it looks obvi
 SCOPED = "reach for the vendored toolchain in this checkout, not whatever is on PATH"
 PREVENTED = "read the exporter's manifest before trusting the row count it prints"
 DEFERRED = "name the branch after the ticket, so a stale checkout tells on itself"
+CURRENT_WORK = "wire the project state into the opening"
 
 #: A hexadecimal string no printed id can begin with: the ninth character of a
 #: UUID is always a dash, so twelve hexadecimal digits match nothing, whatever
@@ -181,6 +182,44 @@ def test_a_dated_condition_is_written_by_the_command_line_and_nowhere_else(run):
 
     code, _, err = run("remember", "something", "--until", "30d")
     assert code == 1 and "14" in err
+
+    # Its own share of the opening now, apart from the memory seats (v3 8).
+    _, out, _ = run("status")
+    line = next(row for row in out.splitlines() if row.startswith("temporary"))
+    assert line.endswith(f"/{config.temporary_capacity()}")
+
+
+def test_the_work_that_is_current_is_printed_under_its_date(run, committing_dsn):
+    """The date is part of the delivered line, on the screen as in the tool (v3 3.1).
+
+    A reader who cannot see how old a state is has no way to know it needs
+    checking against the repository before being believed.
+    """
+    with db.transaction(committing_dsn) as cur:
+        projects.create_project(cur, name="the command line", actor="user")
+        task = tasks.task_create(
+            cur,
+            project="the command line",
+            name=CURRENT_WORK,
+            goal="print the active states with their headings",
+            actor="agent",
+        )
+
+    code, out, _ = run("bootstrap")
+    assert code == 0
+    assert "project state" in out
+    assert str(task["task"]["task_id"])[:8] in out
+    assert f"State as of {task['as_of'].isoformat()}" in out
+    assert "print the active states with their headings" in out
+
+    tokens_line = next(row for row in out.splitlines() if row.startswith("tokens"))
+    assert f"/{config.total_capacity()}" in tokens_line
+    assert "memory=" in tokens_line and "state=" in tokens_line and "temporary=" in tokens_line
+
+    _, out, _ = run("status")
+    state_line = next(row for row in out.splitlines() if row.startswith("state"))
+    assert "active=" in state_line
+    assert state_line.endswith(f"/{config.project_capacity()}")
 
 
 def test_a_pain_that_lands_on_retired_knowledge_is_answered_with_the_reason(run):
@@ -523,3 +562,226 @@ def test_a_carried_instruction_that_repeats_a_retirement_says_so_in_the_listing(
     _, out, _ = run("show", str(carried["nomination"]["nomination_id"])[:8])
     assert "contradicts retired" in out
     assert reason in out
+
+
+#: Every task test opens a project of its own. The duplicate match reads the
+#: open tasks of one project (v3 5.2), so a shared project would make one
+#: test's task the candidate another test's `task create` is refused with.
+PARSER_PROJECT = "the parser rewrite"
+PARSER_TASK = "carry the byte offsets through the tokeniser"
+PARSER_GOAL = "keep every diagnostic pointing at the character the reader typed"
+
+DUPLICATE_PROJECT = "the vendored loader"
+DUPLICATE_TASK = "replace the yaml loader we vendored two years ago"
+
+HISTORY_PROJECT = "the exporter"
+HISTORY_TASK = "give the exporter a manifest of what it wrote"
+LOCATOR = "9d12f5a"
+ATTEMPT = "counted the rows from the cursor instead of the file"
+DECISION = "write the manifest last, so a half-run leaves none"
+CHANGED = "the manifest is written and the count comes from it"
+
+CLOSING_PROJECT = "the poster"
+CLOSING_TASK = "redraw the phase diagram at the printer's resolution"
+
+DORMANT_PROJECT = "the queue paperwork"
+DORMANT_TASK = "collect the walltime figures for the allocation report"
+
+AMBIGUOUS_PROJECT = "the collision bench"
+
+#: Two task ids that agree for four characters, seeded for the same reason the
+#: memory pair above is: real ids are random, so a collision cannot be
+#: arranged by writing rows through the command line.
+TWIN_TASK_A = "abcd0003-0000-4000-8000-00000000000c"
+TWIN_TASK_B = "abcd0004-0000-4000-8000-00000000000d"
+
+
+def created_task(out: str) -> str:
+    assert out.startswith("task  "), out
+    return out.split()[1]
+
+
+def test_a_task_is_created_listed_and_read_back_through_the_command_line(run):
+    """The round trip a person makes: open a project, open work, look at it."""
+    code, out, _ = run("project", "create", PARSER_PROJECT)
+    assert code == 0 and out.startswith("created")
+
+    code, out, _ = run(
+        "task", "create", PARSER_TASK, "--project", PARSER_PROJECT, "--goal", PARSER_GOAL
+    )
+    assert code == 0
+    short = created_task(out)
+
+    code, out, _ = run("task", "list", "--project", PARSER_PROJECT)
+    assert code == 0
+    assert out.startswith("active tasks")
+    assert short in out and PARSER_TASK in out
+    # The date travels in the line itself, not in the caller's hands (v3 3.1).
+    assert "State as of " in out
+
+    code, out, _ = run("task", "show", short)
+    assert code == 0
+    assert PARSER_TASK in out and PARSER_GOAL in out
+    assert "State as of " in out
+    assert "open  active" in out
+
+    code, out, _ = run("project", "list")
+    assert code == 0
+    assert PARSER_PROJECT in out
+
+    code, out, _ = run("project", "show", PARSER_PROJECT)
+    assert code == 0
+    assert "active=1" in out
+    assert short in out
+
+
+def test_a_task_that_reads_like_one_already_open_is_refused_with_the_candidates(run):
+    """Two tasks for one piece of work grow two half-states (v3 5.2)."""
+    run("project", "create", DUPLICATE_PROJECT)
+    _, out, _ = run("task", "create", DUPLICATE_TASK, "--project", DUPLICATE_PROJECT)
+    first = created_task(out)
+
+    code, out, err = run("task", "create", DUPLICATE_TASK, "--project", DUPLICATE_PROJECT)
+    assert code == 1
+    assert out == ""
+    assert first in err
+    assert DUPLICATE_TASK in err
+    assert "--force" in err
+
+    code, out, _ = run("task", "create", DUPLICATE_TASK, "--project", DUPLICATE_PROJECT, "--force")
+    assert code == 0
+    assert created_task(out) != first
+
+
+def test_the_history_and_the_artifact_locators_are_visible_on_one_task(run, committing_dsn):
+    """`task show` is the only screen the history is read from (v3 5.4).
+
+    Nothing here is ever delivered to a session, so an account split across
+    four commands is one nobody assembles. The locator has to be printed in
+    full for the same reason it is all that is stored: Mashu holds the
+    reference and never the body, and an id alone reaches no original.
+    """
+    run("project", "create", HISTORY_PROJECT)
+    _, out, _ = run("task", "create", HISTORY_TASK, "--project", HISTORY_PROJECT)
+    short = created_task(out)
+
+    with db.transaction(committing_dsn) as cur:
+        task_id = cli._task_ref(cur, short)
+        artifact = task_history.artifact_link(
+            cur, task_id, actor="agent", kind="git_commit", locator=LOCATOR, label="the manifest"
+        )
+        task_history.attempt_record(
+            cur, task_id, actor="agent", attempt=ATTEMPT, result="the count came out short"
+        )
+        task_history.decision_record(
+            cur, task_id, actor="agent", decision=DECISION, reason="a half-run must not look whole"
+        )
+        state = tasks.task_get(cur, task_id)["state"]
+        task_history.checkpoint(
+            cur,
+            task_id,
+            actor="agent",
+            what_changed=CHANGED,
+            expect_updated_at=state["updated_at"],
+            status_text=CHANGED,
+            evidence=[artifact["reference_id"]],
+        )
+
+    code, out, _ = run("task", "show", short)
+    assert code == 0
+    assert ATTEMPT in out and "the count came out short" in out
+    assert DECISION in out and "a half-run must not look whole" in out
+    assert CHANGED in out
+    assert f"evidence  git_commit  {LOCATOR}" in out
+    assert f"git_commit  {LOCATOR}  the manifest" in out
+
+
+def test_ending_a_task_needs_an_outcome_and_can_be_taken_back(run):
+    """Close is the user's judgement, and 'closed' alone is not one (v3 6)."""
+    run("project", "create", CLOSING_PROJECT)
+    _, out, _ = run("task", "create", CLOSING_TASK, "--project", CLOSING_PROJECT)
+    short = created_task(out)
+
+    code, out, err = run("task", "close", short)
+    assert code == 1
+    assert out == ""
+    assert "--outcome" in err
+
+    code, out, _ = run("task", "close", short, "--outcome", "completed", "--reason", "printed")
+    assert code == 0 and out.startswith("closed") and "completed" in out
+
+    _, out, _ = run("task", "list", "--project", CLOSING_PROJECT)
+    assert out.strip() == "no active tasks"
+
+    _, out, _ = run("task", "list", "--closed", "--project", CLOSING_PROJECT)
+    assert short in out
+    assert "Final state as of " in out
+
+    code, out, _ = run("task", "reopen", short)
+    assert code == 0 and out.startswith("reopened")
+
+    _, out, _ = run("task", "list", "--project", CLOSING_PROJECT)
+    assert short in out
+
+    code, out, _ = run("task", "touch", short)
+    assert code == 0 and out.startswith("touched")
+
+
+def test_a_task_whose_lease_has_run_out_is_listed_only_when_it_is_asked_for(run, committing_dsn):
+    """Silence is neither completion nor currency (v3 7)."""
+    run("project", "create", DORMANT_PROJECT)
+    _, out, _ = run("task", "create", DORMANT_TASK, "--project", DORMANT_PROJECT)
+    short = created_task(out)
+
+    with db.transaction(committing_dsn) as cur:
+        cur.execute(
+            "UPDATE task SET active_until = now() - interval '1 day' WHERE task_id::text LIKE %s",
+            (f"{short}%",),
+        )
+
+    _, out, _ = run("task", "list", "--project", DORMANT_PROJECT)
+    assert out.strip() == "no active tasks"
+
+    code, out, _ = run("task", "list", "--dormant", "--project", DORMANT_PROJECT)
+    assert code == 0
+    assert short in out
+    # Not the present tense: what it holds is the last thing anybody confirmed.
+    assert "Last known state as of " in out
+
+    _, out, _ = run("bootstrap")
+    assert short not in out
+
+
+def test_a_task_prefix_two_rows_answer_to_is_refused_with_both_of_them(run, committing_dsn):
+    """The short id a listing prints is the one every task command takes back."""
+    import psycopg
+
+    with psycopg.connect(committing_dsn, autocommit=True) as conn:
+        project_id = conn.execute(
+            "INSERT INTO project (name) VALUES (%s) RETURNING project_id",
+            (AMBIGUOUS_PROJECT,),
+        ).fetchone()[0]
+        for task_id in (TWIN_TASK_A, TWIN_TASK_B):
+            conn.execute(
+                "INSERT INTO task (task_id, project_id, name, created_by, active_until) "
+                "VALUES (%s, %s, %s, 'test', now() + interval '14 days')",
+                (task_id, project_id, f"seeded for the collision {task_id[:8]}"),
+            )
+            conn.execute(
+                "INSERT INTO task_state (task_id, updated_by) VALUES (%s, 'test')", (task_id,)
+            )
+
+    code, _, err = run("task", "show", "abcd")
+    assert code == 1
+    assert "names more than one task" in err
+    assert "abcd0003" in err and "abcd0004" in err
+
+    code, _, err = run("task", "touch", "abc")
+    assert code == 1 and "too short" in err
+
+    code, _, err = run("task", "show", NOWHERE)
+    assert code == 1 and "no task begins with" in err
+
+    code, out, _ = run("task", "show", TWIN_TASK_A[:8])
+    assert code == 0
+    assert TWIN_TASK_A in out
