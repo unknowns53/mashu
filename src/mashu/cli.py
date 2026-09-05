@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -1218,23 +1219,140 @@ def cmd_serve(args: argparse.Namespace) -> int:
 _REF_HELP = "the row's id, or the first four or more characters of it"
 
 
+_TOP_LEVEL_HELP = """\
+Mashu keeps durable rules, evidence of costly forgetting, and current project work.
+
+Start here:
+  mashu status              Summarize the store and pending review work.
+  mashu bootstrap           Show what a session in this directory receives.
+  mashu memories            List active durable rules.
+  mashu task list           List current work.
+
+Recording information:
+  remember                  A User writes a rule or short-lived condition directly.
+  pain                      Record an incident or repeated lookup and its prevention.
+  trace                     Read dated, unreviewed observations (kept for 30 days).
+
+Managing durable rules:
+  review                    A User decides pending candidates.
+  show                      Inspect one memory, candidate, or ledger row.
+  retire / revise / deliver Withdraw, rewrite, or change delivery of a memory.
+  guard                     Read or change rules delivered before an action.
+
+Work state and routing:
+  project / task            Read and manage current project work.
+  scope / route             Map working directories to knowledge scopes.
+
+Run `mashu COMMAND --help` for arguments and examples. Nested commands use
+`mashu project COMMAND --help` or `mashu task COMMAND --help`.
+
+IDs shown by list commands are shortened to eight characters. Any unique prefix
+of four or more characters is accepted wherever help says REF or ID.
+
+Environment:
+  MASHU_DATABASE_URL         PostgreSQL connection string (default: dbname=mashu).
+  MASHU_AGENT                Agent label used by `mashu serve` when --agent is absent.
+
+This is the human-facing CLI. Agents should normally use the Mashu MCP tools;
+project creation, direct remembering, review decisions, task closure, and task
+reopening remain User decisions even when the command is technically callable.
+"""
+
+
+class _HelpFormatter(argparse.HelpFormatter):
+    """Wrap prose while preserving indented command examples and section breaks."""
+
+    def _fill_text(self, text: str, width: int, indent: str) -> str:
+        rendered: list[str] = []
+        paragraph: list[str] = []
+
+        def flush_paragraph() -> None:
+            if not paragraph:
+                return
+            rendered.append(
+                textwrap.fill(
+                    " ".join(line.strip() for line in paragraph),
+                    width,
+                    initial_indent=indent,
+                    subsequent_indent=indent,
+                )
+            )
+            paragraph.clear()
+
+        for line in text.splitlines():
+            if not line:
+                flush_paragraph()
+                rendered.append("")
+            elif line.startswith("  "):
+                flush_paragraph()
+                rendered.append(f"{indent}{line}")
+            else:
+                paragraph.append(line)
+        flush_paragraph()
+        return "\n".join(rendered)
+
+
+def _command(
+    action: argparse._SubParsersAction[argparse.ArgumentParser],
+    name: str,
+    summary: str,
+    *,
+    description: str | None = None,
+    examples: tuple[str, ...] = (),
+) -> argparse.ArgumentParser:
+    """Add one command with useful help at both parser levels."""
+    epilog = None
+    if examples:
+        epilog = "examples:\n" + "\n".join(f"  {example}" for example in examples)
+    return action.add_parser(
+        name,
+        help=summary,
+        description=description or summary,
+        epilog=epilog,
+        formatter_class=_HelpFormatter,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mashu",
         description="The knowledge state that keeps only what forgetting has cost something.",
+        epilog=_TOP_LEVEL_HELP,
+        formatter_class=_HelpFormatter,
     )
     parser.add_argument("--dsn", default=None, help=argparse.SUPPRESS)
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
-    sub.add_parser("status", help="stock, seats used, pending count, recent ledger").set_defaults(
-        func=cmd_status
-    )
-    sub.add_parser(
-        "bootstrap", help="what a session in this directory is pushed, and its token cost"
+    _command(
+        sub,
+        "status",
+        "stock, seats used, pending count, recent ledger",
+        examples=("mashu status",),
+    ).set_defaults(func=cmd_status)
+    _command(
+        sub,
+        "bootstrap",
+        "what a session in this directory is pushed, and its token cost",
+        description=(
+            "Show the active memories, project state, and temporary context delivered to a "
+            "session started in the current working directory."
+        ),
+        examples=("mashu bootstrap",),
     ).set_defaults(func=cmd_bootstrap)
 
-    remember = sub.add_parser(
-        "remember", help="write a rule straight into the active set (the only immediate path)"
+    remember = _command(
+        sub,
+        "remember",
+        "write a rule straight into the active set (the only immediate path)",
+        description=(
+            "Write a User-confirmed rule directly into active memory. Use --until instead for "
+            "a temporary condition; it cannot be combined with delivery options."
+        ),
+        examples=(
+            'mashu remember "Run migrations before restarting the service"',
+            'mashu remember "The staging host is down" --until 2d',
+            'mashu remember "Check the remote before pushing" --delivery guard --action Bash',
+        ),
     )
     remember.add_argument("body", help="the rule, written as a short sentence")
     remember.add_argument("--scope", help="deliver it to this scope only")
@@ -1254,28 +1372,76 @@ def build_parser() -> argparse.ArgumentParser:
     )
     remember.set_defaults(func=cmd_remember)
 
-    retire = sub.add_parser("retire", help="withdraw a memory, leaving the reason as its tombstone")
+    retire = _command(
+        sub,
+        "retire",
+        "withdraw a memory, leaving the reason as its tombstone",
+        examples=('mashu retire 1a2b3c4d --reason "The service no longer exists"',),
+    )
     retire.add_argument("memory_id", help=_REF_HELP)
     retire.add_argument("--reason", required=True, help="why it is wrong; later matches read this")
     retire.set_defaults(func=cmd_retire)
 
-    revise = sub.add_parser("revise", help="rewrite a memory's body, keeping the old one on file")
+    revise = _command(
+        sub,
+        "revise",
+        "rewrite a memory's body, keeping the old one on file",
+        description=(
+            "Rewrite a memory while retaining its revision history. Without --content, Mashu "
+            "opens $VISUAL, then $EDITOR, then vi. This is a User decision."
+        ),
+        examples=(
+            "mashu revise 1a2b3c4d",
+            'mashu revise 1a2b3c4d --content "Use the repository toolchain"',
+        ),
+    )
     revise.add_argument("memory_id", help=_REF_HELP)
     revise.add_argument("--content", help="the new body; without it, an editor opens on the old")
     revise.set_defaults(func=cmd_revise)
 
-    show = sub.add_parser("show", help="one memory, candidate, or ledger row in full")
+    show = _command(
+        sub,
+        "show",
+        "one memory, candidate, or ledger row in full",
+        examples=("mashu show 1a2b3c4d",),
+    )
     show.add_argument("ref", help=f"{_REF_HELP}, in any of the three tables")
     show.set_defaults(func=cmd_show)
 
-    memories_parser = sub.add_parser("memories", help="list the memories held")
+    memories_parser = _command(
+        sub,
+        "memories",
+        "list the memories held",
+        examples=(
+            "mashu memories",
+            "mashu memories --scope deployment",
+            "mashu memories --retired",
+        ),
+    )
     memories_parser.add_argument("--scope", help="only the memories belonging to this scope")
     memories_parser.add_argument(
         "--retired", action="store_true", help="list the withdrawn ones, with their reasons"
     )
     memories_parser.set_defaults(func=cmd_memories)
 
-    pain = sub.add_parser("pain", help="record a pain in the ledger and see what it resembles")
+    pain = _command(
+        sub,
+        "pain",
+        "record a pain in the ledger and see what it resembles",
+        description=(
+            "Record what costly forgetting caused and the knowledge or one-time work that would "
+            "prevent it. Rules may become review candidates after repeated evidence; work is "
+            "filed into a task's next actions when --task is supplied."
+        ),
+        examples=(
+            'mashu pain --kind incident --what "Deployed twice" '
+            '--prevention "Check the release ledger"',
+            'mashu pain --kind friction --what "Looked up the quota again" '
+            '--prevention "Quota resets at midnight"',
+            'mashu pain --kind incident --what "Bad export" '
+            '--prevention "Validate the manifest" --prevention-kind work --task 1a2b3c4d',
+        ),
+    )
     pain.add_argument(
         "--kind",
         choices=("incident", "friction"),
@@ -1299,17 +1465,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pain.set_defaults(func=cmd_pain)
 
-    ledger = sub.add_parser("ledger", help="read the pain ledger, newest first")
+    ledger = _command(
+        sub,
+        "ledger",
+        "read the pain ledger, newest first",
+        examples=("mashu ledger", "mashu ledger --scope deployment --limit 50"),
+    )
     ledger.add_argument("--limit", type=int, default=20, help="how many rows to show (default 20)")
     ledger.add_argument("--scope", help="only the pains recorded in this scope")
     ledger.set_defaults(func=cmd_ledger)
 
-    trace = sub.add_parser("trace", help="read and search the traces (dated, unreviewed, 30 days)")
+    trace = _command(
+        sub,
+        "trace",
+        "read and search the traces (dated, unreviewed, 30 days)",
+        description=(
+            "Read recent observations. Traces are dated, unreviewed evidence and expire after "
+            "30 days; they are not durable rules."
+        ),
+        examples=("mashu trace", 'mashu trace "quota reset" --scope deployment'),
+    )
     trace.add_argument("query", nargs="?", help="text to match; without it, the recent traces")
     trace.add_argument("--scope", help="only the traces left in this scope")
     trace.set_defaults(func=cmd_trace)
 
-    review = sub.add_parser("review", help="decide the pending candidates, one at a time")
+    review = _command(
+        sub,
+        "review",
+        "decide the pending candidates, one at a time",
+        description=(
+            "Open the interactive review UI, list its queue non-interactively, or decide one "
+            "candidate by reference. Admission and rejection are User decisions."
+        ),
+        examples=(
+            "mashu review",
+            "mashu review --list --all",
+            "mashu review --admit 1a2b3c4d --delivery scope --scope deployment",
+            'mashu review --decline 1a2b3c4d --reason "Too specific to one run"',
+        ),
+    )
     review_group = review.add_mutually_exclusive_group()
     review_group.add_argument("--list", action="store_true", help="print the queue and stop")
     review_group.add_argument("--admit", metavar="REF", help=f"admit one candidate: {_REF_HELP}")
@@ -1327,7 +1521,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     review.set_defaults(func=cmd_review)
 
-    deliver = sub.add_parser("deliver", help="move a memory between the opening and the act gate")
+    deliver = _command(
+        sub,
+        "deliver",
+        "move a memory between the opening and the act gate",
+        description=(
+            "Change where an active memory is delivered. Scope delivery requires --scope; guard "
+            "delivery requires --action."
+        ),
+        examples=(
+            "mashu deliver 1a2b3c4d always",
+            "mashu deliver 1a2b3c4d scope --scope deployment",
+            "mashu deliver 1a2b3c4d guard --action Bash",
+        ),
+    )
     deliver.add_argument("memory_id", help=_REF_HELP)
     deliver.add_argument(
         "delivery", choices=("always", "scope", "guard"), help="where it is delivered from now on"
@@ -1336,7 +1543,20 @@ def build_parser() -> argparse.ArgumentParser:
     deliver.add_argument("--scope", help="the scope it belongs to, for scope")
     deliver.set_defaults(func=cmd_deliver)
 
-    guard = sub.add_parser("guard", help="the rules standing in front of one act")
+    guard = _command(
+        sub,
+        "guard",
+        "the rules standing in front of one act",
+        description=(
+            "Without --pin or --unpin, print rules guarding ACTION. A non-empty gate exits 2 so "
+            "a hook can show the rules and ask the caller to retry; an empty gate exits 0."
+        ),
+        examples=(
+            "mashu guard Bash",
+            "mashu guard Bash --json",
+            "mashu guard Bash --pin 1a2b3c4d",
+        ),
+    )
     guard.add_argument("action", help="the tool being guarded")
     guard_group = guard.add_mutually_exclusive_group()
     guard_group.add_argument("--pin", metavar="REF", help=f"pin a memory here: {_REF_HELP}")
@@ -1346,12 +1566,34 @@ def build_parser() -> argparse.ArgumentParser:
     guard.add_argument("--json", action="store_true", help="print as JSON, for the hook to read")
     guard.set_defaults(func=cmd_guard)
 
-    scope = sub.add_parser("scope", help="the scope register")
+    scope = _command(
+        sub,
+        "scope",
+        "the scope register",
+        description=(
+            "List scopes, or create one with both --add and --about. Creation is User-only."
+        ),
+        examples=("mashu scope", 'mashu scope --add deployment --about "Production releases"'),
+    )
     scope.add_argument("--add", metavar="NAME", help="create a scope with this name")
     scope.add_argument("--about", metavar="LINE", help="what the scope covers; required with --add")
     scope.set_defaults(func=cmd_scope)
 
-    route = sub.add_parser("route", help="which working directory means which scope")
+    route = _command(
+        sub,
+        "route",
+        "which working directory means which scope",
+        description=(
+            "List directory-prefix routes, add or remove one, or explicitly mark a prefix as "
+            "unscoped. --add requires --scope."
+        ),
+        examples=(
+            "mashu route",
+            "mashu route --add /work/service --scope deployment",
+            "mashu route --ignore /work/scratch",
+            "mashu route --remove /work/service",
+        ),
+    )
     route_group = route.add_mutually_exclusive_group()
     route_group.add_argument("--add", metavar="PATH", help="route this path prefix to --scope")
     route_group.add_argument(
@@ -1361,23 +1603,72 @@ def build_parser() -> argparse.ArgumentParser:
     route.add_argument("--scope", help="the scope to route to; required with --add")
     route.set_defaults(func=cmd_route)
 
-    project = sub.add_parser("project", help="the projects work state is filed under")
-    project_sub = project.add_subparsers(dest="project_command", required=True)
-    project_sub.add_parser(
-        "list", help="every project, and how many tasks it is carrying"
+    project = _command(
+        sub,
+        "project",
+        "the projects work state is filed under",
+        description=(
+            "List, create, or inspect projects. Projects group tasks; scopes control knowledge "
+            "delivery, so the two are related but not interchangeable."
+        ),
+        examples=(
+            "mashu project list",
+            'mashu project create website --scope frontend',
+            "mashu project show website",
+        ),
+    )
+    project_sub = project.add_subparsers(dest="project_command", required=True, metavar="COMMAND")
+    _command(
+        project_sub,
+        "list",
+        "every project, and how many tasks it is carrying",
+        examples=("mashu project list",),
     ).set_defaults(func=cmd_project_list)
-    project_create = project_sub.add_parser("create", help="open a project (User only)")
+    project_create = _command(
+        project_sub,
+        "create",
+        "open a project (User only)",
+        examples=('mashu project create website --scope frontend',),
+    )
     project_create.add_argument("name", help="what its tasks are filed under")
     project_create.add_argument("--scope", help="the scope this project's sessions run in")
     project_create.set_defaults(func=cmd_project_create)
-    project_show = project_sub.add_parser("show", help="one project and the tasks still open in it")
+    project_show = _command(
+        project_sub,
+        "show",
+        "one project and the tasks still open in it",
+        examples=("mashu project show website", "mashu project show 1a2b3c4d"),
+    )
     project_show.add_argument("ref", help=f"the project's name, or {_REF_HELP}")
     project_show.set_defaults(func=cmd_project_show)
 
-    task = sub.add_parser("task", help="the work that is current, and how current it is")
-    task_sub = task.add_subparsers(dest="task_command", required=True)
+    task = _command(
+        sub,
+        "task",
+        "the work that is current, and how current it is",
+        description=(
+            "List, inspect, create, refresh, close, or reopen tasks. Agents update task state "
+            "through MCP; closing and reopening are User decisions."
+        ),
+        examples=(
+            "mashu task list",
+            "mashu task show 1a2b3c4d",
+            'mashu task create "Add CLI help" --project mashu '
+            '--goal "Every command explains itself"',
+        ),
+    )
+    task_sub = task.add_subparsers(dest="task_command", required=True, metavar="COMMAND")
 
-    task_listing = task_sub.add_parser("list", help="the tasks, each under its own date")
+    task_listing = _command(
+        task_sub,
+        "list",
+        "the tasks, each under its own date",
+        description=(
+            "List active tasks by default. --dormant shows open tasks whose lease expired; "
+            "--closed shows ended tasks."
+        ),
+        examples=("mashu task list", "mashu task list --dormant --project mashu"),
+    )
     task_which = task_listing.add_mutually_exclusive_group()
     task_which.add_argument(
         "--dormant", action="store_true", help="the open tasks whose lease has run out"
@@ -1388,11 +1679,28 @@ def build_parser() -> argparse.ArgumentParser:
     task_listing.add_argument("--project", help="only the tasks filed under this project")
     task_listing.set_defaults(func=cmd_task_list)
 
-    task_show = task_sub.add_parser("show", help="one task in full, with its history and artifacts")
+    task_show = _command(
+        task_sub,
+        "show",
+        "one task in full, with its history and artifacts",
+        examples=("mashu task show 1a2b3c4d",),
+    )
     task_show.add_argument("ref", help=_REF_HELP)
     task_show.set_defaults(func=cmd_task_show)
 
-    task_create = task_sub.add_parser("create", help="open a task, matched against the open ones")
+    task_create = _command(
+        task_sub,
+        "create",
+        "open a task, matched against the open ones",
+        description=(
+            "Create a task after checking for similar open work. The project may be named "
+            "explicitly or inferred from the current directory's route."
+        ),
+        examples=(
+            'mashu task create "Add CLI help" --project mashu '
+            '--goal "Every command explains itself"',
+        ),
+    )
     task_create.add_argument("name", help="the work, named as the duplicate match will read it")
     task_create.add_argument(
         "--project", help="where it is filed; without it, the project this directory routes to"
@@ -1403,11 +1711,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     task_create.set_defaults(func=cmd_task_create)
 
-    task_touch = task_sub.add_parser("touch", help="say the work is still current, nothing more")
+    task_touch = _command(
+        task_sub,
+        "touch",
+        "say the work is still current, nothing more",
+        examples=("mashu task touch 1a2b3c4d",),
+    )
     task_touch.add_argument("ref", help=_REF_HELP)
     task_touch.set_defaults(func=cmd_task_touch)
 
-    task_close = task_sub.add_parser("close", help="end a task (User only), on a chosen outcome")
+    task_close = _command(
+        task_sub,
+        "close",
+        "end a task (User only), on a chosen outcome",
+        description=(
+            "Close a task with an explicit outcome. Silence or an expired lease is not closure; "
+            "this command records the User's decision."
+        ),
+        examples=(
+            'mashu task close 1a2b3c4d --outcome completed --reason "Released in v2.1"',
+        ),
+    )
     task_close.add_argument("ref", help=_REF_HELP)
     task_close.add_argument(
         "--outcome", choices=tasks.OUTCOMES, help="whether it was finished, given up, or replaced"
@@ -1415,19 +1739,42 @@ def build_parser() -> argparse.ArgumentParser:
     task_close.add_argument("--reason", help="what a later reader would want to know about the end")
     task_close.set_defaults(func=cmd_task_close)
 
-    task_reopen = task_sub.add_parser("reopen", help="take back a closure (User only)")
+    task_reopen = _command(
+        task_sub,
+        "reopen",
+        "take back a closure (User only)",
+        examples=("mashu task reopen 1a2b3c4d",),
+    )
     task_reopen.add_argument("ref", help=_REF_HELP)
     task_reopen.set_defaults(func=cmd_task_reopen)
 
-    serve = sub.add_parser("serve", help="run the MCP server on stdio")
+    serve = _command(
+        sub,
+        "serve",
+        "run the MCP server on stdio",
+        description=(
+            "Run Mashu as an MCP stdio server. MCP client configuration normally launches this "
+            "command; --agent labels agent-originated writes and overrides MASHU_AGENT."
+        ),
+        examples=("mashu serve --agent codex",),
+    )
     serve.add_argument("--agent", help="the name writes are attributed to")
     serve.set_defaults(func=cmd_serve)
 
-    admin = sub.add_parser("admin", help="store maintenance")
-    admin_sub = admin.add_subparsers(dest="admin_command", required=True)
-    admin_sub.add_parser("migrate", help="apply the migrations not yet applied").set_defaults(
-        func=cmd_migrate
+    admin = _command(
+        sub,
+        "admin",
+        "store maintenance",
+        description="Administrative operations; inspect a nested command's help before running it.",
+        examples=("mashu admin migrate",),
     )
+    admin_sub = admin.add_subparsers(dest="admin_command", required=True, metavar="COMMAND")
+    _command(
+        admin_sub,
+        "migrate",
+        "apply the migrations not yet applied",
+        examples=("mashu admin migrate",),
+    ).set_defaults(func=cmd_migrate)
     return parser
 
 

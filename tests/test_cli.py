@@ -69,6 +69,87 @@ def pending_id(out: str, content: str) -> str:
     raise AssertionError(f"no pending nomination proposing {content!r} in:\n{out}")
 
 
+HELP_PATHS = (
+    ("status",),
+    ("bootstrap",),
+    ("remember",),
+    ("retire",),
+    ("revise",),
+    ("show",),
+    ("memories",),
+    ("pain",),
+    ("ledger",),
+    ("trace",),
+    ("review",),
+    ("deliver",),
+    ("guard",),
+    ("scope",),
+    ("route",),
+    ("project",),
+    ("project", "list"),
+    ("project", "create"),
+    ("project", "show"),
+    ("task",),
+    ("task", "list"),
+    ("task", "show"),
+    ("task", "create"),
+    ("task", "touch"),
+    ("task", "close"),
+    ("task", "reopen"),
+    ("serve",),
+    ("admin",),
+    ("admin", "migrate"),
+)
+
+
+def test_top_level_help_explains_the_cli_to_people_and_agents(capsys):
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["--help"])
+
+    out, err = capsys.readouterr()
+    prose = " ".join(out.split())
+    assert stopped.value.code == 0 and err == ""
+    assert "Start here:" in out
+    assert "mashu COMMAND --help" in out
+    assert "Any unique prefix" in prose
+    assert "human-facing CLI" in prose and "Mashu MCP tools" in prose
+    assert "MASHU_DATABASE_URL" in out and "MASHU_AGENT" in out
+
+
+@pytest.mark.parametrize("path", HELP_PATHS, ids=lambda path: "-".join(path))
+def test_every_command_help_has_a_description_and_an_example(path, capsys):
+    with pytest.raises(SystemExit) as stopped:
+        cli.main([*path, "--help"])
+
+    out, err = capsys.readouterr()
+    assert stopped.value.code == 0 and err == ""
+    assert f"usage: mashu {' '.join(path)}" in out
+    assert "examples:\n  mashu " in out
+
+
+@pytest.mark.parametrize(
+    ("path", "needles"),
+    (
+        (("remember",), ("temporary condition", "cannot be combined")),
+        (("review",), ("interactive review UI", "User decisions")),
+        (("deliver",), ("Scope delivery requires --scope", "guard delivery requires --action")),
+        (("guard",), ("exits 2", "empty gate exits 0")),
+        (("scope",), ("both --add and --about", "User-only")),
+        (("route",), ("--add requires --scope", "--ignore")),
+        (("task", "close"), ("explicit outcome", "User's decision")),
+        (("serve",), ("MCP stdio server", "MASHU_AGENT")),
+    ),
+)
+def test_command_help_states_runtime_constraints(path, needles, capsys):
+    with pytest.raises(SystemExit):
+        cli.main([*path, "--help"])
+
+    out, _ = capsys.readouterr()
+    prose = " ".join(out.split())
+    for needle in needles:
+        assert needle in prose
+
+
 def test_a_pinned_rule_holds_the_act_and_lets_go_when_it_is_unpinned(run):
     """The gate's contract is the exit code, which is what the hook reads.
 

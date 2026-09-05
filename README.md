@@ -58,6 +58,10 @@ ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
 
 普段使うのはこの四つ。
 
+全体像とコマンド一覧は `mashu --help`、各引数の制約と実行例は
+`mashu <command> --help` で確認できる。`project`、`task`、`admin` は二段なので、
+たとえば `mashu task create --help` のように末端のコマンドまで指定する。
+
 | コマンド | 内容 |
 |---|---|
 | `mashu status` | 在庫と定員（memory / project state / 期限つき条件の三枠）、pending 件数、台帳と痕跡の状況、配信失敗の疑い件数 |
