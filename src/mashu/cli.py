@@ -376,6 +376,10 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             scope_name=scope_name,
             routed=routed,
         )
+    unapplied = answer.get("schema_pending") or []
+    if unapplied:
+        print(f"schema    {len(unapplied)} MIGRATION(S) PENDING: {', '.join(unapplied)}")
+        print("          writes against the new columns fail until 'mashu admin migrate'")
     routed_text = str(answer.get("routed", routed)).lower()
     print(f"scope     {answer.get('scope') or '-'}  routed={routed_text}")
     _print_memory_rows(answer.get("always", []), heading="always")

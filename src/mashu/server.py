@@ -129,15 +129,23 @@ def build_server() -> Any:
                     scope_name=scope_name,
                     routed=routed,
                 )
-                answer = {
-                    **answer,
-                    "ok": True,
-                    "note": (
-                        "Knowledge is pushed, not searched. Call trace_put for a "
-                        "later re-derivation and pain_report when forgetting caused pain; "
-                        "nothing an agent writes becomes knowledge without a human decision."
-                    ),
-                }
+                note = (
+                    "Knowledge is pushed, not searched. Call trace_put for a "
+                    "later re-derivation and pain_report when forgetting caused pain; "
+                    "nothing an agent writes becomes knowledge without a human decision."
+                )
+                if answer["schema_pending"]:
+                    # In front of the habits, because a session that writes
+                    # into a schema the code has outgrown gets an error per
+                    # call and no hint of the cause. Telling whoever is here
+                    # is the only way it reaches a person at all.
+                    note = (
+                        "This store is behind the code: "
+                        f"{', '.join(answer['schema_pending'])} not applied, so any tool "
+                        "writing the columns they add will fail. Ask the user to run "
+                        "'mashu admin migrate'. " + note
+                    )
+                answer = {**answer, "ok": True, "note": note}
                 return _plain(answer)
         except MashuError as error:
             return _failure(error)
