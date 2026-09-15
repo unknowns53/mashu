@@ -516,8 +516,11 @@ def cmd_pain(args: argparse.Namespace) -> int:
         print(f"{name}: {len(matches.get(name, []))}")
     if row.get("prevention_kind") == "work":
         filed = row.get("filed_task")
-        print(f"prevention  work, filed on task {_short(filed)}" if filed else
-              "prevention  work, filed nowhere")
+        print(
+            f"prevention  work, filed on task {_short(filed)}"
+            if filed
+            else "prevention  work, filed nowhere"
+        )
         if row.get("note"):
             print(_flow(row["note"], indent="    "))
     elif row.get("tombstone_suppressed"):
