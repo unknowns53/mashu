@@ -243,3 +243,42 @@ def test_an_unrelated_rule_is_not_stopped_by_somebody_elses_retirement(cur):
     )
     assert written["status"] == "active"
     assert written["overrides"] == []
+
+
+def test_a_scoped_rule_moved_to_the_act_gate_can_be_freed_of_the_scope_it_came_from(cur, scope_id):
+    """The gate serves a scoped rule only at home, so a rule about the act
+    itself has to be able to stop belonging to the project it was written in."""
+    memory = memories.remember(cur, content=RULE, actor="user", scope_id=scope_id, delivery="scope")
+
+    kept = memories.set_delivery(
+        cur, memory["memory_id"], delivery="guard", actor="user", guard_action="Bash"
+    )
+    assert kept["scope_id"] == scope_id
+    assert memories.guard_pins(cur, action="Bash") == []
+
+    freed = memories.set_delivery(
+        cur,
+        memory["memory_id"],
+        delivery="guard",
+        actor="user",
+        guard_action="Bash",
+        clear_scope=True,
+    )
+    assert freed["scope_id"] is None
+    assert [row["memory_id"] for row in memories.guard_pins(cur, action="Bash")] == [
+        memory["memory_id"]
+    ]
+
+
+def test_a_move_cannot_both_name_a_scope_and_clear_it(cur, scope_id):
+    memory = memories.remember(cur, content=RULE, actor="user")
+    with pytest.raises(MashuError, match="clear"):
+        memories.set_delivery(
+            cur,
+            memory["memory_id"],
+            delivery="guard",
+            actor="user",
+            guard_action="Bash",
+            scope_id=scope_id,
+            clear_scope=True,
+        )

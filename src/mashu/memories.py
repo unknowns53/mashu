@@ -222,6 +222,7 @@ def set_delivery(
     actor: str,
     guard_action: str | None = None,
     scope_id: UUID | None = None,
+    clear_scope: bool = False,
 ) -> dict[str, Any]:
     """Move a rule between the opening, one scope's opening, and the act gate.
 
@@ -229,9 +230,17 @@ def set_delivery(
     this leaves the content and its history alone. The seat check runs only
     when the move lands in an opening; moving out to guard frees a seat and
     can never need one.
+
+    A rule keeps the scope it carried unless `clear_scope` says otherwise,
+    because most moves are between deliveries and not between homes. Clearing
+    is what a misfiled guard rule needs: the gate serves a scoped rule only
+    inside that scope, so a rule about the act itself has to stop belonging to
+    the project it was first written in.
     """
     current = _require_active(cur, memory_id)
-    home = current["scope_id"] if scope_id is None else scope_id
+    if clear_scope and scope_id is not None:
+        raise MashuError("pass a scope or clear it, not both")
+    home = None if clear_scope else (current["scope_id"] if scope_id is None else scope_id)
     _check_delivery(delivery, home, guard_action)
     if delivery != "guard":
         guard_action = None

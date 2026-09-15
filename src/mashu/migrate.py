@@ -28,12 +28,38 @@ def migration_files(directory: pathlib.Path | None = None) -> list[pathlib.Path]
     return sorted((directory or MIGRATIONS_DIR).glob("*.sql"))
 
 
+def applied_names(cur: psycopg.Cursor) -> set[str]:
+    """Filenames recorded as applied, without writing to find out.
+
+    A reader that only wants to know where the schema stands must not create
+    the ledger as a side effect, so a database with no ledger yet answers
+    'nothing applied' rather than gaining a table.
+    """
+    cur.execute("SELECT to_regclass('schema_migration') AS reg")
+    if cur.fetchone()["reg"] is None:
+        return set()
+    cur.execute("SELECT filename FROM schema_migration")
+    return {row["filename"] for row in cur.fetchall()}
+
+
 def applied(conn: psycopg.Connection) -> set[str]:
-    """Filenames already recorded as applied."""
+    """Filenames already recorded as applied, creating the ledger if absent."""
     with conn.cursor() as cur:
         cur.execute(_LEDGER)
-        cur.execute("SELECT filename FROM schema_migration")
-        return {row["filename"] for row in cur.fetchall()}
+        return applied_names(cur)
+
+
+def pending(cur: psycopg.Cursor, directory: pathlib.Path | None = None) -> list[str]:
+    """The migrations on disk this database has not applied, in order.
+
+    Takes a cursor rather than a connection so `status` can ask from inside
+    the transaction it already holds. The reading matters because code and
+    schema travel separately: a checkout that is ahead of the database leaves
+    tools that write the new columns failing on every call, with nothing on
+    the screen that says why.
+    """
+    already = applied_names(cur)
+    return [path.name for path in migration_files(directory) if path.name not in already]
 
 
 def migrate(conninfo: str | None = None, directory: pathlib.Path | None = None) -> list[str]:

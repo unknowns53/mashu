@@ -222,6 +222,17 @@ def test_the_work_that_is_current_is_printed_under_its_date(run, committing_dsn)
     assert state_line.endswith(f"/{config.project_capacity()}")
 
 
+def test_status_says_where_the_schema_stands_before_it_reports_any_count(run):
+    """Every number under it is read through the schema, so it is read first.
+
+    A store the code has outgrown answers its tools with a missing column and
+    nothing else; the one screen a person opens is where that has to be said.
+    """
+    code, out, _ = run("status")
+    assert code == 0
+    assert out.splitlines()[0] == "schema  up to date"
+
+
 def test_a_pain_that_lands_on_retired_knowledge_is_answered_with_the_reason(run):
     """The tombstone is the answer, and no candidate is filed behind it."""
     _, out, _ = run("remember", WITHDRAWN_RULE)

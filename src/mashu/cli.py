@@ -333,7 +333,17 @@ def cmd_status(args: argparse.Namespace) -> int:
         # and the conditions standing at their heaviest.
         states = tasks.active_state_costs(cur)
         temporary_totals = temporary.pushed_totals(cur)
+        # First, because every count below it is read through a schema that
+        # may no longer be the one the code writes. A tool whose INSERT names
+        # a column the database lacks fails on every call, and the only place
+        # that shows is the caller's error.
+        unapplied = migration.pending(cur)
 
+    if unapplied:
+        print(f"schema  {len(unapplied)} MIGRATION(S) PENDING: {', '.join(unapplied)}")
+        print("        writes against the new columns fail until 'mashu admin migrate'")
+    else:
+        print("schema  up to date")
     active = "  ".join(f"{key}={counts.get(key, 0)}" for key in ("always", "scope", "guard"))
     print(f"active  {active}")
     print(
@@ -832,6 +842,7 @@ def cmd_deliver(args: argparse.Namespace) -> int:
             actor=ACTOR,
             guard_action=args.action,
             scope_id=_scope(cur, args.scope) if args.scope else None,
+            clear_scope=args.no_scope,
         )
     print(f"delivery  {row['memory_id']}  {row['delivery']}")
     return 0
@@ -1334,6 +1345,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     deliver.add_argument("--action", help="the tool it stands in front of, for guard")
     deliver.add_argument("--scope", help="the scope it belongs to, for scope")
+    deliver.add_argument(
+        "--no-scope",
+        action="store_true",
+        help="drop the scope it carried, so a guard rule stands at the act everywhere",
+    )
     deliver.set_defaults(func=cmd_deliver)
 
     guard = sub.add_parser("guard", help="the rules standing in front of one act")

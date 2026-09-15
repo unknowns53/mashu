@@ -60,7 +60,7 @@ ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
 
 | コマンド | 内容 |
 |---|---|
-| `mashu status` | 在庫と定員（memory / project state / 期限つき条件の三枠）、pending 件数、台帳と痕跡の状況、配信失敗の疑い件数 |
+| `mashu status` | 先頭に schema の状態（未適用 migration があればその一覧）。続けて在庫と定員（memory / project state / 期限つき条件の三枠）、pending 件数、台帳と痕跡の状況、配信失敗の疑い件数 |
 | `mashu review [--all]` | 昇格候補を 1 件ずつ確定・却下・保留する TUI（次節） |
 | `mashu remember <body> [--until 5d]` | User 明示。唯一の即時経路。退役済みの記憶と衝突すると退役理由を出して確認する（`--force` で無条件）。`--until` を付けると期限つき条件（Temporary Context）になり、Review 不要で期限に消える |
 | `mashu pain --kind {incident,friction} --what <w> --prevention <p>` | 痛みの手動記録。`--prevention-kind work --task <id>` を付けると、候補を作らず Task の next_actions へ入る（次節） |
@@ -100,7 +100,7 @@ mashu pain --kind incident --what "..." --prevention "..." --prevention-kind wor
 | `mashu trace [query]` | 痕跡の閲覧と検索 |
 | `mashu retire <id> --reason <r>` | 退役。以後は照合で、何が、なぜ否定されたかだけ返る |
 | `mashu revise <id>` | 本文の改訂（User のみ）。改訂履歴が残る |
-| `mashu deliver <id> {always,scope,guard}` | 配信経路の変更 |
+| `mashu deliver <id> {always,scope,guard} [--no-scope]` | 配信経路の変更。`--no-scope` は持っていた Scope を外す。guard は Scope 付きだとその Scope でしか出ないので、行為そのものについての規則はこれで外す |
 | `mashu guard <action> [--pin <id>] [--unpin <id>]` | 記憶の行為へのピン留めと照会 |
 | `mashu scope [--add <name> --about <line>]` | Scope 台帳（作成は User のみ） |
 | `mashu route [--add <path> --scope <name>] [--ignore <path>]` | 作業ディレクトリと Scope の対応 |
