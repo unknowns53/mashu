@@ -263,3 +263,21 @@ def test_what_was_handed_over_is_logged(cur, scope_id):
     detail = cur.fetchone()["detail"]
     assert detail["tokens"] == got["tokens"]
     assert detail["scope"] == "test scope"
+
+
+def test_an_opening_against_a_schema_the_code_has_outgrown_says_so(cur):
+    """The one reading every session takes without being asked.
+
+    `status` reports the same gap, but only to somebody who opens it — and
+    nobody did for the fifteen days a writer was failing on every call. The
+    opening is where it reaches a session that never thought to look.
+    """
+    assert bootstrap.session_bootstrap(cur, actor="agent")["schema_pending"] == []
+
+    cur.execute("DELETE FROM schema_migration WHERE filename = %s", ("0001_init.sql",))
+    got = bootstrap.session_bootstrap(cur, actor="agent")
+    assert got["schema_pending"] == ["0001_init.sql"]
+
+    cur.execute("SELECT detail FROM event_log WHERE event_type = 'bootstrap_schema_behind'")
+    rows = cur.fetchall()
+    assert [row["detail"]["pending"] for row in rows] == [["0001_init.sql"]]

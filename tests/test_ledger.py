@@ -277,8 +277,7 @@ def test_work_never_asks_for_a_seat(cur, work_task):
     The review desk decides what is worth knowing, and 'do it' is not one of
     the decisions available there. A change made once leaves the queue alone.
     """
-    got = report(cur, "incident", FIX, prevention_kind="work",
-                 task_id=work_task["task"]["task_id"])
+    got = report(cur, "incident", FIX, prevention_kind="work", task_id=work_task["task"]["task_id"])
 
     assert got["nomination"] is None
     assert got["prevention_kind"] == "work"
@@ -345,8 +344,9 @@ def test_a_work_friction_can_still_be_the_prior_half_of_a_rederivation(cur, work
     Whether the answer is a rule or a change is the reporter's view of the
     answer, and the second reporter is entitled to their own.
     """
-    first = report(cur, "friction", HOLE, prevention_kind="work",
-                   task_id=work_task["task"]["task_id"])
+    first = report(
+        cur, "friction", HOLE, prevention_kind="work", task_id=work_task["task"]["task_id"]
+    )
     assert first["nomination"] is None
 
     second = report(cur, "friction", SAME_HOLE)
@@ -362,7 +362,10 @@ def test_a_full_task_refuses_the_filing_and_keeps_the_pain(cur, work_task):
     task_id = work_task["task"]["task_id"]
     at = tasks.task_get(cur, task_id)["state"]["updated_at"]
     tasks.task_update(
-        cur, task_id, actor="agent", expect_updated_at=at,
+        cur,
+        task_id,
+        actor="agent",
+        expect_updated_at=at,
         next_actions=[f"action {n}" for n in range(tasks.LIST_MAX_ITEMS)],
     )
 
