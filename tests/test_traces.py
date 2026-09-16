@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from mashu import config, ledger, scopes, traces
 
@@ -93,7 +93,14 @@ def test_freezing_records_both_ends(cur):
 
 
 def test_a_trace_written_yesterday_says_when_it_was_derived(cur):
-    """The date is the point: an observation without one asserts it is still true."""
+    """The date is the point: an observation without one asserts it is still true.
+
+    The expected day is asked of the database, not of UTC. What the reader
+    wants is the day they would have called it, so the row is rendered in the
+    connection's timezone — and a UTC expectation agrees with that only while
+    both sit on the same calendar date, which made this pass every day except
+    between midnight and nine in the morning east of Greenwich.
+    """
     put = traces.put_trace(cur, content=DERIVED, actor="agent")
     cur.execute(
         "UPDATE trace SET created_at = now() - INTERVAL '3 days' WHERE trace_id = %s",
@@ -103,5 +110,6 @@ def test_a_trace_written_yesterday_says_when_it_was_derived(cur):
     trace = cur.fetchone()
     frozen = traces.freeze_trace(cur, trace, actor="agent")
 
-    expected = (datetime.now(UTC) - timedelta(days=3)).date().isoformat()
+    cur.execute("SELECT (now() - INTERVAL '3 days')::date AS day")
+    expected = cur.fetchone()["day"].isoformat()
     assert expected in frozen["what"]

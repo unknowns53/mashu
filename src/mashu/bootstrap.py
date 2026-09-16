@@ -32,7 +32,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import config, events, memories, projects, tasks, temporary
+from mashu import config, events, memories, migrate, projects, tasks, temporary
 from mashu.tokens import pushed_cost
 
 
@@ -76,6 +76,12 @@ def session_bootstrap(
 
     cur.execute("SELECT count(*) AS n FROM nomination WHERE status = 'pending'")
     pending = cur.fetchone()["n"]
+
+    # Where the schema stands, delivered rather than looked up. `status` says
+    # the same thing, but only to somebody who opens it, and a store the code
+    # has outgrown answers its writers with a missing column and nothing else.
+    # This is the one reading every session takes without being asked.
+    schema_pending = migrate.pending(cur)
 
     # Counted apart because they are refused apart (v3 8). A single number
     # would say the opening fits while hiding which entrance is the one under
@@ -125,6 +131,17 @@ def session_bootstrap(
                 "temporary": temporary_tokens,
             },
         )
+    if schema_pending:
+        # Recorded, not merely returned: the count of sessions that opened
+        # against a schema the code had already moved past is what says how
+        # long a broken writer went unnoticed, and it cannot be recovered
+        # afterwards from anything else.
+        events.record(
+            cur,
+            "bootstrap_schema_behind",
+            actor,
+            detail={"pending": schema_pending},
+        )
     return {
         "always": [{"memory_id": r["memory_id"], "content": r["content"]} for r in always],
         "scoped": [{"memory_id": r["memory_id"], "content": r["content"]} for r in scoped],
@@ -139,4 +156,5 @@ def session_bootstrap(
         "tokens": total,
         "capacity": ceiling,
         "over_budget": over,
+        "schema_pending": schema_pending,
     }

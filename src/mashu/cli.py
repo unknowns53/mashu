@@ -334,7 +334,17 @@ def cmd_status(args: argparse.Namespace) -> int:
         # and the conditions standing at their heaviest.
         states = tasks.active_state_costs(cur)
         temporary_totals = temporary.pushed_totals(cur)
+        # First, because every count below it is read through a schema that
+        # may no longer be the one the code writes. A tool whose INSERT names
+        # a column the database lacks fails on every call, and the only place
+        # that shows is the caller's error.
+        unapplied = migration.pending(cur)
 
+    if unapplied:
+        print(f"schema  {len(unapplied)} MIGRATION(S) PENDING: {', '.join(unapplied)}")
+        print("        writes against the new columns fail until 'mashu admin migrate'")
+    else:
+        print("schema  up to date")
     active = "  ".join(f"{key}={counts.get(key, 0)}" for key in ("always", "scope", "guard"))
     print(f"active  {active}")
     print(
@@ -367,6 +377,10 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             scope_name=scope_name,
             routed=routed,
         )
+    unapplied = answer.get("schema_pending") or []
+    if unapplied:
+        print(f"schema    {len(unapplied)} MIGRATION(S) PENDING: {', '.join(unapplied)}")
+        print("          writes against the new columns fail until 'mashu admin migrate'")
     routed_text = str(answer.get("routed", routed)).lower()
     print(f"scope     {answer.get('scope') or '-'}  routed={routed_text}")
     _print_memory_rows(answer.get("always", []), heading="always")
@@ -507,8 +521,11 @@ def cmd_pain(args: argparse.Namespace) -> int:
         print(f"{name}: {len(matches.get(name, []))}")
     if row.get("prevention_kind") == "work":
         filed = row.get("filed_task")
-        print(f"prevention  work, filed on task {_short(filed)}" if filed else
-              "prevention  work, filed nowhere")
+        print(
+            f"prevention  work, filed on task {_short(filed)}"
+            if filed
+            else "prevention  work, filed nowhere"
+        )
         if row.get("note"):
             print(_flow(row["note"], indent="    "))
     elif row.get("tombstone_suppressed"):
@@ -833,6 +850,7 @@ def cmd_deliver(args: argparse.Namespace) -> int:
             actor=ACTOR,
             guard_action=args.action,
             scope_id=_scope(cur, args.scope) if args.scope else None,
+            clear_scope=args.no_scope,
         )
     print(f"delivery  {row['memory_id']}  {row['delivery']}")
     return 0
@@ -1541,6 +1559,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     deliver.add_argument("--action", help="the tool it stands in front of, for guard")
     deliver.add_argument("--scope", help="the scope it belongs to, for scope")
+    deliver.add_argument(
+        "--no-scope",
+        action="store_true",
+        help="drop the scope it carried, so a guard rule stands at the act everywhere",
+    )
     deliver.set_defaults(func=cmd_deliver)
 
     guard = _command(

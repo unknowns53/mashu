@@ -64,7 +64,7 @@ ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
 
 | コマンド | 内容 |
 |---|---|
-| `mashu status` | 在庫と定員（memory / project state / 期限つき条件の三枠）、pending 件数、台帳と痕跡の状況、配信失敗の疑い件数 |
+| `mashu status` | 先頭に schema の状態（未適用 migration があればその一覧）。続けて在庫と定員（memory / project state / 期限つき条件の三枠）、pending 件数、台帳と痕跡の状況、配信失敗の疑い件数 |
 | `mashu review [--all]` | 昇格候補を 1 件ずつ確定・却下・保留する TUI（次節） |
 | `mashu remember <body> [--until 5d]` | User 明示。唯一の即時経路。退役済みの記憶と衝突すると退役理由を出して確認する（`--force` で無条件）。`--until` を付けると期限つき条件（Temporary Context）になり、Review 不要で期限に消える |
 | `mashu pain --kind {incident,friction} --what <w> --prevention <p>` | 痛みの手動記録。`--prevention-kind work --task <id>` を付けると、候補を作らず Task の next_actions へ入る（次節） |
@@ -104,11 +104,11 @@ mashu pain --kind incident --what "..." --prevention "..." --prevention-kind wor
 | `mashu trace [query]` | 痕跡の閲覧と検索 |
 | `mashu retire <id> --reason <r>` | 退役。以後は照合で、何が、なぜ否定されたかだけ返る |
 | `mashu revise <id>` | 本文の改訂（User のみ）。改訂履歴が残る |
-| `mashu deliver <id> {always,scope,guard}` | 配信経路の変更 |
+| `mashu deliver <id> {always,scope,guard} [--no-scope]` | 配信経路の変更。`--no-scope` は持っていた Scope を外す。guard は Scope 付きだとその Scope でしか出ないので、行為そのものについての規則はこれで外す |
 | `mashu guard <action> [--pin <id>] [--unpin <id>]` | 記憶の行為へのピン留めと照会 |
 | `mashu scope [--add <name> --about <line>]` | Scope 台帳（作成は User のみ） |
 | `mashu route [--add <path> --scope <name>] [--ignore <path>]` | 作業ディレクトリと Scope の対応 |
-| `mashu bootstrap` | このディレクトリのセッションが受け取る内容と token |
+| `mashu bootstrap` | このディレクトリのセッションが受け取る内容と token。未適用の migration があれば先頭に出る |
 | `mashu project list` / `create <name> [--scope <s>]` / `show <id>` | プロジェクト台帳（作成は User のみ）。Task の所属単位で、Scope とは別 |
 | `mashu task list [--dormant] [--closed] [--project <p>]` | Task の一覧。既定は active のみ。どの行の状態も最終確認日を見出しに持つ |
 | `mashu task show <id>` | Task 1 件を全文で。現在状態と checkpoint・attempt・decision・成果物の参照先 |
@@ -132,7 +132,7 @@ Agent 名は `--agent` または環境変数 `MASHU_AGENT` で渡す。MCP ツ�
 
 | Tool | 役割 |
 |---|---|
-| `session_bootstrap` | セッション開始時に一度。always と現在 Scope の記憶、active な Task の現在状態（最終確認日を本文に含む）、期限つき条件、pending 件数 |
+| `session_bootstrap` | セッション開始時に一度。always と現在 Scope の記憶、active な Task の現在状態（最終確認日を本文に含む）、期限つき条件、pending 件数。未適用の migration があれば `schema_pending` に載り、note の先頭でも知らせる |
 | `pain_report` | 痛みを台帳へ記録し、類似の台帳エントリ・痕跡・退役理由・配信中の記憶を返す。二度目なら候補を生成。`prevention_kind="work"` なら候補を作らず、`task_id` の next_actions へ入れる |
 | `trace_put` | 調べて分かったことを一行残す |
 | `trace_search` | 痕跡の検索。日付つき・未検証の印で返る |
