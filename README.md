@@ -424,3 +424,5 @@ tools/pretooluse_guard.py    guard 用 PreToolUse hook
 tools/sessionstart_guard.py  SessionStart 用 hook
 hooks/                       pre-commit / commit-msg
 ~~~
+
+*摩周湖は世界最高クラスの透明度が観測されたことで知られており、どこまでも遡って追跡できる Knowledge State を目指して命名された。摩周湖の流入する川も流出する川もなく、外部の流れに属さない閉じた水盆という地形は、特定の Agent に依存しない独立の Knowledge Layer という設計思想に対応する。摩周湖は霧で見えないことで有名であり、本プロジェクトの意義は霧を晴らして何を信頼してよいかを人が判断できる状態にすることである。*
