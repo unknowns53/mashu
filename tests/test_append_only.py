@@ -1,11 +1,3 @@
-"""Append-only, enforced by the database rather than promised by the code.
-
-Three tables carry the trigger, and each carries it for its own reason. The
-ledger is what memories cite, so a row that could be rewritten would let an
-active claim silently change what it stands on. The revision history is the
-only record of what a rule used to say. The event log is the only account of
-who did any of it, and an audit trail that can be edited is a narrative.
-"""
 
 from __future__ import annotations
 

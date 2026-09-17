@@ -13,7 +13,7 @@ files=$(git diff --cached --name-only --diff-filter=ACMR)
 
 failed=0
 
-# 1. Paths.
+# Check staged paths.
 offending_paths=$(printf '%s\n' "$files" | grep -E -f "$BANNED_PATTERNS_FILE" || true)
 if [ -n "$offending_paths" ]; then
     printf '%s\n' "pre-commit: banned pattern in staged path(s):" >&2
@@ -21,8 +21,8 @@ if [ -n "$offending_paths" ]; then
     failed=1
 fi
 
-# 2. Contents of the staged blobs, not just the added lines.
-#    Iterated with IFS=newline so the loop body runs in this shell, not a subshell.
+# Check staged blobs, not just added lines.
+# Set IFS to newline so paths with spaces stay intact and updates to $failed persist.
 old_ifs=$IFS
 IFS='
 '

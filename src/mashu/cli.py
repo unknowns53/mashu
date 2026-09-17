@@ -1,4 +1,4 @@
-"""The human command line for Mashu v2."""
+"""Command-line interface for Mashu."""
 
 from __future__ import annotations
 
@@ -51,17 +51,13 @@ ACTOR = "user"
 GUARD_HOLD = 2
 _DAYS = re.compile(r"^(\d+(?:\.\d+)?)(?:d)?$")
 
-#: What a reference may be made of when it is not a whole id: the characters a
-#: UUID prints as, so that pasting any front portion of a displayed id works.
+#: Characters accepted in a UUID reference or prefix.
 _HEX_REF = re.compile(r"[0-9a-f][0-9a-f-]*")
 
-#: Short enough to type from a listing, long enough that a collision is news
-#: rather than routine. Below this the prefix is refused instead of resolved,
-#: because a reference that names half the store is not a reference.
+#: Minimum length for a UUID prefix.
 _MIN_PREFIX = 4
 
-#: How many colliding ids an ambiguity refusal will name before it stops. The
-#: list is there to be re-typed from, and a screenful of them is not.
+#: How many colliding ids an ambiguity refusal will name before it stops.
 _AMBIGUITY_LIMIT = 10
 
 #: The tables `show` reaches into, in the order it reports collisions.
@@ -85,13 +81,7 @@ def _plain(value: Any) -> Any:
 
 
 def _lookup(cur: Any, ref: str, *, table: str, id_col: str, extra_where: str = "") -> list[UUID]:
-    """Every id in one table that this reference could be naming.
-
-    Everything this command line prints is an eight-character prefix, so
-    everything it accepts has to be one. A whole id is matched as itself; a
-    prefix is matched against the printed form of the id, which is the form
-    the person is copying from.
-    """
+    """Every id in one table that this reference could be naming."""
     text = (ref or "").strip().lower()
     try:
         exact: str | None = str(UUID(text))
@@ -117,13 +107,7 @@ def _lookup(cur: Any, ref: str, *, table: str, id_col: str, extra_where: str = "
 def _resolve(
     cur: Any, ref: str, *, table: str, id_col: str, label: str, extra_where: str = ""
 ) -> UUID:
-    """The one row this reference names, or a refusal saying why it is not one.
-
-    A whole id passes straight through without a lookup: the command that
-    receives it will say soon enough if there is no such row, and its sentence
-    is the better one. Only a prefix has to be resolved here, and an ambiguous
-    one is refused with its candidates rather than settled arbitrarily.
-    """
+    """The one row this reference names, or a refusal saying why it is not one."""
     try:
         return UUID((ref or "").strip())
     except (ValueError, AttributeError):
@@ -146,13 +130,7 @@ def _task_ref(cur: Any, ref: str) -> UUID:
 
 
 def _project_ref(cur: Any, ref: str) -> UUID:
-    """A project by the name it was opened under, or by the front of its id.
-
-    The name first, because that is what a person calls a project and what
-    every other entrance to this subsystem takes. Falling through to the id
-    only for something shaped like one keeps a mistyped name answered by the
-    refusal that lists the open projects, rather than by 'not an id'.
-    """
+    """A project by the name it was opened under, or by the front of its id."""
     row = projects.get_project(cur, ref)
     if row is not None:
         return row["project_id"]
@@ -197,14 +175,7 @@ def _pad(text: str, width: int) -> str:
 
 
 def _flow(text: str, indent: str = "  ", width: int | None = None) -> str:
-    """Wrap a long body for reading, counting double-width characters as two.
-
-    Not textwrap: that breaks at spaces, and much of what is stored here is
-    Japanese, which has none. Measured in cells instead, a line breaks where
-    the terminal would have wrapped it anyway — at a space when one is near,
-    mid-run when there is none — and the indent marks where a record's body
-    ends and the next record begins.
-    """
+    """Wrap a long body for reading, counting double-width characters as two."""
     if width is None:
         width = min(88, max(40, shutil.get_terminal_size((88, 24)).columns))
     out: list[str] = []
@@ -225,8 +196,7 @@ def _flow(text: str, indent: str = "  ", width: int | None = None) -> str:
                     out.append(row)
                     row = indent
                 used = len(indent) + _cells(row[len(indent) :])
-                # A space is dropped only when it is the seam itself; carried
-                # text keeps the spaces between its own words.
+                # Drop only the wrap-boundary space; preserve spaces within the text.
                 if ch == " " and row == indent:
                     continue
             row += ch
@@ -266,13 +236,7 @@ def _parse_days(value: str) -> float:
 
 
 def _gate_warnings(result: dict[str, Any]) -> None:
-    """Say when the entrance check did not run, or ran on a broken list.
-
-    Both states let content through, which is also what a clean pass looks
-    like, so nothing about the result distinguishes them. These go to stderr
-    so a caller reading stdout for an id is unaffected, and the person at the
-    terminal still sees that the gate was not what they assumed.
-    """
+    """Say when the entrance check did not run, or ran on a broken list."""
     if result.get("unchecked"):
         print("warning: banned-pattern list not found; nothing was checked", file=sys.stderr)
     malformed = result.get("malformed") or 0
@@ -290,14 +254,7 @@ def _print_memory_rows(rows: list[dict[str, Any]], *, heading: str = "memories")
 
 
 def _print_state_rows(rows: list[dict[str, Any]]) -> None:
-    """The work that is current, each state under the date it was last confirmed.
-
-    The heading leads the row rather than trailing it, because it is what
-    tells the reader whether to trust the lines beneath before reading them
-    (v3 3.1). The body is flowed rather than printed raw: a state carries
-    several fields and one of them running off the right edge would take the
-    next with it.
-    """
+    """The work that is current, each state under the date it was last confirmed."""
     print("project state")
     for row in rows:
         print(f"{row['task']:8}  {row['heading']}")
@@ -318,11 +275,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             "SELECT count(*) AS count FROM ledger WHERE created_at >= now() - interval '30 days'"
         )
         ledger_count = cur.fetchone()["count"]
-        # The specification's own falsification criterion, as a number on the
-        # screen a person actually opens (12). A pain that landed on a rule
-        # already being delivered says the push or the guard is not reaching
-        # the moment it is needed, and that reading is worthless if it only
-        # exists in a table nobody queries.
+        # Count delivery-failure reports from the last 30 days.
         cur.execute(
             "SELECT count(*) AS count FROM event_log "
             "WHERE event_type = 'delivery_failure_suspected' "
@@ -331,15 +284,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         suspect_count = cur.fetchone()["count"]
         pending = nominations.pending_nominations(cur)
         scope_rows = scopes.list_scopes(cur)
-        # The other two shares of the opening, read the same way their own
-        # entrances read them (v3 8): the active tasks across every project,
-        # and the conditions standing at their heaviest.
+        # Add active task and temporary-context costs to the status report.
         states = tasks.active_state_costs(cur)
         temporary_totals = temporary.pushed_totals(cur)
-        # First, because every count below it is read through a schema that
-        # may no longer be the one the code writes. A tool whose INSERT names
-        # a column the database lacks fails on every call, and the only place
-        # that shows is the caller's error.
+        # Check migrations before querying tables introduced by newer schema versions.
         unapplied = migration.pending(cur)
 
     if unapplied:
@@ -449,18 +397,7 @@ def cmd_remember(args: argparse.Namespace) -> int:
 
 
 def _confirm_override(conflict: RetiredConflictError) -> bool:
-    """Show what was withdrawn and why, then ask whether to write it back.
-
-    Section 5.3 gives a person the right to overrule a retirement, and this is
-    the whole of what that right needs to mean something: the reason in front
-    of them at the moment they exercise it. Refusing outright would take the
-    right away, and writing silently would leave them exercising it without
-    knowing there was anything to exercise.
-
-    Nothing to type at means nothing to read either, so a non-interactive
-    caller is refused and told the flag that says the reason has been read
-    elsewhere.
-    """
+    """Show what was withdrawn and why, then ask whether to write it back."""
     print(str(conflict), file=sys.stderr)
     for row in conflict.tombstones:
         retired = row.get("retired_at")
@@ -562,12 +499,10 @@ def cmd_ledger(args: argparse.Namespace) -> int:
             f"{_short(row['ledger_id']):8}  {row['kind']:<9}  "
             f"{_date(row.get('created_at'))}  {row['what']}"
         )
-        # The prevention is the sentence the matching runs on, so a listing
-        # that hides it shows the half of each row that decides nothing.
+        # Include the prevention text used for matching.
         label = "prevention"
         if row.get("prevention_kind") == "work":
-            # Naming where it went, or that it went nowhere, is the whole
-            # reason the column exists: an unfiled fix is invisible otherwise.
+            # Show whether this work fix was filed on a task.
             where = f"filed {_short(row['filed_task'])}" if row.get("filed_task") else "UNFILED"
             label = f"prevention  (work, {where})"
         print(f"    {label}  {row['prevention']}")
@@ -591,13 +526,7 @@ def _ledger_rows(cur: Any, ids: list[UUID]) -> list[dict[str, Any]]:
 
 
 def _print_evidence(cur: Any, evidence: list[UUID] | None) -> None:
-    """The pains a row rests on, opened out.
-
-    Ids alone answer nothing here. What makes a memory readable after the fact
-    is the prevention sentence it was admitted against, which is also the
-    sentence a later pain will collide with. The id still leads the line, so
-    the ledger row itself can be opened from what is printed.
-    """
+    """The pains a row rests on, opened out."""
     print("evidence")
     for row in _ledger_rows(cur, list(evidence or [])):
         print(
@@ -659,9 +588,7 @@ def _show_nomination(cur: Any, nomination_id: UUID) -> None:
     _field("scope", row["scope_name"] or "-")
     print("content")
     print(f"  {row['content']}")
-    # Before the evidence for the same reason the review screen puts it there:
-    # a candidate that walks back into a retirement is not something a reader
-    # should have to reach the bottom of the page to find out about.
+    # Show retirement conflicts before the evidence list.
     for conflict in nominations.conflict_rows(cur, row["conflicts"]):
         print(f"! contradicts retired {_short(conflict['memory_id'])}")
         print(f"  retired because: {conflict['retire_reason']}")
@@ -679,9 +606,7 @@ def _show_ledger(cur: Any, ledger_id: UUID) -> None:
     _field("what", row["what"])
     _field("prevention", row["prevention"])
     _field("source", row["source"] or "-")
-    # Which candidates and memories this pain was spent on. Without it the
-    # ledger reads as a complaints file, and whether anything came of a pain
-    # is exactly what a person reading one back wants to know.
+    # Related nominations and memories.
     cur.execute(
         """
         SELECT 'nomination' AS held_in, nomination_id AS row_id, status, created_at
@@ -793,9 +718,7 @@ def _print_pending(rows: list[dict[str, Any]]) -> None:
         print(f"  {row['content']}")
         if row.get("deferred_at"):
             print(f"  deferred: {row.get('defer_reason') or ''}")
-        # Above the evidence here too. A collision that shows on the sitting
-        # and on `show` but not on the listing is a collision that hides on
-        # whichever screen the reader happened to use.
+        # Above the evidence here too.
         for conflict in row.get("conflict_rows", []):
             print(f"  ! contradicts retired {_short(conflict['memory_id'])}")
             print(f"    retired because: {conflict['retire_reason']}")
@@ -951,11 +874,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             print("removed" if removed else "not found")
             return 0
         rows = routing.all_routes(cur)
-    # A route is told apart by its tail, so a fixed column cutting the end
-    # printed every path under one tree as the same row. The column is taken
-    # from the longest route instead, measured in cells: a route through a
-    # Japanese directory name spends two of them per character, and counting
-    # characters left the scope beside it stepping in and out.
+    # Size this column by display width so full routes remain distinguishable.
     header = "path_prefix"
     width = max([_cells(header), *(_cells(row["path_prefix"]) for row in rows)])
     print(f"{header}{' ' * (width - _cells(header))}  scope")
@@ -967,14 +886,7 @@ def cmd_route(args: argparse.Namespace) -> int:
 
 
 def _print_task_rows(rows: list[dict[str, Any]], *, project: bool = True) -> None:
-    """Each task named on its own line, with its state under its heading.
-
-    The heading leads the state line here for the reason it leads the opening
-    (v3 3.1): what tells a reader whether to trust a line is how old it is,
-    and a date printed after the line it qualifies is read too late. The row
-    is kept to two lines because a listing answers "what is going on", and
-    everything a task holds is one `task show` away.
-    """
+    """Each task named on its own line, with its state under its heading."""
     for row in rows:
         task, state = row["task"], row["state"]
         head = f"{_short(task['task_id']):8}  {task['name']}"
@@ -985,9 +897,7 @@ def _print_task_rows(rows: list[dict[str, Any]], *, project: bool = True) -> Non
         print(_flow(f"{row['heading']}  {summary}".rstrip(), indent="          "))
         proposal = row.get("proposal")
         if proposal:
-            # A third line only where there is one. A proposal is the reason
-            # to open the closing screen, so a listing that knew about it and
-            # said nothing would send the reader straight past what is waiting.
+            # A third line only where there is one.
             said = f"proposed {proposal['outcome']} on {proposal['on_date']}"
             if proposal["stale"]:
                 said += ", state written since"
@@ -1067,12 +977,7 @@ def _print_state_fields(state: dict[str, Any]) -> None:
 
 
 def cmd_task_show(args: argparse.Namespace) -> int:
-    """One task in full: what it is now, and the history that got it there.
-
-    The history is pulled whole rather than by flag. It is never delivered to
-    a session (v3 5.4), so this screen is the only place a person reads it,
-    and an account split across four commands is one nobody assembles.
-    """
+    """One task in full: what it is now, and the history that got it there."""
     with db.transaction(args.dsn) as cur:
         row = task_history.expanded_task(
             cur,
@@ -1097,9 +1002,7 @@ def cmd_task_show(args: argparse.Namespace) -> int:
     print(f"{row['heading']}  {state['updated_by']}")
     _print_state_fields(state)
 
-    # The locators are the point of the artifact rows: Mashu holds the
-    # reference and never the body (v3 4), so a screen that printed only the
-    # ids would leave the original unreachable from the only place it is named.
+    # Print artifact locators in full; the store keeps references, not file bodies.
     artifacts = {artifact["reference_id"]: artifact for artifact in row["artifacts"]}
     print("artifacts")
     for artifact in row["artifacts"]:
@@ -1136,12 +1039,7 @@ def cmd_task_show(args: argparse.Namespace) -> int:
 
 
 def _task_project(cur: Any, given: str | None) -> UUID:
-    """The project named, or the one this working directory already belongs to.
-
-    A task filed under the wrong project splits one body of work state in two,
-    so nothing is guessed here: the route table's scope answers only when it
-    holds exactly one project, and every other case is asked about by name.
-    """
+    """The project named, or the one this working directory already belongs to."""
     if given:
         return _project_ref(cur, given)
     scope_id, scope_name, _ = _routed_scope(cur)
@@ -1178,8 +1076,7 @@ def cmd_task_create(args: argparse.Namespace) -> int:
                 force=args.force,
             )
     except DuplicateTaskError as clash:
-        # The candidates rather than the count, because continuing one of them
-        # is the right answer nine times in ten and that needs their ids.
+        # Show candidate ids so the caller can continue an existing task.
         print(str(clash), file=sys.stderr)
         for candidate in clash.candidates:
             found = candidate["task"]
@@ -1203,13 +1100,7 @@ def cmd_task_touch(args: argparse.Namespace) -> int:
 
 
 def cmd_task_close(args: argparse.Namespace) -> int:
-    """End a task. Only a person reaches this, and only with an outcome (v3 6).
-
-    Named with no task at all, it opens the closing screen instead. That is
-    the form to reach this in when there is more than one task to answer for,
-    because there the outcome is a keystroke rather than a retyped line; the
-    named form stays because one close is worth one line.
-    """
+    """End a task. Only a person reaches this, and only with an outcome (v3 6)."""
     if not args.ref:
         from mashu import close_ui
 
@@ -1221,8 +1112,7 @@ def cmd_task_close(args: argparse.Namespace) -> int:
             "says reversibly. `mashu task close` with no task named opens the screen "
             "that asks for an outcome one task at a time"
         )
-    # A transaction each, so a reference that turns out to name nothing leaves
-    # the tasks already closed closed, rather than rolling them back open.
+    # Commit each task separately so a later invalid reference does not undo earlier closes.
     for ref in args.ref:
         with db.transaction(args.dsn) as cur:
             task_id = _task_ref(cur, ref)
@@ -1247,8 +1137,6 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
-    # The MCP client's own configuration is where the agent identity comes
-    # from; --agent is the flag that configuration passes.
     if args.agent:
         os.environ["MASHU_AGENT"] = args.agent
     from mashu import server
@@ -1257,8 +1145,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
-#: Said wherever an id is taken. Every listing prints a short id, so every
-#: command that takes one has to accept the short id back.
+#: Said wherever an id is taken.
 _REF_HELP = "the row's id, or the first four or more characters of it"
 
 
@@ -1841,10 +1728,7 @@ def main(argv: list[str] | None = None) -> int:
         print(str(error), file=sys.stderr)
         return 1
     except psycopg.errors.UndefinedTable as error:
-        # A checkout ahead of its database, which `status` reports and every
-        # other command used to meet as a traceback. Reads break on it now and
-        # not only writes: a table joined for every task is a table the whole
-        # subsystem stops without.
+        # Explain pending migrations instead of exposing UndefinedTable.
         print(_behind(args) or str(error), file=sys.stderr)
         return 1
 

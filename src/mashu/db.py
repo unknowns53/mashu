@@ -1,10 +1,4 @@
-"""Connection handling.
-
-One rule holds throughout the layer: a change and the event_log rows that
-describe it belong to the same transaction. So every module takes a cursor
-rather than opening its own connection, and the caller decides where the
-transaction boundary sits.
-"""
+"""Database connection and transaction helpers."""
 
 from __future__ import annotations
 
@@ -31,10 +25,6 @@ def connect(conninfo: str | None = None) -> psycopg.Connection:
 
 @contextmanager
 def transaction(conninfo: str | None = None) -> Iterator[psycopg.Cursor]:
-    """Yield a cursor inside one transaction, committing on a clean exit.
-
-    Any exception rolls the whole thing back, which is what keeps a memory
-    without its revision, or an event row without its change, from landing.
-    """
+    """Yield a cursor inside one transaction, committing on a clean exit."""
     with connect(conninfo) as conn, conn.transaction(), conn.cursor() as cur:
         yield cur

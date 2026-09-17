@@ -1,15 +1,2 @@
--- What a candidate is known to contradict (5.1, 5.3).
---
--- A retired memory answers later matches with the reason it was withdrawn,
--- and until now three of the four ways into the active set consulted it and
--- one did not. Suppressing the candidate outright was the first answer, and
--- it had a cost the refutation does not justify: the person who asked for the
--- rule never learns it was refused, so "only a human steps over a
--- retirement" held while the human stepped over nothing, having been told
--- nothing. What is wanted instead is the collision travelling with the
--- candidate to the screen where a person reads both.
---
--- Ids rather than a foreign key, because a candidate can collide with more
--- than one tombstone, and memory rows are retired rather than deleted, so an
--- id written here stays resolvable.
+-- Store retirement conflicts on nominations for human review (5.1, 5.3).
 ALTER TABLE nomination ADD COLUMN conflicts UUID[];

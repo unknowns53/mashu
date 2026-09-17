@@ -1,4 +1,3 @@
-"""Memories: the only rows delivered as true (specification 5)."""
 
 from __future__ import annotations
 
@@ -13,8 +12,6 @@ WITHDRAWN = "the tool now refuses on its own"
 
 
 def test_a_rule_recorded_by_hand_is_active_at_once_and_carries_its_own_evidence(cur):
-    """The schema will not hold a rule with nothing under it, so the act of
-    recording is itself entered in the ledger and cited."""
     memory = memories.remember(cur, content=RULE, actor="user")
     assert memory["status"] == "active"
     assert memory["delivery"] == "always"
@@ -39,13 +36,6 @@ def test_retiring_needs_a_reason_because_the_reason_is_all_that_survives(cur):
 
 
 def test_a_reason_carrying_a_banned_pattern_does_not_retire_anything(cur):
-    """The reason is the one field here that is delivered.
-
-    It comes back from every later match against this tombstone, so an
-    identifier written into it travels further than one written into the
-    content it replaces — and until now it was the only text entering the
-    store without passing the gate.
-    """
     memory = memories.remember(cur, content=RULE, actor="user")
     with pytest.raises(RefusedError):
         memories.retire(
@@ -57,11 +47,6 @@ def test_a_reason_carrying_a_banned_pattern_does_not_retire_anything(cur):
 
 
 def test_the_gate_says_when_it_did_not_run(cur, monkeypatch, tmp_path):
-    """A missing list is not a pass, and a broken line in one is not either.
-
-    Both states let content through, which is exactly what a clean check looks
-    like from the outside, so the result has to carry the difference.
-    """
     memory = memories.remember(cur, content=RULE, actor="user")
     assert memory["unchecked"] is False
     assert "malformed" not in memory
@@ -73,16 +58,12 @@ def test_the_gate_says_when_it_did_not_run(cur, monkeypatch, tmp_path):
     assert retired["malformed"] == 1
 
     monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(tmp_path / "absent"))
-    # REVISED is a rewording of the rule just retired, so the retirement check
-    # stands in front of the gate check this test is about. Stepping over it
-    # explicitly is what a person at the terminal does, and it leaves the
-    # gate's own report as the only thing still under test.
+    # REVISED matches the retired text, so conflict handling runs first.
     rewritten = memories.remember(cur, content=REVISED, actor="user", override_retired=True)
     assert rewritten["unchecked"] is True
 
 
 def test_a_retired_rule_answers_with_why_it_was_withdrawn_and_never_with_itself(cur):
-    """Handing the body back would put the withdrawn claim into circulation again."""
     memory = memories.remember(cur, content=RULE, actor="user")
     memories.retire(cur, memory["memory_id"], reason=WITHDRAWN, actor="user")
 
@@ -109,7 +90,6 @@ def test_a_revision_keeps_what_the_rule_used_to_say(cur):
 
 
 def test_a_withdrawn_rule_is_not_edited_back_into_life(cur):
-    """Reviving it would leave the tombstone standing next to a live claim."""
     memory = memories.remember(cur, content=RULE, actor="user")
     memories.retire(cur, memory["memory_id"], reason="superseded", actor="user")
 
@@ -120,7 +100,6 @@ def test_a_withdrawn_rule_is_not_edited_back_into_life(cur):
 
 
 def test_moving_a_rule_to_the_act_gate_needs_the_act(cur):
-    """A guard with no action fires on nothing, which is a rule that was deleted quietly."""
     memory = memories.remember(cur, content=RULE, actor="user")
     with pytest.raises(MashuError, match="action"):
         memories.set_delivery(cur, memory["memory_id"], delivery="guard", actor="user")
@@ -149,7 +128,6 @@ def test_moving_a_rule_into_a_scope_needs_a_scope_and_leaving_guard_clears_the_a
 
 
 def test_a_guard_with_no_scope_fires_everywhere_and_a_scoped_one_only_at_home(cur, scope_id):
-    """Guard is orthogonal to scope: one narrows when, the other narrows where."""
     everywhere = memories.remember(
         cur, content=RULE, actor="user", delivery="guard", guard_action="Task"
     )
@@ -182,7 +160,6 @@ def test_a_pin_for_another_act_does_not_answer_this_one(cur):
 
 
 def test_listing_a_scope_shows_what_lives_there_by_whatever_route(cur, scope_id):
-    """A guard rule costs the opening nothing but still occupies a person's attention."""
     pushed = memories.remember(cur, content=RULE, actor="user", scope_id=scope_id, delivery="scope")
     pinned = memories.remember(
         cur,
@@ -202,13 +179,6 @@ def test_listing_a_scope_shows_what_lives_there_by_whatever_route(cur, scope_id)
 
 
 def test_writing_a_retired_rule_back_stops_to_show_why_it_was_withdrawn(cur):
-    """Section 5.3 gives a person the right to overrule a retirement.
-
-    The right is worth nothing if it can be exercised without knowing there
-    was anything to exercise, so the collision halts the write and hands back
-    the reason. It is a halt, not a refusal: saying so again carries it
-    through, and the override is on the record.
-    """
     kept = memories.remember(cur, content=RULE, actor="user")
     memories.retire(cur, kept["memory_id"], reason=WITHDRAWN, actor="user")
 
@@ -234,7 +204,6 @@ def test_writing_a_retired_rule_back_stops_to_show_why_it_was_withdrawn(cur):
 
 
 def test_an_unrelated_rule_is_not_stopped_by_somebody_elses_retirement(cur):
-    """The halt is a collision, not a mood: only a match holds anything up."""
     kept = memories.remember(cur, content=RULE, actor="user")
     memories.retire(cur, kept["memory_id"], reason=WITHDRAWN, actor="user")
 
@@ -246,8 +215,6 @@ def test_an_unrelated_rule_is_not_stopped_by_somebody_elses_retirement(cur):
 
 
 def test_a_scoped_rule_moved_to_the_act_gate_can_be_freed_of_the_scope_it_came_from(cur, scope_id):
-    """The gate serves a scoped rule only at home, so a rule about the act
-    itself has to be able to stop belonging to the project it was written in."""
     memory = memories.remember(cur, content=RULE, actor="user", scope_id=scope_id, delivery="scope")
 
     kept = memories.set_delivery(

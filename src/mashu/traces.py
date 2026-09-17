@@ -1,14 +1,4 @@
-"""Traces: dated observations that are not knowledge (specification 4.2).
-
-The first time something is worked out it does not hurt, so nobody reports it.
-That is why the second time cannot be proven: there is nothing to match
-against. A trace is written during the work, for nothing in return, purely so
-that a later derivation of the same thing has a counterpart to collide with.
-
-Nothing here is reviewed and nothing here is pushed. A trace claims only "on
-this day it looked like this", which is why thirty days is enough — what rots
-is the implied claim that it is still true, and a trace never made one.
-"""
+"""Record and search dated observations."""
 
 from __future__ import annotations
 
@@ -110,12 +100,7 @@ def search_traces(
 
 
 def freeze_trace(cur: psycopg.Cursor, trace: dict[str, Any], *, actor: str) -> dict[str, Any]:
-    """Copy a trace into the ledger so that citing it survives its expiry.
-
-    Evidence has to outlive the thing it was drawn from. A memory whose only
-    support expired in three weeks would be an active claim with nothing
-    underneath it, which is the one state section 5 forbids.
-    """
+    """Copy a trace into the ledger so that citing it survives its expiry."""
     cur.execute(
         """
         INSERT INTO ledger (kind, what, prevention, scope_id, source, from_trace, created_by)

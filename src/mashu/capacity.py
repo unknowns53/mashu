@@ -1,31 +1,4 @@
-"""The seat count (specification 5.2).
-
-A ceiling, but not a budget. In v1 what did not fit fell through to search;
-here there is no search, so the ceiling is the thing that keeps the whole
-store small enough to be pushed in full. Refusing an admission is therefore
-not a deferral — it is the mechanism.
-
-What an addition is weighed against depends on where it lands. A scope rule
-rides with one scope's sessions, so it competes with that scope. An always
-rule rides with every session in turn, including the session that opens in the
-heaviest scope, so the fullest scope is what it has to fit alongside. A guard
-rule rides with neither: it is not in the opening at all, which is why
-stepping down to guard is one of the ways out a refusal names.
-
-What it counts is the memories, and only those. v2 weighed the temporary
-contexts here as well, on the ground that they are pushed in the same opening;
-v3 8 keeps the arithmetic and moves it, because one subsystem quietly spending
-another's room is the failure the split ceilings exist to prevent — a fortnight
-of expiring conditions could refuse a rule admitted against evidence. Each
-share is now refused at its own entrance and none of them borrows.
-
-The always layer answers to a second, lower ceiling of its own. Left with only
-the shared one it never overflows; it quietly spends the whole store's headroom
-on rules that most sessions did not need, and the scopes find the room gone
-without anything having refused them. Counting rows was the earlier shorthand
-for this and it drifted: the rows came out shorter than the estimate they stood
-in for, so the count held the layer near half the size it was meant to have.
-"""
+"""Enforce capacity limits for memories delivered at session start."""
 
 from __future__ import annotations
 
@@ -38,18 +11,11 @@ from mashu import config
 from mashu.errors import MashuError
 from mashu.tokens import pushed_cost
 
-#: The advisory lock namespace this module and the pain pipeline share. Two
-#: classes, taken for the whole transaction so they hold until the write they
-#: guard commits.
+#: The advisory lock namespace this module and the pain pipeline share.
 LOCK_NAMESPACE = 271828
-#: Serialises the seat check against every other seat check. Without it two
-#: sessions read the same totals, both find room for the last seat, and both
-#: sit down: the ceiling is checked twice and enforced never.
+#: Serialises the seat check against every other seat check.
 LOCK_ADMISSION = 1
-#: Serialises the pain pipeline: ledger insert, matching, and the nomination
-#: that may follow. Held by ledger.report_pain and by the agent-carried
-#: instruction path, which are the two writers that read the queue to decide
-#: whether to add to it.
+#: Serialises the pain pipeline: ledger insert, matching, and the nomination that may follow.
 LOCK_PAIN = 2
 
 _PUSHED = """
@@ -102,12 +68,7 @@ _GUARD = (
 
 
 def _refusal(projected: int, cost: int, ceiling: int) -> str:
-    """A refusal that names the numbers and both doors out.
-
-    A gate that only says no teaches nothing, and the person reading it is
-    holding a rule they believe is worth keeping. The two ways through are
-    real commands, not advice.
-    """
+    """A refusal that names the numbers and both doors out."""
     return (
         f"the opening seats {ceiling} tokens and "
         + _room(projected, cost)
@@ -116,12 +77,7 @@ def _refusal(projected: int, cost: int, ceiling: int) -> str:
 
 
 def _refusal_always(projected: int, cost: int, ceiling: int) -> str:
-    """The same refusal, plus the door only a rule in this layer has.
-
-    A rule refused here is not too big for the store; it is too big for the
-    part of the store every session pays for. So the way out a scope rule
-    does not have is the useful one: if it governs one place, say which.
-    """
+    """The same refusal, plus the door only a rule in this layer has."""
     return (
         f"the always layer seats {ceiling} tokens and "
         + _room(projected, cost)
@@ -139,18 +95,8 @@ def check_admission(
     scope_id: UUID | None = None,
     exclude_memory_id: UUID | None = None,
 ) -> dict[str, Any]:
-    """Whether this content can take a seat, and what it would cost if it did.
-
-    `exclude_memory_id` is what makes revision-in-place possible: a memory
-    being rewritten is not competing with itself, and without the exclusion
-    every edit to a full store would be refused for the space it already
-    occupies.
-    """
-    # Before reading anything. The gap between deciding there is room and
-    # taking it is where two writers both fit into one seat, and every write
-    # that changes the opening comes through here inside the caller's single
-    # transaction, so holding until commit closes the gap rather than narrowing
-    # it.
+    """Whether this content can take a seat, and what it would cost if it did."""
+    # Lock before calculating capacity.
     cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (LOCK_NAMESPACE, LOCK_ADMISSION))
 
     cost = pushed_cost([content])
@@ -158,7 +104,7 @@ def check_admission(
     totals = _totals(cur, exclude_memory_id)
 
     if delivery == "guard":
-        # Not in the opening, so nothing to weigh it against.
+        # Guard memories are not part of the session payload.
         return {
             "ok": True,
             "tokens": cost,
@@ -167,10 +113,7 @@ def check_admission(
             "refusal": None,
         }
     if delivery == "always":
-        # Two ceilings, checked nearest first so the refusal names the one that
-        # actually bites. A rule can clear the layer and still not clear the
-        # opening it shares with the heaviest scope; the reverse is what the
-        # layer ceiling exists to catch.
+        # Check the always-layer limit before the overall limit.
         layer = totals["always"] + cost
         layer_ceiling = config.always_capacity()
         if layer > layer_ceiling:

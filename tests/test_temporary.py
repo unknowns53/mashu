@@ -1,4 +1,3 @@
-"""Conditions that expire on their own (specification 7)."""
 
 from __future__ import annotations
 
@@ -13,7 +12,6 @@ RULE = "name the timezone in every scheduled job"
 
 
 def test_a_window_longer_than_the_ceiling_is_a_permanent_claim_in_disguise(cur):
-    """Fourteen days is the whole of the discipline, so the refusal points elsewhere."""
     with pytest.raises(RefusedError, match="pain_report"):
         temporary.put_temporary(cur, content=WINDOW, actor="agent", days=30)
     with pytest.raises(RefusedError):
@@ -49,13 +47,6 @@ def test_a_scoped_session_still_sees_the_conditions_that_apply_everywhere(cur, s
 
 
 def test_a_condition_takes_room_in_its_own_share_while_it_lasts(cur, monkeypatch):
-    """Expiring on its own is why it needs no review, not why it is weightless.
-
-    It is pushed in the same opening as the memories, so it is weighed before
-    it is written. What it is weighed against is the temporary share, which
-    v3 8 gives it apart from the seats; the refusal therefore names the only
-    exits there are here, neither of which is a retirement.
-    """
     monkeypatch.setenv("MASHU_TEMPORARY_CAPACITY", "30")
     first = temporary.put_temporary(cur, content=WINDOW, actor="user", days=3)
     assert temporary.pushed_totals(cur)["always"] == pushed_cost([WINDOW])
@@ -72,12 +63,6 @@ def test_a_condition_takes_room_in_its_own_share_while_it_lasts(cur, monkeypatch
 
 
 def test_a_condition_does_not_spend_the_memory_seats(cur, monkeypatch):
-    """v2 counted it inside the seat count; v3 8 stops the two borrowing.
-
-    A fortnight of outages must not be able to refuse a rule that cost
-    something to learn, and the seats must not leave this week's outage
-    nowhere to go either.
-    """
     monkeypatch.setenv("MASHU_CAPACITY", "40")
     monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", "40")
     temporary.put_temporary(cur, content=WINDOW, actor="user", days=3)
@@ -98,7 +83,6 @@ def test_a_scoped_condition_weighs_on_that_scope(cur, scope_id):
 def test_a_condition_for_everywhere_is_weighed_against_the_heaviest_scope(
     cur, scope_id, monkeypatch
 ):
-    """It rides with every session, including the session already carrying most."""
     monkeypatch.setenv("MASHU_TEMPORARY_CAPACITY", "30")
     temporary.put_temporary(cur, content=WINDOW, actor="user", days=3, scope_id=scope_id)
 
@@ -109,7 +93,6 @@ def test_a_condition_for_everywhere_is_weighed_against_the_heaviest_scope(
 
 
 def test_a_condition_too_big_for_the_empty_share_is_not_told_to_wait(cur, monkeypatch):
-    """There is nothing standing to lapse, and waiting for it would be forever."""
     monkeypatch.setenv("MASHU_TEMPORARY_CAPACITY", "5")
     with pytest.raises(RefusedError, match="say this one shorter") as refused:
         temporary.put_temporary(cur, content=WINDOW, actor="user", days=3)
@@ -124,7 +107,6 @@ def test_an_expired_condition_stops_taking_up_room(cur):
 
 
 def test_a_banned_pattern_is_refused_here_too(cur):
-    """The entrance check does not care which table the text was heading for."""
     with pytest.raises(RefusedError):
         temporary.put_temporary(
             cur, content="use the SECRETMARKER7 path this week", actor="agent", days=1

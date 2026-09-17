@@ -1,27 +1,5 @@
 #!/usr/bin/env python3
-"""Put what the store holds in front of an action, before the action runs (30.1).
-
-A PreToolUse hook. It reads what is about to run -- the tool, and for a tool
-that stands for more than one judgement the command it was handed -- asks
-`mashu guard` whether anything is pinned to that judgement, and refuses the
-call once with what came back.
-
-Refusing rather than appending is the whole point. Section 6.1 put the read
-guarantee at session start and called its own first stage a pseudo-push
-depending on the agent's obedience. The failure that followed was neither
-stage: the opening had fired, the index had been delivered, and the decision
-came hours later with an answer already in hand from a file that is always in
-context and never says it is out of date. What is in context and what is in
-front of a judgement are different things.
-
-Fires once per action per compaction generation. Every occurrence would be a
-gate nobody reads, which is the failure 16.3 and 20.3 both name in their own
-screens, and the second delegation of a session is taken with the first one's
-answer still close. But "still close" is exactly what a compaction ends, so
-the count restarts there rather than running to the end of the session id.
-Every firing is logged by `mashu guard`, so how often this is right is a
-question the ledger can answer rather than one to reason about.
-"""
+"""Check tool actions against configured guard rules."""
 
 from __future__ import annotations
 
@@ -34,16 +12,12 @@ import sys
 import tempfile
 
 #: Which judgement a tool carries out, for the tools the client itself ships.
-#: A tool reached through an MCP server names an installation, not a client,
-#: and belongs in the file below.
 ACTIONS = {
     "Task": "delegate",
     "Agent": "delegate",
 }
 
-#: The rest of the table, kept outside the repository the way the
-#: banned-pattern list is: it names this installation's servers, hosts and
-#: wrappers.
+#: External tools and wrappers are configured per installation.
 ACTIONS_FILE = ".mashu-guard-actions"
 ACTIONS_ENV_VAR = "MASHU_GUARD_ACTIONS"
 
@@ -64,12 +38,7 @@ def actions_path() -> pathlib.Path | None:
 
 
 def rules() -> list[tuple[str, str, str]]:
-    """The configured rules as (subject, expression, judgement), in reading order.
-
-    One rule per line: judgement, subject, expression. A broken line is one
-    rule missing rather than a table refused. With no file the gate stands
-    where ACTIONS puts it, which is where it stood before the file existed.
-    """
+    """The configured rules as (subject, expression, judgement), in reading order."""
     path = actions_path()
     if path is None:
         return []
@@ -98,46 +67,24 @@ def rules() -> list[tuple[str, str, str]]:
 
 MARKERS = pathlib.Path(tempfile.gettempdir()) / "mashu-guard"
 
-#: What a completed compaction leaves in the transcript. Matched as a raw
-#: substring: the line is one JSON object per transcript entry and this key is
-#: written without spaces, so parsing every line to find it would cost the
-#: whole file for one boolean.
+#: What a completed compaction leaves in the transcript.
 COMPACTED = '"isCompactSummary":true'
 
 
 def generation(transcript: str | None) -> int:
-    """How many times this session has been compacted.
-
-    Firing once per session assumes the first firing is still in the context
-    when the second decision arrives. Compaction is exactly where that stops
-    being true: the session id does not change, so the marker survives, while
-    the conversation the guard wrote into is dropped. The gate then stays shut
-    over a context that no longer holds what it said, which is the failure
-    this hook exists to prevent, reintroduced by its own bookkeeping.
-
-    Counting compactions turns the marker into one per generation. A session
-    that has never been compacted is generation 0 and behaves as before.
-    """
+    """How many times this session has been compacted."""
     if not transcript:
         return 0
     try:
         with open(transcript, encoding="utf-8", errors="replace") as handle:
             return sum(1 for line in handle if COMPACTED in line)
     except OSError:
-        # An unreadable transcript is not evidence that nothing was dropped,
-        # but neither is it grounds to fire on every call. Hold generation 0
-        # and behave as this hook did before.
+        # If the transcript cannot be read, preserve the previous generation.
         return 0
 
 
 def action_for(event: dict) -> str | None:
-    """The judgement this call carries out, or nothing if it carries none.
-
-    The tool answers first; the command only for tools whose name is too
-    coarse, where listing a directory and submitting a cluster job arrive the
-    same way. Nothing is the ordinary answer: firing on calls the store holds
-    nothing about is how a gate stops being read.
-    """
+    """The judgement this call carries out, or nothing if it carries none."""
     tool = event.get("tool_name", "")
     configured = rules()
     if tool:
@@ -178,9 +125,7 @@ def main() -> int:
             timeout=20,
         )
     except (OSError, subprocess.SubprocessError):
-        # A guard that cannot run does not block the work. This is the one
-        # place that judgement is made, and it is made this way because the
-        # store being unreachable is not evidence about the decision at hand.
+        # A guard that cannot run does not block the work.
         return 0
 
     if done.returncode != 2 or not done.stdout.strip():

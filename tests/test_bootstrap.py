@@ -1,11 +1,3 @@
-"""What a session opens with (specification 6.1, v3 8).
-
-The v3 opening carries three shares that are refused at three separate
-entrances, so the counting is checked share by share as well as in total, and
-the task states are checked for the two things section 15 asks of them: that
-nothing dormant or closed is in there, and that nothing arrives without the
-date it was last confirmed.
-"""
 
 from __future__ import annotations
 
@@ -62,7 +54,6 @@ def test_a_rule_for_every_session_reaches_every_session(cur, scope_id):
 
 
 def test_a_scope_rule_waits_for_a_session_in_that_scope(cur, scope_id):
-    """Sending a scope's rules everywhere dilutes the layer everyone does read."""
     memories.remember(cur, content=LOCAL, actor="user", scope_id=scope_id, delivery="scope")
     elsewhere = scopes.create_scope(cur, name="somewhere else", actor="user")["scope_id"]
 
@@ -74,7 +65,6 @@ def test_a_scope_rule_waits_for_a_session_in_that_scope(cur, scope_id):
 
 
 def test_a_rule_held_at_the_act_gate_is_not_in_the_opening(cur, scope_id):
-    """That is the point of moving it there: it arrives at the decision, not before it."""
     memories.remember(
         cur,
         content=PINNED,
@@ -89,7 +79,6 @@ def test_a_rule_held_at_the_act_gate_is_not_in_the_opening(cur, scope_id):
 
 
 def test_a_pushed_row_carries_an_id_and_a_body_and_nothing_else(cur):
-    """Scaffolding in a fixed-size opening evicts the rules it surrounds."""
     memories.remember(cur, content=DISCIPLINE, actor="user")
     row = bootstrap.session_bootstrap(cur, actor="agent")["always"][0]
     assert set(row) == {"memory_id", "content"}
@@ -103,7 +92,6 @@ def test_the_conditions_of_the_week_come_with_the_opening(cur, scope_id):
 
 
 def test_a_candidate_waiting_is_worth_one_number(cur):
-    """The person has to learn the queue is not empty somewhere, and this costs a line."""
     assert bootstrap.session_bootstrap(cur, actor="agent")["pending"] == 0
 
     ledger.report_pain(
@@ -117,12 +105,6 @@ def test_a_candidate_waiting_is_worth_one_number(cur):
 
 
 def test_the_opening_reports_each_share_and_the_total(cur, scope_id, task):
-    """Three entrances, so three numbers and the sum of them (v3 8).
-
-    One number would say the opening fits while hiding which share is the one
-    under pressure, and no share can be relieved by the room another has
-    spare.
-    """
     memories.remember(cur, content=DISCIPLINE, actor="user")
     memories.remember(cur, content=LOCAL, actor="user", scope_id=scope_id, delivery="scope")
     temporary.put_temporary(cur, content=THIS_WEEK, actor="user", days=3)
@@ -138,7 +120,6 @@ def test_the_opening_reports_each_share_and_the_total(cur, scope_id, task):
 
 
 def test_a_temporary_context_no_longer_spends_the_memory_seats(cur, scope_id):
-    """v2 counted it inside the seat count; v3 gives it a room of its own (8)."""
     temporary.put_temporary(cur, content=THIS_WEEK, actor="user", days=3)
     got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
     assert got["memory_tokens"] == 0
@@ -148,20 +129,13 @@ def test_a_temporary_context_no_longer_spends_the_memory_seats(cur, scope_id):
 def test_an_opening_over_the_total_is_recorded_rather_than_quietly_served(
     cur, scope_id, task, monkeypatch
 ):
-    """Every share is refused at its own door, so the total cannot be exceeded.
-
-    Which is exactly why it is checked here. An invariant nobody observes is
-    not an invariant, and if one of the entrances ever stops holding, the
-    reading that says so has to exist somewhere other than in this comment.
-    """
     memories.remember(cur, content=DISCIPLINE, actor="user")
     monkeypatch.setenv("MASHU_TOTAL_CAPACITY", "10")
 
     got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
     assert got["capacity"] == 10
     assert got["over_budget"] is True
-    # Still whole: trimming would drop the standing rules the session opened
-    # with, which is the failure the ceiling exists to prevent.
+    # The opening is never trimmed when it exceeds its configured ceiling.
     assert len(got["always"]) == 1 and len(got["states"]) == 1
 
     cur.execute("SELECT detail FROM event_log WHERE event_type = 'bootstrap_over_capacity'")
@@ -176,11 +150,6 @@ def test_nothing_is_recorded_when_the_opening_fits(cur, scope_id, task):
 
 
 def test_the_state_of_current_work_arrives_under_the_date_it_was_confirmed(cur, task):
-    """A current state never wears the face of the present tense (v3 3.1).
-
-    The date is inside the delivered text, not beside it: a heading the client
-    is free to drop is not a presentation discipline, it is a hope.
-    """
     row = bootstrap.session_bootstrap(cur, actor="agent")["states"][0]
     assert set(row) == {"task", "heading", "content"}
     assert row["task"] == str(task["task"]["task_id"])[:8]
@@ -191,7 +160,6 @@ def test_the_state_of_current_work_arrives_under_the_date_it_was_confirmed(cur, 
 
 
 def test_a_task_whose_lease_ran_out_is_not_in_the_opening(cur, task):
-    """Silence is not completion, but it is not the present either (7)."""
     expire(cur, task["task"]["task_id"])
     got = bootstrap.session_bootstrap(cur, actor="agent")
     assert got["states"] == []
@@ -207,7 +175,6 @@ def test_a_closed_task_is_not_in_the_opening(cur, task):
 
 
 def test_the_states_arrive_in_a_fixed_order(cur, task):
-    """Most recent work first, and ties broken by id rather than by luck."""
     second = tasks.task_create(cur, project="mashu", name=OTHER_WORK, actor="agent")
     cur.execute(
         "UPDATE task SET last_activity_at = now() - interval '2 days' WHERE task_id = %s",
@@ -225,12 +192,6 @@ def test_the_states_arrive_in_a_fixed_order(cur, task):
 
 
 def test_work_belonging_to_another_scope_stays_there(cur, scope_id, task):
-    """A routed session is handed its own place's work, and the unplaced work.
-
-    A project nobody has put anywhere is not a project for nowhere: excluding
-    it would make it visible only to sessions that are themselves unrouted,
-    which is the inverse of useful.
-    """
     elsewhere = scopes.create_scope(cur, name="somewhere else", actor="user")["scope_id"]
     projects.create_project(cur, name="the other repository", actor="user", scope_id=elsewhere)
     away = tasks.task_create(
@@ -245,8 +206,7 @@ def test_work_belonging_to_another_scope_stays_there(cur, scope_id, task):
     over_there = bootstrap.session_bootstrap(cur, actor="agent", scope_id=elsewhere)
     assert {row["task"] for row in over_there["states"]} == {here, there}
 
-    # Unrouted: nothing to filter on, and the whole of it is inside the
-    # ceiling every one of those writes was refused against anyway.
+    # Unrouted sessions receive all projects; writes enforce the same ceiling.
     unrouted = bootstrap.session_bootstrap(cur, actor="agent")
     assert {row["task"] for row in unrouted["states"]} == {here, there}
 
@@ -266,12 +226,6 @@ def test_what_was_handed_over_is_logged(cur, scope_id):
 
 
 def test_an_opening_against_a_schema_the_code_has_outgrown_says_so(cur):
-    """The one reading every session takes without being asked.
-
-    `status` reports the same gap, but only to somebody who opens it — and
-    nobody did for the fifteen days a writer was failing on every call. The
-    opening is where it reaches a session that never thought to look.
-    """
     assert bootstrap.session_bootstrap(cur, actor="agent")["schema_pending"] == []
 
     cur.execute("DELETE FROM schema_migration WHERE filename = %s", ("0001_init.sql",))

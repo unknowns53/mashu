@@ -1,13 +1,4 @@
-"""Which scope a working directory belongs to.
-
-Nothing here infers. A directory nobody has mapped resolves to "no route",
-which is a different answer from "mapped to nothing on purpose", and the
-difference matters: only the first is a gap for a person to fill. Collapsing
-them would turn a prompt to write one route into a warning that never stops.
-
-Longest prefix wins, so a subdirectory can be split off from the tree around
-it without restating the tree.
-"""
+"""Resolve a working directory to its configured scope."""
 
 from __future__ import annotations
 
@@ -22,19 +13,7 @@ from mashu import events
 
 
 def normalise(path: str) -> str:
-    """One spelling per directory, so two routes cannot both look like the match.
-
-    Separator and case are part of the spelling. A working directory arrives
-    from os.getcwd(), and where that is spelled with backslashes it shares no
-    segment boundary with a route typed by hand, so resolution below reads one
-    long segment and only an exact equality can hit. Case is the same problem
-    reached from the other side: the same tree is reachable as C:\\Users and
-    c:/users, and either may be what a client hands over.
-
-    The failure both produce is a subdirectory answering "no route", which is
-    not visibly wrong from the far end. The opening still arrives; its scoped
-    half is empty, and an empty scoped half reads as a scope holding nothing.
-    """
+    """One spelling per directory, so two routes cannot both look like the match."""
     expanded = os.path.expanduser(str(path).strip())
     if os.name == "nt":
         return pathlib.PureWindowsPath(expanded).as_posix().rstrip("/").lower() or "/"
@@ -44,11 +23,7 @@ def normalise(path: str) -> str:
 def add_route(
     cur: psycopg.Cursor, *, path_prefix: str, scope_id: UUID | None, actor: str
 ) -> dict[str, Any]:
-    """Map a directory tree onto a scope, replacing any earlier mapping for it.
-
-    A route to nothing is an answer too, and the upsert is what keeps one
-    directory from carrying two contradictory answers at once.
-    """
+    """Map a directory tree onto a scope, replacing any earlier mapping for it."""
     prefix = normalise(path_prefix)
     cur.execute(
         """
@@ -71,12 +46,7 @@ def add_route(
 
 
 def remove_route(cur: psycopg.Cursor, *, path_prefix: str, actor: str) -> bool:
-    """Unmap a directory, recording who unmapped it.
-
-    The actor is the remover, not the row's author. Reading the deleted row's
-    created_by back into the event filed the removal under whoever wrote the
-    route, which is the one name the log can be sure did not do this.
-    """
+    """Unmap a directory, recording who unmapped it."""
     prefix = normalise(path_prefix)
     cur.execute("DELETE FROM route WHERE path_prefix = %s", (prefix,))
     if cur.rowcount == 0:
@@ -99,12 +69,7 @@ def all_routes(cur: psycopg.Cursor) -> list[dict[str, Any]]:
 
 
 def resolve(cur: psycopg.Cursor, cwd: str | None) -> tuple[UUID | None, bool]:
-    """The scope a directory maps to, and whether it was mapped at all.
-
-    Matching is on whole path segments. A plain string prefix would let
-    /a/project-old answer for the route /a/project, which is a different tree
-    with a name that happens to start the same way.
-    """
+    """The scope a directory maps to, and whether it was mapped at all."""
     if not cwd:
         return None, False
     here = normalise(cwd)

@@ -1,8 +1,4 @@
-"""The history that explains how a task got where its state says it is.
-
-Current State is replaced and delivered only while it is active. These rows
-are the durable account of the work, kept append-only and pulled by request.
-"""
+"""Store and read immutable task checkpoints, attempts, decisions, and artifact references."""
 
 from __future__ import annotations
 

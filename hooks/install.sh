@@ -1,9 +1,5 @@
 #!/bin/sh
-# One-time setup for a fresh clone:
-#   1. point git at hooks/ so pre-commit and commit-msg run
-#   2. create .git-banned-patterns if it does not exist yet
-#
-# Usage: ./hooks/install.sh
+# Set up Git hooks and create the local pattern file if needed.
 set -eu
 
 repo_root=$(git rev-parse --show-toplevel)

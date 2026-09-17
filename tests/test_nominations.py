@@ -1,4 +1,3 @@
-"""The queue that waits on a person (specification 5.1)."""
 
 from __future__ import annotations
 
@@ -37,11 +36,6 @@ def two_pains(cur, scope_id=None):
 
 
 def test_admitting_carries_the_evidence_across(cur):
-    """What the person approved was this rule standing on these pains.
-
-    A memory that quietly points somewhere else is a different decision from
-    the one that was made.
-    """
     first, second, nomination = two_pains(cur)
     memory = nominations.admit(cur, nomination["nomination_id"], actor="user", delivery="always")
 
@@ -71,7 +65,6 @@ def test_the_first_revision_names_where_the_rule_came_from(cur):
 
 
 def test_an_admission_may_reword_the_rule_and_choose_where_it_lands(cur, scope_id):
-    """The evidence proves a hole exists; how to say it is the person's call."""
     _, _, nomination = two_pains(cur, scope_id=scope_id)
     memory = nominations.admit(
         cur,
@@ -127,7 +120,6 @@ def test_a_decided_candidate_leaves_the_queue(cur):
 
 
 def test_putting_a_candidate_off_needs_a_reason_and_does_not_decide_it(cur):
-    """The note is all the next reader inherits, because nothing was settled."""
     _, _, nomination = two_pains(cur)
     with pytest.raises(MashuError, match="reason"):
         nominations.defer(cur, nomination["nomination_id"], actor="user", reason="   ")
@@ -162,11 +154,6 @@ def test_a_decided_candidate_cannot_be_put_off_afterwards(cur):
 
 
 def test_the_queue_hands_over_the_pains_and_not_their_ids(cur):
-    """The decision being asked for is whether these pains justify a seat.
-
-    An identifier answers nothing, and the person deciding cannot go and look
-    them up mid-keystroke.
-    """
     first, second, _ = two_pains(cur)
     waiting = nominations.pending_nominations(cur)[0]
     rows = waiting["evidence_rows"]
@@ -182,16 +169,8 @@ def test_a_kind_the_schema_does_not_know_is_refused_before_the_insert(cur):
         nominations.create_nomination(cur, content=HOLE, kind="a hunch", evidence=[], actor="agent")
 
 
-# --------------------------------------------------------------------------
 # an instruction an agent says it was given (5.1, path three)
-# --------------------------------------------------------------------------
 def test_a_carried_instruction_reaches_the_queue_and_stops_there(cur, scope_id):
-    """What is on file is that an agent said this was asked for.
-
-    That is a different fact from its having been asked for, and the ledger
-    row is worded as the first one because the reviewer is the only party who
-    can tell them apart.
-    """
     got = nominations.nominate_user_explicit(
         cur, content=HOLE, actor="the agent", scope_id=scope_id
     )
@@ -213,13 +192,6 @@ def test_a_carried_instruction_reaches_the_queue_and_stops_there(cur, scope_id):
 
 
 def test_the_same_instruction_carried_twice_queues_once_and_counts_twice(cur):
-    """One candidate, both tellings underneath it.
-
-    Two rows in the queue would cost two decisions and admit one rule. But the
-    second telling is not nothing either: how many times this was asked for is
-    part of what the reviewer is weighing, so it lands as evidence rather than
-    as a duplicate.
-    """
     first = nominations.nominate_user_explicit(cur, content=HOLE, actor="agent")
     second = nominations.nominate_user_explicit(cur, content=SAME_HOLE, actor="agent")
 
@@ -236,14 +208,6 @@ def test_the_same_instruction_carried_twice_queues_once_and_counts_twice(cur):
 
 
 def test_a_carried_instruction_reaches_the_queue_carrying_the_retirement_it_repeats(cur):
-    """The refutation travels with the candidate instead of eating it.
-
-    Swallowing the request kept refuted wording off the review screen, and
-    kept the refutation off the user's screen with it: the person who asked
-    was never told the rule had been withdrawn, or why. Filing it with the
-    tombstone attached keeps "only a person overrules a retirement" true and
-    makes it mean something, since the person now sees there is one.
-    """
     _, _, nomination = two_pains(cur)
     memory = nominations.admit(cur, nomination["nomination_id"], actor="user", delivery="always")
     withdrawn = "the tool refuses on its own now"
@@ -272,11 +236,8 @@ def test_a_banned_pattern_is_refused_before_anything_is_carried(cur):
     assert cur.fetchone()["n"] == 0
 
 
-# --------------------------------------------------------------------------
 # evidence that names nothing (FIX 7)
-# --------------------------------------------------------------------------
 def test_evidence_naming_a_row_that_does_not_exist_is_refused_in_words(cur):
-    """The array is a plain UUID[], so nothing in the column stops a made-up id."""
     invented = uuid4()
     with pytest.raises(MashuError, match=str(invented)):
         nominations.create_nomination(
@@ -285,12 +246,6 @@ def test_evidence_naming_a_row_that_does_not_exist_is_refused_in_words(cur):
 
 
 def test_the_database_refuses_the_same_thing_when_the_code_is_gone_round(cur, scope_id):
-    """The Python check is for the message; this is the check that counts.
-
-    A row whose evidence points at nothing looks exactly like a supported one
-    until somebody opens it, which is well past the moment the support was
-    supposed to exist.
-    """
     with pytest.raises(psycopg.errors.RaiseException, match="do not exist"):
         cur.execute(
             "INSERT INTO nomination (content, scope_id, kind, evidence, created_by) "
@@ -310,7 +265,6 @@ def test_the_database_refuses_a_hole_in_the_evidence_array(cur, scope_id):
 
 
 def test_adding_the_same_pain_twice_does_not_lengthen_the_evidence(cur):
-    """Evidence is what happened, not how often the store was told about it."""
     first = ledger.report_pain(
         cur, kind="incident", what="wrong path", prevention=HOLE, actor="agent"
     )
@@ -326,12 +280,6 @@ def test_adding_the_same_pain_twice_does_not_lengthen_the_evidence(cur):
 
 
 def test_evidence_is_not_added_to_a_candidate_somebody_already_decided(cur):
-    """A reviewer can admit it between the caller's match and this write.
-
-    Admission holds a different lock, so the race is real. What it must not do
-    is raise: the pain being reported is still a fact, and losing it to a
-    timing accident would be the worst of the possible answers.
-    """
     _, _, nomination = two_pains(cur)
     nominations.admit(cur, nomination["nomination_id"], actor="user", delivery="always")
     later = ledger.report_pain(

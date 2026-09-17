@@ -1,21 +1,4 @@
-"""Conditions that stop applying on their own (specification 7).
-
-The one part of v1 kept unchanged, because it never had the problem the rest
-had. A temporary context knows its own expiry at the moment it is written, so
-it needs no review to enter and no upkeep to leave: this week's maintenance
-window, tomorrow's reset quota. Nobody has to remember to withdraw it.
-
-The fourteen-day ceiling is the whole of the discipline on how long one lasts.
-A claim that wants longer is not temporary; it is a permanent claim wearing an
-expiry date so it can skip the evidence it would otherwise need, and the
-refusal says where it belongs instead.
-
-How many may stand at once is a second ceiling, and it is this share's own
-(v3 8). In v2 they sat inside the memory seat count, which meant a week of
-outages could refuse a rule that had cost something to learn. The room here is
-small and separate: neither side borrows from the other, and both are refused
-at their own door rather than trimmed at delivery.
-"""
+"""Manage expiring context conditions."""
 
 from __future__ import annotations
 
@@ -28,10 +11,7 @@ from mashu import capacity, config, events, redact
 from mashu.errors import RefusedError
 from mashu.tokens import pushed_cost
 
-#: Advisory lock class, in the namespace capacity.py opened. Classes 1 to 3
-#: there and in tasks.py are the seat check, the pain pipeline and the project
-#: state; this fourth one serialises the temporary share's own check, so two
-#: writers cannot both read room for the last of it.
+#: Advisory lock class, in the namespace capacity.py opened.
 LOCK_TEMPORARY = 4
 
 _TOO_LONG = (
@@ -46,11 +26,7 @@ SELECT scope_id, content, expires_at FROM temporary_context WHERE expires_at > n
 
 
 def _standing(cur: psycopg.Cursor) -> tuple[list[dict[str, Any]], dict[Any, list[dict[str, Any]]]]:
-    """The conditions still applying, in the two buckets they are weighed in.
-
-    Unscoped ones ride with every session, which is what 'always' means for a
-    memory and means here too.
-    """
+    """The conditions still applying, in the two buckets they are weighed in."""
     always: list[dict[str, Any]] = []
     scoped: dict[Any, list[dict[str, Any]]] = {}
     cur.execute(_UNEXPIRED)
@@ -65,13 +41,7 @@ def _cost(rows: list[dict[str, Any]]) -> int:
 
 
 def pushed_totals(cur: psycopg.Cursor) -> dict[str, Any]:
-    """What the standing conditions cost: everywhere, per scope, and at worst.
-
-    The same shape and the same reasoning as the memory totals. An unscoped
-    condition reaches every session, so it weighs on the heaviest scope's
-    opening as well as its own, and 'worst' is the number that has to stay
-    under the ceiling for the ceiling to mean anything.
-    """
+    """What the standing conditions cost: everywhere, per scope, and at worst."""
     always, scoped = _standing(cur)
     scopes = {scope_id: _cost(rows) for scope_id, rows in scoped.items()}
     always_cost = _cost(always)
@@ -84,17 +54,8 @@ def pushed_totals(cur: psycopg.Cursor) -> dict[str, Any]:
 
 
 def _check_room(cur: psycopg.Cursor, *, content: str, scope_id: UUID | None) -> None:
-    """Refuse a condition the share has no room for.
-
-    Nothing retires here and nothing is trimmed, so the refusal names the only
-    two exits there are: the next expiry, which needs nobody's decision, and
-    saying this one shorter. The expiry named is the first among the
-    conditions this one is actually weighed against — waiting on one that
-    weighs somewhere else would free no room here.
-    """
-    # Before reading, and held until the write commits, for the reason the
-    # seat check takes its lock: the gap between finding room and taking it is
-    # where two writers fit into the same room.
+    """Refuse a condition the share has no room for."""
+    # Lock before checking capacity and hold it through the write.
     cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (capacity.LOCK_NAMESPACE, LOCK_TEMPORARY))
 
     always, scoped = _standing(cur)
@@ -110,8 +71,7 @@ def _check_room(cur: psycopg.Cursor, *, content: str, scope_id: UUID | None) -> 
     if projected <= ceiling:
         return
 
-    # Nothing to wait for when this condition overruns the share on its own,
-    # and telling somebody to wait would be telling them to wait forever.
+    # A single oversized condition cannot become valid by waiting for expiry.
     waiting = ""
     if against:
         soonest = min(row["expires_at"] for row in against)
@@ -139,10 +99,7 @@ def put_temporary(
     if not verdict.allowed:
         raise RefusedError(verdict.reason())
 
-    # Pushed, so it is weighed before it is written (v3 8). Expiring on its
-    # own is why it needs no review; it is not a reason to be weightless in an
-    # opening it is being carried in. What it is weighed against is the
-    # temporary share alone, and the memories are weighed against theirs.
+    # Pushed, so it is weighed before it is written (v3 8).
     _check_room(cur, content=content, scope_id=scope_id)
 
     cur.execute(

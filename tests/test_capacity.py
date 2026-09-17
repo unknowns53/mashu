@@ -1,9 +1,3 @@
-"""The seat count (specification 5.2).
-
-The numbers are kept small with MASHU_CAPACITY rather than by writing long
-fixtures: what is being tested is which totals an addition is weighed against,
-and that is the same arithmetic at any ceiling.
-"""
 
 from __future__ import annotations
 
@@ -13,8 +7,7 @@ from mashu import capacity, config, memories, scopes, temporary
 from mashu.errors import RefusedError
 from mashu.tokens import pushed_cost
 
-# The same length each, so every one of them costs the same and the arithmetic
-# below can be read without running it.
+# Equal-length contents make the capacity arithmetic predictable.
 RULES = [f"keep the first rule about ordering ok {i}" for i in range(5)]
 NEW_RULE = "keep another rule about ordering here okay"
 CONDITION = "the shared queue is down for maintenance until Friday"
@@ -35,11 +28,6 @@ def test_an_empty_store_admits_anything_reasonable(cur, scope_id):
 
 
 def test_the_act_gate_is_never_full(cur, monkeypatch):
-    """Guard rows are not in the opening, so there is nothing to weigh them against.
-
-    This is what makes stepping down to guard a real way out of a refusal
-    rather than an equivalent refusal one command later.
-    """
     monkeypatch.setenv("MASHU_CAPACITY", "10")
     got = capacity.check_admission(cur, content=NEW_RULE * 20, delivery="guard")
     assert got["ok"] is True
@@ -47,7 +35,6 @@ def test_the_act_gate_is_never_full(cur, monkeypatch):
 
 
 def test_a_full_scope_refuses_the_next_rule_and_says_by_how_much(cur, scope_id, monkeypatch):
-    """A gate that only says no teaches nothing, and the reader is holding a rule."""
     monkeypatch.setenv("MASHU_CAPACITY", "400")
     fill(cur, scope_id, 5)
 
@@ -63,12 +50,6 @@ def test_a_full_scope_refuses_the_next_rule_and_says_by_how_much(cur, scope_id, 
 
 
 def test_an_always_rule_is_weighed_against_the_fullest_scope(cur, scope_id, monkeypatch):
-    """It rides with every session in turn, including the session that opens heaviest.
-
-    Weighing it against the always layer alone would admit rules that leave
-    the loaded scope's opening over the ceiling, and nothing downstream looks
-    at that again.
-    """
     monkeypatch.setenv("MASHU_CAPACITY", "400")
     light = scopes.create_scope(cur, name="a light scope", actor="user")["scope_id"]
     fill(cur, scope_id, 4)
@@ -88,7 +69,6 @@ def test_an_always_rule_is_weighed_against_the_fullest_scope(cur, scope_id, monk
 
 
 def test_a_rule_being_rewritten_is_not_competing_with_itself(cur, scope_id, monkeypatch):
-    """Without the exclusion every edit to a full store is refused for its own space."""
     monkeypatch.setenv("MASHU_CAPACITY", "400")
     fill(cur, scope_id, 5)
     subject = memories.scope_push_memories(cur, scope_id)[0]
@@ -124,12 +104,6 @@ def test_the_totals_separate_what_every_session_pays_from_what_one_scope_does(
 
 
 def test_the_always_layer_has_a_lower_ceiling_of_its_own(cur, scope_id, monkeypatch):
-    """It can have room in the opening and still be refused.
-
-    Without this the layer never overflows: it spends the headroom the scopes
-    were going to need, and they find the room gone without having been
-    refused anything.
-    """
     monkeypatch.setenv("MASHU_CAPACITY", "400")
     monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", str(pushed_cost(RULES[:1])))
     memories.remember(cur, content=RULES[0], actor="user")
@@ -160,13 +134,6 @@ def test_the_layer_refusal_names_the_door_a_scope_rule_does_not_have(cur, monkey
 
 
 def test_a_dated_condition_is_not_weighed_against_the_seats(cur, scope_id, monkeypatch):
-    """The seats count memories now, and nothing else (v3 8).
-
-    v2 weighed the temporary contexts here on the ground that they are pushed
-    in the same opening. The arithmetic was right and the room was wrong: a
-    fortnight of outages could refuse a rule that had cost something to learn,
-    which is one subsystem spending another's share.
-    """
     monkeypatch.setenv("MASHU_CAPACITY", "400")
     temporary.put_temporary(cur, content=CONDITION, actor="user", days=3, scope_id=scope_id)
     temporary.put_temporary(cur, content=CONDITION_EVERYWHERE, actor="user", days=3)
@@ -179,7 +146,6 @@ def test_a_dated_condition_is_not_weighed_against_the_seats(cur, scope_id, monke
 
 
 def test_a_scope_rule_is_not_weighed_against_the_layer_ceiling(cur, scope_id, monkeypatch):
-    """The lower ceiling is about what every session pays, not about size."""
     monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", "1")
     got = capacity.check_admission(cur, content=NEW_RULE, delivery="scope", scope_id=scope_id)
     assert got["ok"] is True

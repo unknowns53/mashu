@@ -1,6 +1,4 @@
 -- Mashu v2 schema (specification docs/mashu-v2.md, section 9).
--- Nine tables. No pgvector: the only matching this layer does is trigram
--- similarity between short pieces of prose, which pg_trgm carries.
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
@@ -12,8 +10,7 @@ CREATE TABLE scope (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- A route to NULL is an answer too: "this directory is deliberately not
--- captured". Only the absence of a row is a gap for a person to fill.
+-- NULL scope marks a directory as intentionally uncaptured.
 CREATE TABLE route (
     route_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     path_prefix TEXT NOT NULL UNIQUE,
@@ -22,11 +19,7 @@ CREATE TABLE route (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- One row per pain (4.1). Append-only: evidence that has been cited must
--- keep existing, so nothing here is ever updated or deleted. 'explicit' is a
--- person recording by their own hand and 'claimed' is an agent relaying an
--- instruction it says it was given; both are statements rather than pains,
--- which is why 4.1 keeps them out of the rederivation match.
+-- Reported pains; append-only (4.1).
 CREATE TABLE ledger (
     ledger_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     kind       TEXT NOT NULL CHECK (kind IN ('incident', 'friction', 'explicit', 'claimed')),
@@ -40,9 +33,7 @@ CREATE TABLE ledger (
 );
 CREATE INDEX ledger_prevention_trgm ON ledger USING gin (prevention gin_trgm_ops);
 
--- Dated observations, not knowledge (4.2). Expired rows are filtered on
--- read rather than deleted; anything cited as evidence has already been
--- frozen into the ledger by then.
+-- Dated, expiring observations (4.2).
 CREATE TABLE trace (
     trace_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     content    TEXT NOT NULL,
@@ -54,9 +45,7 @@ CREATE TABLE trace (
 );
 CREATE INDEX trace_content_trgm ON trace USING gin (content gin_trgm_ops);
 
--- A memory without evidence cannot exist (5): the array is the reason this
--- row is allowed to occupy a seat. NULL scope means the whole ledger; the
--- delivery checks below are the shape of section 6.
+-- Every memory must cite evidence (5); NULL scope means global delivery.
 CREATE TABLE memory (
     memory_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     content       TEXT NOT NULL,
@@ -76,7 +65,7 @@ CREATE TABLE memory (
 );
 CREATE INDEX memory_content_trgm ON memory USING gin (content gin_trgm_ops);
 
--- Every content a memory has ever carried, including its first. Append-only.
+-- Immutable content revisions for each memory.
 CREATE TABLE memory_revision (
     revision_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     memory_id   UUID NOT NULL REFERENCES memory(memory_id),
@@ -86,8 +75,7 @@ CREATE TABLE memory_revision (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Admission candidates (5.1). Nothing an agent writes reaches another
--- session without a human key-press, and this table is where it waits.
+-- Memory candidates awaiting human review (5.1).
 CREATE TABLE nomination (
     nomination_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     content         TEXT NOT NULL,
@@ -107,9 +95,7 @@ CREATE TABLE nomination (
 );
 CREATE INDEX nomination_content_trgm ON nomination USING gin (content gin_trgm_ops);
 
--- Conditions that stop applying on their own (7). The 14-day ceiling is a
--- constraint rather than advice: a longer claim is an indefinite claim
--- wearing an expiry, and belongs in the evidence pipeline instead.
+-- Expiring temporary conditions (7).
 CREATE TABLE temporary_context (
     context_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     content    TEXT NOT NULL,
@@ -132,13 +118,7 @@ CREATE TABLE event_log (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Evidence is checked where it is written, not where it is read. The array is
--- an untyped UUID[] rather than a foreign key because one row cites several
--- pains, so nothing in the column definition stops a fabricated or NULL id
--- from being stored. A row whose evidence points at nothing looks exactly like
--- a properly supported one until somebody opens it, which is the point at
--- which the support was supposed to be checked. The ledger is append-only and
--- never deleted, so an id that exists at write time exists for good.
+-- Validate evidence references on write.
 CREATE FUNCTION validate_evidence() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
     absent BIGINT;
@@ -164,7 +144,7 @@ CREATE TRIGGER memory_evidence_exists
     BEFORE INSERT OR UPDATE ON memory
     FOR EACH ROW EXECUTE FUNCTION validate_evidence();
 
--- Append-only is enforced by the database, not promised by the code.
+-- Enforce append-only tables in the database.
 CREATE FUNCTION refuse_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     RAISE EXCEPTION '% is append-only', TG_TABLE_NAME;

@@ -1,14 +1,3 @@
-"""Test fixtures.
-
-The suite runs against a real PostgreSQL, not a substitute. Most of what this
-layer promises lives in constraints, a trigger and transaction boundaries, so
-a fake database would test the wrong thing.
-
-There is no embedder fixture any more. v2 matches with pg_trgm, which the
-database already has, so the strings below are chosen for what trigram
-similarity does with them: near-identical text for "the same hole", text with
-no shared substrings for "a different one".
-"""
 
 from __future__ import annotations
 
@@ -28,7 +17,6 @@ ADMIN_DSN = os.environ.get("MASHU_ADMIN_DSN", "dbname=postgres")
 
 @pytest.fixture(scope="session")
 def test_dsn() -> str:
-    """A database built from the migrations, rebuilt once per run."""
     with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{TEST_DB}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{TEST_DB}"')
@@ -41,16 +29,7 @@ def test_dsn() -> str:
 
 @pytest.fixture(scope="session")
 def committing_dsn() -> str:
-    """A second database for tests that have to commit.
-
-    The CLI opens its own connection and commits, so its tests cannot be
-    wrapped in a transaction that is rolled back afterwards; neither can the
-    concurrency tests, where a second connection has to be able to see the row
-    the first one is competing for. Their rows therefore persist, and sharing a
-    database with the rolled-back tests would let committed rows turn up in
-    queries those tests expect to see only their own fixtures in. Separating
-    them keeps both kinds honest rather than making one defensive.
-    """
+    """A second database for tests that have to commit."""
     name = f"{TEST_DB}_committing"
     with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
@@ -62,11 +41,7 @@ def committing_dsn() -> str:
 
 @pytest.fixture
 def cur(test_dsn: str) -> Iterator[psycopg.Cursor]:
-    """A cursor whose transaction is rolled back when the test ends.
-
-    Rolling back is also the only way to clear event_log, since the trigger
-    refuses DELETE and TRUNCATE.
-    """
+    """A cursor whose transaction is rolled back when the test ends."""
     conn = psycopg.connect(test_dsn, row_factory=dict_row)
     try:
         with conn.cursor() as cursor:
@@ -86,14 +61,7 @@ def scope_id(cur: psycopg.Cursor):
 
 @pytest.fixture(autouse=True)
 def banned_patterns(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point the gate at a pattern nobody's real identity matches.
-
-    The repository's own list is the one the commit hooks read, and a test that
-    depends on it would either publish what it contains or start failing the
-    day somebody edits it. One invented marker is enough to prove the refusal
-    path, and pointing the environment variable here also proves the gate is
-    never silently unchecked during a run.
-    """
+    """Point the gate at a pattern nobody's real identity matches."""
     path = tmp_path / "banned-patterns"
     path.write_text("SECRETMARKER\\d+\n", encoding="utf-8")
     monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(path))

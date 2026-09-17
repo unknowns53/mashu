@@ -1,16 +1,4 @@
-"""The scope ledger.
-
-A scope is a place a rule belongs to, and only a person creates one. The
-consequence of guessing is not a near miss: a memory filed under a scope the
-sessions that need it never open is indistinguishable from a memory that was
-never written, and nothing about the result reads as wrong.
-
-The counts this module reports exist for the seat check (specification 5.2).
-`push_tokens` is what a session opening in the scope pays for that scope
-alone; `n_active` is everything homed there, guard rows included, because a
-guard row occupies a person's attention even though it costs the opening
-nothing.
-"""
+"""Manage memory scopes and their capacity totals."""
 
 from __future__ import annotations
 
@@ -26,11 +14,7 @@ from mashu.tokens import pushed_cost
 def create_scope(
     cur: psycopg.Cursor, *, name: str, summary: str | None = None, actor: str
 ) -> dict[str, Any]:
-    """Open a scope, refusing a name that is already taken.
-
-    Two scopes with the same name would split one body of knowledge in half
-    silently, so the collision is an error rather than a merge.
-    """
+    """Open a scope, refusing a name that is already taken."""
     if get_scope(cur, name) is not None:
         raise MashuError(f"scope '{name}' already exists")
     cur.execute(
@@ -48,11 +32,7 @@ def get_scope(cur: psycopg.Cursor, name: str) -> dict[str, Any] | None:
 
 
 def require_scope(cur: psycopg.Cursor, name: str) -> dict[str, Any]:
-    """The scope by that name, or an error that says which names exist.
-
-    A caller who mistyped a scope cannot see the ledger from where they are
-    standing, so the refusal carries it.
-    """
+    """The scope by that name, or an error that says which names exist."""
     row = get_scope(cur, name)
     if row is not None:
         return row

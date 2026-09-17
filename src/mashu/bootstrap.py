@@ -1,29 +1,4 @@
-"""What a session is handed when it opens (specification 6.1, v3 8).
-
-The whole of the reading path for knowledge, since v2 has no search over it.
-That is the trade the seat count pays for: if everything a session needs
-arrives before it asks, then the failure v1 could not fix — an agent not
-knowing that it does not know, and so never running the query — has nothing
-left to happen in.
-
-The rows carry an id and a body and nothing else. v1 measured two thirds of
-its opening going to scaffolding around one sentence each, and scaffolding in
-a fixed-size opening does not merely cost: it evicts the rules it surrounds.
-The id stays because a person reading a stale line needs something to type
-after `mashu retire`.
-
-v3 adds the current state of the active tasks, between the memories and the
-conditions of the week, and it is the one thing here an agent wrote without a
-person confirming it. So it arrives wearing a heading built by tasks.py: the
-date is inside the delivered text rather than beside it, because a field the
-client may drop is not a presentation discipline (v3 3.1). Dormant and closed
-tasks are not in this list at all — silence is neither completion nor currency.
-
-The three shares are counted apart and totalled. Nothing here enforces the
-total: each share is refused at its own entrance, so an opening over it means
-an entrance has stopped holding, and that is worth an event rather than a
-quiet delivery.
-"""
+"""Build the session payload from active memories, task state, and temporary context."""
 
 from __future__ import annotations
 
@@ -37,19 +12,7 @@ from mashu.tokens import pushed_cost
 
 
 def active_states(cur: psycopg.Cursor, scope_id: UUID | None = None) -> list[dict[str, Any]]:
-    """The active tasks whose state this session is entitled to, in a fixed order.
-
-    A project sits in at most one scope, so a routed session is handed the
-    work of its own place plus the work of every project nobody has placed —
-    the same rule a temporary context follows, and for the same reason: a
-    project that belongs nowhere would otherwise be visible only to sessions
-    that are themselves nowhere. A session with no scope is handed all of it,
-    because there is nothing to filter on and the whole of it is already
-    bounded by the ceiling every write was refused against.
-
-    Archived projects are not excluded. Archiving is a judgement about a
-    shelf; what stops a state being delivered is its own lease running out.
-    """
+    """The active tasks whose state this session is entitled to, in a fixed order."""
     rows = tasks.task_list(cur, activity="active")
     if scope_id is None:
         return rows
@@ -77,15 +40,10 @@ def session_bootstrap(
     cur.execute("SELECT count(*) AS n FROM nomination WHERE status = 'pending'")
     pending = cur.fetchone()["n"]
 
-    # Where the schema stands, delivered rather than looked up. `status` says
-    # the same thing, but only to somebody who opens it, and a store the code
-    # has outgrown answers its writers with a missing column and nothing else.
-    # This is the one reading every session takes without being asked.
+    # Where the schema stands, delivered rather than looked up.
     schema_pending = migrate.pending(cur)
 
-    # Counted apart because they are refused apart (v3 8). A single number
-    # would say the opening fits while hiding which entrance is the one under
-    # pressure, and none of the three can be relieved by the other two.
+    # Counted apart because they are refused apart (v3 8).
     memory_tokens = pushed_cost([row["content"] for row in always + scoped])
     state_rows = [
         {
@@ -114,11 +72,7 @@ def session_bootstrap(
         },
     )
     if over:
-        # An invariant nobody can observe is not an invariant (v3 15). The
-        # entrances are what keep the total down, so this row is the record
-        # that one of them let something past, not a decision about the
-        # opening: it is still delivered whole, since the alternative is
-        # dropping rules a session was opened with.
+        # An invariant nobody can observe is not an invariant (v3 15).
         events.record(
             cur,
             "bootstrap_over_capacity",
@@ -132,10 +86,7 @@ def session_bootstrap(
             },
         )
     if schema_pending:
-        # Recorded, not merely returned: the count of sessions that opened
-        # against a schema the code had already moved past is what says how
-        # long a broken writer went unnoticed, and it cannot be recovered
-        # afterwards from anything else.
+        # Count sessions opened against a newer schema to track migration lag.
         events.record(
             cur,
             "bootstrap_schema_behind",

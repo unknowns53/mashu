@@ -1,9 +1,4 @@
-"""Writing to the append-only log.
-
-There is no read-modify-write here and no update path, matching the trigger
-on the table. Every call adds one row describing something that already
-happened in the same transaction.
-"""
+"""Append-only event log helpers."""
 
 from __future__ import annotations
 

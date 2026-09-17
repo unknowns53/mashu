@@ -1,15 +1,4 @@
-"""The pain ledger (specification 4.1).
-
-Not knowledge. A ledger row is never delivered to anyone and never asserts
-anything to another session. It does two jobs: it records the first time
-something hurt, cheaply enough that recording it is not itself a cost, and it
-gives the second time something to collide with.
-
-The price of the standard in section 3 is that the first pain is paid in full.
-What the ledger buys back is that it is paid exactly once — the second
-occurrence arrives already proven, instead of being another isolated
-complaint.
-"""
+"""Record reported pains and connect them to matching evidence."""
 
 from __future__ import annotations
 
@@ -24,18 +13,10 @@ from mashu.errors import MashuError, RefusedError
 
 REPORTABLE_KINDS = ("incident", "friction")
 
-#: What shape the answer to a pain takes. A 'rule' is a sentence somebody has
-#: to be holding at the moment it applies, and it asks for a memory seat. A
-#: 'work' is a change made once, after which nothing has to be remembered —
-#: so it asks for nothing here, and belongs on a task instead (v3 9).
-#:
-#: The reporter chooses, and choosing 'work' is not a way of dodging review:
-#: the ledger row is written either way, and it is the ledger that counts what
-#: forgetting cost.
+#: What shape the answer to a pain takes.
 PREVENTION_KINDS = ("rule", "work")
 
-#: The kinds a person's own statement takes. Neither is a pain, so neither is
-#: reportable here and neither counts as the first half of a rederivation.
+#: The kinds a person's own statement takes.
 STATED_KINDS = ("explicit", "claimed")
 
 
@@ -51,20 +32,7 @@ def report_pain(
     prevention_kind: str = "rule",
     task_id: UUID | None = None,
 ) -> dict[str, Any]:
-    """Record one pain, show what it resembles, and nominate when it is proven.
-
-    `prevention` is the matching key throughout: what would have had to be
-    known. Two reports of the same hole converge on that sentence long before
-    they agree on what went wrong downstream of it.
-
-    `prevention_kind` says which shape that answer has. 'rule' is the v2 path
-    and the default, and it can end in a nomination. 'work' never nominates,
-    because there is no seat to ask for: what would have stopped the pain is a
-    change to make once, and the review desk has no verb for that. Where the
-    change goes instead is `task_id`, whose next actions it joins — and when
-    no task is named it goes nowhere, which the caller is told rather than
-    left to discover from an empty review queue.
-    """
+    """Record one pain, show what it resembles, and nominate when it is proven."""
     if kind not in REPORTABLE_KINDS:
         raise MashuError(
             f"kind must be one of {', '.join(REPORTABLE_KINDS)}; 'explicit' and 'claimed' are "
@@ -82,16 +50,10 @@ def report_pain(
     if not verdict.allowed:
         raise RefusedError(verdict.reason())
 
-    # Before the insert and before any matching. Two reports of one hole
-    # arriving together would each match only what the other had not yet
-    # written, and both would nominate: one rule, two rows in a queue whose
-    # whole premise is that it holds a few items a week.
+    # Before the insert and before any matching.
     cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (LOCK_NAMESPACE, LOCK_PAIN))
 
-    # Filing happens before the insert, because the ledger is append-only:
-    # where the work went is written into the row or it is not written at all.
-    # This is also the one place both advisory locks are held, and the order
-    # is pain then project state — nothing takes them the other way round.
+    # Store the task filing on the append-only ledger row.
     filed_task, filing_note = (None, None)
     if prevention_kind == "work":
         filed_task, filing_note = _file_work(
@@ -131,10 +93,7 @@ def report_pain(
     if verdict.malformed:
         result["malformed"] = verdict.malformed
 
-    # Work leaves before the three branches below, all of which decide
-    # something about a nomination. What it resembles is still returned, since
-    # a fix worth making twice is worth seeing the first one, but none of the
-    # branches has anything to say about a row that is not asking for a seat.
+    # Work leaves before the three branches below, all of which decide something about a nomination.
     if prevention_kind == "work":
         result["note"] = filing_note
         if filed_task is not None:
@@ -149,11 +108,7 @@ def report_pain(
 
     threshold = config.match_threshold()
 
-    # A pain that lands on retired knowledge does not nominate. The automatic
-    # path re-submitting refuted content would resurrect it with the reviewer
-    # never shown the refutation; what comes back instead is the retire
-    # reason, and overriding a retirement stays a human act (mashu remember),
-    # made with that reason in view.
+    # A pain that lands on retired knowledge does not nominate.
     best_tombstone = matches["tombstones"][0] if matches["tombstones"] else None
     if best_tombstone and best_tombstone["score"] >= threshold:
         result["tombstone_suppressed"] = True
@@ -164,13 +119,7 @@ def report_pain(
         )
         return result
 
-    # A pain that lands on a rule already being delivered is not the standard
-    # in section 3 being met once more; it is the specification's own
-    # falsification criterion firing (12). The rule was admitted, it is being
-    # pushed, and it still did not reach the moment it was needed — so the
-    # thing to fix is the delivery, and a second seat for the same sentence
-    # would fix nothing while looking like a fix. The ledger row stays, since
-    # that is the evidence the delivery is failing.
+    # Record a delivery failure when an active rule did not prevent the pain.
     delivered = matches["memories"][0] if matches["memories"] else None
     if delivered and delivered["score"] >= threshold:
         result["delivery_suspect"] = True
@@ -193,10 +142,6 @@ def report_pain(
         return result
 
     # A candidate already waiting for this rule is not a second candidate.
-    # Two rows in the queue saying the same thing cost a person two decisions
-    # and admit one rule, and the duplicate is invisible until it is read. The
-    # new pain goes underneath the waiting one instead, because how many times
-    # this has now happened is most of what the reviewer is weighing.
     waiting = match.similar_pending_nominations(cur, prevention, limit=1)
     if waiting and waiting[0]["score"] >= threshold:
         existing = nominations.add_evidence(
@@ -234,21 +179,7 @@ def report_pain(
 def _file_work(
     cur: psycopg.Cursor, *, prevention: str, task_id: UUID | None, actor: str
 ) -> tuple[UUID | None, str]:
-    """Put the change on the task that will make it, and say which happened.
-
-    Returns where it landed and the sentence the caller shows. A refusal from
-    the task side — closed, five next actions already, no room in the project
-    budget — must not take the pain down with it: the pain happened, and that
-    is the part a later reader cannot reconstruct. So the append runs inside a
-    savepoint and a refusal comes back as words, with the ledger row still to
-    be written behind it.
-
-    What is caught is a refusal, not a fault. A psycopg error from underneath
-    — a constraint nothing checked first, a trigger — is left to propagate and
-    take the transaction with it, because a store that answered a broken write
-    with 'the fix still needs a home' would be reporting the wrong thing in
-    the one case worth interrupting for.
-    """
+    """Put the change on the task that will make it, and say which happened."""
     unseated = (
         "recorded as work, so no nomination was created: a change made once is not a rule "
         "to be admitted. "
@@ -276,30 +207,7 @@ def _file_work(
 def _best_prior(
     cur: psycopg.Cursor, matches: dict[str, list[dict[str, Any]]], threshold: float, *, actor: str
 ) -> UUID | None:
-    """The ledger row a second friction can point back at, if there is one.
-
-    Only a friction or a trace qualifies (4.1). A friction reported as work
-    qualifies too: what it recorded is that somebody worked the same thing out
-    a second time, which is what a re-derivation is, and the reporter's view
-    that the answer was a code change is a view about the answer rather than
-    about whether the hole is real. It nominates nothing itself; it can be the
-    prior half of somebody else's.
-
-    An incident finished its own nomination when it was reported, and
-    'explicit' and 'claimed' rows are
-    somebody stating a rule, not anybody having worked something out twice.
-    Counting those would let a single look-up next to an existing statement
-    call itself a re-derivation, which is the standard in section 3 being met
-    by paraphrase.
-
-    What is filtered is the choice, not the display: the caller still shows
-    every match, because a reporter deciding whether this is the same hole
-    wants to see the statement too.
-
-    Ledger rows and traces compete on the same scale here. A trace that wins
-    is frozen on the spot, because the candidate it supports will outlive the
-    thirty days the trace has left.
-    """
+    """The ledger row a second friction can point back at, if there is one."""
     frictions = [row for row in matches["ledger"] if row["kind"] == "friction"]
     best_ledger = frictions[0] if frictions else None
     best_trace = matches["traces"][0] if matches["traces"] else None

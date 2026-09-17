@@ -1,9 +1,4 @@
-"""Apply the numbered SQL files in migrations/ in order.
-
-Plain SQL rather than a migration framework, because the schema is the
-specification's own artefact and reading it should not require translating an
-object model back into DDL.
-"""
+"""Apply pending SQL migrations."""
 
 from __future__ import annotations
 
@@ -29,12 +24,7 @@ def migration_files(directory: pathlib.Path | None = None) -> list[pathlib.Path]
 
 
 def applied_names(cur: psycopg.Cursor) -> set[str]:
-    """Filenames recorded as applied, without writing to find out.
-
-    A reader that only wants to know where the schema stands must not create
-    the ledger as a side effect, so a database with no ledger yet answers
-    'nothing applied' rather than gaining a table.
-    """
+    """Filenames recorded as applied, without writing to find out."""
     cur.execute("SELECT to_regclass('schema_migration') AS reg")
     if cur.fetchone()["reg"] is None:
         return set()
@@ -50,24 +40,13 @@ def applied(conn: psycopg.Connection) -> set[str]:
 
 
 def pending(cur: psycopg.Cursor, directory: pathlib.Path | None = None) -> list[str]:
-    """The migrations on disk this database has not applied, in order.
-
-    Takes a cursor rather than a connection so `status` can ask from inside
-    the transaction it already holds. The reading matters because code and
-    schema travel separately: a checkout that is ahead of the database leaves
-    tools that write the new columns failing on every call, with nothing on
-    the screen that says why.
-    """
+    """The migrations on disk this database has not applied, in order."""
     already = applied_names(cur)
     return [path.name for path in migration_files(directory) if path.name not in already]
 
 
 def migrate(conninfo: str | None = None, directory: pathlib.Path | None = None) -> list[str]:
-    """Apply every pending migration and return the filenames applied.
-
-    Each file runs in its own transaction together with its ledger row, so a
-    file that fails leaves no trace of itself.
-    """
+    """Apply every pending migration and return the filenames applied."""
     done: list[str] = []
     with connect(conninfo) as conn:
         already = applied(conn)

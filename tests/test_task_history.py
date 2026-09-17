@@ -1,4 +1,3 @@
-"""Task history, which records the work without becoming a second current state."""
 
 from __future__ import annotations
 
@@ -141,11 +140,6 @@ def test_a_stale_checkpoint_leaves_no_frozen_row(cur, task):
 
 
 def test_a_budget_refusal_leaves_no_frozen_row(cur, task, monkeypatch):
-    """The write has to grow the state, because that is what a refusal is for.
-
-    A ceiling already exceeded lets a shrinking write through, so a checkpoint
-    that dropped fields would be admitted and prove nothing about the freeze.
-    """
     tasks.task_create(cur, project="history", name="another active task", actor="agent")
     monkeypatch.setenv("MASHU_PROJECT_CAPACITY", "1")
 

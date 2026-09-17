@@ -1,11 +1,4 @@
-"""The closing screen: every open task on one list, one decision per keystroke.
-
-Closing stays the user's (specification 6). What this changes is the cost of
-saying so: the judgement is usually made days earlier and written into the
-state, and recording it then means reading that sentence back out, copying the
-id and retyping the outcome. That transcription is what this removes, and the
-outcome is still chosen per task — there is no key that closes the rest.
-"""
+"""Interactive screen for reviewing and closing open tasks."""
 
 from __future__ import annotations
 
@@ -22,7 +15,7 @@ ACTOR = "user"
 #: The three outcomes, on the letters they start with.
 _OUTCOME_KEYS = {"c": "completed", "a": "abandoned", "s": "superseded"}
 
-#: The lease, in the four cells the column has. Only open tasks reach here.
+#: The lease, in the four cells the column has.
 _ACTIVITY = {"active": "act", "dormant": "dorm"}
 
 _KEYS = (
@@ -66,10 +59,7 @@ def _date(value: Any) -> str:
 
 
 def _order(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Proposals first, standing ones over overtaken ones.
-
-    Within each group `task_list` has already ordered by last activity.
-    """
+    """Proposals first, standing ones over overtaken ones."""
 
     def rank(row: dict[str, Any]) -> int:
         proposal = row.get("proposal")
@@ -99,11 +89,7 @@ def _line(row: dict[str, Any], width: int) -> str:
 
 
 def _detail(row: dict[str, Any]) -> str:
-    """What is being decided about, under the list and above the keys.
-
-    The grounds are printed before the key that accepts them is pressed, not
-    after.
-    """
+    """What is being decided about, under the list and above the keys."""
     task = row["task"]
     head = f"  ── {_short(task['task_id'])}  {task['name']}"
     proposal = row.get("proposal")
@@ -141,12 +127,7 @@ def _help() -> None:
 
 
 def _reason(row: dict[str, Any], outcome: str) -> str | None:
-    """The grounds for a close, where an empty line is an answer.
-
-    Unlike the review sitting: 'completed' on your own work usually explains
-    itself. Where the standing proposal names this same outcome an empty line
-    keeps its grounds instead (`tasks.close`), and the prompt says so.
-    """
+    """The grounds for a close, where an empty line is an answer."""
     proposal = row.get("proposal")
     if proposal and proposal["outcome"] == outcome:
         prompt = f"  reason [⏎ keeps: {screen.clip(proposal['reason'], 48)}]: "
@@ -180,12 +161,7 @@ def _open_tasks(dsn: str | None, project: str | None) -> list[dict[str, Any]]:
 
 
 def run(dsn: str | None = None, *, project: str | None = None) -> int:
-    """Work the list: the open tasks, and one decision at a time against them.
-
-    Refetched after every decision rather than struck off in memory, because
-    somebody sits here for minutes with the whole of the open work in front of
-    them.
-    """
+    """Work the list: the open tasks, and one decision at a time against them."""
     at, note = 0, ""
     while True:
         try:

@@ -1,14 +1,3 @@
-"""The closing screen (v3 specification 6).
-
-Driven through the fallback the screens keep for when there is no terminal to
-put into single-key mode: one typed line stands in for one keystroke. What is
-tested is the dispatch, the transaction per decision and what the store is
-left holding — not the escape sequences a terminal would send.
-
-Each test builds its own database. The screen commits, so nothing here can be
-rolled back around it, and a list carrying another test's task would make the
-cursor's position depend on which tests ran.
-"""
 
 from __future__ import annotations
 
@@ -70,7 +59,6 @@ def task_row(dsn: str, task_id):
 
 
 def test_enter_closes_on_the_proposal_and_keeps_its_grounds(dsn, monkeypatch):
-    """The payoff: one keystroke for a judgement that was made days ago."""
     task_id = a_task(dsn, "drop the close-up tool", propose="completed")
     keys(monkeypatch, "enter", "q")
 
@@ -134,7 +122,6 @@ def test_a_typed_reason_is_what_is_recorded(dsn, monkeypatch):
 
 
 def test_an_overtaken_proposal_is_asked_about_before_it_is_taken(dsn, monkeypatch):
-    """The one shape where the sentence and the repository are known to disagree."""
     task_id = a_task(dsn, "drop the close-up tool", propose="completed")
     with db.transaction(dsn) as cur:
         state = tasks.task_get(cur, task_id)
@@ -239,7 +226,6 @@ def test_a_store_with_nothing_open_says_so_rather_than_painting_a_list(dsn, monk
 
 
 def test_the_screen_reads_the_dormant_tasks_too(dsn, monkeypatch):
-    """A proposal does not renew the lease, so the proposed ones arrive dormant."""
     task_id = a_task(dsn, "drop the close-up tool", propose="completed")
     with db.transaction(dsn) as cur:
         cur.execute(

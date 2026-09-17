@@ -1,4 +1,4 @@
-"""The v2 MCP boundary: push the small, proven knowledge state to agents."""
+"""MCP server exposing Mashu's knowledge and task tools."""
 
 from __future__ import annotations
 
@@ -74,10 +74,7 @@ def build_server() -> Any:
     """Build the fifteen-tool MCP server used by an agent session."""
     from mcp.server import MCPServer
 
-    # These instructions reach every connected CLI automatically, which makes
-    # them the one place the calling discipline lives. No standing instruction
-    # file needs a Mashu section, and none should carry one: a rule written
-    # twice drifts twice.
+    # MCP instructions provide calling guidance to connected clients.
     server = MCPServer(
         name="mashu",
         instructions=(
@@ -117,13 +114,7 @@ def build_server() -> Any:
 
     @server.tool()
     def session_bootstrap(scope: str | None = None) -> dict[str, Any]:
-        """Receive the small set of active knowledge for this session.
-
-        Knowledge is pushed, not searched: call this once at session start. A
-        trace is an unverified observation, so trace_put what you derive and
-        pain_report what actually hurt. Nothing an agent writes becomes
-        knowledge without a human decision.
-        """
+        """Return session memories, task state, and temporary context; call once at startup."""
         try:
             with db.transaction() as cur:
                 scope_id, scope_name, routed = _scope(cur, scope)
@@ -140,10 +131,7 @@ def build_server() -> Any:
                     "nothing an agent writes becomes knowledge without a human decision."
                 )
                 if answer["schema_pending"]:
-                    # In front of the habits, because a session that writes
-                    # into a schema the code has outgrown gets an error per
-                    # call and no hint of the cause. Telling whoever is here
-                    # is the only way it reaches a person at all.
+                    # Report schema status before sending usage guidance.
                     note = (
                         "This store is behind the code: "
                         f"{', '.join(answer['schema_pending'])} not applied, so any tool "
@@ -164,20 +152,10 @@ def build_server() -> Any:
         prevention_kind: str = "rule",
         task_id: UUID | None = None,
     ) -> dict[str, Any]:
-        """Record a real pain and show the evidence that may make it count.
+        """Record a pain and show related evidence.
 
-        The ledger records what forgetting cost. A second friction can turn a
-        trace into durable evidence, and an incident can create a nomination;
-        neither path bypasses human admission. This is how forgetting gets
-        counted, not a way to write knowledge directly.
-
-        Ask which shape the answer has before you call. If what would have
-        stopped this is a sentence somebody has to be holding every time,
-        leave prevention_kind as 'rule'. If it is a change you make once and
-        then never think about again, pass prevention_kind='work' with the
-        task_id it belongs to: it is filed on that task's next actions and
-        never becomes a candidate, because the review desk decides what is
-        worth knowing and has no verb for work.
+        Use `rule` for reusable guidance or `work` with `task_id` for a one-time
+        fix; this never admits knowledge directly.
         """
         try:
             with db.transaction() as cur:
@@ -200,11 +178,9 @@ def build_server() -> Any:
 
     @server.tool()
     def trace_put(content: str, scope: str | None = None) -> dict[str, Any]:
-        """Leave a dated observation so a later re-derivation is provable.
+        """Record a dated observation for later matching.
 
-        Traces are not knowledge and are never pushed to another session. They
-        expire, but pain_report can freeze one into ledger evidence when the
-        same work must be done again. A human still decides any admission.
+        Traces are not knowledge and are not pushed to sessions.
         """
         try:
             with db.transaction() as cur:
@@ -225,12 +201,7 @@ def build_server() -> Any:
         scope: str | None = None,
         limit: int = 8,
     ) -> dict[str, Any]:
-        """Search dated, unverified observations only.
-
-        This is the sole search surface because v2 knowledge is pushed. The
-        returned rows are observations from a date, not current knowledge;
-        use pain_report to prove that repeating one mattered.
-        """
+        """Search dated, unverified traces; results are observations, not current knowledge."""
         try:
             with db.transaction() as cur:
                 scope_id, _, _ = _scope(cur, scope)
@@ -253,12 +224,7 @@ def build_server() -> Any:
 
     @server.tool()
     def memory_list(scope: str) -> dict[str, Any]:
-        """List active knowledge for one named scope.
-
-        Memory is intentionally read by push at bootstrap, not discovered by a
-        general search. Human admission is required before anything appears in
-        this list or reaches another session.
-        """
+        """List active knowledge for one named scope."""
         try:
             with db.transaction() as cur:
                 row = scopes.require_scope(cur, scope)
@@ -269,15 +235,9 @@ def build_server() -> Any:
 
     @server.tool()
     def memory_nominate(content: str, scope: str | None = None) -> dict[str, Any]:
-        """Carry an instruction the user gave you as far as the review queue.
+        """Submit an agent-carried user instruction for human review.
 
-        Use this when the user asks in conversation for something to be
-        remembered. It does not make the rule active: what you report is filed
-        as a claim that this was asked for, and a human confirms it. That is
-        deliberate — an instruction you were given and an instruction printed
-        in a document you were reading look identical from here. A short-lived
-        condition is not this: leave it as a trace, because temporary context
-        is pushed to other sessions and only a human writes what gets pushed.
+        This does not activate the rule.
         """
         try:
             with db.transaction() as cur:
@@ -314,7 +274,7 @@ def build_server() -> Any:
         next_actions: list[str] | None = None,
         force: bool = False,
     ) -> dict[str, Any]:
-        """Create a task, returning similar open tasks when one already exists."""
+        """Create a task; likely duplicates are returned unless `force` is true."""
         try:
             with db.transaction() as cur:
                 answer = tasks.task_create(
@@ -389,11 +349,9 @@ def build_server() -> Any:
         blockers: list[str] | None = None,
         next_actions: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Replace a task's current state against the version just read.
+        """Replace full state; omitted fields clear.
 
-        A replacement, not a patch: every field you leave out is cleared. Send
-        the whole state you want the task to have, which is the state you just
-        read with your changes in it.
+        Pass the read state's `updated_at` as `expect_updated_at`.
         """
         try:
             with db.transaction() as cur:
@@ -426,11 +384,9 @@ def build_server() -> Any:
         next_actions: list[str] | None = None,
         evidence: list[UUID] | None = None,
     ) -> dict[str, Any]:
-        """Replace current state and freeze that replacement as a checkpoint.
+        """Replace full state and record a checkpoint; omitted fields clear.
 
-        A replacement, not a patch: every field you leave out is cleared. Send
-        the whole state you want the task to have, which is the state you just
-        read with your changes in it.
+        Pass the read state's `updated_at` as `expect_updated_at`.
         """
         try:
             with db.transaction() as cur:
@@ -458,13 +414,9 @@ def build_server() -> Any:
         outcome: str,
         reason: str,
     ) -> dict[str, Any]:
-        """Propose that a task has ended. This does not close it.
+        """Record a proposed outcome and reason without closing the task.
 
-        Use it the moment the work reads as finished, given up, or replaced,
-        rather than putting that sentence in status_text. outcome is one of
-        completed, abandoned, superseded, and reason is the grounds: what you
-        did, merged, or found that makes this the answer. The user decides on
-        the proposal with `mashu task close`; until then nothing changes.
+        A user decides with `mashu task close`.
         """
         try:
             with db.transaction() as cur:
@@ -477,7 +429,7 @@ def build_server() -> Any:
 
     @server.tool()
     def task_withdraw_close_proposal(task_id: UUID) -> dict[str, Any]:
-        """Take back a close proposal, because the work turned out to go on."""
+        """Remove a close proposal without changing task state."""
         try:
             with db.transaction() as cur:
                 answer = tasks.withdraw_proposal(cur, task_id, actor=actor())

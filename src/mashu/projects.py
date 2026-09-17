@@ -1,18 +1,4 @@
-"""Where work state belongs (v3 specification 5.1).
-
-A project is the home of tasks, usually one repository or one line of
-research. It is not a scope: a scope decides where a rule is delivered, a
-project decides which work a state belongs to, and one project starting with
-one main scope is as far as this goes until something measured asks for more.
-
-Only a person creates one. An agent that could open a project would open one
-whenever it failed to find the right name, and the split would be invisible
-from either half — which is the same failure `task_create` spends a trigram
-match to avoid one level down.
-
-This module knows nothing about tasks beyond counting them. Everything that
-reads or writes a task lives in tasks.py, which imports this one.
-"""
+"""Manage projects that own task state."""
 
 from __future__ import annotations
 
@@ -28,12 +14,7 @@ from mashu.errors import MashuError, RefusedError, UnknownProjectError
 def create_project(
     cur: psycopg.Cursor, *, name: str, actor: str, scope_id: UUID | None = None
 ) -> dict[str, Any]:
-    """Open a project, refusing a name already taken.
-
-    Two projects under one name would divide one body of work state without
-    anything reading as wrong, so the collision is an error rather than a
-    merge — the same call `create_scope` makes.
-    """
+    """Open a project, refusing a name already taken."""
     if not name or not name.strip():
         raise MashuError("a project needs a name: it is what tasks are filed under")
     verdict = redact.check(name)
@@ -76,9 +57,7 @@ def require_project(cur: psycopg.Cursor, project: UUID | str) -> dict[str, Any]:
     raise UnknownProjectError(f"no project '{project}' (open projects: {listed})")
 
 
-#: What every listing counts. active and dormant are the lease read against
-#: now() rather than stored columns (7), so they are computed here and cannot
-#: drift from what the delivery path computes for itself.
+#: What every listing counts.
 _COUNTS = """
 SELECT project_id,
        count(*) FILTER (WHERE status = 'open' AND now() <= active_until) AS n_active,
@@ -110,12 +89,7 @@ def list_projects(cur: psycopg.Cursor, *, include_archived: bool = False) -> lis
 
 
 def show_project(cur: psycopg.Cursor, project: UUID | str) -> dict[str, Any]:
-    """One project and what it is carrying, without the tasks themselves.
-
-    The tasks are `tasks.task_list`'s to hand over. Keeping the join out of
-    here is what keeps the import one-way, and a caller printing a project
-    screen is asking for both anyway.
-    """
+    """One project and what it is carrying, without the tasks themselves."""
     row = require_project(cur, project)
     cur.execute(f"SELECT * FROM ({_COUNTS}) c WHERE project_id = %s", (row["project_id"],))
     tally = cur.fetchone()
@@ -128,14 +102,7 @@ def show_project(cur: psycopg.Cursor, project: UUID | str) -> dict[str, Any]:
 
 
 def archive_project(cur: psycopg.Cursor, project: UUID | str, *, actor: str) -> dict[str, Any]:
-    """Take a project off the working list.
-
-    Archiving says nothing about the tasks underneath it, and deliberately
-    does not close them: closing is a judgement about a piece of work and this
-    is a judgement about a shelf. What stops an abandoned project's states
-    from being delivered is the lease running out on each of them (7), which
-    needs no help from here.
-    """
+    """Take a project off the working list."""
     row = require_project(cur, project)
     if row["archived_at"] is not None:
         raise MashuError(f"project '{row['name']}' was already archived")

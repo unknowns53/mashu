@@ -1,9 +1,3 @@
-"""Tasks, their one state, and the lease (v3 specification 5.2, 5.3, 7).
-
-The invariants of section 15 that Phase A can carry: an agent cannot close a
-task, silence does not close one either, a dormant state is never handed over
-as current truth, and no state is handed over without its date.
-"""
 
 from __future__ import annotations
 
@@ -44,12 +38,7 @@ def task(cur, project):
 
 
 def expire(cur, task_id):
-    """Age a task past its lease, which is all dormancy is (7).
-
-    Both columns move, because a fortnight of silence is what the state is
-    supposed to look like and now() is one value for the whole test's
-    transaction.
-    """
+    """Age a task past its lease, which is all dormancy is (7)."""
     cur.execute(
         """
         UPDATE task
@@ -66,9 +55,7 @@ def lease_of(cur, task_id):
     return cur.fetchone()
 
 
-# --------------------------------------------------------------------------
 # creation, and the match that keeps one piece of work in one place (5.2)
-# --------------------------------------------------------------------------
 def test_a_new_task_starts_open_active_and_dated(cur, task):
     assert task["task"]["status"] == "open"
     assert task["task"]["outcome"] is None
@@ -80,12 +67,6 @@ def test_a_new_task_starts_open_active_and_dated(cur, task):
 
 
 def test_a_task_that_reads_like_an_open_one_is_not_created(cur, task):
-    """The duplicate that happens is not two sessions at once.
-
-    It is a session a week later whose search missed the task it should have
-    continued, and a lock cannot see that one at all. So the match runs before
-    the insert, and what comes back is the task to continue.
-    """
     with pytest.raises(DuplicateTaskError) as raised:
         tasks.task_create(cur, project="mashu", name=SAME_WORK, actor="agent")
 
@@ -130,9 +111,7 @@ def test_a_banned_pattern_is_refused_before_the_task_exists(cur, project):
     assert cur.fetchone()["n"] == 0
 
 
-# --------------------------------------------------------------------------
 # the hard limits (5.3)
-# --------------------------------------------------------------------------
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -180,7 +159,6 @@ def test_a_list_entry_over_its_limit_is_refused(cur, task, field):
 
 
 def test_the_database_refuses_the_same_lengths_when_the_code_is_gone_round(cur, task):
-    """The Python check is for the message; this is the check that counts."""
     with pytest.raises(psycopg.errors.CheckViolation):
         cur.execute(
             "UPDATE task_state SET goal = %s WHERE task_id = %s",
@@ -196,15 +174,8 @@ def test_the_database_refuses_a_sixth_line_when_the_code_is_gone_round(cur, task
         )
 
 
-# --------------------------------------------------------------------------
 # replacement, not accumulation (5.3)
-# --------------------------------------------------------------------------
 def test_an_update_replaces_the_state_and_keeps_none_of_the_old_one(cur, task):
-    """A work diary is what this subsystem exists not to become.
-
-    A next action that survived because the caller did not mention it is a
-    line nobody wrote, standing in a state whose whole claim is currency.
-    """
     updated = tasks.task_update(
         cur,
         task["task"]["task_id"],
@@ -234,7 +205,6 @@ def test_an_update_replaces_the_state_and_keeps_none_of_the_old_one(cur, task):
 
 
 def test_a_replacement_written_against_a_replaced_state_is_rejected(cur, task):
-    """Last-writer-wins would delete a parallel session's work in silence."""
     stale = task["state"]["updated_at"]
     tasks.task_update(
         cur,
@@ -263,13 +233,10 @@ def test_a_replacement_written_against_a_replaced_state_is_rejected(cur, task):
     assert cur.fetchone()["status_text"] == "all seven tables are in"
 
 
-# --------------------------------------------------------------------------
 # the budget (5.3, 8)
-# --------------------------------------------------------------------------
 def test_a_state_that_would_overflow_the_share_is_refused_with_the_breakdown(
     cur, task, monkeypatch
 ):
-    """Nothing is trimmed and nothing falls through to search (8)."""
     tasks.task_create(
         cur, project="mashu", name=OTHER_WORK, goal="find the ternary window", actor="agent"
     )
@@ -298,7 +265,6 @@ def test_a_state_that_would_overflow_the_share_is_refused_with_the_breakdown(
 
 
 def test_a_dormant_task_stops_spending_the_share(cur, task, monkeypatch):
-    """The lease is one of the three exits the refusal names (7)."""
     quiet = tasks.task_create(
         cur, project="mashu", name=OTHER_WORK, goal="find the ternary window", actor="agent"
     )
@@ -344,9 +310,7 @@ def test_a_first_task_too_large_for_the_share_never_reaches_the_table(cur, proje
     assert cur.fetchone()["n"] == 0
 
 
-# --------------------------------------------------------------------------
 # the lease (7)
-# --------------------------------------------------------------------------
 def test_every_mutating_call_extends_the_lease(cur, task):
     task_id = task["task"]["task_id"]
 
@@ -375,7 +339,6 @@ def test_every_mutating_call_extends_the_lease(cur, task):
 
 
 def test_a_touch_is_the_whole_of_reactivation(cur, task):
-    """There is no transition to run, so reactivating is extending (7)."""
     task_id = task["task"]["task_id"]
     expire(cur, task_id)
     before = lease_of(cur, task_id)
@@ -390,7 +353,6 @@ def test_a_touch_is_the_whole_of_reactivation(cur, task):
 
 
 def test_a_dormant_state_is_handed_over_as_the_last_thing_anybody_confirmed(cur, task):
-    """Silence is not completion, and it is not currency either (7, 3.1)."""
     task_id = task["task"]["task_id"]
     expire(cur, task_id)
 
@@ -425,9 +387,7 @@ def test_the_search_reads_the_state_as_well_as_the_name(cur, task):
     assert [row["task"]["task_id"] for row in found] == [task["task"]["task_id"]]
 
 
-# --------------------------------------------------------------------------
 # ending, which is a person's judgement (6)
-# --------------------------------------------------------------------------
 def test_a_closed_task_refuses_every_write(cur, task):
     task_id = task["task"]["task_id"]
     closed = tasks.close(
@@ -484,9 +444,7 @@ def test_the_database_refuses_a_closure_without_an_outcome(cur, task):
         )
 
 
-# --------------------------------------------------------------------------
 # the history tables, which Phase B fills and nothing ever edits (5.4-5.6)
-# --------------------------------------------------------------------------
 HISTORY = [
     (
         "task_checkpoint",
@@ -517,7 +475,6 @@ HISTORY = [
 
 @pytest.mark.parametrize(("table", "insert", "params", "rewrite"), HISTORY)
 def test_the_history_refuses_to_be_rewritten(cur, task, table, insert, params, rewrite):
-    """The current state keeps nothing, so this is the only account there is."""
     cur.execute(insert, (task["task"]["task_id"], *params))
     with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
         cur.execute(rewrite)
@@ -536,19 +493,10 @@ def test_the_history_refuses_to_be_emptied(cur, table):
         cur.execute(f"TRUNCATE {table}")
 
 
-# --------------------------------------------------------------------------
 # what a delivered state says about itself (v3 5.3, 8)
-# --------------------------------------------------------------------------
 
 
 def test_a_delivered_state_names_the_field_each_line_belongs_to(cur, task):
-    """An unlabelled pile of paragraphs is delivered, but it is not read.
-
-    The labels live in the body rather than in a printer because the MCP
-    caller and the terminal are handed the same string, and the two fields a
-    reader is likeliest to confuse — a question nobody has answered and an
-    action somebody should take — differ in whether acting on them is right.
-    """
     text = tasks.state_text(task["task"]["name"], task["state"])
 
     assert text.splitlines()[0] == SCHEMA
@@ -559,15 +507,12 @@ def test_a_delivered_state_names_the_field_each_line_belongs_to(cur, task):
 
 
 def test_the_labels_are_counted_in_what_the_state_costs(cur, task):
-    """The trade is paid at the entrance, not hidden from the budget."""
     state = task["state"]
     name = task["task"]["name"]
     assert tasks.state_cost(name, state) == tasks.pushed_cost([tasks.state_text(name, state)])
 
 
-# --------------------------------------------------------------------------
 # the one append (v3 5.3, and ledger's work path)
-# --------------------------------------------------------------------------
 
 
 def test_an_append_adds_one_action_and_disturbs_nothing_else(cur, task):
@@ -592,7 +537,6 @@ def test_an_append_does_not_repeat_what_the_task_already_carries(cur, task):
 
 
 def test_an_append_is_refused_past_the_ceiling_a_replacement_would_meet(cur, task):
-    """The append cannot grow a state the replacement path could not write."""
     task_id = task["task"]["task_id"]
     current = tasks.task_get(cur, task_id)
     tasks.task_update(
@@ -615,11 +559,6 @@ def test_an_append_is_refused_on_a_task_a_person_closed(cur, task):
 
 
 def test_an_append_makes_a_replacement_prepared_before_it_stale(cur, task):
-    """Appending is not a way around the optimistic check, it is a write.
-
-    A session that read the state, then had an action appended underneath it,
-    must not be able to replace the state and drop that action silently.
-    """
     task_id = task["task"]["task_id"]
     read_at = tasks.task_get(cur, task_id)["state"]["updated_at"]
     tasks.append_next_action(cur, task_id, "add the check", actor="agent")
@@ -631,14 +570,6 @@ def test_an_append_makes_a_replacement_prepared_before_it_stale(cur, task):
 
 
 def test_a_store_over_its_ceiling_can_still_be_shrunk(cur, project, monkeypatch):
-    """The ceiling is an entrance, not a trap.
-
-    A store can be over without any write having put it there: the ceiling is
-    configuration and the cost is computed from how a state is delivered, so
-    both move underneath rows nobody touched. From there a flat refusal would
-    tell the caller to shrink a task while refusing every shrink, because the
-    other active tasks already exceed the ceiling on their own.
-    """
     for n in ("alpha", "beta", "gamma"):
         tasks.task_create(
             cur,
@@ -660,7 +591,6 @@ def test_a_store_over_its_ceiling_can_still_be_shrunk(cur, project, monkeypatch)
 
 
 def test_being_over_the_ceiling_is_not_a_licence_to_grow(cur, project, monkeypatch):
-    """Only the direction the ceiling wants is let through."""
     other = tasks.task_create(
         cur,
         project=project["project_id"],
@@ -683,7 +613,6 @@ def test_being_over_the_ceiling_is_not_a_licence_to_grow(cur, project, monkeypat
 
 
 def test_the_append_gates_the_whole_state_not_only_the_new_item(cur, project):
-    """Its docstring says the same entrances as a replacement, so prove it."""
     made = tasks.task_create(
         cur,
         project=project["project_id"],

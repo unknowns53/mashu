@@ -1,27 +1,4 @@
-"""Tasks and the one state each of them carries (v3 specification 5.2, 5.3, 7).
-
-This is the subsystem where an agent's writing reaches another session without
-a person confirming it, which v2 allowed nowhere. The relaxation is bounded in
-three directions and all three live in this module: size, because the store
-refuses a field over its limit rather than asking for brevity; time, because a
-state whose lease has run out stops being current; and presentation, because
-nothing here hands back a state without the date it was last confirmed.
-
-The current state is replaced, never appended to. A task that accumulated its
-own history would be a work diary, and a work diary is the artefact v1 proved
-a reader's budget cannot survive. What happened instead is kept as history
-(checkpoint, attempt, decision), which is written but never delivered.
-
-`append_next_action` is the one write that adds instead of replacing, and it
-is bounded by the same ceilings as a replacement, so it cannot grow a state a
-replacement could not have written. It exists for the caller that has one
-thing to say and has not read the rest — see its own docstring.
-
-active and dormant are not stored. They are `open` compared against the lease
-at the moment somebody reads, so there is no transition to run and no race
-between the two: reactivating is the same act as extending, and silence is
-neither completion nor currency.
-"""
+"""Manage tasks, current state, leases, and close proposals."""
 
 from __future__ import annotations
 
@@ -43,34 +20,19 @@ from mashu.errors import (
 )
 from mashu.tokens import pushed_cost
 
-#: The three ways a task can end (6). All three are a person's judgement;
-#: none of them is something an agent may infer from the work looking done.
+#: The three ways a task can end (6).
 OUTCOMES = ("completed", "abandoned", "superseded")
 
-#: Advisory lock class, in the namespace capacity.py opened. Classes 1 and 2
-#: there are the seat check and the pain pipeline; this third one serialises
-#: everything that reads the project state to decide whether to write it —
-#: the duplicate match before a create, and the budget sum before a replace.
-#: One class rather than two, because two locks taken in either order is a
-#: deadlock waiting for the first day both paths run at once.
+#: Advisory lock class, in the namespace capacity.py opened.
 LOCK_PROJECT_STATE = 3
 
-#: The ceilings 5.3 puts on one current state. Initial values, to be moved
-#: once there is measurement; the refusal names them so a caller never has to
-#: guess what it overran.
+#: The ceilings 5.3 puts on one current state.
 TEXT_LIMITS = {"goal": 300, "approach": 500, "status_text": 500}
 LIST_FIELDS = ("open_questions", "blockers", "next_actions")
 LIST_MAX_ITEMS = 5
 LIST_MAX_CHARS = 300
 
-#: What each field is called wherever a state is delivered. The labels belong
-#: to the body rather than to a printer, because the MCP `states[].content`
-#: and the terminal carry the same string: a reader who cannot tell an open
-#: question from a next action may act on the wrong one, and only one of those
-#: two is an instruction. They cost tokens, which is the trade — a state that
-#: is cheap and ambiguous is not cheaper than one that is read correctly.
-#: The fields a caller writes, in the order a state is read. `_STATE_KEYS`
-#: is this plus the two the store stamps itself.
+#: What each field is called wherever a state is delivered.
 EDITABLE_FIELDS = ("goal", "approach", "status_text", *LIST_FIELDS)
 
 STATE_LABELS = {
@@ -93,10 +55,7 @@ _STATE_KEYS = (
     "updated_by",
 )
 
-#: How a state is titled wherever it is shown. Section 3.1 says a current
-#: state is never delivered wearing the face of current truth, and a date in
-#: the caller's hands is not the same as a date in the sentence: the heading is
-#: built here so that no reading path can print the state without it.
+#: How a state is titled wherever it is shown.
 _HEADINGS = {
     "active": "State as of {date}",
     "dormant": "Last known state as of {date}",
@@ -109,9 +68,7 @@ CASE WHEN t.status = 'closed'    THEN 'closed'
      ELSE 'dormant' END
 """
 
-#: A standing close proposal, joined only into the two paths a person reads:
-#: one task and a list of them. The duplicate match and the search answer
-#: "which task is this", which a proposal has no bearing on.
+#: Join close proposals into task reads and task listings.
 _PROPOSAL_COLUMNS = """
        cp.outcome AS proposed_outcome, cp.reason AS proposed_reason,
        cp.state_at AS proposed_against, cp.proposed_at, cp.proposed_by
@@ -132,13 +89,7 @@ JOIN task_state ts ON ts.task_id = t.task_id
 
 
 def _floor() -> float:
-    """The lowest score worth fetching, on match.py's terms.
-
-    The two thresholds mean what they mean there: SHOW_THRESHOLD is worth a
-    glance, match_threshold() is where the code acts alone. Whichever is lower
-    is the retrieval floor, so a threshold tuned downward can never be hidden
-    by the fetch that feeds it.
-    """
+    """The lowest score worth fetching, on match.py's terms."""
     return min(config.SHOW_THRESHOLD, config.match_threshold())
 
 
@@ -165,13 +116,7 @@ def _gate_report(verdict: redact.Verdict) -> dict[str, Any]:
 
 
 def _check_limits(state: dict[str, Any]) -> None:
-    """Refuse an oversized field in words, before the CHECK constraint does.
-
-    The database enforces the same ceilings and that is the enforcement that
-    counts. This exists so a caller learns which field it overran and by how
-    much, instead of meeting a plpgsql exception with its transaction already
-    poisoned behind it.
-    """
+    """Refuse an oversized field in words, before the CHECK constraint does."""
     for field, limit in TEXT_LIMITS.items():
         value = state.get(field)
         if value and len(value) > limit:
@@ -209,14 +154,7 @@ def _state_of(**fields: Any) -> dict[str, Any]:
 
 
 def state_text(name: str, state: dict[str, Any]) -> str:
-    """What one task costs the opening: its name and its state, as delivered.
-
-    The name is counted with the state because a state arriving without the
-    name of the work it belongs to is not deliverable, so the two are one row
-    on the wire and one row in the budget. The field labels are counted with
-    it for the same reason: an unlabelled pile of paragraphs is delivered, but
-    it is not read as the state it is.
-    """
+    """What one task costs the opening: its name and its state, as delivered."""
     parts = [name]
     for field in ("goal", "approach", "status_text"):
         if state.get(field):
@@ -238,8 +176,7 @@ def heading(activity: str, updated_at: dt.datetime) -> str:
     return _HEADINGS[activity].format(date=updated_at.date().isoformat())
 
 
-#: Named so `_split` can keep them out of the task dict, whether or not the
-#: query that produced the row selected them.
+#: Proposal columns removed from the task dictionary in `_split`.
 _PROPOSAL_KEYS = (
     "proposed_outcome",
     "proposed_reason",
@@ -250,13 +187,7 @@ _PROPOSAL_KEYS = (
 
 
 def _proposal(row: dict[str, Any]) -> dict[str, Any] | None:
-    """The standing proposal that this task has ended, if an agent left one.
-
-    `stale` is what `state_at` is stored for: a state written after the
-    proposal is somebody having gone on working. It does not withdraw the
-    proposal, because whether the later work settles or contradicts it is the
-    judgement this subsystem does not make.
-    """
+    """The standing proposal that this task has ended, if an agent left one."""
     if not row.get("proposed_outcome"):
         return None
     return {
@@ -288,12 +219,7 @@ def _split(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def task_get(cur: psycopg.Cursor, task_id: UUID) -> dict[str, Any]:
-    """One task, its current state, and how current that state actually is.
-
-    `activity` and `heading` are not decoration. A dormant task's state is the
-    last thing anybody confirmed, not what is true now, and every path that
-    hands one over says which of the two it is holding.
-    """
+    """One task, its current state, and how current that state actually is."""
     cur.execute(f"{_TASK_ROW} WHERE t.task_id = %s", (task_id,))
     row = cur.fetchone()
     if row is None:
@@ -304,12 +230,7 @@ def task_get(cur: psycopg.Cursor, task_id: UUID) -> dict[str, Any]:
 def task_list(
     cur: psycopg.Cursor, *, project: UUID | str | None = None, activity: str = "active"
 ) -> list[dict[str, Any]]:
-    """Tasks in one activity, newest activity first.
-
-    'active' is the default because it is the only one that answers "what is
-    going on"; the rest are asked for by name. A dormant task is still open
-    and still searchable — what it has stopped doing is claiming the present.
-    """
+    """Tasks in one activity, newest activity first."""
     if activity not in ("active", "dormant", "open", "closed", "all"):
         raise MashuError(f"unknown activity '{activity}'")
     project_id = projects.require_project(cur, project)["project_id"] if project else None
@@ -331,9 +252,7 @@ def task_list(
     return [_split(row) for row in cur.fetchall()]
 
 
-# --------------------------------------------------------------------------
 # creation, and the match that stops a task being created twice (5.2)
-# --------------------------------------------------------------------------
 
 _CANDIDATES = f"""
 SELECT * FROM (
@@ -360,13 +279,7 @@ LIMIT %(limit)s
 def similar_open_tasks(
     cur: psycopg.Cursor, *, project_id: UUID, name: str, goal: str | None = None, limit: int = 5
 ) -> list[dict[str, Any]]:
-    """Open tasks in this project whose name or goal reads like this one.
-
-    Dormant tasks are included, and that is the point of matching on `open`
-    rather than on the lease: the task an agent is about to duplicate is
-    usually one nobody has touched for a fortnight, which is exactly why it
-    was not found by looking.
-    """
+    """Open tasks in this project whose name or goal reads like this one."""
     cur.execute(
         _CANDIDATES,
         {
@@ -394,19 +307,7 @@ def task_create(
     next_actions: list[str] | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    """Open a task, unless one that reads like it is already open here.
-
-    The match runs before the insert for the reason the nomination queue
-    matches before it files: what a lock prevents is two arrivals at once, and
-    the duplicate that actually happens arrives a week later, from a session
-    whose search for the existing task missed it. Two tasks for one piece of
-    work is not a tidiness problem — the state grows in both and neither is
-    ever whole.
-
-    `force` is how a caller says it looked and meant it anyway. The candidates
-    come back on the exception either way, because continuing one of them is
-    the right answer far more often than insisting.
-    """
+    """Open a task, unless one that reads like it is already open here."""
     home = projects.require_project(cur, project)
     name = (name or "").strip()
     if not name:
@@ -422,9 +323,7 @@ def task_create(
     _check_limits(state)
     verdict = _gate(name, *_texts(state))
 
-    # Held from before the match until the insert commits. Between reading
-    # "nothing like this exists" and writing the row is exactly where two
-    # sessions starting the same work both find nothing.
+    # Held from before the match until the insert commits.
     _lock(cur)
 
     candidates = similar_open_tasks(
@@ -483,9 +382,7 @@ def _texts(state: dict[str, Any]) -> list[str]:
     return [text for text in out if text]
 
 
-# --------------------------------------------------------------------------
 # search (5.2, 13.1)
-# --------------------------------------------------------------------------
 
 _SEARCH = f"""
 SELECT * FROM (
@@ -518,14 +415,7 @@ def task_search(
     include_closed: bool = False,
     limit: int = 10,
 ) -> list[dict[str, Any]]:
-    """Tasks whose name, goal or status reads like this.
-
-    The one pull path in a subsystem that otherwise pushes. It exists because
-    dormant and closed tasks leave the opening but not the store: what stopped
-    being delivered has to stay findable, or the lease would be a delete with
-    extra steps. Every row carries its activity and its date, so a hit on a
-    year-old task cannot be mistaken for a report of the present.
-    """
+    """Tasks whose name, goal or status reads like this."""
     project_id = projects.require_project(cur, project)["project_id"] if project else None
     cur.execute(
         _SEARCH,
@@ -540,9 +430,7 @@ def task_search(
     return [_split(row) for row in cur.fetchall()]
 
 
-# --------------------------------------------------------------------------
 # the budget (5.3, 8)
-# --------------------------------------------------------------------------
 
 _ACTIVE_STATES = """
 SELECT t.task_id, t.name, ts.goal, ts.approach, ts.status_text,
@@ -553,11 +441,7 @@ WHERE t.status = 'open' AND now() <= t.active_until
 
 
 def active_state_costs(cur: psycopg.Cursor) -> list[dict[str, Any]]:
-    """What every active task's state costs to push, heaviest first.
-
-    Across all projects, because the ceiling is on what one session is handed
-    and a session is handed the active states, not a project's worth of them.
-    """
+    """What every active task's state costs to push, heaviest first."""
     cur.execute(_ACTIVE_STATES)
     rows = [
         {"task_id": row["task_id"], "name": row["name"], "tokens": state_cost(row["name"], row)}
@@ -569,29 +453,7 @@ def active_state_costs(cur: psycopg.Cursor) -> list[dict[str, Any]]:
 def _check_budget(
     cur: psycopg.Cursor, *, task_id: UUID | None, name: str, state: dict[str, Any]
 ) -> None:
-    """Refuse a write that would push the Project State share over (5.3).
-
-    The task being written is taken out of the total and put back at its new
-    weight, so a state being rewritten never competes with itself. It is added
-    rather than replaced when it is dormant or not yet inserted, since a
-    successful write renews the lease and makes it active either way.
-
-    Nothing is trimmed and nothing falls through to search. The overflow is
-    resolved at the entrance, as it is for memories: something else shrinks,
-    goes quiet, or gets closed by the person who owns it.
-
-    A store can be over the ceiling without any write having put it there —
-    the ceiling is configuration, and what a state costs is computed from how
-    it is delivered, so both can move underneath rows nobody has touched. From
-    there a flat refusal is a trap rather than an entrance: if the other
-    active tasks already exceed the ceiling on their own, emptying this one
-    entirely still lands over, and the refusal would be telling the caller to
-    do the one thing it is refusing. So a write that leaves the store smaller
-    than it found it goes through even while the total is still over. It
-    cannot be used to grow anything — a smaller state is the direction the
-    ceiling wants — and every other write stays refused until the store is
-    back inside it.
-    """
+    """Refuse a write that would push the Project State share over (5.3)."""
     cost = state_cost(name, state)
     seated = active_state_costs(cur)
     others = [row for row in seated if row["task_id"] != task_id]
@@ -618,19 +480,11 @@ def _check_budget(
     )
 
 
-# --------------------------------------------------------------------------
 # the current state, and the lease (5.3, 7)
-# --------------------------------------------------------------------------
 
 
 def _require_open(cur: psycopg.Cursor, task_id: UUID) -> dict[str, Any]:
-    """The task row, locked, or an error saying a person has ended it.
-
-    FOR UPDATE because every caller reads the row, decides on what it read,
-    and writes. Closed is a refusal rather than a no-op: the write was going
-    to say something, and swallowing it would leave the writer believing the
-    state it is holding is the one being delivered.
-    """
+    """The task row, locked, or an error saying a person has ended it."""
     cur.execute("SELECT * FROM task WHERE task_id = %s FOR UPDATE", (task_id,))
     row = cur.fetchone()
     if row is None:
@@ -644,12 +498,7 @@ def _require_open(cur: psycopg.Cursor, task_id: UUID) -> dict[str, Any]:
 
 
 def _renew(cur: psycopg.Cursor, task_id: UUID) -> None:
-    """Extend the lease from this moment. Every sign of activity comes through here.
-
-    clock_timestamp() for the same reason updated_at uses it: now() is one
-    value for a whole transaction, and a renewal that does not move the
-    timestamp is indistinguishable from no activity at all.
-    """
+    """Extend the lease from this moment. Every sign of activity comes through here."""
     cur.execute(
         """
         UPDATE task
@@ -674,18 +523,7 @@ def task_update(
     blockers: list[str] | None = None,
     next_actions: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Replace the current state whole, and extend the lease by having done so.
-
-    A replacement, so a field left out is a field cleared: three next actions
-    that survived because the caller only mentioned two would be a state
-    nobody wrote, and the one thing a current state must not carry is a line
-    that is no longer true.
-
-    `expect_updated_at` has no default on purpose. There is no unconditional
-    write here, because the failure 5.3 names is not a lost update anybody
-    notices — it is a parallel session's work disappearing with nothing left
-    to say it was ever there.
-    """
+    """Replace the current state whole, and extend the lease by having done so."""
     _lock(cur)
     task = _require_open(cur, task_id)
     state = _state_of(
@@ -734,30 +572,7 @@ def task_update(
 def append_next_action(
     cur: psycopg.Cursor, task_id: UUID, text: str, *, actor: str
 ) -> dict[str, Any]:
-    """Add one next action, leaving every other field as it stands.
-
-    The only append in this module. It exists because the caller is a pain
-    being reported, not a session that has just read the state: a pain is
-    recorded by whoever was hurt at the moment it hurt, and asking that call
-    to carry the whole current state so it can replace it would mean the
-    report either invents the other five fields or does not happen.
-
-    There is no `expect_updated_at` because there is no version to be stale
-    against — this writes one item and reads none. The lock still serialises
-    it against a replacement, and the write moves `updated_at`, so a
-    replacement prepared before this ran is refused rather than silently
-    dropping what was appended.
-
-    Every entrance a replacement passes is passed here too: the gate, the list
-    ceiling, the project budget — over the whole state, not just the new item,
-    so this cannot carry a state a replacement would have been refused.
-
-    Reading the state back through `_state_of` normalises it, so an existing
-    item with surrounding whitespace is trimmed and an empty one is dropped.
-    The database allows both; nothing that writes through this module produces
-    them, and a state that has been through here is the state a replacement
-    would have written.
-    """
+    """Add one next action, leaving every other field as it stands."""
     text = (text or "").strip()
     if not text:
         raise MashuError("a next action needs something in it")
@@ -788,13 +603,7 @@ def append_next_action(
 
 
 def touch(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, Any]:
-    """Say the work is still current, without claiming anything about it.
-
-    Also the whole of reactivation (7). Because dormancy is derived rather
-    than stored, there is nothing to transition back: a task nobody has
-    touched for a fortnight and a task touched a moment ago differ only in
-    what now() is compared against.
-    """
+    """Say the work is still current, without claiming anything about it."""
     _require_open(cur, task_id)
     was = task_get(cur, task_id)["activity"]
     _renew(cur, task_id)
@@ -802,30 +611,16 @@ def touch(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, Any]:
     return task_get(cur, task_id)
 
 
-# --------------------------------------------------------------------------
 # ending, which is a person's judgement (6)
-# --------------------------------------------------------------------------
 
-#: What a proposed reason may run to. The same ceiling as a status_text,
-#: because it is the same kind of sentence written for the same reader.
+#: What a proposed reason may run to.
 PROPOSAL_REASON_MAX = 500
 
 
 def propose_close(
     cur: psycopg.Cursor, task_id: UUID, *, outcome: str, reason: str, actor: str
 ) -> dict[str, Any]:
-    """Say that this task looks ended, without ending it.
-
-    Section 6 reserves the deciding, not the saying: an agent reaches this and
-    not `close`, and nothing here touches task.status.
-
-    The reason is required, unlike the one on a close, because a person
-    reading a proposal was not there when it was written.
-
-    The lease is deliberately not renewed — a proposal claims the work has
-    stopped, so renewing would keep exactly the finished tasks at the front of
-    every opening. The closing screen reads the dormant ones too.
-    """
+    """Say that this task looks ended, without ending it."""
     if outcome not in OUTCOMES:
         raise MashuError(f"outcome must be one of {', '.join(OUTCOMES)}")
     reason = (reason or "").strip()
@@ -862,14 +657,7 @@ def propose_close(
 
 
 def withdraw_proposal(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, Any]:
-    """Take a proposal back, leaving the task exactly as it was.
-
-    Reached both ways: by an agent that has resumed work it had called
-    finished, and by a person who has read the proposal and disagreed. Neither
-    is a statement about the lease, so neither renews it; the closing screen
-    touches the task itself when the person's answer was that the work is
-    still live.
-    """
+    """Take a proposal back, leaving the task exactly as it was."""
     _require_open(cur, task_id)
     cur.execute(
         "DELETE FROM task_close_proposal WHERE task_id = %s RETURNING outcome",
@@ -890,24 +678,7 @@ def withdraw_proposal(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict
 def close(
     cur: psycopg.Cursor, task_id: UUID, *, outcome: str, actor: str, reason: str | None = None
 ) -> dict[str, Any]:
-    """End a task, on an outcome somebody chose.
-
-    The outcome is required because 'closed' on its own says only that nobody
-    is working on this, which is what dormancy already says and says
-    reversibly. Whether the work was finished, given up, or replaced is the
-    part a later reader cannot reconstruct.
-
-    The state that was current when the task ended is frozen as a final
-    checkpoint before the row closes (5.6), so what the work looked like at
-    the moment somebody judged it is not lost to the next replacement.
-
-    A standing proposal is answered by this and goes with it. Where the person
-    closed on the outcome that was proposed and gave no reason of their own,
-    the proposed grounds become the close reason: they are the sentence being
-    agreed with, and making the person retype it to keep it is the friction
-    the proposal was added to remove. A different outcome means they decided
-    against the proposal, and its reason is not theirs to be recorded under.
-    """
+    """End a task, on an outcome somebody chose."""
     if outcome not in OUTCOMES:
         raise MashuError(f"outcome must be one of {', '.join(OUTCOMES)}")
     _lock(cur)
@@ -947,17 +718,7 @@ def close(
 
 
 def reopen(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, Any]:
-    """Take back a closure, leaving no record of it on the task.
-
-    The outcome is cleared rather than kept as a former one: a task carrying
-    'completed' while open would be read by whichever of the two fields the
-    reader happened to look at. What it was closed as stays in the event log,
-    which is where the account of who decided what belongs anyway.
-
-    The lease is renewed with it, because a task reopened into an expired
-    lease would be dormant the instant it came back, and reopening is somebody
-    saying this work is current again.
-    """
+    """Take back a closure, leaving no record of it on the task."""
     cur.execute("SELECT * FROM task WHERE task_id = %s FOR UPDATE", (task_id,))
     task = cur.fetchone()
     if task is None:

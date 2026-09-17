@@ -1,16 +1,4 @@
-"""Memories: the only thing here that is delivered as true (specification 5).
-
-Everything in this table was admitted against evidence, and the schema will
-not hold a row without it. There is no type system and no version graph — a
-row, an append-only revision history, and a status. v1's three layers existed
-to manage a volume the standard in section 3 no longer produces.
-
-`remember` is the single path that reaches `active` without passing the
-nomination queue, and it exists for exactly one caller: a person at their own
-terminal. An agent cannot reach it, because an agent reporting that the user
-asked for something cannot tell that sentence apart from one printed in a
-document it was reading.
-"""
+"""Manage active memories, retirement reasons, and delivery scopes."""
 
 from __future__ import annotations
 
@@ -46,21 +34,7 @@ def remember(
     guard_action: str | None = None,
     override_retired: bool = False,
 ) -> dict[str, Any]:
-    """Write a rule straight into the active set, with the writing as its evidence.
-
-    The schema requires evidence and this path has none of the usual kind, so
-    the act of recording is itself entered in the ledger. That is not
-    bookkeeping theatre: a rule admitted this way is supported by a person
-    having decided it, and the ledger row is where that decision is kept.
-
-    Section 5.3 makes this the one path that may overrule a retirement, and
-    `override_retired` is where the person says they are doing so. Without it
-    a collision stops the write and hands back the reason — not to forbid
-    anything, but because the reason a claim was withdrawn is precisely what
-    somebody re-entering it needs, and nothing else would have shown it to
-    them. A retirement stepped over knowingly is a decision; stepped over
-    unknowingly it is the refutation quietly failing to do its one job.
-    """
+    """Write a rule straight into the active set, with the writing as its evidence."""
     _check_delivery(delivery, scope_id, guard_action)
     if delivery != "guard":
         guard_action = None
@@ -108,9 +82,7 @@ def remember(
     )
     detail: dict[str, Any] = {"delivery": delivery}
     if overruled:
-        # On the record, and deliberately on the memory's own creation event:
-        # a rule that stands because somebody set aside a refutation should
-        # say so at the place a later reader goes to ask where it came from.
+        # Record the retirement override on the memory's creation event.
         detail["overrides"] = [str(row["memory_id"]) for row in overruled]
     events.record(
         cur,
@@ -124,13 +96,7 @@ def remember(
 
 
 def _gate_report(verdict: redact.Verdict) -> dict[str, Any]:
-    """What the caller is told about the gate itself, beside the result.
-
-    'unchecked' always travels, because a missing list is not a pass. The
-    malformed count only appears when there is one, so a clean run stays
-    silent and a broken line in the list is not something the reader has to
-    notice the absence of.
-    """
+    """What the caller is told about the gate itself, beside the result."""
     report: dict[str, Any] = {"unchecked": verdict.unchecked}
     if verdict.malformed:
         report["malformed"] = verdict.malformed
@@ -152,17 +118,7 @@ def _require_active(cur: psycopg.Cursor, memory_id: UUID) -> dict[str, Any]:
 
 
 def retire(cur: psycopg.Cursor, memory_id: UUID, *, reason: str, actor: str) -> dict[str, Any]:
-    """Withdraw a rule, leaving the reason behind as the tombstone.
-
-    The reason is required because it is the whole of what a later reader
-    gets. Section 5.3 hands back why the claim was withdrawn and never the
-    claim itself, so a retirement with no reason silently deletes the warning.
-
-    The reason goes through the gate for the same reason: it is the one field
-    here that is delivered, coming back from every later match against this
-    tombstone, so an identifier written into it travels further than one
-    written into the content it replaces.
-    """
+    """Withdraw a rule, leaving the reason behind as the tombstone."""
     _require_active(cur, memory_id)
     if not reason or not reason.strip():
         raise MashuError("retiring needs a reason: the reason is what later readers are given")
@@ -224,19 +180,7 @@ def set_delivery(
     scope_id: UUID | None = None,
     clear_scope: bool = False,
 ) -> dict[str, Any]:
-    """Move a rule between the opening, one scope's opening, and the act gate.
-
-    Where a rule is delivered is a separate question from what it says, so
-    this leaves the content and its history alone. The seat check runs only
-    when the move lands in an opening; moving out to guard frees a seat and
-    can never need one.
-
-    A rule keeps the scope it carried unless `clear_scope` says otherwise,
-    because most moves are between deliveries and not between homes. Clearing
-    is what a misfiled guard rule needs: the gate serves a scoped rule only
-    inside that scope, so a rule about the act itself has to stop belonging to
-    the project it was first written in.
-    """
+    """Move a rule between the opening, one scope's opening, and the act gate."""
     current = _require_active(cur, memory_id)
     if clear_scope and scope_id is not None:
         raise MashuError("pass a scope or clear it, not both")
@@ -314,13 +258,7 @@ def active_memories(cur: psycopg.Cursor, *, scope_id: UUID) -> list[dict[str, An
 def guard_pins(
     cur: psycopg.Cursor, *, action: str, scope_id: UUID | None = None
 ) -> list[dict[str, Any]]:
-    """The rules that stand in front of one act.
-
-    Guard is orthogonal to scope: a pin with no scope fires wherever the act
-    is attempted, and a scoped pin fires only where its scope is in force. A
-    session that resolved to no scope therefore sees the unscoped pins alone,
-    which is what the NULL comparison below says.
-    """
+    """The rules that stand in front of one act."""
     cur.execute(
         """
         SELECT * FROM memory

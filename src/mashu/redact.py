@@ -1,21 +1,4 @@
-"""What must never enter the knowledge state, whoever wrote it.
-
-The store is not a private notebook. Its contents are handed to agents on
-every session and travel outward from there into whatever those agents
-produce, so a personal identifier that lands here has been published slowly
-rather than not at all. Nothing downstream is going to catch it: review reads
-for whether a claim is true, not for whether a home directory is spelled out
-in the middle of a path.
-
-The patterns are held outside the repository — the same file the git hooks
-read — because a list of the things that must not be committed is itself a
-list of those things. When the file is absent the check does not silently
-pass: it reports that it could not run, and the caller decides.
-
-Deliberately not a redactor. It refuses rather than rewrites. Editing content
-on its way in would leave text nobody chose, which is exactly the provenance
-this layer exists to keep honest.
-"""
+"""Check input text against configured banned patterns."""
 
 from __future__ import annotations
 
@@ -35,17 +18,11 @@ class Verdict:
 
     #: False when a pattern matched.
     allowed: bool
-    #: Index of the pattern that matched, never the text it matched. Reporting
-    #: the match would copy the identifier into a log, an exception message and
-    #: a terminal, which is three more places than it was in.
+    #: Index of the pattern that matched, never the text it matched.
     pattern_index: int | None = None
-    #: True when no pattern file was found. The content is allowed through, and
-    #: the caller is told the check did not run rather than told it passed.
+    #: True when no pattern file was found.
     unchecked: bool = False
-    #: How many lines of the list would not compile. A partly broken guard
-    #: guards partly, and the difference is invisible from the outcome: content
-    #: passes either way. Counting them is what lets the caller say the list
-    #: needs fixing instead of reading a pass as a clean bill of health.
+    #: How many lines of the list would not compile.
     malformed: int = 0
 
     def reason(self) -> str:
@@ -69,12 +46,7 @@ def patterns_path() -> pathlib.Path | None:
 
 
 def load() -> tuple[list[re.Pattern[str]], int] | None:
-    """The compiled list and the count of lines that would not compile.
-
-    Nothing when the file is absent. The count is returned rather than logged
-    because the only symptom of a line that failed to compile is content
-    getting through, which is also what success looks like.
-    """
+    """The compiled list and the count of lines that would not compile."""
     path = patterns_path()
     if path is None:
         return None
@@ -87,8 +59,8 @@ def load() -> tuple[list[re.Pattern[str]], int] | None:
         try:
             out.append(re.compile(line, re.IGNORECASE))
         except re.error:
-            # A malformed line is a broken guard, not a reason to stop guarding
-            # with the rest of the list.
+            # A malformed line is a broken guard, not a reason to stop guarding with the rest of
+            # the list.
             malformed += 1
             continue
     return out, malformed

@@ -1,10 +1,4 @@
-"""Estimating what a piece of content costs to push.
-
-An estimate, deliberately: the real count depends on the tokenizer of
-whichever agent receives the context, and the seat count only has to keep the
-bootstrap pushable. CJK characters run close to one token each; other scripts
-run nearer four characters to a token.
-"""
+"""Estimate the token cost of pushed content."""
 
 from __future__ import annotations
 
@@ -14,10 +8,7 @@ from collections.abc import Iterable
 
 _CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿ｦ-ﾟ]")
 
-#: What one pushed row costs beyond its content: the id and the framing that
-#: carries it. v1 measured its opening at twice the counted content because
-#: the scaffolding went uncounted; this constant is the correction, kept
-#: deliberately simple.
+#: Extra token cost per pushed row for its id and framing.
 ROW_OVERHEAD = 8
 
 

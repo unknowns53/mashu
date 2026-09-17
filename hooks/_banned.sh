@@ -1,7 +1,5 @@
 #!/bin/sh
 # Shared helper: materialise the active banned-pattern list into $BANNED_PATTERNS_FILE.
-# The list itself lives in .git-banned-patterns, which is gitignored on purpose:
-# committing the patterns would defeat their purpose.
 
 banned_load() {
     repo_root=$(git rev-parse --show-toplevel) || return 1

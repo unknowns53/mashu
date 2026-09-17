@@ -1,15 +1,3 @@
-"""The review sitting (specification 8.2).
-
-Driven through the fallback the sitting keeps for when there is no terminal to
-put into single-key mode: one typed line stands in for one keystroke. That is
-the same loop a person drives, one key further from the metal, so what is
-tested here is the dispatch, the transaction per decision and what the store
-is left holding — not the escape sequences a terminal would send.
-
-Each test builds its own database. The sitting commits, so nothing here can be
-rolled back around, and a queue that carried another test's candidate would
-make the cursor's position depend on which tests ran.
-"""
 
 from __future__ import annotations
 
@@ -86,7 +74,6 @@ def memory_rows(dsn: str) -> list[dict]:
 
 
 def test_opening_a_candidate_and_pressing_y_admits_it_where_it_belongs(dsn, monkeypatch, capsys):
-    """Enter opens the queue's first line, y admits, and enter takes the default."""
     nomination = a_candidate(dsn, RULE)
     keys(monkeypatch, "", "y", "")
 
@@ -116,7 +103,6 @@ def test_turning_one_down_keeps_the_reason_that_was_typed_for_it(dsn, monkeypatc
 
 
 def test_putting_one_off_hides_it_from_the_sitting_until_all_asks_for_it(dsn, monkeypatch, capsys):
-    """Putting off is not deciding: the row stays pending, out of the way."""
     nomination = a_candidate(dsn, RULE)
     keys(monkeypatch, "", "s", "waiting on the other team to answer")
 
@@ -140,7 +126,6 @@ def test_putting_one_off_hides_it_from_the_sitting_until_all_asks_for_it(dsn, mo
 
 
 def test_a_refused_admission_leaves_the_reader_on_the_same_candidate(dsn, monkeypatch, capsys):
-    """A decision the store refused is not a decision, and does not move the cursor."""
     nomination = a_candidate(dsn, RULE)
     monkeypatch.setenv("MASHU_CAPACITY", "1")
     keys(monkeypatch, "", "y", "", "q")
@@ -156,11 +141,8 @@ def test_a_refused_admission_leaves_the_reader_on_the_same_candidate(dsn, monkey
 def test_editing_before_admitting_keeps_the_wording_that_was_written(
     dsn, monkeypatch, capsys, tmp_path
 ):
-    """e admits what the reader wrote, not what the agent proposed."""
     a_candidate(dsn, RULE)
-    # The stand-in editor is a Python script run by the interpreter at hand,
-    # because a shebang script cannot be executed on Windows, and the paths go
-    # through shlex.split in posix mode, which eats backslashes.
+    # Run the editor through Python; Windows cannot execute a shebang script here.
     editor = tmp_path / "append_a_line.py"
     editor.write_text(
         "import pathlib, sys\n"
@@ -184,7 +166,6 @@ def test_editing_before_admitting_keeps_the_wording_that_was_written(
 
 
 def test_the_queue_names_every_candidate_before_any_of_them_is_opened(dsn, monkeypatch, capsys):
-    """The list is the screen a reader chooses from, so it has to carry them all."""
     first = a_candidate(dsn, RULE)
     second = a_candidate(dsn, OTHER)
     keys(monkeypatch, "q")
@@ -200,20 +181,13 @@ def test_the_queue_names_every_candidate_before_any_of_them_is_opened(dsn, monke
 def test_a_candidate_that_walks_back_a_retirement_says_so_above_its_evidence(
     dsn, monkeypatch, capsys
 ):
-    """The one thing on the page that can make the whole decision wrong.
-
-    A reader who admits a rule withdrawn last month, never having been shown
-    that it was, has been failed by the screen. The reason is printed; the
-    withdrawn body is not, because a tombstone answers with its reason (5.3).
-    """
     withdrawn = "the server runs the migration on boot now"
     with db.transaction(dsn) as cur:
         from mashu import memories
 
         kept = memories.remember(cur, content=OTHER, actor="user")
         memories.retire(cur, kept["memory_id"], reason=withdrawn, actor="user")
-        # friction, so the report files nothing of its own: the only
-        # candidate on the queue has to be the one carrying the collision.
+        # Keep the existing candidate so the repeated pain carries its conflict.
         pain = ledger.report_pain(
             cur, kind="friction", what="looked it up", prevention=RULE, actor="agent"
         )

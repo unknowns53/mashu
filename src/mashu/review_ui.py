@@ -1,20 +1,4 @@
-"""The review sitting: the queue on one screen, one candidate on the next.
-
-A decision is asked for one candidate at a time, and that part is not
-negotiable — an admission is a permanent seat, and seats are given out singly.
-What was wrong with printing them one after another is different: a reader who
-cannot see what is waiting cannot choose what to spend ten minutes on, and a
-page that scrolls away above the prompt cannot be read back. So the sitting is
-two screens and no more. The queue, everything pending on one line each, moved
-through with the arrows; and one candidate opened in a keystroke, its whole
-body and every pain under it, paged so that nothing is ever printed past the
-bottom of the terminal.
-
-There is no key that approves the rest. v1 had one because v1's volume needed
-one, and the reason it is not here is the same reason the batch machinery went
-out: at a few candidates a week, the thing that a bulk key saves time on is
-exactly the thing this queue exists to make somebody do.
-"""
+"""Interactive screen for reviewing pending memory nominations."""
 
 from __future__ import annotations
 
@@ -29,15 +13,11 @@ from typing import Any
 from mashu import db, nominations, screen, tokens
 from mashu.errors import MashuError
 
-# --------------------------------------------------------------------------
 # the screens
-# --------------------------------------------------------------------------
 _QUEUE_KEYS = "  ↑↓ move   ⏎ open   s put off   ? help   q leave"
 _ITEM_KEYS = "  y admit   e edit   r turn down   s put off   ↑↓ next   ← queue   ? help   q leave"
 
-#: What the keys do, for the one keystroke that asks. It lives a keystroke
-#: away rather than under every screen: a hint block long enough to explain
-#: itself is a hint block competing with the thing being read.
+#: What the keys do, for the one keystroke that asks.
 _HELP = """
   ⏎  open the candidate the cursor is on, and from inside one, admit it.
      ← goes back to the queue.
@@ -115,12 +95,7 @@ def _queue_screen(rows: list[dict[str, Any]], at: int, hidden: int, keys: str) -
 
 
 def _item_text(row: dict[str, Any], place: int, total: int) -> str:
-    """One candidate as a page of its own, with the pains it rests on under it.
-
-    The evidence is on the same page as the body rather than a keystroke away,
-    because the question being asked is not whether the sentence is true; it
-    is whether these particular pains are worth a permanent seat.
-    """
+    """One candidate as a page of its own, with the pains it rests on under it."""
     label = f" {place} of {total} "
     across = screen.text_width()
     cost = tokens.pushed_cost([row["content"]])
@@ -134,12 +109,7 @@ def _item_text(row: dict[str, Any], place: int, total: int) -> str:
         lines.extend([screen.wrap(f"(put off earlier: {row.get('defer_reason') or ''})"), ""])
     lines.extend([screen.wrap(row["content"]), ""])
 
-    # Above the evidence, not below it. This is the one thing on the page that
-    # can make the whole candidate the wrong decision, and a reader who admits
-    # a rule that was withdrawn last month, without ever being shown that it
-    # was, has been failed by the screen rather than by their own judgement.
-    # The retired body is not printed: the reason is what a tombstone answers
-    # with (5.3), and the wording beside it here is the candidate's own.
+    # Above the evidence, not below it.
     for conflict in row.get("conflict_rows", []):
         retired = conflict.get("retired_at")
         when = retired.date().isoformat() if isinstance(retired, datetime) else str(retired or "")
@@ -159,9 +129,7 @@ def _item_text(row: dict[str, Any], place: int, total: int) -> str:
     return "\n".join(lines)
 
 
-# --------------------------------------------------------------------------
 # carrying one decision into the store
-# --------------------------------------------------------------------------
 def _editor_text(content: str) -> str:
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
     command = shlex.split(editor) or ["vi"]
@@ -181,11 +149,7 @@ def _editor_text(content: str) -> str:
 
 
 def _delivery(row: dict[str, Any]) -> tuple[str, str | None]:
-    """Where the admitted memory is delivered from, asked once, at admission.
-
-    The default is the narrowest place it can live: its own scope where it has
-    one, and everywhere only when it has none.
-    """
+    """Where the admitted memory is delivered from, asked once, at admission."""
     print("delivery: enter for the default, or 'g ACTION' for a guard", flush=True)
     try:
         answer = input("> ").strip()
@@ -199,14 +163,7 @@ def _delivery(row: dict[str, Any]) -> tuple[str, str | None]:
 
 
 def _admit(dsn: str | None, row: dict[str, Any], *, edit: bool = False) -> str:
-    """Admit one candidate in a transaction of its own.
-
-    One transaction per decision is what lets a reader stop anywhere: what is
-    behind them is committed, and a sitting does not have to be finished to
-    have been worth starting. That only holds if a refusal stops the decision
-    and not the sitting, so what the store declines to do comes back as
-    something to say. Returns that, empty when it simply worked.
-    """
+    """Admit one candidate in a transaction of its own."""
     content = row["content"]
     try:
         if edit:
@@ -222,10 +179,7 @@ def _admit(dsn: str | None, row: dict[str, Any], *, edit: bool = False) -> str:
                 content=content,
             )
     except MashuError as refusal:
-        # A capacity refusal names its own way out (retire something, or step
-        # it down to guard); the sitting continues either way, and the reader
-        # stays on the candidate rather than finding themselves one further on
-        # with nothing recorded behind them.
+        # Keep the candidate selected when admission is refused.
         return f"  {refusal}"
     return ""
 
@@ -249,9 +203,7 @@ def _queue(dsn: str | None, show_deferred: bool) -> tuple[list[dict[str, Any]], 
     return rows, hidden
 
 
-# --------------------------------------------------------------------------
 # a sitting
-# --------------------------------------------------------------------------
 def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
     """Work the queue: the list, one candidate at a time, decisions as they are made."""
     rows, hidden = _queue(dsn, show_deferred)
@@ -285,9 +237,7 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
             return 0
 
         if reading and key in ("space", "pagedown"):
-            # Read on where a candidate is longer than the screen. Space also
-            # steps to the next candidate where it is not, because in both
-            # cases it means carry on; the page keys stay on the page.
+            # Read on where a candidate is longer than the screen.
             if more:
                 back.append(scroll)
                 scroll = more
@@ -345,8 +295,7 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
         else:
             continue
 
-        # A decision the store refused is not a decision: the queue is not
-        # re-read and the reader keeps their place, with the refusal under it.
+        # Keep the current item selected when a decision is refused.
         if note:
             continue
         rows, hidden = _queue(dsn, show_deferred)

@@ -1,10 +1,3 @@
-"""The human command line (specification 8.2).
-
-These run against the committing database, because the CLI opens its own
-connection and commits: there is no transaction for the test to roll back
-around it. Nothing here drives a terminal — the interactive review sitting is
-out of scope, and every path it uses is reachable through a flag.
-"""
 
 from __future__ import annotations
 
@@ -19,9 +12,7 @@ from mashu.migrate import migrate
 
 ADMIN_DSN = os.environ.get("MASHU_ADMIN_DSN", "dbname=postgres")
 
-# Each test writes to a database the others also write to, so the strings are
-# kept mutually dissimilar: a trigram match across tests would make one test's
-# tombstone or pending candidate answer another test's report.
+# Keep test strings dissimilar to prevent cross-test trigram matches.
 RULE = "keep the deployment order in the runbook rather than in anyone's head"
 QUOTA = "the shared queue resets its quota at midnight, not at the hour"
 WITHDRAWN_RULE = "compile the extension against the vendored headers, never the system ones"
@@ -35,14 +26,10 @@ PREVENTED = "read the exporter's manifest before trusting the row count it print
 DEFERRED = "name the branch after the ticket, so a stale checkout tells on itself"
 CURRENT_WORK = "wire the project state into the opening"
 
-#: A hexadecimal string no printed id can begin with: the ninth character of a
-#: UUID is always a dash, so twelve hexadecimal digits match nothing, whatever
-#: the store happens to hold.
+#: A UUID prefix cannot contain twelve consecutive hex digits; position nine is a dash.
 NOWHERE = "ffffffffffff"
 
-#: Two ids that agree for four characters and part at the fifth. Real ids are
-#: random, so a collision cannot be arranged by writing rows through the
-#: command line; these are seeded directly to get one.
+#: Two ids that agree for four characters and part at the fifth.
 TWIN_A = "abcd0001-0000-4000-8000-00000000000a"
 TWIN_B = "abcd0002-0000-4000-8000-00000000000b"
 
@@ -155,11 +142,6 @@ def test_command_help_states_runtime_constraints(path, needles, capsys):
 
 
 def test_a_pinned_rule_holds_the_act_and_lets_go_when_it_is_unpinned(run):
-    """The gate's contract is the exit code, which is what the hook reads.
-
-    Two means a rule was put in front of this act and the call should be made
-    again having read it; zero means there was nothing to say.
-    """
     _, out, _ = run("remember", RULE)
     memory_id = remembered_id(out)
 
@@ -228,7 +210,6 @@ def test_a_candidate_can_be_turned_down_and_needs_a_reason_to_be(run):
 
 
 def test_a_candidate_put_off_is_out_of_the_listing_until_all_asks_for_it(run, committing_dsn):
-    """Deferral is written by the sitting, so the listing is what is checked here."""
     run("pain", "--kind", "incident", "--what", "guessed at it", "--prevention", DEFERRED)
     _, out, _ = run("review", "--list")
     nomination_id = pending_id(out, DEFERRED)
@@ -250,14 +231,12 @@ def test_a_candidate_put_off_is_out_of_the_listing_until_all_asks_for_it(run, co
     assert nomination_id in out
     assert "deferred: the owner of that runbook is away" in out
 
-    # Naming it directly still works: putting something off is not a decision,
-    # so it does not put the candidate out of reach.
+    # A deferred candidate remains addressable by id.
     code, out, _ = run("review", "--decline", nomination_id, "--reason", "answered elsewhere")
     assert code == 0 and out.startswith("declined")
 
 
 def test_a_dated_condition_is_written_by_the_command_line_and_nowhere_else(run):
-    """Temporary context is pushed, so only a person writes it (7)."""
     code, out, _ = run("remember", "the build host is down until Thursday", "--until", "3d")
     assert code == 0 and out.startswith("temporary")
 
@@ -275,11 +254,6 @@ def test_a_dated_condition_is_written_by_the_command_line_and_nowhere_else(run):
 
 
 def test_the_work_that_is_current_is_printed_under_its_date(run, committing_dsn):
-    """The date is part of the delivered line, on the screen as in the tool (v3 3.1).
-
-    A reader who cannot see how old a state is has no way to know it needs
-    checking against the repository before being believed.
-    """
     with db.transaction(committing_dsn) as cur:
         projects.create_project(cur, name="the command line", actor="user")
         task = tasks.task_create(
@@ -308,18 +282,12 @@ def test_the_work_that_is_current_is_printed_under_its_date(run, committing_dsn)
 
 
 def test_status_says_where_the_schema_stands_before_it_reports_any_count(run):
-    """Every number under it is read through the schema, so it is read first.
-
-    A store the code has outgrown answers its tools with a missing column and
-    nothing else; the one screen a person opens is where that has to be said.
-    """
     code, out, _ = run("status")
     assert code == 0
     assert out.splitlines()[0] == "schema  up to date"
 
 
 def test_a_pain_that_lands_on_retired_knowledge_is_answered_with_the_reason(run):
-    """The tombstone is the answer, and no candidate is filed behind it."""
     _, out, _ = run("remember", WITHDRAWN_RULE)
     memory_id = remembered_id(out)
     run("retire", memory_id, "--reason", "the vendored headers were dropped upstream")
@@ -349,7 +317,6 @@ def test_a_refusal_leaves_by_the_error_channel_with_a_failing_code(run):
 
 
 def test_the_short_id_that_is_printed_is_the_one_that_can_be_typed_back(run):
-    """Everything here prints eight characters, so eight characters must work."""
     _, out, _ = run("remember", NAMED)
     memory_id = remembered_id(out)
     short = memory_id[:8]
@@ -373,7 +340,6 @@ def test_the_short_id_that_is_printed_is_the_one_that_can_be_typed_back(run):
 
 
 def test_a_prefix_two_rows_answer_to_is_refused_with_both_of_them(run, committing_dsn):
-    """An ambiguous reference is a question, and guessing an answer loses rows."""
     import psycopg
 
     with psycopg.connect(committing_dsn, autocommit=True) as conn:
@@ -405,7 +371,6 @@ def test_a_prefix_two_rows_answer_to_is_refused_with_both_of_them(run, committin
 
 
 def test_what_a_memory_rests_on_can_still_be_read_after_it_is_admitted(run):
-    """The evidence is the point of the standard, so it has to stay legible."""
     code, out, _ = run(
         "pain",
         "--kind",
@@ -486,8 +451,7 @@ def test_the_ledger_listing_shows_the_sentence_the_matching_runs_on(run):
     assert f"    prevention  {PREVENTED}" in out
 
 
-#: Japanese on purpose, and without a single space: the wrapping has to break
-#: it by cell width, because textwrap would have kept it as one line.
+#: Japanese without spaces exercises cell-width wrapping.
 TRACED = (
     "混合溶媒中の凝集判定は動径分布関数の第一ピークだけでは決められず、"
     "配位数の積分範囲を第一極小で切ったうえで両成分の温度依存を並べて初めて向きが読める。"
@@ -496,7 +460,6 @@ TRACED = (
 
 
 def test_a_trace_is_shown_dated_named_and_wrapped_instead_of_as_one_long_line(run, committing_dsn):
-    """A trace is a long dated observation, and one unwrapped line buries it."""
     with db.transaction(committing_dsn) as cur:
         left = trace_domain.put_trace(cur, content=TRACED, actor="agent")
     code, out, _ = run("trace")
@@ -520,9 +483,7 @@ def test_a_trace_is_shown_dated_named_and_wrapped_instead_of_as_one_long_line(ru
     assert out.splitlines()[where].startswith(str(left["trace_id"])[:8])
 
 
-#: Japanese with spaced Latin identifiers threaded through it, the mixture the
-#: real traces hold. A space that is not the seam itself has to survive the
-#: wrap, or two identifiers fuse into one that exists nowhere.
+#: Mixed Japanese and Latin text verifies wrapped spaces are preserved.
 MIXED = (
     "実装完了と報告したが盤の声の立ち絵が一枚も無く、この検査は器の側で通っていた。"
     "verify_board も verify_story も立ち絵を測っていなかったのが原因で、"
@@ -531,16 +492,9 @@ MIXED = (
 
 
 def test_wrapping_keeps_the_spaces_that_are_not_the_seam_itself(run):
-    """Words may move to the next row, but no two of them fuse at a seam.
-
-    Swept across every width rather than one, because the fusion only happens
-    when a space lands exactly on the overflow after an earlier cut, and a
-    single width either hits that geometry or silently proves nothing.
-    """
     for width in range(40, 89):
         lines = cli._flow(MIXED, width=width).splitlines()
-        # Aligned against the original: each row must read on from where the
-        # last one stopped, and only the seam itself may stand for a space.
+        # Rows must join without losing or duplicating a space.
         pos = 0
         for line in lines:
             chunk = line[2:]
@@ -552,13 +506,6 @@ def test_wrapping_keeps_the_spaces_that_are_not_the_seam_itself(run):
 
 
 def test_the_route_listing_keeps_the_tail_that_tells_two_routes_apart(run):
-    """A route is identified by its end, and a Japanese one prints twice as wide.
-
-    Cutting the listing at a fixed column printed every route under one tree
-    as the same row, which is the one reading a person consults this table to
-    settle. Padding by character count is the same mistake reached from the
-    other side: the scope beside a Japanese path stepped out of its column.
-    """
     run("scope", "--add", "the listing", "--about", "routes printed side by side")
     deep = "/listing/investigation/results/first-pass"
     wide = "/listing/調査/結果/一回目"
@@ -574,19 +521,12 @@ def test_the_route_listing_keeps_the_tail_that_tells_two_routes_apart(run):
     assert len({cli._cells(row) for row in rows}) == 1, out
 
 
-#: Kept apart from every other string in this file for the same reason as the
-#: rest: these two tests turn on a trigram match, so a stray resemblance to
-#: another test's rule would decide them for the wrong reason.
+#: Unique text prevents cross-test trigram matches.
 REVIVED = "vacuum the audit table on the replica, and never while an export is running"
 DELIVERED = "hold a lock across the whole rename, or a reader sees half of it applied"
 
 
 def test_writing_a_retired_rule_back_is_stopped_until_the_reason_has_been_read(run):
-    """Section 5.3 lets a person overrule a retirement, knowingly.
-
-    With nothing to type at, there is nothing to read at either, so the write
-    is refused and the flag that says the reason was read elsewhere is named.
-    """
     _, out, _ = run("remember", REVIVED)
     memory_id = remembered_id(out)
     reason = "the replica lost its audit table in the last schema change"
@@ -605,7 +545,6 @@ def test_writing_a_retired_rule_back_is_stopped_until_the_reason_has_been_read(r
 
 
 def test_a_pain_on_a_rule_already_delivered_names_the_delivery_and_is_counted(run):
-    """The falsification criterion, on the screen a person opens (12)."""
     _, out, _ = run("remember", DELIVERED)
     memory_id = remembered_id(out)
 
@@ -637,11 +576,6 @@ CARRIED_BACK = "give the batch job its own credentials, never the operator's ses
 def test_a_carried_instruction_that_repeats_a_retirement_says_so_in_the_listing(
     run, committing_dsn
 ):
-    """Every screen a candidate is read from has to carry the collision.
-
-    One that shows on the sitting and on `show` but not on the listing hides
-    on whichever screen the reader happened to open.
-    """
     _, out, _ = run("remember", CARRIED_BACK)
     memory_id = remembered_id(out)
     reason = "the batch job runs unattended now and has no session to borrow"
@@ -660,9 +594,7 @@ def test_a_carried_instruction_that_repeats_a_retirement_says_so_in_the_listing(
     assert reason in out
 
 
-#: Every task test opens a project of its own. The duplicate match reads the
-#: open tasks of one project (v3 5.2), so a shared project would make one
-#: test's task the candidate another test's `task create` is refused with.
+#: Every task test opens a project of its own.
 PARSER_PROJECT = "the parser rewrite"
 PARSER_TASK = "carry the byte offsets through the tokeniser"
 PARSER_GOAL = "keep every diagnostic pointing at the character the reader typed"
@@ -685,9 +617,7 @@ DORMANT_TASK = "collect the walltime figures for the allocation report"
 
 AMBIGUOUS_PROJECT = "the collision bench"
 
-#: Two task ids that agree for four characters, seeded for the same reason the
-#: memory pair above is: real ids are random, so a collision cannot be
-#: arranged by writing rows through the command line.
+#: Seed UUIDs sharing a four-character prefix to test ambiguity handling.
 TWIN_TASK_A = "abcd0003-0000-4000-8000-00000000000c"
 TWIN_TASK_B = "abcd0004-0000-4000-8000-00000000000d"
 
@@ -698,7 +628,6 @@ def created_task(out: str) -> str:
 
 
 def test_a_task_is_created_listed_and_read_back_through_the_command_line(run):
-    """The round trip a person makes: open a project, open work, look at it."""
     code, out, _ = run("project", "create", PARSER_PROJECT)
     assert code == 0 and out.startswith("created")
 
@@ -732,7 +661,6 @@ def test_a_task_is_created_listed_and_read_back_through_the_command_line(run):
 
 
 def test_a_task_that_reads_like_one_already_open_is_refused_with_the_candidates(run):
-    """Two tasks for one piece of work grow two half-states (v3 5.2)."""
     run("project", "create", DUPLICATE_PROJECT)
     _, out, _ = run("task", "create", DUPLICATE_TASK, "--project", DUPLICATE_PROJECT)
     first = created_task(out)
@@ -750,13 +678,6 @@ def test_a_task_that_reads_like_one_already_open_is_refused_with_the_candidates(
 
 
 def test_the_history_and_the_artifact_locators_are_visible_on_one_task(run, committing_dsn):
-    """`task show` is the only screen the history is read from (v3 5.4).
-
-    Nothing here is ever delivered to a session, so an account split across
-    four commands is one nobody assembles. The locator has to be printed in
-    full for the same reason it is all that is stored: Mashu holds the
-    reference and never the body, and an id alone reaches no original.
-    """
     run("project", "create", HISTORY_PROJECT)
     _, out, _ = run("task", "create", HISTORY_TASK, "--project", HISTORY_PROJECT)
     short = created_task(out)
@@ -793,7 +714,6 @@ def test_the_history_and_the_artifact_locators_are_visible_on_one_task(run, comm
 
 
 def test_ending_a_task_needs_an_outcome_and_can_be_taken_back(run):
-    """Close is the user's judgement, and 'closed' alone is not one (v3 6)."""
     run("project", "create", CLOSING_PROJECT)
     _, out, _ = run("task", "create", CLOSING_TASK, "--project", CLOSING_PROJECT)
     short = created_task(out)
@@ -824,7 +744,6 @@ def test_ending_a_task_needs_an_outcome_and_can_be_taken_back(run):
 
 
 def test_a_task_whose_lease_has_run_out_is_listed_only_when_it_is_asked_for(run, committing_dsn):
-    """Silence is neither completion nor currency (v3 7)."""
     run("project", "create", DORMANT_PROJECT)
     _, out, _ = run("task", "create", DORMANT_TASK, "--project", DORMANT_PROJECT)
     short = created_task(out)
@@ -849,7 +768,6 @@ def test_a_task_whose_lease_has_run_out_is_listed_only_when_it_is_asked_for(run,
 
 
 def test_a_task_prefix_two_rows_answer_to_is_refused_with_both_of_them(run, committing_dsn):
-    """The short id a listing prints is the one every task command takes back."""
     import psycopg
 
     with psycopg.connect(committing_dsn, autocommit=True) as conn:
@@ -883,11 +801,8 @@ def test_a_task_prefix_two_rows_answer_to_is_refused_with_both_of_them(run, comm
     assert TWIN_TASK_A in out
 
 
-# --------------------------------------------------------------------------
 # a checkout ahead of its database (13.2)
-# --------------------------------------------------------------------------
 def test_a_store_behind_the_code_says_so_instead_of_raising(capsys, tmp_path):
-    """Reads break on a pending migration now, so they have to break in words."""
     import pathlib
     import shutil
 

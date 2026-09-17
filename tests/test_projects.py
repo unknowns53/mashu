@@ -1,4 +1,3 @@
-"""Where work state is filed (v3 specification 5.1)."""
 
 from __future__ import annotations
 
@@ -60,11 +59,6 @@ def test_archiving_takes_a_project_off_the_list_and_happens_once(cur):
 
 
 def test_archiving_says_nothing_about_the_tasks_underneath(cur):
-    """A shelf is not a judgement about the work on it (6).
-
-    What stops an abandoned project's states from being pushed is each task's
-    own lease running out, not the archive flag.
-    """
     projects.create_project(cur, name="mashu", actor="user")
     task = tasks.task_create(cur, project="mashu", name="implement the v3 schema", actor="agent")
     projects.archive_project(cur, "mashu", actor="user")
