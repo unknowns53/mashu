@@ -19,306 +19,15 @@ exactly the thing this queue exists to make somebody do.
 from __future__ import annotations
 
 import os
-import re
 import shlex
-import shutil
 import subprocess
-import sys
 import tempfile
-import textwrap
-import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from mashu import db, nominations, tokens
+from mashu import db, nominations, screen, tokens
 from mashu.errors import MashuError
-
-try:
-    import select
-    import termios
-    import tty
-except ImportError:  # pragma: no cover - these are absent on Windows
-    select = None  # type: ignore[assignment]
-    termios = None
-    tty = None
-
-#: The width text is laid out at when the terminal is wider than reads well.
-WIDTH = 88
-
-
-# --------------------------------------------------------------------------
-# reading one key at a time
-# --------------------------------------------------------------------------
-#: What a terminal sends, and what this calls it. The escape on its own means
-#: go back, which is also what the left arrow and backspace mean here.
-_TOKENS = {
-    "\x1b[A": "up",
-    "\x1b[B": "down",
-    "\x1b[C": "right",
-    "\x1b[D": "left",
-    "\x1b[5~": "pageup",
-    "\x1b[6~": "pagedown",
-    "\x1b[H": "home",
-    "\x1b[F": "end",
-    "\r": "enter",
-    "\n": "enter",
-    "\x7f": "left",
-    "\x1b": "left",
-    "\x03": "q",
-    "\x04": "q",
-    " ": "space",
-}
-
-
-def _getkey() -> str:
-    """One keystroke, without waiting for a return.
-
-    A review that costs a whole typed line per decision is a review that does
-    not happen. Terminals hand arrow keys over as escape sequences, so the
-    escape has to be read and then looked at again: on its own it means go
-    back, and followed by a bracket it is an arrow.
-
-    Where there is no terminal to put into this mode, a typed line stands in
-    for a keystroke and everything above still works — one key more. That path
-    is not a courtesy to pipes; it is how the sitting is tested at all.
-    """
-    if termios is None or tty is None or select is None or not sys.stdin.isatty():
-        try:
-            typed = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            return "q"
-        return _TOKENS.get(typed, typed[:1].lower() or "enter")
-
-    descriptor = sys.stdin.fileno()
-    saved = termios.tcgetattr(descriptor)
-    try:
-        # TCSANOW, not the default TCSAFLUSH: the default discards whatever
-        # was typed before the mode switch, and the switch happens between
-        # every two keys. A ⏎ pressed on the heels of an arrow lands in that
-        # gap, and a key that is thrown away reads as a key that did nothing.
-        tty.setcbreak(descriptor, termios.TCSANOW)
-        key = _byte(descriptor)
-        # Read the descriptor rather than sys.stdin. A text stream keeps its
-        # own buffer, so the bracket and the letter of an arrow sequence can
-        # already be inside Python while select still reports the descriptor
-        # as empty, and every arrow then arrives as three unrelated keys.
-        if key == "\x1b" and select.select([descriptor], [], [], 0.05)[0]:
-            key += _byte(descriptor)
-            if key.endswith("["):
-                key += _csi(descriptor)
-    finally:
-        termios.tcsetattr(descriptor, termios.TCSADRAIN, saved)
-    return _TOKENS.get(key, key.lower())
-
-
-def _csi(descriptor: int) -> str:
-    """The rest of an escape sequence, up to and including the byte that ends it.
-
-    Arrows end after one byte and the page keys do not: Page Down is ESC [ 6 ~,
-    so stopping at the first byte leaves a tilde in the buffer and the terminal
-    delivers one unknown key followed by another. Both are ignored, and a key
-    pressed once with nothing happening twice reads as a key that does nothing.
-    """
-    out = ""
-    while select.select([descriptor], [], [], 0.05)[0]:
-        byte = _byte(descriptor)
-        out += byte
-        if "@" <= byte <= "~":
-            break
-    return out
-
-
-def _byte(descriptor: int) -> str:
-    """One byte off the terminal, with the end of input read as leaving."""
-    try:
-        raw = os.read(descriptor, 1)
-    except OSError:
-        return "\x04"
-    return raw.decode("utf-8", "replace") if raw else "\x04"
-
-
-def _typed(prompt: str) -> str | None:
-    """A line, for the reasons a decision is not allowed to go without.
-
-    Nothing typed cancels: an empty reason would be a decision recorded with
-    the one part of it that mattered left blank.
-    """
-    try:
-        answer = input(prompt).strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return None
-    if not answer:
-        print("  never mind")
-        return None
-    return answer
-
-
-def _screen(text: str) -> None:
-    """Repaint. What is being decided about should be the whole view."""
-    if sys.stdout.isatty():
-        sys.stdout.write("\x1b[H\x1b[2J")
-    print(text)
-
-
-# --------------------------------------------------------------------------
-# measuring, so that nothing is printed past the bottom of the screen
-# --------------------------------------------------------------------------
-def _width() -> int:
-    """How wide the terminal is, not how wide the writing was laid out to be."""
-    return max(40, shutil.get_terminal_size((WIDTH, 24)).columns)
-
-
-def _across() -> int:
-    """The width to lay text out at: the terminal's, but never wider than reads well."""
-    return min(WIDTH, _width())
-
-
-def _room(*fixed: str) -> int:
-    """How many lines are left for a list or a page once the fixed parts have theirs.
-
-    The fixed parts are handed in and measured rather than counted into a
-    number here. A number is right until somebody adds a line to a heading,
-    and then it is wrong everywhere the number was used and nothing says so.
-
-    The one line taken off the end is the newline print() adds after a screen.
-    """
-    used = sum(_rows_of(text) for text in fixed)
-    return max(0, shutil.get_terminal_size((WIDTH, 24)).lines - used - 1)
-
-
-def _rows_of(text: str) -> int:
-    """How many terminal lines a printed block takes.
-
-    Split on the newline rather than by splitlines, which drops a trailing
-    empty line: "a\\n" prints two lines and splitlines calls it one.
-    """
-    width = _width()
-    return sum(_rows(line, width) for line in text.split("\n"))
-
-
-def _rows(text: str, width: int) -> int:
-    """How many terminal lines one written line takes once it wraps."""
-    plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
-    return max(1, -(-_cells(plain) // width))
-
-
-def _cells(text: str) -> int:
-    """How wide this is on a terminal, counting the double-width characters as two."""
-    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
-
-
-def _clip(text: str, cells: int) -> str:
-    """Cut a line to fit, measuring in cells rather than in characters."""
-    if _cells(text) <= cells:
-        return text
-    out, used = [], 0
-    for ch in text:
-        used += 2 if unicodedata.east_asian_width(ch) in "WF" else 1
-        if used > cells - 1:
-            break
-        out.append(ch)
-    return "".join(out) + "…"
-
-
-def _pad(text: str, cells: int) -> str:
-    """Fill a column out to a width, counting cells so a Japanese name lines up too."""
-    clipped = _clip(text, cells)
-    return clipped + " " * max(0, cells - _cells(clipped))
-
-
-def _wrap(text: str, indent: str = "  ") -> str:
-    """Wrap for reading, keeping the line breaks whoever wrote it put in.
-
-    Filling the whole thing as one paragraph collapses a list of points into a
-    wall, and the review is the one place where reading is the work.
-    """
-    out = []
-    for line in text.strip().splitlines():
-        if not line.strip():
-            out.append("")
-            continue
-        hang = indent + "  " if line.lstrip().startswith(("-", "*", "•")) else indent
-        out.append(
-            textwrap.fill(
-                line.strip(), width=_across(), initial_indent=indent, subsequent_indent=hang
-            )
-        )
-    return "\n".join(out)
-
-
-def _trailer(*parts: str) -> str:
-    """Everything printed under a page or a list, as one measurable block.
-
-    One string, because what follows the screen has to be measured before the
-    screen is built and printed after it, and two ways of assembling it is one
-    way too many.
-    """
-    return "\n".join(part for part in parts if part)
-
-
-def _list_screen(head: str, rows: list[str], at: int, keys: str) -> str:
-    """A heading, as much of a list as fits under it, and the keys.
-
-    Composed and measured against the same string, in one place: measuring the
-    parts separately and assembling them separately is how a heading that ends
-    in a newline comes to cost two lines and be counted as one.
-    """
-    around = f"{head}\n\n\n{keys}"
-    shown, above, below = _fit(rows, at, _room(around))
-    body = [line for line in (above, *shown, below) if line]
-    return f"{head}\n\n" + "\n".join(body) + f"\n\n{keys}"
-
-
-def _fit(rows: list[str], at: int, room: int) -> tuple[list[str], str, str]:
-    """The part of a list that fits in the room given, kept around the cursor."""
-    if len(rows) <= room:
-        return rows, "", ""
-    room = max(1, room - 2)  # the two lines that say what is not being shown
-    top = max(0, min(at - room // 2, len(rows) - room))
-    above = f"  ↑ {top} more" if top else ""
-    below = f"  ↓ {len(rows) - top - room} more" if top + room < len(rows) else ""
-    return rows[top : top + room], above, below
-
-
-def _paged(text: str, offset: int, trailer: str = "") -> tuple[str, int]:
-    """As much of one candidate as fits, and where the next screenful starts.
-
-    The first lines stay on screen whatever the offset: what is being decided
-    about should not scroll away from the deciding.
-
-    Filled twice on purpose. The line that says how much is left is itself a
-    line, so a page filled to the brim and then told it is not the whole thing
-    comes out one row past the bottom of the screen. The first fill answers
-    whether that line is needed; the second makes room for it.
-    """
-    lines = text.splitlines()
-    head, body = lines[:3], lines[3:]
-    room = _room("\n".join(head), trailer)
-
-    shown = _fill(body[offset:], room)
-    if offset + len(shown) >= len(body):
-        return "\n".join(head + shown), 0
-
-    shown = _fill(body[offset:], room - 1)
-    left = len(body) - offset - len(shown)
-    marker = f"  … {left} more line(s), space to go on"
-    return "\n".join(head + shown + [marker]), offset + len(shown)
-
-
-def _fill(lines: list[str], room: int) -> list[str]:
-    """As many of these as fit in the rows given, counting the ones that wrap."""
-    width = _width()
-    out, used = [], 0
-    for line in lines:
-        cost = _rows(line, width)
-        if used + cost > room:
-            break
-        out.append(line)
-        used += cost
-    return out
-
 
 # --------------------------------------------------------------------------
 # the screens
@@ -365,9 +74,9 @@ def _help() -> None:
     body = _HELP.strip("\n")  # the blank lines around the block, not the indent inside it
     while True:
         # three lines are pinned above the body, so one of them says what this is
-        page, more = _paged(f"  what each key does\n\n\n{body}", offset, _HELP_KEYS)
-        _screen(page + "\n" + _HELP_KEYS)
-        if _getkey() != "space" or not more:
+        page, more = screen.paged(f"  what each key does\n\n\n{body}", offset, _HELP_KEYS)
+        screen.paint(page + "\n" + _HELP_KEYS)
+        if screen.getkey() != "space" or not more:
             return
         offset = more
 
@@ -387,14 +96,14 @@ def _days(row: dict[str, Any]) -> int:
 
 def _queue_screen(rows: list[dict[str, Any]], at: int, hidden: int, keys: str) -> str:
     """Everything waiting, one line each, so ten minutes can be spent on purpose."""
-    width = _width()
+    width = screen.terminal_width()
     lines = []
     for number, row in enumerate(rows):
         body = " ".join((row["content"] or "").split())
         mark = "·" if row.get("deferred_at") else " "
-        line = _clip(
-            f" {mark} {_short(row['nomination_id'])}  {_pad(row['kind'], 12)} "
-            f"{_pad(row.get('scope_name') or '-', 12)} {_days(row):>3}d  {body}",
+        line = screen.clip(
+            f" {mark} {_short(row['nomination_id'])}  {screen.pad(row['kind'], 12)} "
+            f"{screen.pad(row.get('scope_name') or '-', 12)} {_days(row):>3}d  {body}",
             width - 1,
         )
         lines.append(f"\x1b[1m▸{line[1:]}\x1b[0m" if number == at else line)
@@ -402,7 +111,7 @@ def _queue_screen(rows: list[dict[str, Any]], at: int, hidden: int, keys: str) -
     head = f"{len(rows)} waiting for review"
     if hidden:
         head += f"; {hidden} deferred; --all to see them"
-    return _list_screen(head, lines, at, keys)
+    return screen.list_screen(head, lines, at, keys)
 
 
 def _item_text(row: dict[str, Any], place: int, total: int) -> str:
@@ -413,17 +122,17 @@ def _item_text(row: dict[str, Any], place: int, total: int) -> str:
     is whether these particular pains are worth a permanent seat.
     """
     label = f" {place} of {total} "
-    across = _across()
+    across = screen.text_width()
     cost = tokens.pushed_cost([row["content"]])
     lines = [
-        "─" * 4 + label + "─" * max(4, across - 4 - _cells(label)),
+        "─" * 4 + label + "─" * max(4, across - 4 - screen.cells(label)),
         f"{row['kind']}  [{row.get('scope_name') or '-'}]  {_short(row['nomination_id'])}  "
         f"waiting {_days(row)} day(s)  tokens ~{cost}",
         "",
     ]
     if row.get("deferred_at"):
-        lines.extend([_wrap(f"(put off earlier: {row.get('defer_reason') or ''})"), ""])
-    lines.extend([_wrap(row["content"]), ""])
+        lines.extend([screen.wrap(f"(put off earlier: {row.get('defer_reason') or ''})"), ""])
+    lines.extend([screen.wrap(row["content"]), ""])
 
     # Above the evidence, not below it. This is the one thing on the page that
     # can make the whole candidate the wrong decision, and a reader who admits
@@ -435,7 +144,7 @@ def _item_text(row: dict[str, Any], place: int, total: int) -> str:
         retired = conflict.get("retired_at")
         when = retired.date().isoformat() if isinstance(retired, datetime) else str(retired or "")
         lines.append(f"  ! contradicts a retired memory  {_short(conflict['memory_id'])}  {when}")
-        lines.append(_wrap(f"retired because: {conflict['retire_reason']}", indent="      "))
+        lines.append(screen.wrap(f"retired because: {conflict['retire_reason']}", indent="      "))
     if row.get("conflict_rows"):
         lines.append("")
 
@@ -444,8 +153,8 @@ def _item_text(row: dict[str, Any], place: int, total: int) -> str:
         created = evidence.get("created_at")
         when = created.date().isoformat() if isinstance(created, datetime) else str(created or "")
         lines.append(f"    {evidence['kind']}  {when}")
-        lines.append(_wrap(f"what: {evidence['what']}", indent="      "))
-        lines.append(_wrap(f"prevention: {evidence['prevention']}", indent="      "))
+        lines.append(screen.wrap(f"what: {evidence['what']}", indent="      "))
+        lines.append(screen.wrap(f"prevention: {evidence['prevention']}", indent="      "))
     lines.append("─" * across)
     return "\n".join(lines)
 
@@ -560,13 +269,13 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
         at = min(at, len(rows) - 1)
 
         if reading:
-            under = _trailer(_ITEM_KEYS, note)
-            page, more = _paged(_item_text(rows[at], at + 1, len(rows)), scroll, under)
-            _screen(page + "\n" + under)
+            under = screen.trailer(_ITEM_KEYS, note)
+            page, more = screen.paged(_item_text(rows[at], at + 1, len(rows)), scroll, under)
+            screen.paint(page + "\n" + under)
         else:
             more = 0
-            _screen(_queue_screen(rows, at, hidden, _trailer(_QUEUE_KEYS, note)))
-        key = _getkey()
+            screen.paint(_queue_screen(rows, at, hidden, screen.trailer(_QUEUE_KEYS, note)))
+        key = screen.getkey()
         note = ""  # it has been read now; the next screen starts clean
 
         if key == "?":
@@ -612,7 +321,7 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
                 reading = True
                 back, scroll = [], 0
             elif key == "s":
-                reason = _typed("  why put it off? ")
+                reason = screen.typed("  why put it off? ")
                 if reason is None:
                     continue
                 note = _decide(dsn, rows[at], "s", reason)
@@ -629,7 +338,7 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
         elif key == "e":
             note = _admit(dsn, rows[at], edit=True)
         elif key in ("r", "s"):
-            reason = _typed("  why turn it down? " if key == "r" else "  why put it off? ")
+            reason = screen.typed("  why turn it down? " if key == "r" else "  why put it off? ")
             if reason is None:
                 continue
             note = _decide(dsn, rows[at], key, reason)
