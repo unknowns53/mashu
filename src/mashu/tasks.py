@@ -109,14 +109,25 @@ CASE WHEN t.status = 'closed'    THEN 'closed'
      ELSE 'dormant' END
 """
 
+#: A standing close proposal, joined only into the two paths a person reads:
+#: one task and a list of them. The duplicate match and the search answer
+#: "which task is this", which a proposal has no bearing on.
+_PROPOSAL_COLUMNS = """
+       cp.outcome AS proposed_outcome, cp.reason AS proposed_reason,
+       cp.state_at AS proposed_against, cp.proposed_at, cp.proposed_by
+"""
+_PROPOSAL_JOIN = "LEFT JOIN task_close_proposal cp ON cp.task_id = t.task_id"
+
 _TASK_ROW = f"""
 SELECT t.*, p.name AS project_name, {_ACTIVITY} AS activity,
        clock_timestamp() - ts.updated_at AS state_age,
        ts.goal, ts.approach, ts.status_text, ts.open_questions, ts.blockers,
-       ts.next_actions, ts.updated_at, ts.updated_by
+       ts.next_actions, ts.updated_at, ts.updated_by,
+{_PROPOSAL_COLUMNS}
 FROM task t
 JOIN project p ON p.project_id = t.project_id
 JOIN task_state ts ON ts.task_id = t.task_id
+{_PROPOSAL_JOIN}
 """
 
 
@@ -227,9 +238,40 @@ def heading(activity: str, updated_at: dt.datetime) -> str:
     return _HEADINGS[activity].format(date=updated_at.date().isoformat())
 
 
+#: Named so `_split` can keep them out of the task dict, whether or not the
+#: query that produced the row selected them.
+_PROPOSAL_KEYS = (
+    "proposed_outcome",
+    "proposed_reason",
+    "proposed_against",
+    "proposed_at",
+    "proposed_by",
+)
+
+
+def _proposal(row: dict[str, Any]) -> dict[str, Any] | None:
+    """The standing proposal that this task has ended, if an agent left one.
+
+    `stale` is what `state_at` is stored for: a state written after the
+    proposal is somebody having gone on working. It does not withdraw the
+    proposal, because whether the later work settles or contradicts it is the
+    judgement this subsystem does not make.
+    """
+    if not row.get("proposed_outcome"):
+        return None
+    return {
+        "outcome": row["proposed_outcome"],
+        "reason": row["proposed_reason"],
+        "proposed_at": row["proposed_at"],
+        "proposed_by": row["proposed_by"],
+        "on_date": row["proposed_at"].date(),
+        "stale": row["updated_at"] > row["proposed_against"],
+    }
+
+
 def _split(row: dict[str, Any]) -> dict[str, Any]:
-    """One joined row as task, state, and the three things derived from both."""
-    extra = set(_STATE_KEYS) | {"activity", "state_age", "score"}
+    """One joined row as task, state, and the things derived from both."""
+    extra = set(_STATE_KEYS) | set(_PROPOSAL_KEYS) | {"activity", "state_age", "score"}
     state = {key: row[key] for key in _STATE_KEYS}
     result = {
         "task": {key: value for key, value in row.items() if key not in extra},
@@ -238,6 +280,7 @@ def _split(row: dict[str, Any]) -> dict[str, Any]:
         "as_of": row["updated_at"].date(),
         "age_days": row["state_age"].days,
         "heading": heading(row["activity"], row["updated_at"]),
+        "proposal": _proposal(row),
     }
     if "score" in row:
         result["score"] = row["score"]
@@ -763,6 +806,86 @@ def touch(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, Any]:
 # ending, which is a person's judgement (6)
 # --------------------------------------------------------------------------
 
+#: What a proposed reason may run to. The same ceiling as a status_text,
+#: because it is the same kind of sentence written for the same reader.
+PROPOSAL_REASON_MAX = 500
+
+
+def propose_close(
+    cur: psycopg.Cursor, task_id: UUID, *, outcome: str, reason: str, actor: str
+) -> dict[str, Any]:
+    """Say that this task looks ended, without ending it.
+
+    Section 6 reserves the deciding, not the saying: an agent reaches this and
+    not `close`, and nothing here touches task.status.
+
+    The reason is required, unlike the one on a close, because a person
+    reading a proposal was not there when it was written.
+
+    The lease is deliberately not renewed — a proposal claims the work has
+    stopped, so renewing would keep exactly the finished tasks at the front of
+    every opening. The closing screen reads the dormant ones too.
+    """
+    if outcome not in OUTCOMES:
+        raise MashuError(f"outcome must be one of {', '.join(OUTCOMES)}")
+    reason = (reason or "").strip()
+    if not reason:
+        raise MashuError(
+            "a proposal needs the grounds with it: what makes this look finished, "
+            "given up, or replaced"
+        )
+    if len(reason) > PROPOSAL_REASON_MAX:
+        raise OverLimitError("reason", PROPOSAL_REASON_MAX, len(reason))
+    _lock(cur)
+    task = _require_open(cur, task_id)
+    verdict = _gate(reason)
+    current = task_get(cur, task_id)
+    cur.execute(
+        """
+        INSERT INTO task_close_proposal
+               (task_id, outcome, reason, state_at, proposed_at, proposed_by)
+        VALUES (%s, %s, %s, %s, clock_timestamp(), %s)
+        ON CONFLICT (task_id) DO UPDATE
+        SET outcome = EXCLUDED.outcome, reason = EXCLUDED.reason,
+            state_at = EXCLUDED.state_at, proposed_at = EXCLUDED.proposed_at,
+            proposed_by = EXCLUDED.proposed_by
+        """,
+        (task_id, outcome, reason, current["state"]["updated_at"], actor),
+    )
+    events.record(
+        cur,
+        "task_close_proposed",
+        actor,
+        detail={"task_id": str(task_id), "name": task["name"], "outcome": outcome},
+    )
+    return {**task_get(cur, task_id), **_gate_report(verdict)}
+
+
+def withdraw_proposal(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, Any]:
+    """Take a proposal back, leaving the task exactly as it was.
+
+    Reached both ways: by an agent that has resumed work it had called
+    finished, and by a person who has read the proposal and disagreed. Neither
+    is a statement about the lease, so neither renews it; the closing screen
+    touches the task itself when the person's answer was that the work is
+    still live.
+    """
+    _require_open(cur, task_id)
+    cur.execute(
+        "DELETE FROM task_close_proposal WHERE task_id = %s RETURNING outcome",
+        (task_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise MashuError("no close proposal stands on this task")
+    events.record(
+        cur,
+        "task_close_proposal_withdrawn",
+        actor,
+        detail={"task_id": str(task_id), "was": row["outcome"]},
+    )
+    return task_get(cur, task_id)
+
 
 def close(
     cur: psycopg.Cursor, task_id: UUID, *, outcome: str, actor: str, reason: str | None = None
@@ -777,11 +900,25 @@ def close(
     The state that was current when the task ended is frozen as a final
     checkpoint before the row closes (5.6), so what the work looked like at
     the moment somebody judged it is not lost to the next replacement.
+
+    A standing proposal is answered by this and goes with it. Where the person
+    closed on the outcome that was proposed and gave no reason of their own,
+    the proposed grounds become the close reason: they are the sentence being
+    agreed with, and making the person retype it to keep it is the friction
+    the proposal was added to remove. A different outcome means they decided
+    against the proposal, and its reason is not theirs to be recorded under.
     """
     if outcome not in OUTCOMES:
         raise MashuError(f"outcome must be one of {', '.join(OUTCOMES)}")
     _lock(cur)
     task = _require_open(cur, task_id)
+    cur.execute(
+        "DELETE FROM task_close_proposal WHERE task_id = %s RETURNING outcome, reason",
+        (task_id,),
+    )
+    proposal = cur.fetchone()
+    if reason is None and proposal is not None and proposal["outcome"] == outcome:
+        reason = proposal["reason"]
     verdict = _gate(reason)
     what_changed = f"closed as {outcome}" + (f": {reason}" if reason else "")
     from mashu import task_history
@@ -799,7 +936,12 @@ def close(
         cur,
         "task_closed",
         actor,
-        detail={"task_id": str(task_id), "name": task["name"], "outcome": outcome},
+        detail={
+            "task_id": str(task_id),
+            "name": task["name"],
+            "outcome": outcome,
+            "proposed": proposal["outcome"] if proposal else None,
+        },
     )
     return {**task_get(cur, task_id), **_gate_report(verdict)}
 

@@ -255,9 +255,13 @@ mashu task list --closed
 mashu task show 1a2b3c4d
 mashu task create "Add CLI help" --project mashu --goal "Every command explains itself"
 mashu task touch 1a2b3c4d
+mashu task close
 mashu task close 1a2b3c4d --outcome completed --reason "Released in v2.1"
+mashu task close 1a2b3c4d 5e6f7a8b --outcome superseded
 mashu task reopen 1a2b3c4d
 ~~~
+
+`mashu task close` を引数なしで叩くと決定の画面が開く。open な Task が 1 行ずつ並び、↑↓ で選び、c / a / s で outcome を打つ。Agent が終了を提案している Task は先頭に集まり、その根拠が一覧の下に出た状態で ⏎ が提案をそのまま受理する。まとめて閉じる鍵は無い。
 
 Task の Current State には goal、approach、status、open questions、blockers、next actions が入る。Attempt、Decision、Checkpoint、Artifact Reference は履歴として別に残る。
 
@@ -266,6 +270,7 @@ Task の Current State には goal、approach、status、open questions、blocke
 - open Task は活動が 14 日途切れると dormant になり、bootstrap から外れる。履歴は残る
 - dormant は終了ではない。task touch で活動期限を延長して戻せる
 - Task を closed にできるのは User だけ。outcome は completed、abandoned、superseded のいずれか
+- Agent は task_propose_close で「終わったと思う」と根拠つきで提案できる。提案は open / closed を動かさず、lease も延ばさない。User が同じ outcome で理由を書かずに close すると、提案の根拠がそのまま close_reason になる
 
 task_update と task_checkpoint は state の patch ではなく置換だ。指定しなかった欄は空になるので、Agent は読み取った全欄を必要な値と一緒に送る。
 
@@ -313,7 +318,7 @@ User が「覚えて」と言った → memory_nominate
 作業の区切り            → task_checkpoint
 ~~~
 
-Attempt は失敗した試行の結末、Decision は理由を失うと再導出コストが高い判断に使う。Temporary Context の登録、Memory の直接登録、review、Task の close / reopen は User の CLI 操作だ。
+Attempt は失敗した試行の結末、Decision は理由を失うと再導出コストが高い判断に使う。Temporary Context の登録、Memory の直接登録、review、Task の close / reopen は User の CLI 操作だ。終わったと思ったら status_text にそう書くのではなく task_propose_close を使う。前者は User に読み直しと打ち直しをさせ、後者は 1 打鍵で決まる。
 
 ### PreToolUse hook で guard を有効にする
 

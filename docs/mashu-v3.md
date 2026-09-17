@@ -189,10 +189,19 @@ session summary・daily summary・進捗レポートの類は保存しない。�
 Task の完了を Agent に推測させない。Agent が「実装は完了したと思われる」と判断しても `closed` にはできない。User が最後の手作業をする、User が結果を見て判断する、Agent が完了条件を誤認する、Agent の担当範囲だけが終わる。いずれも v1 で実測された誤判定の形である。
 
 ```text
-mashu task close <id>        outcome: completed / abandoned / superseded
+mashu task close                     決定の画面。open な Task を一覧し、1 件 1 打鍵
+mashu task close <id>... --outcome   outcome: completed / abandoned / superseded
 ```
 
 close 時は最終 checkpoint を凍結し、bootstrap から除外する。attempt / decision / artifact は保持する。closed の再開は `mashu task reopen <id>`（User のみ）。
+
+### 6.1 Close Proposal — 判定は渡さない、転記だけ消す
+
+原則が禁じているのは Agent が終了を**決める**ことであって、終了したと**言う**ことではない。両者を一緒に禁じた結果が実測された摩擦である。Agent はブランチをマージした直後に「削除済み。閉じてよい」と status_text に書き、User はその文を読み直し、ID をコピーし、そこに既に書かれている outcome を打ち直す。18 件なら判断 18 回ではなく、判断 18 回と転記 18 回だ。消せるのは後者だけである。
+
+そこで Agent は `task_propose_close`（outcome と理由、理由は必須）で提案だけを置く。提案は Task の open / closed に一切影響せず、lease も延長しない（完了に見える Task を opening の先頭に留めてしまうため）。提案が立った状態で User が同じ outcome で close し、自分の理由を書かなかった場合、提案の理由がそのまま close_reason になる。同意した文をもう一度打たせないためである。outcome が違えば User は提案に反対したのだから、その理由は記録しない。
+
+提案は `task_state.updated_at` を控える。提案後に state が書き換えられていれば「追い越された提案」として表示され、決定の画面では 1 打鍵での受理ではなく確認を挟む。画面と repository が食い違っていると分かっている唯一の形だからである。
 
 ## 7. Activity Lease — 沈黙は完了ではないが、現在でもない
 
@@ -284,6 +293,7 @@ attempt_record と decision_record は「失敗した試行の結末」「後か
 | trace / pain / nomination | ○ | ○ |
 | task 作成・state・checkpoint・attempt・decision・artifact | ○ | ○ |
 | task close / reopen | × | ○ |
+| close proposal（提案のみ・決定ではない） | ○ | ○（取り下げ） |
 | Memory の active 化・revise・retire | × | ○ |
 | Temporary Context | × | ○ |
 | Scope / Route / delivery / guard | × | ○ |
@@ -320,8 +330,9 @@ v3 実装のマージ時に、`docs/mashu-v2.md` の次の箇所へ注記を入�
 | `task_update` | Current State の置換（楽観チェック・hard limit・予算判定つき） |
 | `task_checkpoint` | 置換 + 履歴凍結（5.6 節） |
 | `attempt_record` / `decision_record` / `artifact_link` | 履歴の追記 |
+| `task_propose_close` / `task_withdraw_close_proposal` | 終了の提案と取り下げ（6.1 節） |
 
-`attempt_list` / `decision_list` / `artifact_list` は `task_get` の展開引数として提供し、Tool 数の増殖を避ける。**`task_close` は Agent 用 MCP に置かない。**
+`attempt_list` / `decision_list` / `artifact_list` は `task_get` の展開引数として提供し、Tool 数の増殖を避ける。**`task_close` は Agent 用 MCP に置かない。**提案は close ではないので `task_propose_close` はこの禁止に触れない。
 
 ### 13.2 CLI 追加
 
@@ -330,7 +341,8 @@ mashu project list / create / show <id>
 mashu task list [--dormant] [--closed]
 mashu task show <id>            state・履歴・artifacts を全文
 mashu task create / touch <id>
-mashu task close <id> [--outcome ...] / reopen <id>
+mashu task close                決定の画面（引数なし）
+mashu task close <id>... [--outcome ...] / reopen <id>
 
 mashu pain --prevention-kind {rule,work} [--task <id>]   9 節の二つの形
 ```
@@ -364,6 +376,7 @@ DB / service 層のテストで保証する。
 ```text
 Task lifecycle:
   Agent は Task を close できない
+  Agent の close proposal は Task の status を変えない
   沈黙は Task を close しない（lease は dormant 導出までしかしない）
   dormant な state は現在の真実として配信されない
   Current State は日付なしで配信されない

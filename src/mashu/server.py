@@ -106,7 +106,12 @@ def build_server() -> Any:
             "state is what was last confirmed on its date, not current truth; "
             "when that date is old, verify it against the repository and its "
             "artifacts before working from it. Task completion is never the "
-            "agent's call: closing is the user's, via the CLI."
+            "agent's call: closing is the user's, via the CLI. When work you "
+            "finish looks like the end of its task, say so with "
+            "task_propose_close — the outcome you would choose and the "
+            "grounds for it — instead of writing 'this can be closed' into "
+            "the state, where the user has to read it back out and retype it. "
+            "The proposal decides nothing; it waits on the closing screen."
         ),
     )
 
@@ -443,6 +448,39 @@ def build_server() -> Any:
                     next_actions=next_actions,
                     evidence=evidence,
                 )
+                return _plain({"ok": True, **answer})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def task_propose_close(
+        task_id: UUID,
+        outcome: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Propose that a task has ended. This does not close it.
+
+        Use it the moment the work reads as finished, given up, or replaced,
+        rather than putting that sentence in status_text. outcome is one of
+        completed, abandoned, superseded, and reason is the grounds: what you
+        did, merged, or found that makes this the answer. The user decides on
+        the proposal with `mashu task close`; until then nothing changes.
+        """
+        try:
+            with db.transaction() as cur:
+                answer = tasks.propose_close(
+                    cur, task_id, outcome=outcome, reason=reason, actor=actor()
+                )
+                return _plain({"ok": True, **answer})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def task_withdraw_close_proposal(task_id: UUID) -> dict[str, Any]:
+        """Take back a close proposal, because the work turned out to go on."""
+        try:
+            with db.transaction() as cur:
+                answer = tasks.withdraw_proposal(cur, task_id, actor=actor())
                 return _plain({"ok": True, **answer})
         except MashuError as error:
             return _failure(error)

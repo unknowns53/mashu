@@ -9,11 +9,15 @@ out of scope, and every path it uses is reachable through a flag.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
 from mashu import cli, config, db, nominations, projects, task_history, tasks
 from mashu import traces as trace_domain
+from mashu.migrate import migrate
+
+ADMIN_DSN = os.environ.get("MASHU_ADMIN_DSN", "dbname=postgres")
 
 # Each test writes to a database the others also write to, so the strings are
 # kept mutually dissimilar: a trigram match across tests would make one test's
@@ -877,3 +881,32 @@ def test_a_task_prefix_two_rows_answer_to_is_refused_with_both_of_them(run, comm
     code, out, _ = run("task", "show", TWIN_TASK_A[:8])
     assert code == 0
     assert TWIN_TASK_A in out
+
+
+# --------------------------------------------------------------------------
+# a checkout ahead of its database (13.2)
+# --------------------------------------------------------------------------
+def test_a_store_behind_the_code_says_so_instead_of_raising(capsys, tmp_path):
+    """Reads break on a pending migration now, so they have to break in words."""
+    import pathlib
+    import shutil
+
+    import psycopg
+
+    from mashu.migrate import migration_files
+
+    name = "mashu_test_behind"
+    with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
+        conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        conn.execute(f'CREATE DATABASE "{name}"')
+    partial = pathlib.Path(tmp_path / "migrations")
+    partial.mkdir()
+    for path in migration_files()[:-1]:
+        shutil.copy(path, partial / path.name)
+    migrate(f"dbname={name}", partial)
+
+    code = cli.main(["--dsn", f"dbname={name}", "task", "list"])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "behind the code" in captured.err
+    assert migration_files()[-1].name in captured.err

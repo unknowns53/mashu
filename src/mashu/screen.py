@@ -57,6 +57,18 @@ _TOKENS = {
     "\x03": "q",
     "\x04": "q",
     " ": "space",
+    # The names, for the path where a typed line stands in for a keystroke.
+    # Without them an arrow has no spelling at all there, and the first letter
+    # a word falls back to is frequently a key that does something else —
+    # "space" reads as s, which on the closing screen is an outcome.
+    "up": "up",
+    "down": "down",
+    "left": "left",
+    "right": "right",
+    "enter": "enter",
+    "space": "space",
+    "pageup": "pageup",
+    "pagedown": "pagedown",
 }
 
 

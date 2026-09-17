@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+import psycopg
+
 from mashu import (
     bootstrap,
     capacity,
@@ -981,6 +983,15 @@ def _print_task_rows(rows: list[dict[str, Any]], *, project: bool = True) -> Non
         print(head)
         summary = state["status_text"] or state["goal"] or ""
         print(_flow(f"{row['heading']}  {summary}".rstrip(), indent="          "))
+        proposal = row.get("proposal")
+        if proposal:
+            # A third line only where there is one. A proposal is the reason
+            # to open the closing screen, so a listing that knew about it and
+            # said nothing would send the reader straight past what is waiting.
+            said = f"proposed {proposal['outcome']} on {proposal['on_date']}"
+            if proposal["stale"]:
+                said += ", state written since"
+            print(_flow(f"{said}: {proposal['reason']}", indent="          "))
 
 
 def cmd_project_list(args: argparse.Namespace) -> int:
@@ -1192,18 +1203,32 @@ def cmd_task_touch(args: argparse.Namespace) -> int:
 
 
 def cmd_task_close(args: argparse.Namespace) -> int:
-    """End a task. Only a person reaches this, and only with an outcome (v3 6)."""
+    """End a task. Only a person reaches this, and only with an outcome (v3 6).
+
+    Named with no task at all, it opens the closing screen instead. That is
+    the form to reach this in when there is more than one task to answer for,
+    because there the outcome is a keystroke rather than a retyped line; the
+    named form stays because one close is worth one line.
+    """
+    if not args.ref:
+        from mashu import close_ui
+
+        return close_ui.run(args.dsn, project=args.project)
     if not args.outcome:
         raise MashuError(
             f"close requires --outcome ({', '.join(tasks.OUTCOMES)}): 'closed' on its own "
             "says only that nobody is working on this, which the lease already says and "
-            "says reversibly"
+            "says reversibly. `mashu task close` with no task named opens the screen "
+            "that asks for an outcome one task at a time"
         )
-    with db.transaction(args.dsn) as cur:
-        task_id = _task_ref(cur, args.ref)
-        row = tasks.close(cur, task_id, outcome=args.outcome, actor=ACTOR, reason=args.reason)
-    _gate_warnings(row)
-    print(f"closed  {_short(task_id)}  {row['task']['outcome']}")
+    # A transaction each, so a reference that turns out to name nothing leaves
+    # the tasks already closed closed, rather than rolling them back open.
+    for ref in args.ref:
+        with db.transaction(args.dsn) as cur:
+            task_id = _task_ref(cur, ref)
+            row = tasks.close(cur, task_id, outcome=args.outcome, actor=ACTOR, reason=args.reason)
+        _gate_warnings(row)
+        print(f"closed  {_short(task_id)}  {row['task']['outcome']}")
     return 0
 
 
@@ -1746,20 +1771,27 @@ def build_parser() -> argparse.ArgumentParser:
     task_close = _command(
         task_sub,
         "close",
-        "end a task (User only), on a chosen outcome",
+        "end tasks (User only), on a chosen outcome",
         description=(
-            "Close a task with an explicit outcome. Silence or an expired lease is not closure; "
-            "this command records the User's decision."
+            "Close tasks with an explicit outcome. Silence or an expired lease is not closure; "
+            "this command records the User's decision. With no task named it opens the closing "
+            "screen: every open task on one list, the outcome chosen per task in a keystroke, "
+            "and a close proposal left by an agent taken with a single key."
         ),
         examples=(
+            "mashu task close",
             'mashu task close 1a2b3c4d --outcome completed --reason "Released in v2.1"',
+            "mashu task close 1a2b3c4d 5e6f7a8b --outcome superseded",
         ),
     )
-    task_close.add_argument("ref", help=_REF_HELP)
+    task_close.add_argument("ref", nargs="*", help=f"the tasks to end; {_REF_HELP}")
     task_close.add_argument(
         "--outcome", choices=tasks.OUTCOMES, help="whether it was finished, given up, or replaced"
     )
     task_close.add_argument("--reason", help="what a later reader would want to know about the end")
+    task_close.add_argument(
+        "--project", help="for the closing screen: only the tasks filed under this project"
+    )
     task_close.set_defaults(func=cmd_task_close)
 
     task_reopen = _command(
@@ -1808,6 +1840,28 @@ def main(argv: list[str] | None = None) -> int:
     except MashuError as error:
         print(str(error), file=sys.stderr)
         return 1
+    except psycopg.errors.UndefinedTable as error:
+        # A checkout ahead of its database, which `status` reports and every
+        # other command used to meet as a traceback. Reads break on it now and
+        # not only writes: a table joined for every task is a table the whole
+        # subsystem stops without.
+        print(_behind(args) or str(error), file=sys.stderr)
+        return 1
+
+
+def _behind(args: argparse.Namespace) -> str | None:
+    """The sentence `status` prints, for a command that has just failed on it."""
+    try:
+        with db.transaction(args.dsn) as cur:
+            unapplied = migration.pending(cur)
+    except Exception:  # noqa: BLE001 - the database is what just failed
+        return None
+    if not unapplied:
+        return None
+    return (
+        f"this store is behind the code: {len(unapplied)} migration(s) pending "
+        f"({', '.join(unapplied)}). Run 'mashu admin migrate'"
+    )
 
 
 if __name__ == "__main__":
