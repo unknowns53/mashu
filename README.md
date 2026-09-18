@@ -101,6 +101,16 @@ status の先頭に未適用 migration が表示されたら、uv run mashu admi
 
 ## 日常の使い方
 
+### 人向けの画面を開く
+
+引数なしの `mashu` は dashboard を開く。review 待ちと保留中の candidate、active / dormant な Task、close proposal、active Memory、Project の件数を一画面で確認できる。矢印または j / k で選び、Enter で review または Task の close 画面へ進む。r / t なら直接開け、d なら保留中を含む review 一覧を開く。各画面から退出すると、件数を読み直して dashboard に戻る。
+
+~~~bash
+mashu
+~~~
+
+Agent が使うサブコマンドと MCP は変わらない。引数を付けたコマンドは従来どおり非対話で動作する。
+
 ### 恒久ルールを直接登録する
 
 User が自分で実行した mashu remember は、review を待たずに active Memory になる。
@@ -168,8 +178,10 @@ TUI の操作は次のとおり。
 | キー | 動作 |
 |---|---|
 | ↑ / ↓ または j / k | 候補を移動 |
+| Home / End、PageUp / PageDown | 先頭・末尾または画面単位で移動 |
+| / | ID、kind、scope、本文、evidence を絞り込み。空入力で解除 |
 | Enter | 選択した候補を開く |
-| ← | 一覧に戻る |
+| Esc / ← | 詳細から一覧へ戻る。絞り込み中は解除 |
 | y | 確定。delivery を選ぶ |
 | e | 本文をエディタで直してから確定 |
 | r | 理由を入力して却下 |
@@ -178,7 +190,7 @@ TUI の操作は次のとおり。
 | ? | キーの説明 |
 | q | 退出 |
 
-保留は却下ではなく、candidate を pending のまま一時的に一覧から隠す操作だ。途中で退出しても、済んだ決定は保存される。
+一覧では選択中の本文、evidence 数、退役済み Memory との衝突、以前の保留理由を preview できる。保留は却下ではなく、candidate を pending のまま一時的に一覧から隠す操作だ。途中で退出しても、済んだ決定は保存される。
 
 ## 見る・変更する
 
@@ -256,12 +268,12 @@ mashu task show 1a2b3c4d
 mashu task create "Add CLI help" --project mashu --goal "Every command explains itself"
 mashu task touch 1a2b3c4d
 mashu task close
-mashu task close 1a2b3c4d --outcome completed --reason "Released in v2.1"
+mashu task close 1a2b3c4d --outcome completed --reason "Merged and released"
 mashu task close 1a2b3c4d 5e6f7a8b --outcome superseded
 mashu task reopen 1a2b3c4d
 ~~~
 
-`mashu task close` を引数なしで叩くと決定の画面が開く。open な Task が 1 行ずつ並び、↑↓ で選び、c / a / s で outcome を打つ。Agent が終了を提案している Task は先頭に集まり、その根拠が一覧の下に出た状態で ⏎ が提案をそのまま受理する。まとめて閉じる鍵は無い。
+`mashu task close` を引数なしで叩くと決定の画面が開く。open な Task が 1 行ずつ並び、選択中の goal、status、approach、open questions、blockers、next actions と close proposal を一覧の下で読める。↑↓ または j / k で移動し、`/` で ID、Task 名、Project、Current State、proposal の理由を絞り込む。c / a / s で outcome を選ぶ。Agent が終了を提案している Task は先頭に集まり、Enter で提案をそのまま受理する。まとめて閉じる鍵は無い。
 
 Task の Current State には goal、approach、status、open questions、blockers、next actions が入る。Attempt、Decision、Checkpoint、Artifact Reference は履歴として別に残る。
 

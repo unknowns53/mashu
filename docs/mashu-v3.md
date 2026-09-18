@@ -337,6 +337,7 @@ v3 実装のマージ時に、`docs/mashu-v2.md` の次の箇所へ注記を入�
 ### 13.2 CLI 追加
 
 ```text
+mashu                           人向け dashboard。review と Task close へ進む
 mashu project list / create / show <id>
 mashu task list [--dormant] [--closed]
 mashu task show <id>            state・履歴・artifacts を全文
@@ -346,6 +347,8 @@ mashu task close <id>... [--outcome ...] / reopen <id>
 
 mashu pain --prevention-kind {rule,work} [--task <id>]   9 節の二つの形
 ```
+
+dashboard は review 待ち、保留、active / dormant Task、close proposal、active Memory、Project の件数を表示する。review と Task close の画面から戻るたびに再集計する。Task close の一覧は、選択中の Current State と proposal を同時に表示し、ID・Task 名・Project・Current State・proposal の理由で絞り込める。これは人向けの入口だけを加える変更で、引数つき CLI と MCP の契約は変えない。
 
 短縮 ID の解決は既存の規則（表示される先頭 8 文字、4 文字未満と多重一致は候補を挙げて拒否）を共用する。
 

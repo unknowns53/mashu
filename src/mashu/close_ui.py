@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import shutil
 from typing import Any
 from uuid import UUID
 
@@ -19,11 +20,18 @@ _OUTCOME_KEYS = {"c": "completed", "a": "abandoned", "s": "superseded"}
 _ACTIVITY = {"active": "act", "dormant": "dorm"}
 
 _KEYS = (
-    "  ↑↓ move   ⏎ take the proposal   c completed   a abandoned   s superseded\n"
-    "  w drop the proposal   t still live   ? help   q leave"
+    "  ↑↓/jk move   Home/End   PgUp/PgDn   / search   ⏎ take proposal\n"
+    "  c completed   a abandoned   s superseded   w drop   t renew   ? help   q leave"
 )
 
 _HELP = """
+  ↑/↓ or j/k move one task. Home and End jump to the first and last task;
+     Page Up and Page Down move by one visible screenful.
+
+  /  search task id, name, project, activity, current state, or proposal grounds.
+     Search is case-insensitive. Submit an empty search to show everything again.
+     ← or Esc clears an active search; with no search it leaves this screen.
+
   ⏎  close the task on the proposal printed under the list: its outcome and
      its grounds, recorded as your decision. Only where one stands, and where
      the state has moved since it was written, you are asked once more first.
@@ -75,43 +83,176 @@ def _mark(row: dict[str, Any]) -> str:
     proposal = row.get("proposal")
     if not proposal:
         return " "
-    return "◌" if proposal["stale"] else "●"
+    return screen.warning("◌") if proposal["stale"] else screen.accent("●")
 
 
 def _line(row: dict[str, Any], width: int) -> str:
     """One task, as much of it as the terminal is wide."""
     task = row["task"]
-    return screen.clip(
-        f" {_mark(row)} {_short(task['task_id'])}  {screen.pad(task['project_name'], 10)} "
-        f"{screen.pad(_ACTIVITY[row['activity']], 4)} {row['age_days']:>3}d  {task['name']}",
-        width - 1,
+    plain_fixed = (
+        f"   {_short(task['task_id'])}  {screen.pad(task['project_name'], 10)} "
+        f"{screen.pad(_ACTIVITY[row['activity']], 4)}"
     )
+    styled_activity = (
+        screen.success(screen.pad(_ACTIVITY[row["activity"]], 4))
+        if row["activity"] == "active"
+        else screen.dim(screen.pad(_ACTIVITY[row["activity"]], 4))
+    )
+    fixed = (
+        f" {_mark(row)} {_short(task['task_id'])}  {screen.pad(task['project_name'], 10)} "
+        f"{styled_activity}"
+    )
+    suffix = f" {row['age_days']:>3}d  {task['name']}"
+    room = max(1, width - screen.cells(plain_fixed))
+    return f"{fixed}{screen.clip(suffix, room)}"
 
 
-def _detail(row: dict[str, Any]) -> str:
-    """What is being decided about, under the list and above the keys."""
+def _field(label: str, value: Any, *, value_style=None) -> str:
+    """One compact, readable state field which cannot wrap past the screen."""
+    if isinstance(value, (list, tuple)):
+        text = "  •  ".join(str(item) for item in value)
+    else:
+        text = " ".join(str(value).splitlines())
+    prefix = f"  {label:<13}"
+    available = max(1, screen.text_width() - screen.cells(prefix))
+    shown = screen.clip(text, available)
+    if value_style is not None:
+        shown = value_style(shown)
+    return f"  {screen.bold(f'{label:<13}')}{shown}"
+
+
+def _detail(row: dict[str, Any], limit: int | None = None) -> str:
+    """The selected task's decision context, kept inside the terminal height."""
     task = row["task"]
-    head = f"  ── {_short(task['task_id'])}  {task['name']}"
+    title_prefix = f"  ── {_short(task['task_id'])}  "
+    title = screen.clip(task["name"], max(1, screen.text_width() - screen.cells(title_prefix)))
+    activity = (
+        screen.success(row["activity"])
+        if row["activity"] == "active"
+        else screen.warning(row["activity"])
+    )
+    lines = [
+        screen.bold(f"{title_prefix}{title}"),
+        f"  {screen.dim(row['heading'])}  ·  {activity}",
+    ]
+
     proposal = row.get("proposal")
-    if not proposal:
-        body = row["state"]["status_text"] or row["state"]["goal"] or "(no state written)"
-        return f"{head}\n  {row['heading']}\n{screen.wrap(body, '  ')}"
-    said = f"  proposed {proposal['outcome']} by {proposal['proposed_by']} on {proposal['on_date']}"
-    if proposal["stale"]:
-        said += f"; the state has been written since, as of {row['as_of']}"
-    return f"{head}\n{said}\n{screen.wrap(proposal['reason'], '  ')}"
+    if proposal:
+        said = (
+            f"PROPOSAL  proposed {proposal['outcome']} by "
+            f"{proposal['proposed_by']} on {proposal['on_date']}"
+        )
+        lines.append(screen.accent(f"  {said}"))
+        lines.append(_field("reason", proposal["reason"], value_style=screen.accent))
+        if proposal["stale"]:
+            lines.append(
+                screen.warning(
+                    f"  STALE        state was written since the proposal, as of {row['as_of']}"
+                )
+            )
+
+    state = row["state"]
+    state_fields = (
+        ("goal", state.get("goal")),
+        ("status", state.get("status_text")),
+        ("approach", state.get("approach")),
+        ("open questions", state.get("open_questions")),
+        ("blockers", state.get("blockers")),
+        ("next actions", state.get("next_actions")),
+    )
+    for label, value in state_fields:
+        if value:
+            lines.append(_field(label, value))
+    if len(lines) == 2 and not proposal:
+        lines.append(screen.dim("  (no state written)"))
+
+    if limit is not None and len(lines) > limit:
+        hidden = len(lines) - max(1, limit - 1)
+        lines = lines[: max(1, limit - 1)]
+        lines.append(screen.dim(f"  … {hidden} more detail line(s)"))
+    return "\n".join(lines)
 
 
-def _screen_text(rows: list[dict[str, Any]], at: int, under: str) -> str:
+def _heading(rows: list[dict[str, Any]], total: int, query: str) -> str:
+    standing = sum(1 for row in rows if row.get("proposal"))
+    if query:
+        head = f"  {len(rows)}/{total} open task(s)  ·  search {screen.accent(repr(query))}"
+    else:
+        head = f"  {total} open task(s)"
+    return head + (f", {standing} proposed closed" if standing else "")
+
+
+def _screen_text(
+    rows: list[dict[str, Any]], at: int, under: str, *, total: int | None = None, query: str = ""
+) -> str:
     """The whole screen: how many are open, the list, the cursor's task, the keys."""
     width = screen.terminal_width()
-    standing = sum(1 for row in rows if row.get("proposal"))
-    head = f"  {len(rows)} open task(s)" + (f", {standing} proposed closed" if standing else "")
+    head = _heading(rows, len(rows) if total is None else total, query)
     lines = []
     for number, row in enumerate(rows):
-        line = _line(row, width)
-        lines.append(f"\x1b[1m▸{line[1:]}\x1b[0m" if number == at else line)
+        line = _line(row, width - 1)
+        lines.append(screen.selected(line) if number == at else line)
+    if not rows:
+        lines.append(screen.dim("  no tasks match; / searches again, ← clears the search"))
     return screen.list_screen(head, lines, at, under)
+
+
+def _matches(row: dict[str, Any], query: str) -> bool:
+    """Whether the task contains the query in one of the user-facing search fields."""
+    proposal = row.get("proposal") or {}
+    task = row["task"]
+    state = row["state"]
+    values = (
+        task.get("task_id"),
+        task.get("name"),
+        task.get("project_name"),
+        row.get("activity"),
+        state.get("goal"),
+        state.get("status_text"),
+        state.get("approach"),
+        *(state.get("open_questions") or []),
+        *(state.get("blockers") or []),
+        *(state.get("next_actions") or []),
+        proposal.get("reason"),
+    )
+    needle = query.casefold()
+    return any(needle in str(value).casefold() for value in values if value is not None)
+
+
+def _filtered(rows: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+    return [row for row in rows if not query or _matches(row, query)]
+
+
+def _search(current: str) -> str | None:
+    """Read a substring; an empty answer intentionally clears the current search."""
+    prompt = f"  search [{current}; empty clears]: " if current else "  search [empty clears]: "
+    try:
+        return input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+
+def _task_id(row: dict[str, Any]) -> UUID:
+    return row["task"]["task_id"]
+
+
+def _find(rows: list[dict[str, Any]], task_id: UUID | None) -> int | None:
+    if task_id is None:
+        return None
+    return next((number for number, row in enumerate(rows) if _task_id(row) == task_id), None)
+
+
+def _detail_limit(head: str, note: str) -> int:
+    """Leave room for a list row, blank separators, keys, and optional feedback."""
+    terminal_lines = shutil.get_terminal_size((screen.WIDTH, 24)).lines
+    fixed = screen.height_of(head) + screen.height_of(_KEYS) + screen.height_of(note) + 6
+    return max(2, min(12, terminal_lines - fixed))
+
+
+def _page_size(head: str, under: str) -> int:
+    """The number of one-line tasks that fit on the current list page."""
+    return max(1, screen.room_under(f"{head}\n\n\n{under}"))
 
 
 def _help() -> None:
@@ -152,7 +293,7 @@ def _close(dsn: str | None, row: dict[str, Any], outcome: str, reason: str | Non
     task_id = row["task"]["task_id"]
     with db.transaction(dsn) as cur:
         tasks.close(cur, task_id, outcome=outcome, actor=ACTOR, reason=reason)
-    return f"  closed  {_short(task_id)}  {outcome}"
+    return screen.success(f"  ✓ closed  {_short(task_id)}  {outcome}")
 
 
 def _open_tasks(dsn: str | None, project: str | None) -> list[dict[str, Any]]:
@@ -160,44 +301,90 @@ def _open_tasks(dsn: str | None, project: str | None) -> list[dict[str, Any]]:
         return _order(tasks.task_list(cur, project=project, activity="open"))
 
 
+@screen.fullscreen
 def run(dsn: str | None = None, *, project: str | None = None) -> int:
     """Work the list: the open tasks, and one decision at a time against them."""
-    at, note = 0, ""
+    at, note, query = 0, "", ""
+    selected_id: UUID | None = None
     while True:
         try:
-            rows = _open_tasks(dsn, project)
+            all_rows = _open_tasks(dsn, project)
         except MashuError as error:
             print(error)
             return 1
-        if not rows:
+        if not all_rows:
             if note:
                 print(note)
             print(_NOTHING)
             return 0
-        at = max(0, min(at, len(rows) - 1))
-        row = rows[at]
+        rows = _filtered(all_rows, query)
+        preserved = _find(rows, selected_id)
+        if preserved is not None:
+            at = preserved
+        elif rows:
+            at = max(0, min(at, len(rows) - 1))
+            selected_id = _task_id(rows[at])
+        else:
+            at = 0
 
-        under = screen.trailer(f"{_detail(row)}\n", _KEYS, note)
-        screen.paint(_screen_text(rows, at, under))
+        head = _heading(rows, len(all_rows), query)
+        detail = _detail(rows[at], _detail_limit(head, note)) if rows else ""
+        under = screen.trailer(f"{detail}\n" if detail else "", _KEYS, note)
+        screen.paint(_screen_text(rows, at, under, total=len(all_rows), query=query))
         key = screen.getkey()
         note = ""  # it has been read now; the next screen starts clean
 
         if key == "q":
             return 0
+        if key == "/":
+            searched = _search(query)
+            if searched is not None:
+                query = searched
+                at = 0
+            continue
+        if key == "left":
+            if query:
+                query = ""
+                at = 0
+                continue
+            return 0
         if key == "?":
             _help()
             continue
-        if key in ("up", "pageup"):
-            at = max(0, at - 1)
+        if not rows:
             continue
-        if key in ("down", "pagedown"):
+
+        row = rows[at]
+        step = _page_size(head, under)
+        if key in ("up", "k"):
+            at = max(0, at - 1)
+            selected_id = _task_id(rows[at])
+            continue
+        if key in ("down", "j"):
             at = min(len(rows) - 1, at + 1)
+            selected_id = _task_id(rows[at])
+            continue
+        if key == "home":
+            at = 0
+            selected_id = _task_id(rows[at])
+            continue
+        if key == "end":
+            at = len(rows) - 1
+            selected_id = _task_id(rows[at])
+            continue
+        if key == "pageup":
+            at = max(0, at - step)
+            selected_id = _task_id(rows[at])
+            continue
+        if key == "pagedown":
+            at = min(len(rows) - 1, at + step)
+            selected_id = _task_id(rows[at])
             continue
 
         try:
             note = _decide(dsn, row, key)
         except MashuError as error:
-            note = f"  {error}"
+            note = screen.danger(f"  ✗ {error}")
 
 
 def _decide(dsn: str | None, row: dict[str, Any], key: str) -> str:
@@ -207,11 +394,13 @@ def _decide(dsn: str | None, row: dict[str, Any], key: str) -> str:
 
     if key == "enter":
         if not proposal:
-            return "  nothing is proposed for this one; c, a or s chooses an outcome"
+            return screen.warning(
+                "  ! left open — nothing is proposed; c, a or s chooses an outcome"
+            )
         if proposal["stale"] and not _confirm(
             f"the state was written after this was proposed; close as {proposal['outcome']}?"
         ):
-            return "  left open"
+            return screen.warning("  ! left open — stale proposal was not accepted")
         return _close(dsn, row, proposal["outcome"], None)
 
     if key in _OUTCOME_KEYS:
@@ -220,15 +409,19 @@ def _decide(dsn: str | None, row: dict[str, Any], key: str) -> str:
 
     if key == "w":
         if not proposal:
-            return "  nothing is proposed for this one"
+            return screen.warning("  ! left open — nothing is proposed for this one")
         with db.transaction(dsn) as cur:
             tasks.withdraw_proposal(cur, task_id, actor=ACTOR)
             tasks.touch(cur, task_id, actor=ACTOR)
-        return f"  {_short(task_id)} is still live; the proposal is gone and the lease renewed"
+        return screen.success(
+            f"  ✓ {_short(task_id)} is still live; the proposal is gone and the lease renewed"
+        )
 
     if key == "t":
         with db.transaction(dsn) as cur:
             tasks.touch(cur, task_id, actor=ACTOR)
-        return f"  {_short(task_id)} renewed; nothing said about whether it is finished"
+        return screen.success(
+            f"  ✓ {_short(task_id)} renewed; nothing said about whether it is finished"
+        )
 
     return ""

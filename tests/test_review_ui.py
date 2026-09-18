@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import io
@@ -80,6 +79,7 @@ def test_opening_a_candidate_and_pressing_y_admits_it_where_it_belongs(dsn, monk
     assert review_ui.run(dsn) == 0
 
     out = capsys.readouterr().out
+    assert f"admitted {str(nomination['nomination_id'])[:8]}" in out
     assert "nothing waiting for review" in out
     rows = memory_rows(dsn)
     assert len(rows) == 1
@@ -95,7 +95,9 @@ def test_turning_one_down_keeps_the_reason_that_was_typed_for_it(dsn, monkeypatc
 
     assert review_ui.run(dsn) == 0
 
-    capsys.readouterr()
+    out = capsys.readouterr().out
+    assert f"declined {str(nomination['nomination_id'])[:8]}" in out
+    assert "nothing waiting for review" in out
     row = nomination_row(dsn, nomination["nomination_id"])
     assert row["status"] == "declined"
     assert row["decision_reason"] == "the tool refuses on its own now"
@@ -109,6 +111,7 @@ def test_putting_one_off_hides_it_from_the_sitting_until_all_asks_for_it(dsn, mo
     assert review_ui.run(dsn) == 0
 
     out = capsys.readouterr().out
+    assert f"deferred {str(nomination['nomination_id'])[:8]}" in out
     assert "nothing waiting for review" in out
     assert "--all to see them" in out
     row = nomination_row(dsn, nomination["nomination_id"])
@@ -123,6 +126,117 @@ def test_putting_one_off_hides_it_from_the_sitting_until_all_asks_for_it(dsn, mo
     keys(monkeypatch, "q")
     assert review_ui.run(dsn, show_deferred=True) == 0
     assert "1 waiting for review" in capsys.readouterr().out
+
+
+def test_queue_preview_shows_judgment_facts_without_opening_the_candidate(dsn, monkeypatch, capsys):
+    nomination = a_candidate(dsn, RULE)
+    keys(monkeypatch, "q")
+
+    assert review_ui.run(dsn) == 0
+
+    out = capsys.readouterr().out
+    assert f"preview  {str(nomination['nomination_id'])[:8]}" in out
+    assert RULE in out
+    assert "evidence: 1" in out
+    assert "conflicts: 0" in out
+
+
+def test_queue_preview_includes_the_deferred_reason(dsn, monkeypatch, capsys):
+    nomination = a_candidate(dsn, RULE)
+    reason = "waiting on the release owner"
+    with db.transaction(dsn) as cur:
+        nominations.defer(cur, nomination["nomination_id"], actor="user", reason=reason)
+    keys(monkeypatch, "q")
+
+    assert review_ui.run(dsn, show_deferred=True) == 0
+
+    out = capsys.readouterr().out
+    assert f"preview  {str(nomination['nomination_id'])[:8]}" in out
+    assert f"put off: {reason}" in out
+
+
+def test_search_matches_every_documented_field_case_insensitively():
+    row = {
+        "nomination_id": "AbCd-1234",
+        "kind": "User_Explicit",
+        "scope_name": "Deployments",
+        "content": "Keep the standby warm",
+        "evidence_rows": [{"what": "The RELEASE stalled", "prevention": "Check the Canary first"}],
+    }
+
+    for query in ("abcd", "EXPLICIT", "deploy", "STANDBY", "release", "canary"):
+        assert review_ui._matches_query(row, query)
+    assert not review_ui._matches_query(row, "unrelated")
+
+
+def test_zero_result_search_can_be_researched_and_empty_search_restores_the_queue(
+    dsn, monkeypatch, capsys
+):
+    first = a_candidate(dsn, RULE)
+    second = a_candidate(dsn, OTHER)
+    keys(monkeypatch, "/", "does not exist", "/", "TIMEZONE", "", "y", "", "/", "", "q")
+
+    assert review_ui.run(dsn) == 0
+
+    out = capsys.readouterr().out
+    assert "0 of 2 waiting for review  ·  search: does not exist" in out
+    assert "no candidates match" in out
+    assert "1 of 2 waiting for review  ·  search: TIMEZONE" in out
+    assert f"admitted {str(second['nomination_id'])[:8]}" in out
+    assert nomination_row(dsn, first["nomination_id"])["status"] == "pending"
+    assert nomination_row(dsn, second["nomination_id"])["status"] == "admitted"
+    assert "1 waiting for review" in out
+
+
+@pytest.mark.parametrize(
+    ("start", "key", "expected"),
+    [
+        (1, "j", 2),
+        (1, "down", 2),
+        (1, "k", 0),
+        (1, "up", 0),
+        (2, "home", 0),
+        (0, "end", 4),
+        (4, "pageup", 0),
+        (0, "pagedown", 4),
+    ],
+)
+def test_candidate_navigation_is_shared_by_queue_and_item(start, key, expected):
+    assert review_ui._move(start, 5, key) == expected
+
+
+@pytest.mark.parametrize(
+    ("movement", "decided"),
+    [
+        (("j", "", "k", "j"), 1),
+        (("end", "", "home", "end", "pageup", "pagedown"), 2),
+    ],
+)
+def test_queue_and_item_use_the_same_candidate_navigation(dsn, monkeypatch, movement, decided):
+    candidates = [
+        a_candidate(dsn, "run migrations before the local server"),
+        a_candidate(dsn, "write explicit timezones in scheduler entries"),
+        a_candidate(dsn, "check the standby before deploying"),
+    ]
+    keys(monkeypatch, *movement, "r", "no longer needed", "q")
+
+    assert review_ui.run(dsn) == 0
+
+    statuses = [nomination_row(dsn, row["nomination_id"])["status"] for row in candidates]
+    assert statuses[decided] == "declined"
+    assert statuses.count("pending") == 2
+
+
+def test_left_clears_a_queue_search_before_it_leaves(dsn, monkeypatch, capsys):
+    a_candidate(dsn, RULE)
+    a_candidate(dsn, OTHER)
+    keys(monkeypatch, "/", "timezone", "left", "q")
+
+    assert review_ui.run(dsn) == 0
+
+    out = capsys.readouterr().out
+    assert "1 of 2 waiting for review  ·  search: timezone" in out
+    assert out.count("2 waiting for review") >= 2
 
 
 def test_a_refused_admission_leaves_the_reader_on_the_same_candidate(dsn, monkeypatch, capsys):
@@ -205,6 +319,7 @@ def test_a_candidate_that_walks_back_a_retirement_says_so_above_its_evidence(
 
     out = capsys.readouterr().out
     assert "contradicts a retired memory" in out
+    assert "conflicts: 1" in out
     assert withdrawn in out
     assert OTHER not in out
-    assert out.index("contradicts a retired memory") < out.index("evidence")
+    assert out.index("contradicts a retired memory") < out.rindex("evidence")

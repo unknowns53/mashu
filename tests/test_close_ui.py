@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import io
@@ -45,7 +44,12 @@ def a_task(dsn: str, name: str, *, propose: str | None = None, reason: str = MER
     """One open task, committed, optionally with a proposal standing on it."""
     with db.transaction(dsn) as cur:
         row = tasks.task_create(
-            cur, project="enrai", name=name, goal=f"finish {name}", actor="agent"
+            cur,
+            project="enrai",
+            name=name,
+            goal=f"finish {name}",
+            actor="agent",
+            force=True,
         )
         task_id = row["task"]["task_id"]
         if propose:
@@ -237,3 +241,161 @@ def test_the_screen_reads_the_dormant_tasks_too(dsn, monkeypatch):
 
     assert close_ui.run(dsn) == 0
     assert task_row(dsn, task_id)["task"]["status"] == "closed"
+
+
+def test_the_preview_shows_decision_context_and_marks_a_stale_proposal(dsn, monkeypatch, capsys):
+    task_id = a_task(dsn, "replace the launch rail", propose="completed")
+    with db.transaction(dsn) as cur:
+        state = tasks.task_get(cur, task_id)
+        tasks.task_update(
+            cur,
+            task_id,
+            actor="agent",
+            expect_updated_at=state["state"]["updated_at"],
+            goal="launch without the old rail",
+            status_text="the replacement is fitted",
+            approach="reuse the aft mounting points",
+            open_questions=["whether the forward mount also moves"],
+            blockers=["await the load certificate"],
+            next_actions=["run the loaded trial"],
+        )
+    keys(monkeypatch, "q")
+
+    assert close_ui.run(dsn) == 0
+    out = capsys.readouterr().out
+    assert "PROPOSAL" in out
+    assert "STALE" in out
+    assert "goal" in out and "launch without the old rail" in out
+    assert "status" in out and "the replacement is fitted" in out
+    assert "approach" in out and "reuse the aft mounting points" in out
+    assert "open questions" in out and "whether the forward mount also moves" in out
+    assert "blockers" in out and "await the load certificate" in out
+    assert "next actions" in out and "run the loaded trial" in out
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "REPLACE",
+        "ENRAI",
+        "ACTIVE",
+        "LAUNCH WITHOUT",
+        "FITTED",
+        "FORWARD MOUNT",
+        "NOTHING ON MAIN",
+    ],
+)
+def test_search_matches_every_promised_text_field_case_insensitively(dsn, query):
+    task_id = a_task(dsn, "replace the launch rail", propose="completed")
+    with db.transaction(dsn) as cur:
+        state = tasks.task_get(cur, task_id)
+        tasks.task_update(
+            cur,
+            task_id,
+            actor="agent",
+            expect_updated_at=state["state"]["updated_at"],
+            goal="launch without the old rail",
+            status_text="the replacement is fitted",
+            open_questions=["whether the forward mount also moves"],
+        )
+        row = tasks.task_get(cur, task_id)
+
+    assert close_ui._matches(row, query)
+    assert close_ui._matches(row, str(task_id)[:12])
+
+
+def test_search_filters_the_list_and_an_empty_search_restores_it(dsn, monkeypatch, capsys):
+    hull = a_task(dsn, "rework the hull")
+    deck = a_task(dsn, "inspect the deck")
+    keys(monkeypatch, "/", "HULL", "/", "", "home", "c", "", "q")
+
+    assert close_ui.run(dsn) == 0
+    out = capsys.readouterr().out
+    assert "1/2 open task(s)" in out
+    assert "search 'HULL'" in out
+    assert task_row(dsn, deck)["task"]["outcome"] == "completed"
+    assert task_row(dsn, hull)["task"]["status"] == "open"
+
+
+def test_zero_search_results_can_be_searched_again_and_left(dsn, monkeypatch, capsys):
+    a_task(dsn, "rework the hull")
+    keys(monkeypatch, "/", "absent", "/", "", "q")
+
+    assert close_ui.run(dsn) == 0
+    out = capsys.readouterr().out
+    assert "0/1 open task(s)" in out
+    assert "no tasks match" in out
+    assert "1 open task(s)" in out
+
+
+def test_left_clears_a_search_then_home_can_reach_the_full_list(dsn, monkeypatch):
+    hull = a_task(dsn, "rework the hull")
+    deck = a_task(dsn, "inspect the deck")
+    keys(monkeypatch, "/", "hull", "left", "home", "c", "", "q")
+
+    assert close_ui.run(dsn) == 0
+    assert task_row(dsn, deck)["task"]["outcome"] == "completed"
+    assert task_row(dsn, hull)["task"]["status"] == "open"
+
+
+@pytest.mark.parametrize(
+    ("movement", "closed_name"),
+    [(("j",), "older"), (("end", "k"), "newer")],
+)
+def test_jk_and_home_end_move_between_tasks(dsn, monkeypatch, movement, closed_name):
+    older = a_task(dsn, "older task")
+    newer = a_task(dsn, "newer task")
+    keys(monkeypatch, *movement, "c", "", "q")
+
+    assert close_ui.run(dsn) == 0
+    expected = older if closed_name == "older" else newer
+    untouched = newer if closed_name == "older" else older
+    assert task_row(dsn, expected)["task"]["outcome"] == "completed"
+    assert task_row(dsn, untouched)["task"]["status"] == "open"
+
+
+def test_page_down_moves_by_more_than_one_visible_task(dsn, monkeypatch):
+    task_ids = [a_task(dsn, f"task {number:02}") for number in range(15)]
+    keys(monkeypatch, "pagedown", "c", "", "q")
+
+    assert close_ui.run(dsn) == 0
+    closed = [
+        task_id for task_id in task_ids if task_row(dsn, task_id)["task"]["status"] == "closed"
+    ]
+    assert len(closed) == 1
+    assert task_row(dsn, task_ids[-1])["task"]["status"] == "open"
+    assert task_row(dsn, task_ids[-2])["task"]["status"] == "open"
+
+
+def test_selection_survives_reload_when_withdrawing_reorders_the_list(dsn, monkeypatch):
+    selected = a_task(dsn, "selected proposal", propose="completed")
+    other = a_task(dsn, "other proposal", propose="completed")
+    keys(monkeypatch, "down", "w", "c", "selected remained selected", "q")
+
+    assert close_ui.run(dsn) == 0
+    assert task_row(dsn, selected)["task"]["outcome"] == "completed"
+    assert task_row(dsn, other)["task"]["status"] == "open"
+
+
+def test_non_tty_output_has_no_ansi_and_small_screens_stay_bounded(dsn, monkeypatch, capsys):
+    task_id = a_task(dsn, "replace the launch rail", propose="completed")
+    with db.transaction(dsn) as cur:
+        state = tasks.task_get(cur, task_id)
+        tasks.task_update(
+            cur,
+            task_id,
+            actor="agent",
+            expect_updated_at=state["state"]["updated_at"],
+            goal="launch without the old rail",
+            status_text="the replacement is fitted",
+            approach="reuse the aft mounting points",
+            blockers=["await the load certificate"],
+            next_actions=["run the loaded trial"],
+        )
+    monkeypatch.setenv("LINES", "12")
+    keys(monkeypatch, "q")
+
+    assert close_ui.run(dsn) == 0
+    out = capsys.readouterr().out
+    assert "\x1b[" not in out
+    assert len(out.splitlines()) <= 12

@@ -14,8 +14,13 @@ from mashu import db, nominations, screen, tokens
 from mashu.errors import MashuError
 
 # the screens
-_QUEUE_KEYS = "  ↑↓ move   ⏎ open   s put off   ? help   q leave"
-_ITEM_KEYS = "  y admit   e edit   r turn down   s put off   ↑↓ next   ← queue   ? help   q leave"
+_QUEUE_KEYS = (
+    "  j/↓ k/↑ move   Home/End first/last   / search   ⏎ open   s put off   ? help   q leave"
+)
+_ITEM_KEYS = (
+    "  y admit   e edit   r turn down   s put off   j/↓ k/↑ next   "
+    "Home/End first/last   ← queue   ? help   q leave"
+)
 
 #: What the keys do, for the one keystroke that asks.
 _HELP = """
@@ -35,8 +40,15 @@ _HELP = """
      'mashu review --all'. Nothing is decided, and the count of what is
      pending does not change.
 
+  /  search the queue by id, kind, scope, content, or the what/prevention in
+     its evidence. Search ignores case; submit an empty search to show all.
+
+  j/↓ and k/↑ move one candidate. Home and End go to the first and last;
+     PageUp and PageDown move a screenful. These work in the queue and while
+     reading a candidate. Escape or ← returns, and returns from the queue leave.
+
   space  read on where a candidate is longer than the screen; b goes back a
-         page and Home returns to the top of it.
+         page.
 
   There is no key that admits the rest. Each seat is given out on its own
   evidence, and every decision is written as it is made — leaving with q keeps
@@ -74,8 +86,34 @@ def _days(row: dict[str, Any]) -> int:
     return max(0, (datetime.now(created.tzinfo) - created).days)
 
 
-def _queue_screen(rows: list[dict[str, Any]], at: int, hidden: int, keys: str) -> str:
-    """Everything waiting, one line each, so ten minutes can be spent on purpose."""
+def _queue_preview(row: dict[str, Any]) -> str:
+    """The decision-sized facts for the selected row, without opening it."""
+    width = screen.terminal_width()
+    evidence = len(row.get("evidence_rows", []))
+    conflicts = len(row.get("conflict_rows", []))
+    scope = row.get("scope_name") or "-"
+    content = " ".join((row.get("content") or "").split()) or "(empty)"
+    lines = [
+        screen.bold(f"  preview  {_short(row['nomination_id'])}  {row['kind']}  [{scope}]"),
+        screen.clip(f"  {content}", width - 1),
+        screen.dim(f"  evidence: {evidence}  ·  conflicts: {conflicts}"),
+    ]
+    if row.get("deferred_at"):
+        reason = " ".join((row.get("defer_reason") or "").split()) or "no reason given"
+        lines.append(screen.warning(screen.clip(f"  put off: {reason}", width - 1)))
+    return "\n".join(lines)
+
+
+def _queue_screen(
+    rows: list[dict[str, Any]],
+    at: int,
+    hidden: int,
+    keys: str,
+    *,
+    query: str = "",
+    total: int | None = None,
+) -> str:
+    """Everything waiting, with a preview that follows the cursor."""
     width = screen.terminal_width()
     lines = []
     for number, row in enumerate(rows):
@@ -86,12 +124,18 @@ def _queue_screen(rows: list[dict[str, Any]], at: int, hidden: int, keys: str) -
             f"{screen.pad(row.get('scope_name') or '-', 12)} {_days(row):>3}d  {body}",
             width - 1,
         )
-        lines.append(f"\x1b[1m▸{line[1:]}\x1b[0m" if number == at else line)
+        lines.append(screen.selected(line) if number == at else line)
 
-    head = f"{len(rows)} waiting for review"
+    total = len(rows) if total is None else total
+    if query:
+        shown_query = " ".join(query.split())
+        head = f"{len(rows)} of {total} waiting for review  ·  search: {shown_query}"
+    else:
+        head = f"{len(rows)} waiting for review"
     if hidden:
         head += f"; {hidden} deferred; --all to see them"
-    return screen.list_screen(head, lines, at, keys)
+    preview = _queue_preview(rows[at]) if rows else screen.warning("  no candidates match")
+    return screen.list_screen(screen.bold(head), lines, at, screen.trailer(preview, keys))
 
 
 def _item_text(row: dict[str, Any], place: int, total: int) -> str:
@@ -100,32 +144,43 @@ def _item_text(row: dict[str, Any], place: int, total: int) -> str:
     across = screen.text_width()
     cost = tokens.pushed_cost([row["content"]])
     lines = [
-        "─" * 4 + label + "─" * max(4, across - 4 - screen.cells(label)),
-        f"{row['kind']}  [{row.get('scope_name') or '-'}]  {_short(row['nomination_id'])}  "
-        f"waiting {_days(row)} day(s)  tokens ~{cost}",
+        screen.dim("─" * 4 + label + "─" * max(4, across - 4 - screen.cells(label))),
+        screen.bold(
+            f"{row['kind']}  [{row.get('scope_name') or '-'}]  "
+            f"{_short(row['nomination_id'])}  waiting {_days(row)} day(s)  tokens ~{cost}"
+        ),
         "",
     ]
     if row.get("deferred_at"):
-        lines.extend([screen.wrap(f"(put off earlier: {row.get('defer_reason') or ''})"), ""])
+        lines.extend(
+            [
+                screen.warning(screen.wrap(f"(put off earlier: {row.get('defer_reason') or ''})")),
+                "",
+            ]
+        )
     lines.extend([screen.wrap(row["content"]), ""])
 
     # Above the evidence, not below it.
     for conflict in row.get("conflict_rows", []):
         retired = conflict.get("retired_at")
         when = retired.date().isoformat() if isinstance(retired, datetime) else str(retired or "")
-        lines.append(f"  ! contradicts a retired memory  {_short(conflict['memory_id'])}  {when}")
+        lines.append(
+            screen.danger(
+                f"  ! contradicts a retired memory  {_short(conflict['memory_id'])}  {when}"
+            )
+        )
         lines.append(screen.wrap(f"retired because: {conflict['retire_reason']}", indent="      "))
     if row.get("conflict_rows"):
         lines.append("")
 
-    lines.append("  evidence")
+    lines.append(screen.accent("  evidence"))
     for evidence in row.get("evidence_rows", []):
         created = evidence.get("created_at")
         when = created.date().isoformat() if isinstance(created, datetime) else str(created or "")
         lines.append(f"    {evidence['kind']}  {when}")
         lines.append(screen.wrap(f"what: {evidence['what']}", indent="      "))
         lines.append(screen.wrap(f"prevention: {evidence['prevention']}", indent="      "))
-    lines.append("─" * across)
+    lines.append(screen.dim("─" * across))
     return "\n".join(lines)
 
 
@@ -180,7 +235,7 @@ def _admit(dsn: str | None, row: dict[str, Any], *, edit: bool = False) -> str:
             )
     except MashuError as refusal:
         # Keep the candidate selected when admission is refused.
-        return f"  {refusal}"
+        return screen.danger(f"  {refusal}")
     return ""
 
 
@@ -191,7 +246,7 @@ def _decide(dsn: str | None, row: dict[str, Any], verb: str, reason: str) -> str
         with db.transaction(dsn) as cur:
             act(cur, row["nomination_id"], actor="user", reason=reason)
     except MashuError as refusal:
-        return f"  {refusal}"
+        return screen.danger(f"  {refusal}")
     return ""
 
 
@@ -203,22 +258,82 @@ def _queue(dsn: str | None, show_deferred: bool) -> tuple[list[dict[str, Any]], 
     return rows, hidden
 
 
+def _matches_query(row: dict[str, Any], query: str) -> bool:
+    """Whether a queue search occurs anywhere useful for judging this candidate."""
+    if not query:
+        return True
+    fields: list[Any] = [
+        row.get("nomination_id"),
+        row.get("kind"),
+        row.get("scope_name"),
+        row.get("content"),
+    ]
+    for evidence in row.get("evidence_rows", []):
+        fields.extend((evidence.get("what"), evidence.get("prevention")))
+    needle = query.casefold()
+    return any(needle in str(value or "").casefold() for value in fields)
+
+
+def _filtered(rows: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+    """A view of the queue; the caller retains rows so clearing never needs a reload."""
+    return [row for row in rows if _matches_query(row, query)]
+
+
+def _search(current: str) -> str | None:
+    """Ask for a filter, deliberately accepting empty input as 'show everything'."""
+    prompt = f"  search [{current}]: " if current else "  search: "
+    try:
+        return input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+
+def _move(at: int, total: int, key: str) -> int:
+    """Move through candidates the same way from the queue and item views."""
+    if total <= 0:
+        return 0
+    page = max(1, screen.room_under(_QUEUE_KEYS) - 6)
+    if key in ("down", "j"):
+        return min(total - 1, at + 1)
+    if key in ("up", "k"):
+        return max(0, at - 1)
+    if key == "home":
+        return 0
+    if key == "end":
+        return total - 1
+    if key == "pagedown":
+        return min(total - 1, at + page)
+    if key == "pageup":
+        return max(0, at - page)
+    return at
+
+
+def _feedback(verb: str, row: dict[str, Any]) -> str:
+    """Name the durable decision on the next screen, including at the end."""
+    words = {"y": "admitted", "e": "admitted", "r": "declined", "s": "deferred"}
+    return screen.success(f"  {words[verb]} {_short(row['nomination_id'])}")
+
+
 # a sitting
+@screen.fullscreen
 def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
     """Work the queue: the list, one candidate at a time, decisions as they are made."""
-    rows, hidden = _queue(dsn, show_deferred)
+    all_rows, hidden = _queue(dsn, show_deferred)
+    query = ""
+    rows = all_rows
     at, scroll, more = 0, 0, 0
     back: list[int] = []
     reading = False
     note = ""
 
     while True:
-        if not rows:
+        if not all_rows:
             if note:
                 print(note)
             print(_NOTHING + (f"; {hidden} deferred, --all to see them" if hidden else ""))
             return 0
-        at = min(at, len(rows) - 1)
+        at = min(at, max(0, len(rows) - 1))
 
         if reading:
             under = screen.trailer(_ITEM_KEYS, note)
@@ -226,7 +341,16 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
             screen.paint(page + "\n" + under)
         else:
             more = 0
-            screen.paint(_queue_screen(rows, at, hidden, screen.trailer(_QUEUE_KEYS, note)))
+            screen.paint(
+                _queue_screen(
+                    rows,
+                    at,
+                    hidden,
+                    screen.trailer(_QUEUE_KEYS, note),
+                    query=query,
+                    total=len(all_rows),
+                )
+            )
         key = screen.getkey()
         note = ""  # it has been read now; the next screen starts clean
 
@@ -236,33 +360,65 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
         if key == "q":
             return 0
 
-        if reading and key in ("space", "pagedown"):
+        if not reading and key == "/":
+            searched = _search(query)
+            if searched is None:
+                continue
+            selected = rows[at]["nomination_id"] if rows else None
+            query = searched
+            rows = _filtered(all_rows, query)
+            at = next(
+                (number for number, row in enumerate(rows) if row["nomination_id"] == selected),
+                0,
+            )
+            back, scroll = [], 0
+            continue
+
+        if key in ("left", "h"):
+            if reading:
+                reading = False
+                back, scroll = [], 0
+                continue
+            if query:
+                selected = rows[at]["nomination_id"] if rows else None
+                query = ""
+                rows = all_rows
+                at = next(
+                    (number for number, row in enumerate(rows) if row["nomination_id"] == selected),
+                    0,
+                )
+                continue
+            return 0
+
+        # A zero-result search is still a live queue: it can be searched again,
+        # cleared with left/Escape, or left with q.
+        if not rows:
+            continue
+
+        if reading and key == "space":
             # Read on where a candidate is longer than the screen.
             if more:
                 back.append(scroll)
                 scroll = more
                 continue
-            if key != "space":
-                continue
         if key == "space":
             key = "down"
-        if reading and key in ("pageup", "b"):
+        if reading and key == "b":
             scroll = back.pop() if back else 0
             continue
-        if reading and key == "home":
-            back, scroll = [], 0
-            continue
-        if not reading and key in ("pagedown", "pageup"):
-            key = "down" if key == "pagedown" else "up"
-        if not reading and key in ("home", "end"):
-            at = 0 if key == "home" else len(rows) - 1
-            continue
-        if key in ("down", "j"):
-            at = min(len(rows) - 1, at + 1)
-            back, scroll = [], 0
-            continue
-        if key in ("up", "k"):
-            at = max(0, at - 1)
+
+        moved = _move(at, len(rows), key)
+        if moved != at or key in (
+            "down",
+            "j",
+            "up",
+            "k",
+            "home",
+            "end",
+            "pagedown",
+            "pageup",
+        ):
+            at = moved
             back, scroll = [], 0
             continue
 
@@ -274,29 +430,38 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
                 reason = screen.typed("  why put it off? ")
                 if reason is None:
                     continue
-                note = _decide(dsn, rows[at], "s", reason)
+                decided = rows[at]
+                note = _decide(dsn, decided, "s", reason)
                 if not note:
-                    rows, hidden = _queue(dsn, show_deferred)
+                    note = _feedback("s", decided)
+                    all_rows, hidden = _queue(dsn, show_deferred)
+                    rows = _filtered(all_rows, query)
+                    at = min(at, max(0, len(rows) - 1))
             continue
 
-        if key in ("left", "h"):
-            reading = False
-            back, scroll = [], 0
-            continue
+        decided = rows[at]
         if key in ("y", "enter"):
-            note = _admit(dsn, rows[at])
+            note = _admit(dsn, decided)
+            verb = "y"
         elif key == "e":
-            note = _admit(dsn, rows[at], edit=True)
+            note = _admit(dsn, decided, edit=True)
+            verb = "e"
         elif key in ("r", "s"):
             reason = screen.typed("  why turn it down? " if key == "r" else "  why put it off? ")
             if reason is None:
                 continue
-            note = _decide(dsn, rows[at], key, reason)
+            note = _decide(dsn, decided, key, reason)
+            verb = key
         else:
             continue
 
         # Keep the current item selected when a decision is refused.
         if note:
             continue
-        rows, hidden = _queue(dsn, show_deferred)
+        note = _feedback(verb, decided)
+        all_rows, hidden = _queue(dsn, show_deferred)
+        rows = _filtered(all_rows, query)
+        if not rows:
+            reading = False
+        at = min(at, max(0, len(rows) - 1))
         back, scroll = [], 0

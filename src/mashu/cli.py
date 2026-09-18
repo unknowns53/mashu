@@ -1153,6 +1153,7 @@ _TOP_LEVEL_HELP = """\
 Mashu keeps durable rules, evidence of costly forgetting, and current project work.
 
 Start here:
+  mashu                     Open the human dashboard for review and task decisions.
   mashu status              Summarize the store and pending review work.
   mashu bootstrap           Show what a session in this directory receives.
   mashu memories            List active durable rules.
@@ -1251,7 +1252,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=_HelpFormatter,
     )
     parser.add_argument("--dsn", default=None, help=argparse.SUPPRESS)
-    sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     _command(
         sub,
@@ -1723,6 +1724,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command is None:
+            from mashu import home_ui
+
+            return home_ui.run(args.dsn)
         return args.func(args)
     except MashuError as error:
         print(str(error), file=sys.stderr)

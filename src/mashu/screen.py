@@ -8,6 +8,8 @@ import shutil
 import sys
 import textwrap
 import unicodedata
+from contextlib import contextmanager
+from functools import wraps
 
 try:
     import select
@@ -20,6 +22,93 @@ except ImportError:  # pragma: no cover - these are absent on Windows
 
 #: The width text is laid out at when the terminal is wider than reads well.
 WIDTH = 88
+
+# TUI entry points can be nested (the dashboard opens review and close screens).
+# The alternate buffer therefore belongs to the outermost active session only.
+_SESSION_DEPTH = 0
+_ALTERNATE_ACTIVE = False
+
+
+@contextmanager
+def terminal_session():
+    """Keep repaints out of scrollback, restoring the caller's screen on exit."""
+    global _ALTERNATE_ACTIVE, _SESSION_DEPTH
+
+    interactive = sys.stdout.isatty()
+    if interactive:
+        _SESSION_DEPTH += 1
+    try:
+        yield
+    finally:
+        if interactive:
+            _SESSION_DEPTH -= 1
+            if _SESSION_DEPTH == 0 and _ALTERNATE_ACTIVE:
+                sys.stdout.write("\x1b[?1049l")
+                sys.stdout.flush()
+                _ALTERNATE_ACTIVE = False
+
+
+def fullscreen(function):
+    """Run a TUI entry point in the shared, re-entrant terminal session."""
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with terminal_session():
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
+def _enter_alternate_screen() -> None:
+    """Enter lazily, so an empty queue can still print a normal one-line result."""
+    global _ALTERNATE_ACTIVE
+
+    if _SESSION_DEPTH and not _ALTERNATE_ACTIVE and sys.stdout.isatty():
+        sys.stdout.write("\x1b[?1049h")
+        sys.stdout.flush()
+        _ALTERNATE_ACTIVE = True
+
+
+def color_enabled() -> bool:
+    """Whether terminal decoration is useful and has not been disabled."""
+    return sys.stdout.isatty() and "NO_COLOR" not in os.environ
+
+
+def _style(text: str, code: str) -> str:
+    """Decorate text for a person's terminal, while keeping redirected output plain."""
+    if not color_enabled():
+        return text
+    return f"\x1b[{code}m{text}\x1b[0m"
+
+
+def bold(text: str) -> str:
+    return _style(text, "1")
+
+
+def dim(text: str) -> str:
+    return _style(text, "2")
+
+
+def accent(text: str) -> str:
+    return _style(text, "36")
+
+
+def success(text: str) -> str:
+    return _style(text, "32")
+
+
+def warning(text: str) -> str:
+    return _style(text, "33")
+
+
+def danger(text: str) -> str:
+    return _style(text, "31")
+
+
+def selected(text: str) -> str:
+    """Make the current choice distinct without relying on colour alone."""
+    marked = f"▸{text[1:]}" if text.startswith(" ") else f"▸ {text}"
+    return _style(marked, "1;7")
 
 
 # Key names mapped from terminal escape sequences.
@@ -46,6 +135,8 @@ _TOKENS = {
     "right": "right",
     "enter": "enter",
     "space": "space",
+    "home": "home",
+    "end": "end",
     "pageup": "pageup",
     "pagedown": "pagedown",
 }
@@ -112,6 +203,7 @@ def typed(prompt: str) -> str | None:
 def paint(text: str) -> None:
     """Repaint. What is being decided about should be the whole view."""
     if sys.stdout.isatty():
+        _enter_alternate_screen()
         sys.stdout.write("\x1b[H\x1b[2J")
     print(text)
 
