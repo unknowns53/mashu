@@ -1153,7 +1153,7 @@ _TOP_LEVEL_HELP = """\
 Mashu keeps durable rules, evidence of costly forgetting, and current project work.
 
 Start here:
-  mashu                     Open the human dashboard for review and task decisions.
+  mashu                     Open the human dashboard.
   mashu status              Summarize the store and pending review work.
   mashu bootstrap           Show what a session in this directory receives.
   mashu memories            List active durable rules.

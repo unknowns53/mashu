@@ -41,7 +41,7 @@ Memory 以外の記録は、Memory の代わりではない。便利なメモや
 User が会話中に「覚えて」と言った
     └─ memory_nominate → pending candidate
 
-User が CLI で mashu remember を実行した
+User が CLI / TUI で Memory を直接登録した
     └─ active Memory（--until なしの場合。唯一の即時経路）
 
 pending candidate
@@ -103,17 +103,26 @@ status の先頭に未適用 migration が表示されたら、uv run mashu admi
 
 ### 人向けの画面を開く
 
-引数なしの `mashu` は dashboard を開く。review 待ちと保留中の candidate、active / dormant な Task、close proposal、active Memory、Project の件数を一画面で確認できる。矢印または j / k で選び、Enter で review または Task の close 画面へ進む。r / t なら直接開け、d なら保留中を含む review 一覧を開く。各画面から退出すると、件数を読み直して dashboard に戻る。
+引数なしの `mashu` は人向け dashboard を開く。
 
 ~~~bash
 mashu
 ~~~
 
-Agent が使うサブコマンドと MCP は変わらない。引数を付けたコマンドは従来どおり非対話で動作する。
+| 領域 | TUI からできること |
+|---|---|
+| Attention | candidate の review、close proposal の判断、dormant Task の確認 |
+| Memories | active / retired Memory と Temporary Context の閲覧・検索、直接登録、revise、retire、delivery / guard の変更 |
+| Work | active / dormant / closed Task と Project の閲覧・検索、Task の履歴・artifact の確認、Task の create / touch / close / reopen、Project の作成 |
+| Settings & health | 容量と queue の状態、bootstrap preview、Scope の作成、route の追加・ignore・削除、migration の確認・適用 |
+
+各画面では矢印または j / k で移動し、Enter で開く。`/` のある一覧は部分検索できる。Esc または ← で一段戻り、q でその領域を閉じる。TUI は alternate screen 上で動くため、再描画した画面は terminal の履歴へ残らない。
+
+Agent が使うサブコマンドと MCP は変わらない。引数を付けたコマンドは従来どおり非対話で動作する。Current State と Task 履歴の書き込みなど Agent 側の操作は TUI に置かない。
 
 ### 恒久ルールを直接登録する
 
-User が自分で実行した mashu remember は、review を待たずに active Memory になる。
+User が CLI の `mashu remember` または dashboard の Memories から直接登録した内容は、review を待たずに active Memory になる。
 
 ~~~bash
 mashu remember "Run migrations before restarting the service"
@@ -278,7 +287,7 @@ mashu task reopen 1a2b3c4d
 Task の Current State には goal、approach、status、open questions、blockers、next actions が入る。Attempt、Decision、Checkpoint、Artifact Reference は履歴として別に残る。
 
 - Agent は MCP で Current State と履歴を更新する
-- User は CLI で Task を作成・close・reopen できる
+- User は CLI / TUI で Task を作成・touch・close・reopen できる
 - open Task は活動が 14 日途切れると dormant になり、bootstrap から外れる。履歴は残る
 - dormant は終了ではない。task touch で活動期限を延長して戻せる
 - Task を closed にできるのは User だけ。outcome は completed、abandoned、superseded のいずれか
@@ -330,7 +339,7 @@ User が「覚えて」と言った → memory_nominate
 作業の区切り            → task_checkpoint
 ~~~
 
-Attempt は失敗した試行の結末、Decision は理由を失うと再導出コストが高い判断に使う。Temporary Context の登録、Memory の直接登録、review、Task の close / reopen は User の CLI 操作だ。終わったと思ったら status_text にそう書くのではなく task_propose_close を使う。前者は User に読み直しと打ち直しをさせ、後者は 1 打鍵で決まる。
+Attempt は失敗した試行の結末、Decision は理由を失うと再導出コストが高い判断に使う。Temporary Context の登録、Memory の直接登録、review、Task の close / reopen は User の CLI / TUI 操作だ。終わったと思ったら status_text にそう書くのではなく task_propose_close を使う。前者は User に読み直しと打ち直しをさせ、後者は 1 打鍵で決まる。
 
 ### PreToolUse hook で guard を有効にする
 
@@ -415,7 +424,7 @@ Trace、Ledger、Attempt、Decision、Checkpoint、dormant Task、closed Task �
 - 禁止パターンはリポジトリ外の .git-banned-patterns に置く。MASHU_BANNED_PATTERNS で場所を変更できる
 - 禁止パターンの一覧が見つからない場合は、検査を通すのではなく「検査できない」として扱う
 - Ledger、Memory の revision history、event_log は append-only で、DB の trigger が書き換えを拒否する
-- 退役した Memory は本文を返さず、「何が、なぜ否定されたか」という理由だけを返す。再登録したい場合は、理由を読んだ User が mashu remember --force を実行する
+- 退役した Memory は本文を返さず、「何が、なぜ否定されたか」という理由だけを返す。再登録したい場合は、理由を読んだ User が `mashu remember --force` を実行するか、Memories TUI で確認する
 
 ## 開発
 

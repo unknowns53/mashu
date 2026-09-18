@@ -5,7 +5,20 @@ import io
 import psycopg
 import pytest
 
-from mashu import cli, db, home_ui, ledger, memories, nominations, projects, screen, tasks
+from mashu import (
+    cli,
+    db,
+    home_ui,
+    ledger,
+    memories,
+    nominations,
+    projects,
+    routing,
+    scopes,
+    screen,
+    tasks,
+    temporary,
+)
 from mashu.migrate import migrate
 
 ADMIN_DSN = "dbname=postgres"
@@ -40,8 +53,27 @@ def test_dashboard_collects_review_task_memory_and_project_counts(
     home_dsn: str,
 ) -> None:
     with db.transaction(home_dsn) as cur:
+        scope = scopes.create_scope(
+            cur, name="home scope", summary="dashboard test scope", actor="user"
+        )
+        routing.add_route(
+            cur, path_prefix="/tmp/mashu-home-dashboard", scope_id=scope["scope_id"], actor="user"
+        )
         projects.create_project(cur, name="home dashboard", actor="user")
         memories.remember(cur, content="keep the dashboard count distinct", actor="user")
+        retired = memories.remember(cur, content="retire this dashboard-only rule", actor="user")
+        memories.retire(
+            cur,
+            retired["memory_id"],
+            reason="the dashboard test needs a retired count",
+            actor="user",
+        )
+        temporary.put_temporary(
+            cur,
+            content="the dashboard test is running today",
+            actor="user",
+            days=1,
+        )
         pain = ledger.report_pain(
             cur,
             kind="friction",
@@ -102,6 +134,21 @@ def test_dashboard_collects_review_task_memory_and_project_counts(
             "UPDATE task SET active_until = now() - interval '1 day' WHERE task_id = %s",
             (dormant["task"]["task_id"],),
         )
+        closed = tasks.task_create(
+            cur,
+            project="home dashboard",
+            name="closed dashboard task",
+            goal="be counted as closed",
+            actor="agent",
+            force=True,
+        )
+        tasks.close(
+            cur,
+            closed["task"]["task_id"],
+            outcome="completed",
+            actor="user",
+            reason="counted by the dashboard test",
+        )
 
     state = home_ui._dashboard(home_dsn)
 
@@ -113,6 +160,12 @@ def test_dashboard_collects_review_task_memory_and_project_counts(
         task_proposals=1,
         active_memories=1,
         projects=1,
+        tasks_closed=1,
+        retired_memories=1,
+        temporary_contexts=1,
+        scopes=1,
+        routes=1,
+        schema_pending=0,
     )
 
 
@@ -134,17 +187,58 @@ def test_review_and_close_screens_return_to_a_refreshed_dashboard(
     assert reads == ["home-dsn", "home-dsn", "home-dsn"]
 
 
-def test_arrows_and_enter_open_the_selected_screen(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_arrows_and_enter_open_the_selected_area(monkeypatch: pytest.MonkeyPatch) -> None:
     keys = iter(("down", "enter", "q"))
     opened: list[str] = []
     empty = home_ui.Dashboard(0, 0, 0, 0, 0, 0, 0)
     monkeypatch.setattr(home_ui, "_dashboard", lambda dsn: empty)
     monkeypatch.setattr(screen, "paint", lambda text: None)
     monkeypatch.setattr(screen, "getkey", lambda: next(keys))
-    monkeypatch.setattr(home_ui.close_ui, "run", lambda dsn: opened.append("tasks") or 0)
+    monkeypatch.setattr(home_ui.memory_ui, "run", lambda dsn: opened.append("memories") or 0)
 
     assert home_ui.run() == 0
-    assert opened == ["tasks"]
+    assert opened == ["memories"]
+
+
+def test_home_shortcuts_open_memory_work_and_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    keys = iter(("m", "w", "s", "q"))
+    opened: list[str] = []
+    empty = home_ui.Dashboard(0, 0, 0, 0, 0, 0, 0)
+    monkeypatch.setattr(home_ui, "_dashboard", lambda dsn: empty)
+    monkeypatch.setattr(screen, "paint", lambda text: None)
+    monkeypatch.setattr(screen, "getkey", lambda: next(keys))
+    monkeypatch.setattr(home_ui.memory_ui, "run", lambda dsn: opened.append("memories") or 0)
+    monkeypatch.setattr(home_ui.work_ui, "run", lambda dsn: opened.append("work") or 0)
+    monkeypatch.setattr(home_ui.settings_ui, "run", lambda dsn: opened.append("settings") or 0)
+
+    assert home_ui.run("home-dsn") == 0
+    assert opened == ["memories", "work", "settings"]
+
+
+def test_attention_menu_opens_deferred_and_dormant_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    keys = iter(("a", "down", "enter", "end", "enter", "q", "q"))
+    opened: list[tuple[str, object]] = []
+    empty = home_ui.Dashboard(1, 2, 3, 4, 1, 5, 6)
+    monkeypatch.setattr(home_ui, "_dashboard", lambda dsn: empty)
+    monkeypatch.setattr(screen, "paint", lambda text: None)
+    monkeypatch.setattr(screen, "getkey", lambda: next(keys))
+    monkeypatch.setattr(
+        home_ui.review_ui,
+        "run",
+        lambda dsn, *, show_deferred=False: opened.append(("review", show_deferred)) or 0,
+    )
+    monkeypatch.setattr(
+        home_ui.work_ui,
+        "run",
+        lambda dsn, *, initial_view="active": opened.append(("work", initial_view)) or 0,
+    )
+
+    assert home_ui.run("home-dsn") == 0
+    assert opened == [("review", True), ("work", "dormant")]
 
 
 def test_deferred_shortcut_opens_the_complete_review_queue(
@@ -174,6 +268,8 @@ def test_non_tty_dashboard_contains_no_ansi(monkeypatch: pytest.MonkeyPatch) -> 
     rendered = home_ui._screen_text(state, 0)
 
     assert "\x1b[" not in rendered
+    assert "Attention" in rendered and "Memories" in rendered
+    assert "Work" in rendered and "Settings & health" in rendered
     assert "1 ready" in rendered and "2 deferred" in rendered
     assert "3 active" in rendered and "4 dormant" in rendered
 
