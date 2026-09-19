@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import psycopg
@@ -64,6 +63,10 @@ def test_a_new_task_starts_open_active_and_dated(cur, task):
     assert task["heading"] == f"State as of {task['as_of'].isoformat()}"
     assert task["state"]["next_actions"] == ["write the migration", "write the services"]
     assert task["candidates"] == []
+    cur.execute("SELECT detail FROM event_log WHERE event_type = 'task_created'")
+    detail = cur.fetchone()["detail"]
+    assert detail["tokens"] == tasks.card_cost(task["task"]["name"], task["state"])
+    assert detail["detail_tokens"] == tasks.state_cost(task["task"]["name"], task["state"])
 
 
 def test_a_task_that_reads_like_an_open_one_is_not_created(cur, task):
@@ -246,7 +249,7 @@ def test_each_scope_has_an_independent_project_state_share(cur, scope_id, monkey
         status_text="x" * 240,
         actor="agent",
     )
-    cost = tasks.state_cost(here["task"]["name"], here["state"])
+    cost = tasks.card_cost(here["task"]["name"], here["state"])
     monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(cost))
 
     there = tasks.task_create(
@@ -273,8 +276,8 @@ def test_unscoped_state_spends_a_seat_in_every_scope(cur, scope_id):
     )
     local_task = tasks.task_create(cur, project="local project", name="local work", actor="agent")
 
-    global_cost = tasks.state_cost(global_task["task"]["name"], global_task["state"])
-    local_cost = tasks.state_cost(local_task["task"]["name"], local_task["state"])
+    global_cost = tasks.card_cost(global_task["task"]["name"], global_task["state"])
+    local_cost = tasks.card_cost(local_task["task"]["name"], local_task["state"])
     totals = tasks.pushed_totals(cur)
 
     assert totals["unscoped"] == global_cost
@@ -296,8 +299,8 @@ def test_an_unscoped_write_is_weighed_against_the_busiest_scope(cur, scope_id, m
     )
     tasks.task_create(cur, project="light project", name="light work", actor="agent")
 
-    busy_cost = tasks.state_cost(busy["task"]["name"], busy["state"])
-    global_cost = tasks.state_cost("global work", {})
+    busy_cost = tasks.card_cost(busy["task"]["name"], busy["state"])
+    global_cost = tasks.card_cost("global work", {})
     monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(busy_cost + global_cost - 1))
 
     with pytest.raises(ProjectBudgetError) as raised:
@@ -569,7 +572,7 @@ def test_the_history_refuses_to_be_emptied(cur, table):
 # what a delivered state says about itself (v3 5.3, 8)
 
 
-def test_a_delivered_state_names_the_field_each_line_belongs_to(cur, task):
+def test_full_state_names_every_field_when_explicitly_fetched(cur, task):
     text = tasks.state_text(task["task"]["name"], task["state"])
 
     assert text.splitlines()[0] == SCHEMA
@@ -583,6 +586,98 @@ def test_the_labels_are_counted_in_what_the_state_costs(cur, task):
     state = task["state"]
     name = task["task"]["name"]
     assert tasks.state_cost(name, state) == tasks.pushed_cost([tasks.state_text(name, state)])
+
+
+def test_bootstrap_card_keeps_detail_bodies_out_and_names_what_can_be_fetched(cur, task):
+    state = {
+        **task["state"],
+        "approach": "rewrite the parser around a smaller boundary",
+        "status_text": "parser is passing its focused tests",
+        "open_questions": ["does the legacy route remain?"],
+        "blockers": ["waiting for the fixture"],
+        "next_actions": ["run the full suite", "update the specification"],
+    }
+
+    card = tasks.card_text(task["task"]["name"], state)
+
+    assert task["task"]["name"] in card
+    assert state["goal"] in card and state["status_text"] in card
+    assert "approach" in card
+    assert "1 open question" in card and "1 blocker" in card
+    assert "2 next actions" in card
+    for hidden in (
+        state["approach"],
+        *state["open_questions"],
+        *state["blockers"],
+        *state["next_actions"],
+    ):
+        assert hidden not in card
+    assert tasks.card_cost(task["task"]["name"], state) == tasks.pushed_cost([card])
+
+
+def test_task_card_and_full_detail_have_independent_limits(cur, project, monkeypatch):
+    name = "bounded task"
+    state = tasks._state_of(goal="short goal", status_text="short status")
+    monkeypatch.setenv("MASHU_TASK_CARD_CAPACITY", str(tasks.card_cost(name, state) - 1))
+
+    with pytest.raises(OverLimitError) as card_error:
+        tasks.task_create(
+            cur,
+            project=project["project_id"],
+            name=name,
+            goal=state["goal"],
+            status_text=state["status_text"],
+            actor="agent",
+        )
+    assert card_error.value.field == "task bootstrap card"
+
+    monkeypatch.delenv("MASHU_TASK_CARD_CAPACITY")
+    detail_state = tasks._state_of(
+        goal="short goal",
+        approach="x" * 400,
+        next_actions=["y" * 250, "z" * 250],
+    )
+    monkeypatch.setenv(
+        "MASHU_TASK_DETAIL_CAPACITY",
+        str(tasks.state_cost(name, detail_state) - 1),
+    )
+    with pytest.raises(OverLimitError) as detail_error:
+        tasks.task_create(
+            cur,
+            project=project["project_id"],
+            name=name,
+            goal=detail_state["goal"],
+            approach=detail_state["approach"],
+            next_actions=detail_state["next_actions"],
+            actor="agent",
+        )
+    assert detail_error.value.field == "task detail"
+
+
+def test_long_detail_does_not_consume_more_bootstrap_capacity(cur, project):
+    short = tasks.task_create(
+        cur,
+        project=project["project_id"],
+        name="short detail",
+        goal="same goal",
+        approach="x",
+        next_actions=["x"],
+        actor="agent",
+    )
+    long = tasks.task_create(
+        cur,
+        project=project["project_id"],
+        name="longer detail",
+        goal="same goal",
+        approach="x" * 400,
+        next_actions=["x" * 250],
+        actor="agent",
+        force=True,
+    )
+
+    same_name = "same card"
+    assert tasks.card_cost(same_name, short["state"]) == tasks.card_cost(same_name, long["state"])
+    assert tasks.state_cost(same_name, short["state"]) < tasks.state_cost(same_name, long["state"])
 
 
 # the one append (v3 5.3, and ledger's work path)
@@ -661,6 +756,35 @@ def test_a_store_over_its_ceiling_can_still_be_shrunk(cur, project, monkeypatch)
     )
 
     assert got["state"]["status_text"] == "tiny"
+
+
+def test_a_task_over_new_card_and_detail_limits_can_still_be_shrunk(cur, project, monkeypatch):
+    made = tasks.task_create(
+        cur,
+        project=project["project_id"],
+        name="oversized after configuration changed",
+        actor="agent",
+        goal="g" * 250,
+        approach="a" * 400,
+        status_text="s" * 400,
+        next_actions=["n" * 250],
+    )
+    current = made["state"]
+    name = made["task"]["name"]
+    monkeypatch.setenv("MASHU_TASK_CARD_CAPACITY", str(tasks.card_cost(name, current) - 20))
+    monkeypatch.setenv("MASHU_TASK_DETAIL_CAPACITY", str(tasks.state_cost(name, current) - 20))
+
+    shrunk = tasks.task_update(
+        cur,
+        made["task"]["task_id"],
+        actor="agent",
+        expect_updated_at=current["updated_at"],
+        goal="short goal",
+        status_text="short status",
+    )
+
+    assert shrunk["state"]["goal"] == "short goal"
+    assert shrunk["state"]["approach"] is None
 
 
 def test_being_over_the_ceiling_is_not_a_licence_to_grow(cur, project, monkeypatch):

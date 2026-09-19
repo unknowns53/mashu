@@ -16,7 +16,7 @@ Mashu には、恒久的な Memory だけでなく、現在の作業状態を扱
 | 種類 | 役割 | 別のセッションに届くか | 寿命 |
 |---|---|---|---|
 | Memory | 今後も守る恒久ルール | User が確定した後、bootstrap または guard で届く | 原則恒久 |
-| Project State | Project / Task の現在地、試行、判断、成果物の参照先 | active な Task の Current State だけ bootstrap で届く | close または Activity Lease が切れるまで |
+| Project State | Project / Task の現在地、試行、判断、成果物の参照先 | active Task の短い card だけ届き、詳細は task_get で読む | close または Activity Lease が切れるまで |
 | Trace | 調べて分かったことを残す日付つきの観測 | 届かない。検索で明示的に読む | 既定 30 日 |
 | Ledger | 忘却によって起きた事故や再調査の記録 | 届かない | append-only |
 | Temporary Context | 期限つきの条件 | User が書いたものだけ bootstrap で届く | 最大 14 日 |
@@ -48,7 +48,7 @@ pending candidate
     └─ mashu review → active Memory → bootstrap / guard
 ~~~
 
-Agent が書いた candidate は、人が review で確定するまで配信されない。Project State は別扱いで、Agent が更新した active な Current State は、人の review を経ずに次のセッションへ届く。
+Agent が書いた candidate は、人が review で確定するまで配信されない。Project State は別扱いで、Agent が更新した active Task の card は、人の review を経ずに次のセッションへ届く。Current State 全文は常時注入せず、card の完全な task_id から `task_get` で明示取得する。
 
 一度直せば以後は覚えなくてよい変更は、Memory ではなく Task の next_actions に記録する。pain の prevention-kind を work にするとこの扱いになる。
 
@@ -245,13 +245,14 @@ scope は「どこで」、guard は「いつ」を絞る。guard に scope も�
 ~~~text
 全体                 4000 token
 Memory               2000 token（always 800 / scope 1200）
-Project State        1600 token / scope
+Task cards           1600 token / scope（1 Task 200）
+Task detail           800 token / Task（常時配信しない）
 Temporary Context     400 token
 ~~~
 
-環境変数 MASHU_TOTAL_CAPACITY、MASHU_CAPACITY、MASHU_ALWAYS_CAPACITY、MASHU_PROJECT_CAPACITY、MASHU_TEMPORARY_CAPACITY で変更できる。
+環境変数 MASHU_TOTAL_CAPACITY、MASHU_CAPACITY、MASHU_ALWAYS_CAPACITY、MASHU_PROJECT_CAPACITY、MASHU_TASK_CARD_CAPACITY、MASHU_TASK_DETAIL_CAPACITY、MASHU_TEMPORARY_CAPACITY で変更できる。
 
-Project State の枠は Scope ごとに独立している。Scope を持たない Project の state は全 Scope 共通分として各枠に含まれ、unrouted session にはこの共通分だけが届く。`mashu status` の Project State 使用量は、最も重い Scope の値である。
+Task card の枠は Scope ごとに独立している。Scope を持たない Project の card は全 Scope 共通分として各枠に含まれ、unrouted session にはこの共通分だけが届く。`mashu status` の card 使用量は、最も重い Scope の値である。Task detail は配信枠には含めず、1 Task ごとの上限だけを持つ。
 
 ## Scope と route
 
@@ -294,6 +295,8 @@ mashu task reopen 1a2b3c4d
 
 Task の Current State には goal、approach、status、open questions、blockers、next actions が入る。Attempt、Decision、Checkpoint、Artifact Reference は履歴として別に残る。
 
+bootstrap が常時配信するのは、完全な Task ID、Task 名、goal、status、詳細項目の件数、最終確認日からなる短い card だけである。approach、open questions、blockers、next actions の本文は配信しない。Agent は Task に着手する前に、card の完全な Task IDで `task_get` を呼び、Current State 全文を取得する。
+
 - Agent は MCP で Current State と履歴を更新する
 - User は CLI / TUI で Task を作成・touch・close・reopen でき、TUI では Task 名・Project・Current State も訂正できる
 - open Task は活動が 14 日途切れると dormant になり、bootstrap から外れる。履歴は残る
@@ -322,7 +325,7 @@ MCP tool は 15 個ある。
 
 | 分類 | Tool | 役割 |
 |---|---|---|
-| Knowledge | session_bootstrap | セッション開始時に一度呼び、Memory・active Task・Temporary Context を受け取る |
+| Knowledge | session_bootstrap | セッション開始時に一度呼び、Memory・active Task card・Temporary Context を受け取る |
 | Knowledge | pain_report | 事故または再調査を Ledger に記録する |
 | Knowledge | trace_put | 調べて分かったことを日付つき Trace に残す |
 | Knowledge | trace_search | Trace だけを検索する |
@@ -330,7 +333,7 @@ MCP tool は 15 個ある。
 | Knowledge | memory_nominate | User の「覚えて」を pending candidate に運ぶ |
 | Project State | project_list | Project と Task 件数を一覧する |
 | Project State | task_create | 類似する open Task を確認して Task を作る |
-| Project State | task_get | Task を取得し、指定した履歴だけ展開する |
+| Project State | task_get | Task の Current State 全文を取得し、指定した履歴だけ展開する。着手前に必須 |
 | Project State | task_search | Task 名と Current State を検索する |
 | Project State | task_update | Current State を置換する |
 | Project State | task_checkpoint | Current State を置換し、区切りとして履歴を凍結する |
@@ -420,11 +423,11 @@ session_bootstrap は次の順序で返す。
 
 1. always Memory
 2. 現在の Scope の Memory
-3. active Task の Current State（最終確認日時つき）
+3. active Task の card（完全な Task ID・名前・goal・status・詳細件数・最終確認日時）
 4. 有効な Temporary Context
 5. pending candidate の件数
 
-Trace、Ledger、Attempt、Decision、Checkpoint、dormant Task、closed Task は bootstrap に載らない。
+approach、open questions、blockers、next actions の本文、および Trace、Ledger、Attempt、Decision、Checkpoint、dormant Task、closed Task は bootstrap に載らない。active Task を続ける前に `task_get` で詳細を取得する。
 
 ## 書き込みの安全規則
 

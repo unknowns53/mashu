@@ -25,7 +25,7 @@ class RetiredConflictError(MashuError):
 
 
 class OverLimitError(RefusedError):
-    """A current-state field longer than the store will hold (v3 5.3)."""
+    """A current-state field, card, or detail longer than the store will hold."""
 
     def __init__(self, field: str, limit: int, actual: int, *, unit: str = "chars"):
         super().__init__(
@@ -47,7 +47,7 @@ class StaleStateError(MashuError):
 
 
 class ProjectBudgetError(RefusedError):
-    """A state that would push the Project State share past its ceiling."""
+    """A card that would push the active-task share past its ceiling."""
 
     def __init__(self, reason: str, breakdown: list[dict[str, object]]):
         super().__init__(reason)

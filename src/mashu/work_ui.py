@@ -7,7 +7,7 @@ import shutil
 from typing import Any
 from uuid import UUID
 
-from mashu import db, projects, scopes, screen, task_history, tasks
+from mashu import config, db, projects, scopes, screen, task_history, tasks
 from mashu.errors import DuplicateTaskError, MashuError
 
 ACTOR = "user"
@@ -225,6 +225,8 @@ def _task_detail(row: dict[str, Any]) -> str:
         screen.bold(f"  {_short(task['task_id'])}  {task['name']}"),
         f"  {task['project_name']}  ·  {row['heading']}",
         f"  status  {task['status']} / {row['activity']}",
+        f"  size  card {tasks.card_cost(task['name'], state)}/{config.task_card_capacity()}"
+        f"  ·  detail {tasks.state_cost(task['name'], state)}/{config.task_detail_capacity()}",
     ]
     if task["status"] == "closed":
         lines.extend(_field("outcome", task.get("outcome")))

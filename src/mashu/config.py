@@ -13,8 +13,14 @@ DEFAULT_CAPACITY = 2000
 #: Hard ceiling on the always layer alone, inside the whole-opening one above (5.2).
 DEFAULT_ALWAYS_CAPACITY = 800
 
-#: Hard ceiling on each scope's Project State share, in estimated tokens (v3 5.3, 8).
+#: Hard ceiling on each scope's pushed task-card share, in estimated tokens (v3 5.3, 8).
 DEFAULT_PROJECT_CAPACITY = 1600
+
+#: Maximum pushed index card for one active task.
+DEFAULT_TASK_CARD_CAPACITY = 200
+
+#: Maximum full current state retrieved for one task.
+DEFAULT_TASK_DETAIL_CAPACITY = 800
 
 #: Hard ceiling on the temporary share of the opening (v3 8).
 DEFAULT_TEMPORARY_CAPACITY = 400
@@ -49,6 +55,14 @@ def always_capacity() -> int:
 
 def project_capacity() -> int:
     return int(os.environ.get("MASHU_PROJECT_CAPACITY") or DEFAULT_PROJECT_CAPACITY)
+
+
+def task_card_capacity() -> int:
+    return int(os.environ.get("MASHU_TASK_CARD_CAPACITY") or DEFAULT_TASK_CARD_CAPACITY)
+
+
+def task_detail_capacity() -> int:
+    return int(os.environ.get("MASHU_TASK_DETAIL_CAPACITY") or DEFAULT_TASK_DETAIL_CAPACITY)
 
 
 def temporary_capacity() -> int:

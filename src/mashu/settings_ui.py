@@ -162,7 +162,7 @@ def _health_text(value: Health) -> str:
             f"  Active memories    {deliveries}",
             f"  Memory capacity    always {value.memory_always_tokens}/{config.always_capacity()}"
             f"  ·  worst {value.memory_worst_tokens}/{config.capacity()}",
-            f"  Project state      {value.active_states} active"
+            f"  Task cards         {value.active_states} active"
             f"  ·  worst {value.state_worst_tokens}/{config.project_capacity()} tokens",
             f"  Temporary          {value.temporary_count} standing"
             f"  ·  {value.temporary_tokens}/{config.temporary_capacity()} tokens",
@@ -217,12 +217,14 @@ def _bootstrap_text(answer: dict[str, Any]) -> str:
     lines.extend(["", *_memory_lines("Scoped memories", answer.get("scoped") or []), ""])
 
     states = answer.get("states") or []
-    lines.append(f"  Current project state ({len(states)})")
+    lines.append(f"  Active task cards ({len(states)})")
     if not states:
         lines.append("    —")
     for row in states:
         lines.append(f"    {row['task']}  {row['heading']}")
         lines.append(screen.wrap(row["content"], indent="      "))
+    if answer.get("task_instruction"):
+        lines.append(screen.wrap(answer["task_instruction"], indent="    "))
 
     contexts = answer.get("temporary") or []
     lines.extend(["", f"  Temporary context ({len(contexts)})"])
@@ -239,7 +241,7 @@ def _bootstrap_text(answer: dict[str, Any]) -> str:
             "",
             f"  Review candidates  {answer.get('pending', 0)} pending",
             f"  Tokens             memory {answer.get('memory_tokens', 0)}"
-            f"  ·  state {answer.get('project_tokens', 0)}"
+            f"  ·  cards {answer.get('card_tokens', answer.get('project_tokens', 0))}"
             f"  ·  temporary {answer.get('temporary_tokens', 0)}",
             f"  Total              {answer.get('tokens', 0)}/{answer.get('capacity', 0)}{over}",
         )

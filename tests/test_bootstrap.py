@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import datetime as dt
@@ -112,7 +111,8 @@ def test_the_opening_reports_each_share_and_the_total(cur, scope_id, task):
     state = task["state"]
     got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
     assert got["memory_tokens"] == pushed_cost([DISCIPLINE, LOCAL])
-    assert got["project_tokens"] == tasks.state_cost(SCHEMA, state)
+    assert got["project_tokens"] == tasks.card_cost(SCHEMA, state)
+    assert got["card_tokens"] == got["project_tokens"]
     assert got["temporary_tokens"] == pushed_cost([THIS_WEEK])
     assert got["tokens"] == got["memory_tokens"] + got["project_tokens"] + got["temporary_tokens"]
     assert got["capacity"] == 4000
@@ -151,12 +151,26 @@ def test_nothing_is_recorded_when_the_opening_fits(cur, scope_id, task):
 
 def test_the_state_of_current_work_arrives_under_the_date_it_was_confirmed(cur, task):
     row = bootstrap.session_bootstrap(cur, actor="agent")["states"][0]
-    assert set(row) == {"task", "heading", "content"}
+    assert set(row) == {"task", "task_id", "heading", "content"}
     assert row["task"] == str(task["task"]["task_id"])[:8]
+    assert row["task_id"] == task["task"]["task_id"]
     assert row["heading"] == f"State as of {task['as_of'].isoformat()}"
     assert dt.date.fromisoformat(row["heading"].rsplit(" ", 1)[1]) == task["as_of"]
     assert SCHEMA in row["content"]
     assert "hand the active states over with their dates" in row["content"]
+    assert "1 next action" in row["content"]
+    assert "count the three shares apart" not in row["content"]
+
+    full = tasks.task_get(cur, task["task"]["task_id"])
+    assert full["state"]["next_actions"] == ["count the three shares apart"]
+
+
+def test_bootstrap_requires_full_task_fetch_before_work(cur, task):
+    got = bootstrap.session_bootstrap(cur, actor="agent")
+
+    assert "call task_get" in got["task_instruction"]
+    assert "full task_id" in got["task_instruction"]
+    assert got["states"][0]["task_id"] == task["task"]["task_id"]
 
 
 def test_a_task_whose_lease_ran_out_is_not_in_the_opening(cur, task):

@@ -99,10 +99,12 @@ def build_server() -> Any:
             "if it hurt, pain_report; if the user said remember, "
             "memory_nominate; at a break in the work, task_checkpoint. Use "
             "attempt_record for the outcome of a failed try and decision_record "
-            "for a judgement whose reason would be costly to re-derive. A task "
-            "state is what was last confirmed on its date, not current truth; "
-            "when that date is old, verify it against the repository and its "
-            "artifacts before working from it. Task completion is never the "
+            "for a judgement whose reason would be costly to re-derive. Bootstrap "
+            "carries compact active-task cards, not full current state. Before "
+            "continuing any task, call task_get with the full task_id from its card. "
+            "A task state is what was last confirmed on its date, not current truth; "
+            "when that date is old, verify it against the repository and its artifacts "
+            "before working from it. Task completion is never the "
             "agent's call: closing is the user's, via the CLI. When work you "
             "finish looks like the end of its task, say so with "
             "task_propose_close — the outcome you would choose and the "
@@ -114,7 +116,7 @@ def build_server() -> Any:
 
     @server.tool()
     def session_bootstrap(scope: str | None = None) -> dict[str, Any]:
-        """Return session memories, task state, and temporary context; call once at startup."""
+        """Return session memories, active task cards, and temporary context at startup."""
         try:
             with db.transaction() as cur:
                 scope_id, scope_name, routed = _scope(cur, scope)
@@ -128,7 +130,8 @@ def build_server() -> Any:
                 note = (
                     "Knowledge is pushed, not searched. Call trace_put for a "
                     "later re-derivation and pain_report when forgetting caused pain; "
-                    "nothing an agent writes becomes knowledge without a human decision."
+                    "nothing an agent writes becomes knowledge without a human decision. "
+                    + bootstrap.TASK_DETAIL_INSTRUCTION
                 )
                 if answer["schema_pending"]:
                     # Report schema status before sending usage guidance.
@@ -302,7 +305,7 @@ def build_server() -> Any:
         artifacts: bool = False,
         checkpoints: bool = False,
     ) -> dict[str, Any]:
-        """Get a task and only the requested history expansions."""
+        """Get full current state and requested history; call before working on a task."""
         try:
             with db.transaction() as cur:
                 answer = task_history.expanded_task(

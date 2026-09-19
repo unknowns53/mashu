@@ -79,7 +79,7 @@ def update_project(
     ceiling = config.project_capacity()
     if after > ceiling and after >= before:
         raise RefusedError(
-            f"the project state share seats {ceiling} tokens and this project edit "
+            f"the task-card share seats {ceiling} tokens and this project edit "
             f"would take the busiest scope from {before} to {after}; shorten its active "
             "task state or move work out of that scope first"
         )

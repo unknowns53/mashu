@@ -254,10 +254,10 @@ def _print_memory_rows(rows: list[dict[str, Any]], *, heading: str = "memories")
 
 
 def _print_state_rows(rows: list[dict[str, Any]]) -> None:
-    """The work that is current, each state under the date it was last confirmed."""
-    print("project state")
+    """The active task cards, each pointing to explicitly fetched detail."""
+    print("active task cards")
     for row in rows:
-        print(f"{row['task']:8}  {row['heading']}")
+        print(f"{row.get('task_id') or row['task']}  {row['heading']}")
         print(_flow(row["content"], indent="          "))
 
 
@@ -302,7 +302,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"worst={totals['worst']}/{config.capacity()}"
     )
     print(
-        f"state   active={state_totals['count']}  "
+        f"cards   active={state_totals['count']}  "
         f"worst={state_totals['worst']}/{config.project_capacity()}"
     )
     print(f"temporary  tokens={temporary_totals['worst']}/{config.temporary_capacity()}")
@@ -336,6 +336,8 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     _print_memory_rows(answer.get("always", []), heading="always")
     _print_memory_rows(answer.get("scoped", []), heading="scoped")
     _print_state_rows(answer.get("states", []))
+    if answer.get("task_instruction"):
+        print(f"          {answer['task_instruction']}")
     print("temporary")
     for row in answer.get("temporary", []):
         print(f"  {row['content']}  (expires {row['expires_at']})")
@@ -343,7 +345,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         f"tokens    {answer.get('tokens', 0)}/"
         f"{answer.get('capacity', config.total_capacity())}  "
         f"memory={answer.get('memory_tokens', 0)}  "
-        f"state={answer.get('project_tokens', 0)}  "
+        f"cards={answer.get('card_tokens', answer.get('project_tokens', 0))}  "
         f"temporary={answer.get('temporary_tokens', 0)}"
     )
     print(f"pending   {answer.get('pending', 0)}")
@@ -1265,7 +1267,7 @@ def build_parser() -> argparse.ArgumentParser:
         "bootstrap",
         "what a session in this directory is pushed, and its token cost",
         description=(
-            "Show the active memories, project state, and temporary context delivered to a "
+            "Show the active memories, task cards, and temporary context delivered to a "
             "session started in the current working directory."
         ),
         examples=("mashu bootstrap",),
@@ -1549,7 +1551,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         examples=(
             "mashu project list",
-            'mashu project create website --scope frontend',
+            "mashu project create website --scope frontend",
             "mashu project show website",
         ),
     )
@@ -1564,7 +1566,7 @@ def build_parser() -> argparse.ArgumentParser:
         project_sub,
         "create",
         "open a project (User only)",
-        examples=('mashu project create website --scope frontend',),
+        examples=("mashu project create website --scope frontend",),
     )
     project_create.add_argument("name", help="what its tasks are filed under")
     project_create.add_argument("--scope", help="the scope this project's sessions run in")

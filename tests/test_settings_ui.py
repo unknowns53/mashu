@@ -252,7 +252,10 @@ def test_bootstrap_preview_resolves_cwd_and_shows_every_payload_share(
     assert answer["always"][0]["content"] == "always in preview"
     assert answer["scoped"][0]["content"] == "scoped into preview"
     assert answer["states"][0]["content"].startswith("preview active state")
+    assert "call task_get" in answer["task_instruction"]
     assert answer["temporary"][0]["content"] == "preview temporary context"
+    assert "Active task cards" in rendered
+    assert "call task_get" in rendered
     assert "Tokens" in rendered and "Total" in rendered
 
 

@@ -10,6 +10,11 @@ import psycopg
 from mashu import config, events, memories, migrate, projects, tasks, temporary
 from mashu.tokens import pushed_cost
 
+TASK_DETAIL_INSTRUCTION = (
+    "Before continuing any active task, call task_get with its full task_id; "
+    "bootstrap carries an index card, not the full current state."
+)
+
 
 def active_states(cur: psycopg.Cursor, scope_id: UUID | None = None) -> list[dict[str, Any]]:
     """The active tasks whose state this session is entitled to, in a fixed order."""
@@ -48,12 +53,13 @@ def session_bootstrap(
     state_rows = [
         {
             "task": str(row["task"]["task_id"])[:8],
+            "task_id": row["task"]["task_id"],
             "heading": row["heading"],
-            "content": tasks.state_text(row["task"]["name"], row["state"]),
+            "content": tasks.card_text(row["task"]["name"], row["state"]),
         }
         for row in states
     ]
-    project_tokens = sum(tasks.state_cost(row["task"]["name"], row["state"]) for row in states)
+    project_tokens = sum(tasks.card_cost(row["task"]["name"], row["state"]) for row in states)
     temporary_tokens = pushed_cost([row["content"] for row in contexts])
     total = memory_tokens + project_tokens + temporary_tokens
     ceiling = config.total_capacity()
@@ -67,6 +73,7 @@ def session_bootstrap(
             "tokens": total,
             "memory": memory_tokens,
             "project": project_tokens,
+            "cards": project_tokens,
             "temporary": temporary_tokens,
             "scope": scope_name,
         },
@@ -82,6 +89,7 @@ def session_bootstrap(
                 "capacity": ceiling,
                 "memory": memory_tokens,
                 "project": project_tokens,
+                "cards": project_tokens,
                 "temporary": temporary_tokens,
             },
         )
@@ -99,9 +107,11 @@ def session_bootstrap(
         "scope": scope_name,
         "routed": routed,
         "states": state_rows,
+        "task_instruction": TASK_DETAIL_INSTRUCTION if state_rows else None,
         "temporary": [{"content": r["content"], "expires_at": r["expires_at"]} for r in contexts],
         "pending": pending,
         "memory_tokens": memory_tokens,
+        "card_tokens": project_tokens,
         "project_tokens": project_tokens,
         "temporary_tokens": temporary_tokens,
         "tokens": total,

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -266,19 +265,20 @@ def test_the_work_that_is_current_is_printed_under_its_date(run, committing_dsn)
 
     code, out, _ = run("bootstrap")
     assert code == 0
-    assert "project state" in out
-    assert str(task["task"]["task_id"])[:8] in out
+    assert "active task cards" in out
+    assert str(task["task"]["task_id"]) in out
     assert f"State as of {task['as_of'].isoformat()}" in out
     assert "print the active states with their headings" in out
+    assert "call task_get" in out
 
     tokens_line = next(row for row in out.splitlines() if row.startswith("tokens"))
     assert f"/{config.total_capacity()}" in tokens_line
-    assert "memory=" in tokens_line and "state=" in tokens_line and "temporary=" in tokens_line
+    assert "memory=" in tokens_line and "cards=" in tokens_line and "temporary=" in tokens_line
 
     _, out, _ = run("status")
-    state_line = next(row for row in out.splitlines() if row.startswith("state"))
-    assert "active=" in state_line and "worst=" in state_line
-    assert state_line.endswith(f"/{config.project_capacity()}")
+    card_line = next(row for row in out.splitlines() if row.startswith("cards"))
+    assert "active=" in card_line and "worst=" in card_line
+    assert card_line.endswith(f"/{config.project_capacity()}")
 
 
 def test_status_says_where_the_schema_stands_before_it_reports_any_count(run):

@@ -60,7 +60,7 @@ Mashu
 | 寿命 | 原則恒久 | 短い |
 | 更新 | 稀 | 頻繁 |
 | 腐敗対策 | 入口を絞る | lease による退場 |
-| bootstrap | 全量 push | active な Current State のみ |
+| bootstrap | 全量 push | active Task の索引 card のみ。Current State 全文は `task_get` |
 | 履歴 | revision | checkpoint / attempt / decision |
 | 終了 | retire（User・理由必須） | close（User）/ dormant（lease） |
 
@@ -68,17 +68,17 @@ Project State から Memory への昇格経路は作らない。作業中に恒�
 
 ### 3.1 信頼境界の緩和 — v3 が v2 の保証を破る唯一の点
 
-v2 は「**Agent の書き込みが人の確定なしに他セッションへ届く経路は一つも存在しない**」を中核保証とした（v2 5.1 節）。Project State はこの保証を**意図的に緩和する**。Agent が書いた Current State は、人の review を経ずに次のセッションの bootstrap へ push される。
+v2 は「**Agent の書き込みが人の確定なしに他セッションへ届く経路は一つも存在しない**」を中核保証とした（v2 5.1 節）。Project State はこの保証を**意図的に緩和する**。Agent が書いた Current State のうち Task 名・goal・status・詳細件数からなる索引 card は、人の review を経ずに次のセッションの bootstrap へ push される。approach・open questions・blockers・next actions の本文は `task_get` で明示取得する。
 
 緩和する理由は、作業状態の性質にある。頻繁に変わるものに毎回人の確定を要求すれば書かれなくなり、書かれない state は存在しないのと同じである。週数件の Memory と違い、Review を挟む運用が成立しない。
 
 緩和の被害は三方向から bound する。
 
-1. **サイズ** — Current State には store が強制する hard limit がある（5.3 節）。長大な誤情報は物理的に書けない
+1. **サイズ** — bootstrap card と Current State 全文には別々に store が強制する hard limit がある（5.3 節）。長大な誤情報は物理的に書けず、詳細が常時注入を膨らませることもない
 2. **時間** — Activity Lease（7 節）により、活動の証拠が絶えた state は bootstrap から退場する
-3. **提示** — 正しさそのものは bound できないので、配信の形式で受ける。**Current State は「現在の真実」の顔で配信しない。**bootstrap に載る Current State には必ず最終確認日時を添え、「YYYY-MM-DD に最後に確認された状態」として提示する。Memory（今後も守るべき規則）と同じ顔をさせない
+3. **提示** — 正しさそのものは bound できないので、配信の形式で受ける。**Task card は「現在の真実」の顔で配信しない。**card には必ず最終確認日時を添え、「YYYY-MM-DD に最後に確認された索引」として提示する。Memory（今後も守るべき規則）と同じ顔をさせず、着手前の `task_get` を要求する
 
-v2 の trace が持つ「書き忘れても検出が弱くなるだけで、嘘は生まれない」という性質を、Current State は持たない。セッションが作業したのに state を更新しなければ、次のセッションには古い状態が届く。日付の明示はこの失敗を無くすのではなく、**受け手が古さを判定できる形にする**ための最低限である。Agent は日付が古い state を鵜呑みにせず、repository と artifacts で裏を取ってから作業に入る。この規律は server instructions が運ぶ。
+v2 の trace が持つ「書き忘れても検出が弱くなるだけで、嘘は生まれない」という性質を、Current State は持たない。セッションが作業したのに state を更新しなければ、次のセッションには古い card が届く。日付の明示はこの失敗を無くすのではなく、**受け手が古さを判定できる形にする**ための最低限である。Agent は card だけで着手せず、完全な task_id で `task_get` したうえ、日付が古ければ repository と artifacts で裏を取る。この規律は bootstrap と server instructions の両方が運ぶ。
 
 ## 4. Single storage ではなく single view
 
@@ -103,7 +103,7 @@ Task の所属単位。通常は repository または研究単位に対応する
 id / name / scope_id / created_at / archived_at
 ```
 
-Project と Scope は同じ概念ではない。Scope は delivery / routing の境界、Project は work state の所属である。初期実装では一つの Project が一つの主要 Scope を持つ形から始め、多対多への一般化は必要が実測されるまでしない。Scope を持つ Project の Current State はその Scope だけに配信する。Scope を持たない Project は全 Scope 共通であり、unrouted session にはこの共通分だけを配信する。
+Project と Scope は同じ概念ではない。Scope は delivery / routing の境界、Project は work state の所属である。初期実装では一つの Project が一つの主要 Scope を持つ形から始め、多対多への一般化は必要が実測されるまでしない。Scope を持つ Project の active Task card はその Scope だけに配信する。Scope を持たない Project の card は全 Scope 共通であり、unrouted session にはこの共通分だけを配信する。Current State 全文は Scope にかかわらず、Task IDを指定した `task_get` にだけ返す。
 
 ### 5.2 Task
 
@@ -130,17 +130,19 @@ status_text     500 chars
 open_questions  最大 5 件 × 300 chars
 blockers        最大 5 件 × 300 chars
 next_actions    最大 5 件 × 300 chars
+bootstrap card  200 estimated tokens / Task
+full detail     800 estimated tokens / Task
 ```
 
-初期値であり、実測後に変更してよい。長文が必要なら原典を Artifact Reference に置く。
+初期値であり、実測後に変更してよい。bootstrap card は Task 名・goal・statusと、approach / open questions / blockers / next actions が存在することを示す件数だけから作る。full detail は全欄を含むが常時配信しない。長文が必要なら原典を Artifact Reference に置く。
 
 **追記は一箇所だけ許す。**`append_next_action` は next_actions に 1 件足すだけで他の欄に触れない。呼び出すのは痛みの記録（9 節の `work`）であって、state を読み終えたセッションではない。痛みは痛かった当人がその場で書くものなので、置換のために state 全体を持って来いと要求すれば、報告は他の 5 欄を捏造するか、行われないかのどちらかになる。上限・入口拒否・予算判定は置換とまったく同じものを通すので、追記で書ける state は置換でも書けた state に限られる。追記も `updated_at` を動かすため、追記前に読んだ置換は楽観チェックで拒否される。
 
 **並行する置換は楽観チェックで受ける。**複数セッションが同じ Task を同時に更新しうる。`task_update` は読み取り時の `updated_at` を添えて置換し、不一致なら拒否して現在の state を返す。黙って last-writer-wins にすると、並行セッションの一方の作業が痕跡なく消える。
 
-**予算境界の挙動も store が持つ。**Project State 枠は Scope ごとに独立する。`task_update` の結果、その Scope に配信される active な Current State の合計が枠（8 節）を超えるなら、書き込みを拒否し、現在の内訳と出口を返す。Scope を持たない Project の state は全 Scope 共通分として各 Scope の合計に含め、共通分への書き込みは最も重い Scope に対して判定する。別 Scope の固有 state は競合しない。溢れたぶんを黙って切り詰めたり検索へ落としたりしない。v2 の定員が Memory admission でしていることと同じ扱いである。
+**予算境界の挙動も store が持つ。**Task card 枠は Scope ごとに独立する。`task_update` の結果、その Scope に配信される active Task card の合計が枠（8 節）を超えるなら、書き込みを拒否し、現在の内訳と出口を返す。Scope を持たない Project の card は全 Scope 共通分として各枠に含め、共通分への書き込みは最も重い Scope に対して判定する。別 Scope の固有 card は競合しない。full detail の本文はこの配信枠を消費せず、1 Task 800-token の上限で別に bound する。溢れたぶんを黙って切り詰めない。
 
-ただし**その Task 自身の state を小さくする書き込みは、枠を超えている状態からでも通す**。枠は設定値であり、state の重さは配信の形から計算されるので、どちらも誰も触っていない行の下で動きうる。つまり書き込みを経ずに枠を超えた状態が成立する。そこで一律に拒否すると、他の active Task だけで枠を超えている場合、対象を空にしても総量が枠を割らないため拒否され、「他を縮めろ」と言いながらその縮約自体を拒む閉じた輪になる。入口拒否の思想は保ったまま、枠が求めている向きの書き込みだけを通す。
+ただし**その Task 自身の card を小さくする書き込みは、枠を超えている状態からでも通す**。枠は設定値であり、card の重さは配信の形から計算されるので、どちらも誰も触っていない行の下で動きうる。つまり書き込みを経ずに枠を超えた状態が成立する。そこで一律に拒否すると、他の active Task だけで枠を超えている場合、対象を空にしても総量が枠を割らないため拒否され、「他を縮めろ」と言いながらその縮約自体を拒む閉じた輪になる。入口拒否の思想は保ったまま、枠が求めている向きの書き込みだけを通す。
 
 ### 5.4 Attempt / Decision
 
@@ -236,25 +238,26 @@ dormant な Task は bootstrap に載らず、履歴は保持され、明示検�
 ```text
 1. Memory: always
 2. Memory: 現在 Scope
-3. active な Task の Current State（各行に最終確認日時を明示）
+3. active Task の bootstrap card（完全な Task IDと最終確認日時を明示）
 4. Temporary Context
 5. pending nomination 件数
 ```
 
-Attempt / Decision / Checkpoint / Trace / Ledger / dormant / closed は載らない。
+approach / open questions / blockers / next actions の本文、および Attempt / Decision / Checkpoint / Trace / Ledger / dormant / closed は載らない。
 
-Current State は**欄の名前を本文に含めて**配信する。MCP の `states[].content` と端末が同じ文字列を運ぶので、ラベルを描画側に置くと片方だけが読める形になる。特に open_questions と next_actions は、読み手が取り違えたときに「着手すべきでないものに着手する」形で外へ出る。ラベルは token を食うが、安く配って誤読される state は安くない。
+Task card は Task 名・goal・statusをラベルつきで運び、approach / open questions / blockers / next actions は本文でなく存在と件数だけを示す。card は作業を開始するための state ではなく、どの Task の詳細を取得するか選ぶ索引である。各 row は MCP がそのまま `task_get` に渡せる完全な `task_id` を持ち、bootstrap 全体も「着手前に task_get」を明記する。これにより、存在を忘れて検索できない問題は card の push で防ぎ、詳細の常時注入は避ける。
 
 初期 hard cap は次のとおりで、実測較正する。既存の `MASHU_CAPACITY`（2000）/ `MASHU_ALWAYS_CAPACITY`（800）と同じ環境変数方式で構成する。
 
 ```text
 TOTAL            4000 tokens
   Memory         2000（always 800 / scope 1200）
-  Project State  1600 / scope
+  Task cards     1600 / scope（200 / Task）
+  Task detail     800 / Task（非配信）
   Temporary       400
 ```
 
-重要なのは、**Agent に押し込まれる総量を Mashu が一元管理し、subsystem が互いの枠を暗黙に借りない**ことである。Memory が余った Project State 枠を恒久的に使うことも、その逆もしない。Memory の定員判定は v2 のまま admission 時に、Project State は Scope ごとの配信量を 5.3 節のとおり書き込み時に判定する。`mashu status` は Project State の全 Scope 合計ではなく、最も重い Scope の配信量を表示する。溢れの解決はどちらも入口側（retire / 格下げ、dormant 化 / 縮約）であり、「入りきらないので検索に落とす」は行わない。v2 に知識の検索が無いのと同じ理由である。
+重要なのは、**Agent に押し込まれる総量を Mashu が一元管理し、subsystem が互いの枠を暗黙に借りない**ことである。Memory が余った Task card 枠を恒久的に使うことも、その逆もしない。Memory の定員判定は v2 のまま admission 時に、Task card は Scope ごとの配信量を 5.3 節のとおり書き込み時に判定する。`mashu status` は card の全 Scope 合計ではなく、最も重い Scope の配信量を表示する。full detail は「入りきらないため検索へ落とす」のではない。存在と取得先を必ず push したうえで、選んだ Task の既知の IDから決定的に pull する。Memory は存在自体を忘れるため本文 push が必要だが、Work は card が取得契機を運ぶため、この二段構造を取れる。
 
 guard は v2 のまま Durable Memory の delivery 機構であり、Project State は guard に使わない。
 
@@ -382,7 +385,8 @@ Task lifecycle:
   Agent の close proposal は Task の status を変えない
   沈黙は Task を close しない（lease は dormant 導出までしかしない）
   dormant な state は現在の真実として配信されない
-  Current State は日付なしで配信されない
+  Task card は日付なしで配信されない
+  Current State 全文は card だけでは配信されず、着手前に task_get する
 
 Memory（v2 のまま）:
   Agent は active な Memory を作れない
@@ -390,7 +394,7 @@ Memory（v2 のまま）:
   退役には理由が必須で、tombstone は再入場の前に提示される
 
 Bootstrap:
-  active な Memory と active な Task State だけが push される
+  active な Memory と active な Task card だけが push される
   dormant / closed / 履歴 / trace は黙って push されない
   総 token が hard cap を超えない
 ```
@@ -406,7 +410,7 @@ migration 0004（7 表）、`projects.py` / `tasks.py`、Task 生成の重複照
 checkpoint（置換 + 凍結の原子性）、attempt、decision、artifact reference、supersedes、`task_get` の展開。
 
 **Phase C — Bootstrap 統合**
-`bootstrap.py` の拡張（active Task State の選択・日付つき整形）、budget の一元管理（TOTAL / Project State 枠の追加）、`mashu bootstrap` / `mashu status` の表示拡張。
+`bootstrap.py` の拡張（active Task card の選択・日付つき整形・task_get 導線）、budget の一元管理（TOTAL / Task card 枠の追加）、`mashu bootstrap` / `mashu status` の表示拡張。
 
 **Phase D — インターフェース**
 MCP Tool 追加、server instructions への 9 節の規律の追記、CLI 追加、v2 文書と CLAUDE.md の修正（12 節）。
@@ -418,11 +422,12 @@ MCP Tool 追加、server instructions への 9 節の規律の追記、CLI 追�
 
 ## 17. 観測指標と、この設計が誤りだったと知る方法
 
-event_log から最低限次を測れるようにする。active / dormant Task 数、自動 dormant 率、reactivate 頻度、Current State の token 使用量、Task あたり attempt 数、checkpoint の打たれた率、stale-state incident（古い state を信じて誤った作業が出た pain_report）。
+event_log から最低限次を測れるようにする。active / dormant Task 数、自動 dormant 率、reactivate 頻度、Task card と full detail の token 使用量、Task あたり attempt 数、checkpoint の打たれた率、stale-state incident（古い state を信じて誤った作業が出た pain_report）。
 
 | 観測 | 意味 |
 |---|---|
-| Current State が長文化する | schema が広すぎる。field 数・文字数を削る |
+| Task card が長文化する | goal / status が索引でなく日誌になっている。card 上限を較正する |
+| full detail が長文化する | schema が広すぎるか、原典を Task に複製している。field 数・上限を見直す |
 | active Task が増え続ける | lease が長すぎるか activity の定義が広すぎる |
 | dormant から頻繁に reactivate される | lease が短すぎる（研究のリズムに合っていない） |
 | User がほぼ close しない | dormant が機能していれば失敗ではない。close を lifecycle の必須条件と考えない |
@@ -432,7 +437,7 @@ event_log から最低限次を測れるようにする。active / dormant Task 
 | Memory nomination が再び大量になる | Project State の情報を Memory へ安易に昇格させていないか疑う |
 | 再開の拾い直しが減らない | Project State そのものの誤りを疑う。1 節の動機が反証されたことになる |
 
-成功条件。新セッションで現在地が bootstrap だけから短時間で復元できる。同じ試行の無駄な再実行が減る。重要な Decision の理由を再導出しなくてよい。Agent が長大な作業日誌を生成できない。User が close を忘れても腐った state が push され続けない。そして Memory の定員から作業状態の圧力が消える。
+成功条件。新セッションで bootstrap card から継続対象を短時間で選び、`task_get` 1 回で現在地を復元できる。同じ試行の無駄な再実行が減る。重要な Decision の理由を再導出しなくてよい。Agent が長大な作業日誌を生成できない。User が close を忘れても腐った card が push され続けない。そして Memory の定員から作業状態の圧力が消える。
 
 ## 18. 非目標と、復活させない v1 の機構
 
@@ -444,6 +449,6 @@ Project State が入っても、speculative extraction・Session End Extraction�
 
 > **人間と Agent が毎回読むものは極小にする。大量に残すものは履歴として隔離する。恒久化するものには実証を要求する。そして現在の状態は、それが最後に確認された日付とともにしか語らせない。**
 
-Memory は少なく、強く、人が確定する。Current State は Agent が頻繁に置換するが、小さく、日付つきで、lease の内側でだけ「現在」を名乗る。履歴は残すが配信しない。Artifacts は複製せず参照する。Task の完了は人が決め、進行中かどうかは活動の証拠が決める。
+Memory は少なく、強く、人が確定する。Current State は Agent が頻繁に置換するが、常時配信するのは小さな日付つき card だけで、全文は既知の Task IDから必要時に読む。履歴は残すが配信しない。Artifacts は複製せず参照する。Task の完了は人が決め、進行中かどうかは活動の証拠が決める。
 
 > **沈黙を完了と解釈しない。だが沈黙した Task を永遠に現在として配信もしない。**

@@ -159,6 +159,7 @@ def test_task_details_show_all_state_proposal_and_latest_history(dsn, monkeypatc
 
     assert work_ui.run(dsn) == 0
     out = capsys.readouterr().out
+    assert "size  card" in out and "detail" in out
     for text in (
         "launch without the old rail",
         "reuse aft mountings",

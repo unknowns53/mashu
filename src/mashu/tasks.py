@@ -44,6 +44,12 @@ STATE_LABELS = {
     "next_actions": "next actions",
 }
 
+CARD_COUNT_LABELS = {
+    "open_questions": ("open question", "open questions"),
+    "blockers": ("blocker", "blockers"),
+    "next_actions": ("next action", "next actions"),
+}
+
 _STATE_KEYS = (
     "goal",
     "approach",
@@ -115,7 +121,13 @@ def _gate_report(verdict: redact.Verdict) -> dict[str, Any]:
     return report
 
 
-def _check_limits(state: dict[str, Any]) -> None:
+def _check_limits(
+    state: dict[str, Any],
+    *,
+    name: str | None = None,
+    previous_name: str | None = None,
+    previous_state: dict[str, Any] | None = None,
+) -> None:
     """Refuse an oversized field in words, before the CHECK constraint does."""
     for field, limit in TEXT_LIMITS.items():
         value = state.get(field)
@@ -128,6 +140,30 @@ def _check_limits(state: dict[str, Any]) -> None:
         for item in items:
             if item and len(item) > LIST_MAX_CHARS:
                 raise OverLimitError(f"{field} entry", LIST_MAX_CHARS, len(item))
+    if name is None:
+        return
+    previous_detail = (
+        state_cost(previous_name, previous_state)
+        if previous_name is not None and previous_state is not None
+        else None
+    )
+    detail_tokens = state_cost(name, state)
+    detail_limit = config.task_detail_capacity()
+    if detail_tokens > detail_limit and not (
+        previous_detail is not None and detail_tokens < previous_detail
+    ):
+        raise OverLimitError("task detail", detail_limit, detail_tokens, unit="estimated tokens")
+    previous_card = (
+        card_cost(previous_name, previous_state)
+        if previous_name is not None and previous_state is not None
+        else None
+    )
+    card_tokens = card_cost(name, state)
+    card_limit = config.task_card_capacity()
+    if card_tokens > card_limit and not (previous_card is not None and card_tokens < previous_card):
+        raise OverLimitError(
+            "task bootstrap card", card_limit, card_tokens, unit="estimated tokens"
+        )
 
 
 def _clean(value: str | None) -> str | None:
@@ -154,7 +190,7 @@ def _state_of(**fields: Any) -> dict[str, Any]:
 
 
 def state_text(name: str, state: dict[str, Any]) -> str:
-    """What one task costs the opening: its name and its state, as delivered."""
+    """The full current state returned only when a task is explicitly fetched."""
     parts = [name]
     for field in ("goal", "approach", "status_text"):
         if state.get(field):
@@ -168,7 +204,32 @@ def state_text(name: str, state: dict[str, Any]) -> str:
 
 
 def state_cost(name: str, state: dict[str, Any]) -> int:
+    """Storage/read cost of a task's complete current state."""
     return pushed_cost([state_text(name, state)])
+
+
+def card_text(name: str, state: dict[str, Any]) -> str:
+    """The compact pointer pushed at bootstrap so full detail can be fetched."""
+    parts = [name]
+    for field in ("goal", "status_text"):
+        if state.get(field):
+            parts.append(f"{STATE_LABELS[field]}: {state[field]}")
+    available: list[str] = []
+    if state.get("approach"):
+        available.append("approach")
+    for field in LIST_FIELDS:
+        count = len(state.get(field) or [])
+        if count:
+            singular, plural = CARD_COUNT_LABELS[field]
+            available.append(f"{count} {singular if count == 1 else plural}")
+    if available:
+        parts.append(f"details: {', '.join(available)}")
+    return "\n".join(parts)
+
+
+def card_cost(name: str, state: dict[str, Any]) -> int:
+    """Push cost of one task's bootstrap index card."""
+    return pushed_cost([card_text(name, state)])
 
 
 def heading(activity: str, updated_at: dt.datetime) -> str:
@@ -320,7 +381,7 @@ def task_create(
         blockers=blockers,
         next_actions=next_actions,
     )
-    _check_limits(state)
+    _check_limits(state, name=name)
     verdict = _gate(name, *_texts(state))
 
     # Held from before the match until the insert commits.
@@ -368,6 +429,8 @@ def task_create(
             "task_id": str(task_id),
             "project": home["name"],
             "name": name,
+            "tokens": card_cost(name, state),
+            "detail_tokens": state_cost(name, state),
             "forced_over": [str(c["task"]["task_id"]) for c in hits] or None,
         },
     )
@@ -443,14 +506,14 @@ WHERE t.status = 'open' AND now() <= t.active_until
 
 
 def active_state_costs(cur: psycopg.Cursor) -> list[dict[str, Any]]:
-    """What every active task's state costs to push, heaviest first."""
+    """What every active task's bootstrap card costs, heaviest first."""
     cur.execute(_ACTIVE_STATES)
     rows = [
         {
             "task_id": row["task_id"],
             "name": row["name"],
             "scope_id": row["scope_id"],
-            "tokens": state_cost(row["name"], row),
+            "tokens": card_cost(row["name"], row),
         }
         for row in cur.fetchall()
     ]
@@ -500,8 +563,8 @@ def _check_budget(
     state: dict[str, Any],
     scope_id: UUID | None,
 ) -> None:
-    """Refuse a write that would push its scope's Project State share over (5.3)."""
-    cost = state_cost(name, state)
+    """Refuse a write that would push its scope's task-card share over (5.3)."""
+    cost = card_cost(name, state)
     seated = active_state_costs(cur)
     was = next((row["tokens"] for row in seated if row["task_id"] == task_id), None)
     others, boundary = _budget_competitors(
@@ -522,11 +585,11 @@ def _check_budget(
     if was is not None and cost < was:
         return
     raise ProjectBudgetError(
-        f"the project state share for {boundary} seats {ceiling} tokens and this would "
+        f"the task-card share for {boundary} seats {ceiling} tokens and this would "
         f"take it to {total} "
         f"({cost} for '{name}' on top of {total - cost} already pushed by "
-        f"{len(others)} active task(s)). A write that makes this task's own state "
-        "smaller is allowed through even from here, so shrink this one; otherwise "
+        f"{len(others)} active task(s)). A write that makes this task's own card "
+        "smaller is allowed through even from here, so shrink this card; otherwise "
         "leave a task alone until its lease runs out, or ask the user to close one "
         "(`mashu task close <id>`).",
         breakdown,
@@ -594,7 +657,12 @@ def task_update(
         blockers=blockers,
         next_actions=next_actions,
     )
-    _check_limits(state)
+    _check_limits(
+        state,
+        name=new_name,
+        previous_name=task["name"],
+        previous_state=current["state"],
+    )
     verdict = _gate(new_name, *_texts(state))
 
     if current["state"]["updated_at"] != expect_updated_at:
@@ -653,7 +721,8 @@ def task_update(
         actor,
         detail={
             "task_id": str(task_id),
-            "tokens": state_cost(new_name, state),
+            "tokens": card_cost(new_name, state),
+            "detail_tokens": state_cost(new_name, state),
             "from_name": task["name"] if new_name != task["name"] else None,
             "to_name": new_name if new_name != task["name"] else None,
             "from_project_id": (
@@ -681,7 +750,7 @@ def append_next_action(
     if text in state["next_actions"]:
         return {**current, "appended": False, "reason": "this next action is already on the task"}
     state["next_actions"] = [*state["next_actions"], text]
-    _check_limits(state)
+    _check_limits(state, name=task["name"])
     verdict = _gate(*_texts(state))
     home = projects.require_project(cur, task["project_id"])
     _check_budget(cur, task_id=task_id, name=task["name"], state=state, scope_id=home["scope_id"])
@@ -696,7 +765,11 @@ def append_next_action(
         cur,
         "task_next_action_appended",
         actor,
-        detail={"task_id": str(task_id), "tokens": state_cost(task["name"], state)},
+        detail={
+            "task_id": str(task_id),
+            "tokens": card_cost(task["name"], state),
+            "detail_tokens": state_cost(task["name"], state),
+        },
     )
     return {**task_get(cur, task_id), **_gate_report(verdict), "appended": True}
 
