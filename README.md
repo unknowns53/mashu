@@ -118,6 +118,8 @@ mashu
 
 各画面では矢印または j / k で移動し、Enter で開く。`/` のある一覧は部分検索できる。Esc または ← で一段戻り、q でその領域を閉じる。TUI は alternate screen 上で動くため、再描画した画面は terminal の履歴へ残らない。
 
+`e` で開く編集入力には現在値が最初から入る。全文を打ち直すのではなく、カーソル移動、Backspace、追記で既存の文章を直接直す。外部エディタを使う候補と Memory も、既存本文を入れた状態で開く。
+
 Agent が使うサブコマンドと MCP は変わらない。引数を付けたコマンドは従来どおり非対話で動作する。人は TUI から現行の本文・設定・Current State を訂正できる。Ledger、Memory revision、Task の checkpoint / attempt / decision / artifact、event_log は履歴なので編集しない。
 
 ### 恒久ルールを直接登録する

@@ -389,9 +389,8 @@ def _create_project(dsn: str | None) -> tuple[str, UUID | None]:
 
 
 def _replacement(label: str, current: str | None, *, clearable: bool = True) -> str | None:
-    shown = current or "-"
     clearing = "; '-' clears" if clearable else ""
-    answer = _readline(f"  {label} [enter keeps {shown}{clearing}]: ")
+    answer = screen.editline(f"  {label} [edit existing{clearing}]: ", current or "")
     if answer is None or answer == "":
         return current
     if clearable and answer == "-":
@@ -400,8 +399,9 @@ def _replacement(label: str, current: str | None, *, clearable: bool = True) -> 
 
 
 def _replacement_list(label: str, current: list[str]) -> list[str]:
-    answer = _readline(
-        f"  {label} [enter keeps {len(current)} item(s); ' | ' separates; '-' clears]: "
+    answer = screen.editline(
+        f"  {label} [edit existing; ' | ' separates; '-' clears]: ",
+        " | ".join(current),
     )
     if answer is None or answer == "":
         return current

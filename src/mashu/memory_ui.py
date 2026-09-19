@@ -311,8 +311,8 @@ def _editor_text(content: str) -> str:
     """Edit text only through an explicitly configured editor."""
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
     if not editor:
-        replacement = _required("  revised content [empty cancels]: ")
-        if replacement is None:
+        replacement = screen.editline("  revise existing content: ", content)
+        if not replacement:
             raise MashuError("revision cancelled")
         return replacement
     command = shlex.split(editor)
@@ -347,7 +347,7 @@ def _delivery_answers(
     action_default: str | None = None,
 ) -> tuple[str, str | None, str | None] | None:
     """Ask for a route and its route-specific fields before opening a transaction."""
-    chosen = _optional(f"  delivery [always/scope/guard; enter={default}]: ") or default
+    chosen = screen.editline("  delivery [always/scope/guard; edit existing]: ", default) or default
     chosen = chosen.casefold()
     if chosen not in memories.DELIVERIES:
         raise MashuError("delivery must be always, scope, or guard")
@@ -359,7 +359,8 @@ def _delivery_answers(
             if scope_default
             else "  scope name [required]: "
         )
-        scope_name = _optional(prompt) or scope_default
+        entered_scope = screen.editline(prompt, scope_default or "")
+        scope_name = entered_scope or scope_default
         if scope_name is None:
             return None
     elif chosen == "guard":
@@ -368,7 +369,8 @@ def _delivery_answers(
             if action_default
             else "  guard action [required]: "
         )
-        action = _optional(action_prompt) or action_default
+        entered_action = screen.editline(action_prompt, action_default or "")
+        action = entered_action or action_default
         if action is None:
             return None
         scope_prompt = (
@@ -376,8 +378,8 @@ def _delivery_answers(
             if scope_default
             else "  scope name [empty means every scope]: "
         )
-        entered_scope = _optional(scope_prompt)
-        scope_name = scope_default if entered_scope is None else entered_scope
+        entered_scope = screen.editline(scope_prompt, scope_default or "")
+        scope_name = scope_default if not entered_scope else entered_scope
         if scope_name == "-":
             scope_name = None
     elif scope_default:
@@ -400,8 +402,8 @@ def _revise_temporary(dsn: str | None, row: dict[str, Any]) -> str:
         if current_scope
         else "  scope name [empty means every scope]: "
     )
-    entered_scope = _optional(scope_prompt)
-    scope_name = current_scope if entered_scope is None else entered_scope
+    entered_scope = screen.editline(scope_prompt, current_scope or "")
+    scope_name = current_scope if not entered_scope else entered_scope
     if scope_name == "-":
         scope_name = None
     with db.transaction(dsn) as cur:

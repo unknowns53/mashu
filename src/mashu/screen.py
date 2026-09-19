@@ -200,6 +200,30 @@ def typed(prompt: str) -> str | None:
     return answer
 
 
+def editline(prompt: str, current: str) -> str | None:
+    """Read a line with the current value already in an interactive input buffer."""
+    readline_module = None
+    if sys.stdin.isatty():
+        try:
+            import readline as readline_module
+
+            def prefill() -> None:
+                readline_module.insert_text(current)
+                readline_module.redisplay()
+
+            readline_module.set_startup_hook(prefill)
+        except (ImportError, AttributeError):  # pragma: no cover - platform dependent
+            readline_module = None
+    try:
+        return input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    finally:
+        if readline_module is not None:
+            readline_module.set_startup_hook()
+
+
 def paint(text: str) -> None:
     """Repaint. What is being decided about should be the whole view."""
     if sys.stdout.isatty():

@@ -348,7 +348,7 @@ mashu task close <id>... [--outcome ...] / reopen <id>
 mashu pain --prevention-kind {rule,work} [--task <id>]   9 節の二つの形
 ```
 
-dashboard は Attention / Memories / Work / Settings & health の四領域を持ち、各画面から戻るたびに件数を再集計する。Attention は review、close proposal、dormant Task を扱う。Work は active / dormant / closed Task と Project を閲覧・検索し、Current State、proposal、全履歴、artifact を表示する。User は Task の create / touch / close / reopen に加え、open Task の名前・所属 Project・Current State と Project の名前・Scope を編集できる。現在値を人が訂正する経路であり、checkpoint / attempt / decision / artifact の追記履歴は編集しない。Settings & health は status、現在の cwd に対する bootstrap preview、Scope と route の作成・編集、migration を扱う。引数つき CLI と MCP の契約は変えない。
+dashboard は Attention / Memories / Work / Settings & health の四領域を持ち、各画面から戻るたびに件数を再集計する。Attention は review、close proposal、dormant Task を扱う。Work は active / dormant / closed Task と Project を閲覧・検索し、Current State、proposal、全履歴、artifact を表示する。User は Task の create / touch / close / reopen に加え、open Task の名前・所属 Project・Current State と Project の名前・Scope を編集できる。編集入力は現在値を入力バッファへ入れて開き、全文の再入力ではなく既存値の部分修正として扱う。現在値を人が訂正する経路であり、checkpoint / attempt / decision / artifact の追記履歴は編集しない。Settings & health は status、現在の cwd に対する bootstrap preview、Scope と route の作成・編集、migration を扱う。引数つき CLI と MCP の契約は変えない。
 
 短縮 ID の解決は既存の規則（表示される先頭 8 文字、4 文字未満と多重一致は候補を挙げて拒否）を共用する。
 

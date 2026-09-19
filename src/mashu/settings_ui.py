@@ -299,12 +299,9 @@ def _confirm(question: str) -> bool:
 
 
 def _replacement(prompt: str, current: str | None, *, clearable: bool = True) -> str | None:
-    shown = current or "-"
     clearing = "; '-' clears" if clearable else ""
-    try:
-        answer = input(f"  {prompt} [enter keeps {shown}{clearing}]: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
+    answer = screen.editline(f"  {prompt} [edit existing{clearing}]: ", current or "")
+    if answer is None:
         return current
     if not answer:
         return current

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import sys
 
 import psycopg
 import pytest
@@ -28,6 +29,38 @@ TEST_DB = "mashu_test_home"
 class TtyBuffer(io.StringIO):
     def isatty(self) -> bool:
         return True
+
+
+class FakeReadline:
+    def __init__(self) -> None:
+        self.startup_hook = None
+        self.inserted = None
+
+    def set_startup_hook(self, hook=None) -> None:
+        self.startup_hook = hook
+
+    def insert_text(self, value: str) -> None:
+        self.inserted = value
+
+    def redisplay(self) -> None:
+        pass
+
+
+def test_editline_starts_with_the_existing_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    readline = FakeReadline()
+    monkeypatch.setitem(sys.modules, "readline", readline)
+    monkeypatch.setattr(sys, "stdin", TtyBuffer())
+
+    def edit(_prompt: str) -> str:
+        assert readline.startup_hook is not None
+        readline.startup_hook()
+        return "edited value"
+
+    monkeypatch.setattr("builtins.input", edit)
+
+    assert screen.editline("edit: ", "existing value") == "edited value"
+    assert readline.inserted == "existing value"
+    assert readline.startup_hook is None
 
 
 @pytest.fixture
