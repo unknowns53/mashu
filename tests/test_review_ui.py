@@ -279,20 +279,13 @@ def test_editing_persists_the_candidate_then_it_can_be_admitted(dsn, monkeypatch
     assert saved["content"] == rows[0]["content"]
 
 
-def test_a_capacity_refusal_can_be_edited_shorter_and_retried(dsn, monkeypatch, capsys, tmp_path):
+def test_a_capacity_refusal_can_be_edited_inline_and_retried(dsn, monkeypatch, capsys):
     candidate = a_candidate(dsn, RULE)
-    editor = tmp_path / "shorten.py"
-    editor.write_text(
-        "import pathlib, sys\n"
-        "pathlib.Path(sys.argv[1]).write_text('migrate first', encoding='utf-8')\n",
-        encoding="utf-8",
-    )
-    interpreter = pathlib.Path(sys.executable).as_posix()
-    monkeypatch.setenv("EDITOR", f'"{interpreter}" "{editor.as_posix()}"')
+    monkeypatch.delenv("EDITOR", raising=False)
     monkeypatch.delenv("VISUAL", raising=False)
     monkeypatch.setenv("MASHU_CAPACITY", "12")
     monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", "12")
-    keys(monkeypatch, "", "y", "", "e", "y", "")
+    keys(monkeypatch, "", "y", "", "e", "migrate first", "y", "")
 
     assert review_ui.run(dsn) == 0
 

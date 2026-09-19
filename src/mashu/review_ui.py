@@ -30,8 +30,8 @@ _HELP = """
   y  admit it. The next question is where it is delivered from: enter takes
      the default, and 'g ACTION' puts it in front of that act instead.
 
-  e  edit the pending candidate and keep it in the queue. This does not admit
-     it. After a capacity refusal, shorten it here and press y to try again.
+  e  edit the existing text in place; Enter saves it in the queue and Ctrl+C
+     cancels. This does not admit it. Press y afterwards to try admission.
 
   r  turn it down, with a reason. The same pain will be reported again, and
      the reason is what tells the next reader this was considered.
@@ -186,8 +186,19 @@ def _item_text(row: dict[str, Any], place: int, total: int) -> str:
 
 # carrying one decision into the store
 def _editor_text(content: str) -> str:
-    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
-    command = shlex.split(editor) or ["vi"]
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if not editor:
+        revised = screen.editline(
+            "  edit existing candidate [Enter saves; Ctrl+C cancels]: ", content
+        )
+        if revised is None:
+            raise MashuError("edit cancelled")
+        if not revised:
+            raise MashuError("a candidate cannot be empty")
+        return revised
+    command = shlex.split(editor)
+    if not command:
+        raise MashuError("editor command is empty")
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, encoding="utf-8"
     ) as handle:
