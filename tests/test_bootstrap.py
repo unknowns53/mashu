@@ -206,9 +206,9 @@ def test_work_belonging_to_another_scope_stays_there(cur, scope_id, task):
     over_there = bootstrap.session_bootstrap(cur, actor="agent", scope_id=elsewhere)
     assert {row["task"] for row in over_there["states"]} == {here, there}
 
-    # Unrouted sessions receive all projects; writes enforce the same ceiling.
+    # An unrouted session has no scoped delivery boundary, so it sees only global state.
     unrouted = bootstrap.session_bootstrap(cur, actor="agent")
-    assert {row["task"] for row in unrouted["states"]} == {here, there}
+    assert [row["task"] for row in unrouted["states"]] == [here]
 
 
 def test_what_was_handed_over_is_logged(cur, scope_id):

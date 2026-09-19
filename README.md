@@ -239,11 +239,13 @@ scope は「どこで」、guard は「いつ」を絞る。guard に scope も�
 ~~~text
 全体                 4000 token
 Memory               2000 token（always 800 / scope 1200）
-Project State        1600 token
+Project State        1600 token / scope
 Temporary Context     400 token
 ~~~
 
 環境変数 MASHU_TOTAL_CAPACITY、MASHU_CAPACITY、MASHU_ALWAYS_CAPACITY、MASHU_PROJECT_CAPACITY、MASHU_TEMPORARY_CAPACITY で変更できる。
+
+Project State の枠は Scope ごとに独立している。Scope を持たない Project の state は全 Scope 共通分として各枠に含まれ、unrouted session にはこの共通分だけが届く。`mashu status` の Project State 使用量は、最も重い Scope の値である。
 
 ## Scope と route
 

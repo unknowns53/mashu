@@ -103,7 +103,7 @@ Task の所属単位。通常は repository または研究単位に対応する
 id / name / scope_id / created_at / archived_at
 ```
 
-Project と Scope は同じ概念ではない。Scope は delivery / routing の境界、Project は work state の所属である。初期実装では一つの Project が一つの主要 Scope を持つ形から始め、多対多への一般化は必要が実測されるまでしない。
+Project と Scope は同じ概念ではない。Scope は delivery / routing の境界、Project は work state の所属である。初期実装では一つの Project が一つの主要 Scope を持つ形から始め、多対多への一般化は必要が実測されるまでしない。Scope を持つ Project の Current State はその Scope だけに配信する。Scope を持たない Project は全 Scope 共通であり、unrouted session にはこの共通分だけを配信する。
 
 ### 5.2 Task
 
@@ -138,7 +138,7 @@ next_actions    最大 5 件 × 300 chars
 
 **並行する置換は楽観チェックで受ける。**複数セッションが同じ Task を同時に更新しうる。`task_update` は読み取り時の `updated_at` を添えて置換し、不一致なら拒否して現在の state を返す。黙って last-writer-wins にすると、並行セッションの一方の作業が痕跡なく消える。
 
-**予算境界の挙動も store が持つ。**`task_update` の結果、active な Current State の合計が Project State 枠（8 節）を超えるなら、書き込みを拒否し、現在の内訳と出口を返す。溢れたぶんを黙って切り詰めたり検索へ落としたりしない。v2 の定員が Memory admission でしていることと同じ扱いである。
+**予算境界の挙動も store が持つ。**Project State 枠は Scope ごとに独立する。`task_update` の結果、その Scope に配信される active な Current State の合計が枠（8 節）を超えるなら、書き込みを拒否し、現在の内訳と出口を返す。Scope を持たない Project の state は全 Scope 共通分として各 Scope の合計に含め、共通分への書き込みは最も重い Scope に対して判定する。別 Scope の固有 state は競合しない。溢れたぶんを黙って切り詰めたり検索へ落としたりしない。v2 の定員が Memory admission でしていることと同じ扱いである。
 
 ただし**その Task 自身の state を小さくする書き込みは、枠を超えている状態からでも通す**。枠は設定値であり、state の重さは配信の形から計算されるので、どちらも誰も触っていない行の下で動きうる。つまり書き込みを経ずに枠を超えた状態が成立する。そこで一律に拒否すると、他の active Task だけで枠を超えている場合、対象を空にしても総量が枠を割らないため拒否され、「他を縮めろ」と言いながらその縮約自体を拒む閉じた輪になる。入口拒否の思想は保ったまま、枠が求めている向きの書き込みだけを通す。
 
@@ -250,11 +250,11 @@ Current State は**欄の名前を本文に含めて**配信する。MCP の `st
 ```text
 TOTAL            4000 tokens
   Memory         2000（always 800 / scope 1200）
-  Project State  1600
+  Project State  1600 / scope
   Temporary       400
 ```
 
-重要なのは、**Agent に押し込まれる総量を Mashu が一元管理し、subsystem が互いの枠を暗黙に借りない**ことである。Memory が余った Project State 枠を恒久的に使うことも、その逆もしない。Memory の定員判定は v2 のまま admission 時に、Project State の枠判定は 5.3 節のとおり書き込み時に行う。溢れの解決はどちらも入口側（retire / 格下げ、dormant 化 / 縮約）であり、「入りきらないので検索に落とす」は行わない。v2 に知識の検索が無いのと同じ理由である。
+重要なのは、**Agent に押し込まれる総量を Mashu が一元管理し、subsystem が互いの枠を暗黙に借りない**ことである。Memory が余った Project State 枠を恒久的に使うことも、その逆もしない。Memory の定員判定は v2 のまま admission 時に、Project State は Scope ごとの配信量を 5.3 節のとおり書き込み時に判定する。`mashu status` は Project State の全 Scope 合計ではなく、最も重い Scope の配信量を表示する。溢れの解決はどちらも入口側（retire / 格下げ、dormant 化 / 縮約）であり、「入りきらないので検索に落とす」は行わない。v2 に知識の検索が無いのと同じ理由である。
 
 guard は v2 のまま Durable Memory の delivery 機構であり、Project State は guard に使わない。
 

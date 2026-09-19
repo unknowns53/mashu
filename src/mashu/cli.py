@@ -285,7 +285,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         pending = nominations.pending_nominations(cur)
         scope_rows = scopes.list_scopes(cur)
         # Add active task and temporary-context costs to the status report.
-        states = tasks.active_state_costs(cur)
+        state_totals = tasks.pushed_totals(cur)
         temporary_totals = temporary.pushed_totals(cur)
         # Check migrations before querying tables introduced by newer schema versions.
         unapplied = migration.pending(cur)
@@ -302,8 +302,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"worst={totals['worst']}/{config.capacity()}"
     )
     print(
-        f"state   active={len(states)}  "
-        f"tokens={sum(row['tokens'] for row in states)}/{config.project_capacity()}"
+        f"state   active={state_totals['count']}  "
+        f"worst={state_totals['worst']}/{config.project_capacity()}"
     )
     print(f"temporary  tokens={temporary_totals['worst']}/{config.temporary_capacity()}")
     print(f"pending {len(pending)}")

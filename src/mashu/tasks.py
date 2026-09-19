@@ -339,7 +339,7 @@ def task_create(
             hits,
         )
 
-    _check_budget(cur, task_id=None, name=name, state=state)
+    _check_budget(cur, task_id=None, name=name, state=state, scope_id=home["scope_id"])
 
     lease = config.task_lease_days()
     cur.execute(
@@ -433,9 +433,11 @@ def task_search(
 # the budget (5.3, 8)
 
 _ACTIVE_STATES = """
-SELECT t.task_id, t.name, ts.goal, ts.approach, ts.status_text,
+SELECT t.task_id, t.name, p.scope_id, ts.goal, ts.approach, ts.status_text,
        ts.open_questions, ts.blockers, ts.next_actions
-FROM task t JOIN task_state ts ON ts.task_id = t.task_id
+FROM task t
+JOIN project p ON p.project_id = t.project_id
+JOIN task_state ts ON ts.task_id = t.task_id
 WHERE t.status = 'open' AND now() <= t.active_until
 """
 
@@ -444,22 +446,73 @@ def active_state_costs(cur: psycopg.Cursor) -> list[dict[str, Any]]:
     """What every active task's state costs to push, heaviest first."""
     cur.execute(_ACTIVE_STATES)
     rows = [
-        {"task_id": row["task_id"], "name": row["name"], "tokens": state_cost(row["name"], row)}
+        {
+            "task_id": row["task_id"],
+            "name": row["name"],
+            "scope_id": row["scope_id"],
+            "tokens": state_cost(row["name"], row),
+        }
         for row in cur.fetchall()
     ]
     return sorted(rows, key=lambda row: row["tokens"], reverse=True)
 
 
+def pushed_totals(cur: psycopg.Cursor) -> dict[str, Any]:
+    """What active state costs everywhere, per scope, and at its worst."""
+    rows = active_state_costs(cur)
+    unscoped = sum(row["tokens"] for row in rows if row["scope_id"] is None)
+    scoped: dict[UUID, int] = {}
+    for row in rows:
+        if row["scope_id"] is not None:
+            scoped[row["scope_id"]] = scoped.get(row["scope_id"], 0) + row["tokens"]
+    return {
+        "unscoped": unscoped,
+        "scopes": scoped,
+        "worst": unscoped + max(scoped.values(), default=0),
+        "count": len(rows),
+    }
+
+
+def _budget_competitors(
+    rows: list[dict[str, Any]], *, scope_id: UUID | None
+) -> tuple[list[dict[str, Any]], str]:
+    """The states delivered beside a write, using the heaviest scope for global state."""
+    unscoped = [row for row in rows if row["scope_id"] is None]
+    if scope_id is not None:
+        scoped = [row for row in rows if row["scope_id"] == scope_id]
+        return [*unscoped, *scoped], "this scope"
+
+    buckets: dict[UUID, list[dict[str, Any]]] = {}
+    for row in rows:
+        if row["scope_id"] is not None:
+            buckets.setdefault(row["scope_id"], []).append(row)
+    heaviest = max(
+        buckets.values(), key=lambda bucket: sum(r["tokens"] for r in bucket), default=[]
+    )
+    return [*unscoped, *heaviest], "the busiest scope"
+
+
 def _check_budget(
-    cur: psycopg.Cursor, *, task_id: UUID | None, name: str, state: dict[str, Any]
+    cur: psycopg.Cursor,
+    *,
+    task_id: UUID | None,
+    name: str,
+    state: dict[str, Any],
+    scope_id: UUID | None,
 ) -> None:
-    """Refuse a write that would push the Project State share over (5.3)."""
+    """Refuse a write that would push its scope's Project State share over (5.3)."""
     cost = state_cost(name, state)
     seated = active_state_costs(cur)
-    others = [row for row in seated if row["task_id"] != task_id]
     was = next((row["tokens"] for row in seated if row["task_id"] == task_id), None)
+    others, boundary = _budget_competitors(
+        [row for row in seated if row["task_id"] != task_id], scope_id=scope_id
+    )
+    reported = [
+        {"task_id": row["task_id"], "name": row["name"], "tokens": row["tokens"]}
+        for row in others
+    ]
     breakdown = sorted(
-        [*others, {"task_id": task_id, "name": name, "tokens": cost}],
+        [*reported, {"task_id": task_id, "name": name, "tokens": cost}],
         key=lambda row: row["tokens"],
         reverse=True,
     )
@@ -470,7 +523,8 @@ def _check_budget(
     if was is not None and cost < was:
         return
     raise ProjectBudgetError(
-        f"the project state seats {ceiling} tokens and this would take it to {total} "
+        f"the project state share for {boundary} seats {ceiling} tokens and this would "
+        f"take it to {total} "
         f"({cost} for '{name}' on top of {total - cost} already pushed by "
         f"{len(others)} active task(s)). A write that makes this task's own state "
         "smaller is allowed through even from here, so shrink this one; otherwise "
@@ -546,7 +600,8 @@ def task_update(
             current,
         )
 
-    _check_budget(cur, task_id=task_id, name=task["name"], state=state)
+    home = projects.require_project(cur, task["project_id"])
+    _check_budget(cur, task_id=task_id, name=task["name"], state=state, scope_id=home["scope_id"])
 
     cur.execute(
         """
@@ -585,7 +640,8 @@ def append_next_action(
     state["next_actions"] = [*state["next_actions"], text]
     _check_limits(state)
     verdict = _gate(*_texts(state))
-    _check_budget(cur, task_id=task_id, name=task["name"], state=state)
+    home = projects.require_project(cur, task["project_id"])
+    _check_budget(cur, task_id=task_id, name=task["name"], state=state, scope_id=home["scope_id"])
 
     cur.execute(
         "UPDATE task_state SET next_actions = %s, updated_at = clock_timestamp(), "

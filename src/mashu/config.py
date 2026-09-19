@@ -13,7 +13,7 @@ DEFAULT_CAPACITY = 2000
 #: Hard ceiling on the always layer alone, inside the whole-opening one above (5.2).
 DEFAULT_ALWAYS_CAPACITY = 800
 
-#: Hard ceiling on the Project State share of the opening, in estimated tokens (v3 5.3, 8).
+#: Hard ceiling on each scope's Project State share, in estimated tokens (v3 5.3, 8).
 DEFAULT_PROJECT_CAPACITY = 1600
 
 #: Hard ceiling on the temporary share of the opening (v3 8).

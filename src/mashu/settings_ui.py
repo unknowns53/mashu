@@ -57,7 +57,7 @@ class Health:
     memory_always_tokens: int
     memory_worst_tokens: int
     active_states: int
-    state_tokens: int
+    state_worst_tokens: int
     temporary_count: int
     temporary_tokens: int
     pending_ready: int
@@ -83,7 +83,7 @@ def _health(dsn: str | None) -> Health:
         )
         memory_counts = {row["delivery"]: row["n"] for row in cur.fetchall()}
         memory_totals = capacity.bootstrap_totals(cur)
-        states = tasks.active_state_costs(cur)
+        state_totals = tasks.pushed_totals(cur)
         temporary_totals = temporary.pushed_totals(cur)
 
         cur.execute(
@@ -129,8 +129,8 @@ def _health(dsn: str | None) -> Health:
         memory_counts=memory_counts,
         memory_always_tokens=memory_totals["always"],
         memory_worst_tokens=memory_totals["worst"],
-        active_states=len(states),
-        state_tokens=sum(row["tokens"] for row in states),
+        active_states=state_totals["count"],
+        state_worst_tokens=state_totals["worst"],
         temporary_count=temporary_totals["count"],
         temporary_tokens=temporary_totals["worst"],
         pending_ready=pending["ready"],
@@ -163,7 +163,7 @@ def _health_text(value: Health) -> str:
             f"  Memory capacity    always {value.memory_always_tokens}/{config.always_capacity()}"
             f"  ·  worst {value.memory_worst_tokens}/{config.capacity()}",
             f"  Project state      {value.active_states} active"
-            f"  ·  {value.state_tokens}/{config.project_capacity()} tokens",
+            f"  ·  worst {value.state_worst_tokens}/{config.project_capacity()} tokens",
             f"  Temporary          {value.temporary_count} standing"
             f"  ·  {value.temporary_tokens}/{config.temporary_capacity()} tokens",
             "",

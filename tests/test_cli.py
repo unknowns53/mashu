@@ -277,7 +277,7 @@ def test_the_work_that_is_current_is_printed_under_its_date(run, committing_dsn)
 
     _, out, _ = run("status")
     state_line = next(row for row in out.splitlines() if row.startswith("state"))
-    assert "active=" in state_line
+    assert "active=" in state_line and "worst=" in state_line
     assert state_line.endswith(f"/{config.project_capacity()}")
 
 

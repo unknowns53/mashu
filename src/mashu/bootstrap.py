@@ -14,12 +14,12 @@ from mashu.tokens import pushed_cost
 def active_states(cur: psycopg.Cursor, scope_id: UUID | None = None) -> list[dict[str, Any]]:
     """The active tasks whose state this session is entitled to, in a fixed order."""
     rows = tasks.task_list(cur, activity="active")
-    if scope_id is None:
-        return rows
     homes = {
         row["project_id"]: row["scope_id"]
         for row in projects.list_projects(cur, include_archived=True)
     }
+    # Unscoped projects apply everywhere. Scoped projects stay in their delivery boundary;
+    # an unrouted session therefore receives only the unscoped rows.
     return [row for row in rows if homes.get(row["task"]["project_id"]) in (None, scope_id)]
 
 

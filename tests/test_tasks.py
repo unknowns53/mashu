@@ -4,7 +4,7 @@ from __future__ import annotations
 import psycopg
 import pytest
 
-from mashu import projects, tasks
+from mashu import projects, scopes, tasks
 from mashu.errors import (
     ClosedTaskError,
     DuplicateTaskError,
@@ -234,6 +234,78 @@ def test_a_replacement_written_against_a_replaced_state_is_rejected(cur, task):
 
 
 # the budget (5.3, 8)
+def test_each_scope_has_an_independent_project_state_share(cur, scope_id, monkeypatch):
+    elsewhere = scopes.create_scope(cur, name="somewhere else", actor="user")["scope_id"]
+    projects.create_project(cur, name="project here", actor="user", scope_id=scope_id)
+    projects.create_project(cur, name="project there", actor="user", scope_id=elsewhere)
+
+    here = tasks.task_create(
+        cur,
+        project="project here",
+        name="fill this scope",
+        status_text="x" * 240,
+        actor="agent",
+    )
+    cost = tasks.state_cost(here["task"]["name"], here["state"])
+    monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(cost))
+
+    there = tasks.task_create(
+        cur,
+        project="project there",
+        name="fill this scope",
+        status_text="x" * 240,
+        actor="agent",
+    )
+
+    totals = tasks.pushed_totals(cur)
+    assert totals["count"] == 2
+    assert totals["scopes"] == {scope_id: cost, elsewhere: cost}
+    assert totals["worst"] == cost
+    assert sum(row["tokens"] for row in tasks.active_state_costs(cur)) == 2 * cost
+    assert there["task"]["project_id"] != here["task"]["project_id"]
+
+
+def test_unscoped_state_spends_a_seat_in_every_scope(cur, scope_id):
+    projects.create_project(cur, name="global project", actor="user")
+    projects.create_project(cur, name="local project", actor="user", scope_id=scope_id)
+    global_task = tasks.task_create(
+        cur, project="global project", name="global work", actor="agent"
+    )
+    local_task = tasks.task_create(cur, project="local project", name="local work", actor="agent")
+
+    global_cost = tasks.state_cost(global_task["task"]["name"], global_task["state"])
+    local_cost = tasks.state_cost(local_task["task"]["name"], local_task["state"])
+    totals = tasks.pushed_totals(cur)
+
+    assert totals["unscoped"] == global_cost
+    assert totals["scopes"] == {scope_id: local_cost}
+    assert totals["worst"] == global_cost + local_cost
+
+
+def test_an_unscoped_write_is_weighed_against_the_busiest_scope(cur, scope_id, monkeypatch):
+    lighter_scope = scopes.create_scope(cur, name="lighter scope", actor="user")["scope_id"]
+    projects.create_project(cur, name="busy project", actor="user", scope_id=scope_id)
+    projects.create_project(cur, name="light project", actor="user", scope_id=lighter_scope)
+    projects.create_project(cur, name="global project", actor="user")
+    busy = tasks.task_create(
+        cur,
+        project="busy project",
+        name="busy work",
+        status_text="x" * 240,
+        actor="agent",
+    )
+    tasks.task_create(cur, project="light project", name="light work", actor="agent")
+
+    busy_cost = tasks.state_cost(busy["task"]["name"], busy["state"])
+    global_cost = tasks.state_cost("global work", {})
+    monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(busy_cost + global_cost - 1))
+
+    with pytest.raises(ProjectBudgetError) as raised:
+        tasks.task_create(cur, project="global project", name="global work", actor="agent")
+
+    assert {row["name"] for row in raised.value.breakdown} == {"busy work", "global work"}
+
+
 def test_a_state_that_would_overflow_the_share_is_refused_with_the_breakdown(
     cur, task, monkeypatch
 ):
@@ -256,6 +328,7 @@ def test_a_state_that_would_overflow_the_share_is_refused_with_the_breakdown(
 
     breakdown = raised.value.breakdown
     assert {row["name"] for row in breakdown} == {SCHEMA, OTHER_WORK}
+    assert all(set(row) == {"task_id", "name", "tokens"} for row in breakdown)
     assert sum(row["tokens"] for row in breakdown) > seated
     assert breakdown == sorted(breakdown, key=lambda row: row["tokens"], reverse=True)
 

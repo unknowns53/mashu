@@ -199,7 +199,7 @@ def test_health_collects_capacity_queues_evidence_and_task_activity(dsn: str) ->
     assert value.schema_pending == ()
     assert value.memory_counts == {"always": 1, "scope": 1}
     assert value.memory_always_tokens > 0 and value.memory_worst_tokens > 0
-    assert value.active_states == 1 and value.state_tokens > 0
+    assert value.active_states == 1 and value.state_worst_tokens > 0
     assert value.temporary_count == 1 and value.temporary_tokens > 0
     # Incident reporting nominates immediately; the explicit second row makes two ready.
     assert (value.pending_ready, value.pending_deferred) == (2, 1)
