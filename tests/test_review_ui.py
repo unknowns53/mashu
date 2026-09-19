@@ -252,10 +252,8 @@ def test_a_refused_admission_leaves_the_reader_on_the_same_candidate(dsn, monkey
     assert nomination_row(dsn, nomination["nomination_id"])["status"] == "pending"
 
 
-def test_editing_before_admitting_keeps_the_wording_that_was_written(
-    dsn, monkeypatch, capsys, tmp_path
-):
-    a_candidate(dsn, RULE)
+def test_editing_persists_the_candidate_then_it_can_be_admitted(dsn, monkeypatch, capsys, tmp_path):
+    candidate = a_candidate(dsn, RULE)
     # Run the editor through Python; Windows cannot execute a shebang script here.
     editor = tmp_path / "append_a_line.py"
     editor.write_text(
@@ -268,7 +266,7 @@ def test_editing_before_admitting_keeps_the_wording_that_was_written(
     interpreter = pathlib.Path(sys.executable).as_posix()
     monkeypatch.setenv("EDITOR", f'"{interpreter}" "{editor.as_posix()}"')
     monkeypatch.delenv("VISUAL", raising=False)
-    keys(monkeypatch, "", "e", "")
+    keys(monkeypatch, "", "e", "y", "")
 
     assert review_ui.run(dsn) == 0
 
@@ -277,6 +275,32 @@ def test_editing_before_admitting_keeps_the_wording_that_was_written(
     assert len(rows) == 1
     assert rows[0]["content"].startswith(RULE)
     assert "and check the standby first" in rows[0]["content"]
+    saved = nomination_row(dsn, candidate["nomination_id"])
+    assert saved["content"] == rows[0]["content"]
+
+
+def test_a_capacity_refusal_can_be_edited_shorter_and_retried(dsn, monkeypatch, capsys, tmp_path):
+    candidate = a_candidate(dsn, RULE)
+    editor = tmp_path / "shorten.py"
+    editor.write_text(
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('migrate first', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    interpreter = pathlib.Path(sys.executable).as_posix()
+    monkeypatch.setenv("EDITOR", f'"{interpreter}" "{editor.as_posix()}"')
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.setenv("MASHU_CAPACITY", "12")
+    monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", "12")
+    keys(monkeypatch, "", "y", "", "e", "y", "")
+
+    assert review_ui.run(dsn) == 0
+
+    out = capsys.readouterr().out
+    assert "seats 12 tokens" in out
+    assert f"edited {str(candidate['nomination_id'])[:8]}" in out
+    assert f"admitted {str(candidate['nomination_id'])[:8]}" in out
+    assert memory_rows(dsn)[0]["content"] == "migrate first"
 
 
 def test_the_queue_names_every_candidate_before_any_of_them_is_opened(dsn, monkeypatch, capsys):

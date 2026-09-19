@@ -17,11 +17,11 @@ _OUTCOMES = {"c": "completed", "a": "abandoned", "s": "superseded"}
 
 _TASK_KEYS = (
     "  1 active  2 dormant  3 closed  4 projects   ↑↓/jk move   Home/End   PgUp/PgDn\n"
-    "  / search   ⏎ details   n new   t renew   c close   o reopen   ← back   q leave"
+    "  / search   ⏎ details   n new   e edit   t renew   c close   o reopen   ← back   q leave"
 )
 _PROJECT_KEYS = (
     "  1 active  2 dormant  3 closed  4 projects   ↑↓/jk move   Home/End   PgUp/PgDn\n"
-    "  / search   ⏎ details   n new project   ← back   q leave"
+    "  / search   ⏎ details   n new project   e edit   ← back   q leave"
 )
 _DETAIL_KEYS = "  space read on   any other key goes back"
 
@@ -388,6 +388,70 @@ def _create_project(dsn: str | None) -> tuple[str, UUID | None]:
     return note, created["project_id"]
 
 
+def _replacement(label: str, current: str | None, *, clearable: bool = True) -> str | None:
+    shown = current or "-"
+    clearing = "; '-' clears" if clearable else ""
+    answer = _readline(f"  {label} [enter keeps {shown}{clearing}]: ")
+    if answer is None or answer == "":
+        return current
+    if clearable and answer == "-":
+        return None
+    return answer
+
+
+def _replacement_list(label: str, current: list[str]) -> list[str]:
+    answer = _readline(
+        f"  {label} [enter keeps {len(current)} item(s); ' | ' separates; '-' clears]: "
+    )
+    if answer is None or answer == "":
+        return current
+    if answer == "-":
+        return []
+    return [item.strip() for item in answer.split("|") if item.strip()]
+
+
+def _edit_task(dsn: str | None, row: dict[str, Any]) -> str:
+    task, state = row["task"], row["state"]
+    name = _replacement("task name", task["name"], clearable=False)
+    project_name = _replacement("project", task["project_name"], clearable=False)
+    edited = {
+        "goal": _replacement("goal", state.get("goal")),
+        "approach": _replacement("approach", state.get("approach")),
+        "status_text": _replacement("status", state.get("status_text")),
+        "open_questions": _replacement_list(
+            "open questions", list(state.get("open_questions") or [])
+        ),
+        "blockers": _replacement_list("blockers", list(state.get("blockers") or [])),
+        "next_actions": _replacement_list("next actions", list(state.get("next_actions") or [])),
+    }
+    with db.transaction(dsn) as cur:
+        tasks.task_update(
+            cur,
+            task["task_id"],
+            actor=ACTOR,
+            expect_updated_at=state["updated_at"],
+            name=name,
+            project=project_name,
+            **edited,
+        )
+    return screen.success(f"  ✓ edited task  {_short(task['task_id'])}")
+
+
+def _edit_project(dsn: str | None, row: dict[str, Any]) -> str:
+    name = _replacement("project name", row["name"], clearable=False)
+    scope_name = _replacement("scope", row.get("scope_name"))
+    with db.transaction(dsn) as cur:
+        scope_id = scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
+        projects.update_project(
+            cur,
+            row["project_id"],
+            name=name or row["name"],
+            scope_id=scope_id,
+            actor=ACTOR,
+        )
+    return screen.success(f"  ✓ edited project  {_short(row['project_id'])}")
+
+
 def _touch(dsn: str | None, row: dict[str, Any]) -> str:
     task_id = _task_id(row)
     with db.transaction(dsn) as cur:
@@ -538,10 +602,14 @@ def run(dsn: str | None = None, *, initial_view: str = "active") -> int:
             try:
                 if view in ("active", "dormant") and key == "t":
                     note = _touch(dsn, row)
+                elif view in ("active", "dormant") and key == "e":
+                    note = _edit_task(dsn, row)
                 elif view in ("active", "dormant") and key == "c":
                     note = _close_task(dsn, row)
                 elif view == "closed" and key == "o":
                     note = _reopen(dsn, row)
+                elif view == "projects" and key == "e":
+                    note = _edit_project(dsn, row)
             except MashuError as error:
                 note = screen.danger(f"  ✗ {error}")
             continue

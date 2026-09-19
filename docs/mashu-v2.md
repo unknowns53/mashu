@@ -237,7 +237,7 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 |---|---|
 | `mashu` | 人向け dashboard。Attention / Memories / Work / Settings & health を開く |
 | `mashu status` | 在庫と定員の使用量（always 層と、最も重い開き方の二つ）、pending 件数、台帳の直近、配信失敗の疑い件数 |
-| `mashu review` | pending の候補を一覧から選び、1 件ずつ全文と根拠を読んで 1 キーで確定・却下・保留 |
+| `mashu review` | pending の候補を一覧から選び、1 件ずつ全文と根拠を読んで編集・確定・却下・保留 |
 | `mashu remember <body>` | User 明示。CLI で即時 active にする経路。退役済みと衝突すると理由を出して確認する（`--force` で無条件） |
 | `mashu retire <id> --reason <r>` | 退役。理由必須 |
 | `mashu revise <id>` | 本文の改訂（User のみ） |
@@ -252,11 +252,11 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 | `mashu bootstrap` | push される内容と token を表示 |
 | `mashu admin migrate` | migration 実行 |
 
-Review UI は一覧と個別の二画面で、v1 の「束」の段は持たない。束は日に百件を捌くための機構であり、週数件なら一覧から選んで 1 件ずつ読めば足りる。ただし一覧そのものは要る。何が待っているか見えなければ、10 分しか無い人がその 10 分を何に使うか選べない。一覧には選択中の本文、evidence 数、退役済み Memory との衝突数、保留理由を preview し、ID・kind・scope・本文・evidence で絞り込める。個別画面は本文全体・token 見積り・根拠の台帳エントリを同じ画面に置き、画面より長ければページ送りする（端末の底より下へは何も出さない）。退役済み Memory との衝突があれば、本文の直後・evidence の手前に退役理由を出す。判断そのものを誤らせうる唯一の情報なので、ページを送らないと見えない位置には置かない。決定は 1 件ずつその場で確定するので、途中で抜けても後ろは残る。定員などで store が拒んだときは、決定にならず同じ候補に留まり、拒否の文面がその場に出る。
+Review UI は一覧と個別の二画面で、v1 の「束」の段は持たない。束は日に百件を捌くための機構であり、週数件なら一覧から選んで 1 件ずつ読めば足りる。ただし一覧そのものは要る。何が待っているか見えなければ、10 分しか無い人がその 10 分を何に使うか選べない。一覧には選択中の本文、evidence 数、退役済み Memory との衝突数、保留理由を preview し、ID・kind・scope・本文・evidence で絞り込める。個別画面は本文全体・token 見積り・根拠の台帳エントリを同じ画面に置き、画面より長ければページ送りする（端末の底より下へは何も出さない）。退役済み Memory との衝突があれば、本文の直後・evidence の手前に退役理由を出す。判断そのものを誤らせうる唯一の情報なので、ページを送らないと見えない位置には置かない。決定は 1 件ずつその場で確定するので、途中で抜けても後ろは残る。定員などで store が拒んだときは、決定にならず同じ候補に留まり、拒否の文面がその場に出る。`e` は候補本文を編集して pending のまま保存する。したがって容量超過の拒否後も、その場で短くしてから `y` で確定を再試行できる。編集は evidence・scope・保留状態を変えず、`nomination_revised` として event_log に残す。
 
 まとめて承認するキーは無い。席は 1 件ずつ、その根拠を見て渡す。決めずに退ける保留（`s`、理由必須）だけは別で、status は pending のまま `deferred_at` と理由を持ち、既定の一覧から外れる。決定ではないので pending の件数も短縮 ID での直接操作も変わらず、`mashu review --all` で一覧に戻る。
 
-dashboard の Memories では active / retired Memory と未失効の Temporary Context を閲覧・検索する。Memory の詳細には evidence と revision history を含める。User は direct remember、Temporary Context の登録、revise、retire、delivery / guard の変更を 1 件ずつ実行できる。退役済み Memory と衝突する direct remember は退役理由を表示し、User が明示的に確認した場合だけ上書きする。
+dashboard の Memories では active / retired Memory と未失効の Temporary Context を閲覧・検索する。Memory の詳細には evidence と revision history を含める。User は direct remember、Memory と Temporary Context の編集、Temporary Context の登録、retire、delivery / guard の変更を 1 件ずつ実行できる。退役済み Memory と衝突する direct remember は退役理由を表示し、User が明示的に確認した場合だけ上書きする。
 
 id を取る引数は、表示される短縮 ID（先頭 8 文字）の前方一致で解決する。一覧が短縮 ID しか出さない以上、完全 UUID しか受け付けない引数は、人に画面外の値を打たせることになる。4 文字未満の前置きと、複数行に当たる前置きは、候補を挙げて拒否する。
 

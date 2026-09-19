@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 import psycopg
 
-from mashu import events
-from mashu.errors import MashuError
+from mashu import events, redact
+from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
 
@@ -23,6 +24,50 @@ def create_scope(
     )
     row = cur.fetchone()
     events.record(cur, "scope_created", actor, detail={"name": name})
+    return row
+
+
+def update_scope(
+    cur: psycopg.Cursor,
+    scope_id: UUID,
+    *,
+    name: str,
+    summary: str | None,
+    actor: str,
+) -> dict[str, Any]:
+    """Edit the human-owned name and description without changing references."""
+    name = (name or "").strip()
+    summary = summary.strip() if summary and summary.strip() else None
+    if not name:
+        raise MashuError("a scope needs a name")
+    verdict = redact.check(name, summary)
+    if not verdict.allowed:
+        raise RefusedError(verdict.reason())
+
+    cur.execute("SELECT * FROM scope WHERE scope_id = %s FOR UPDATE", (scope_id,))
+    current = cur.fetchone()
+    if current is None:
+        raise MashuError(f"no scope {scope_id}")
+    cur.execute("SELECT scope_id FROM scope WHERE name = %s", (name,))
+    taken = cur.fetchone()
+    if taken is not None and taken["scope_id"] != scope_id:
+        raise MashuError(f"scope '{name}' already exists")
+
+    cur.execute(
+        "UPDATE scope SET name = %s, summary = %s WHERE scope_id = %s RETURNING *",
+        (name, summary, scope_id),
+    )
+    row = cur.fetchone()
+    events.record(
+        cur,
+        "scope_updated",
+        actor,
+        detail={
+            "scope_id": str(scope_id),
+            "from_name": current["name"],
+            "to_name": name,
+        },
+    )
     return row
 
 

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from uuid import uuid4
@@ -78,6 +77,38 @@ def test_an_admission_may_reword_the_rule_and_choose_where_it_lands(cur, scope_i
     assert memory["delivery"] == "guard"
     assert memory["guard_action"] == "Bash"
     assert memory["scope_id"] == scope_id
+
+
+def test_a_pending_candidate_can_be_reworded_without_being_decided(cur):
+    _, _, nomination = two_pains(cur)
+    revised = nominations.revise(
+        cur,
+        nomination["nomination_id"],
+        content="run the migration before the server",
+        actor="user",
+    )
+
+    assert revised["content"] == "run the migration before the server"
+    assert revised["status"] == "pending"
+    assert revised["evidence"] == nomination["evidence"]
+    cur.execute("SELECT detail FROM event_log WHERE event_type = 'nomination_revised'")
+    assert cur.fetchone()["detail"] == {
+        "from_chars": len(nomination["content"]),
+        "to_chars": len("run the migration before the server"),
+    }
+
+
+def test_a_decided_candidate_cannot_be_reworded(cur):
+    _, _, nomination = two_pains(cur)
+    nominations.decline(cur, nomination["nomination_id"], actor="user", reason="obsolete")
+
+    with pytest.raises(MashuError, match="already declined"):
+        nominations.revise(
+            cur,
+            nomination["nomination_id"],
+            content="too late to change this",
+            actor="user",
+        )
 
 
 def test_a_decision_is_made_once(cur):

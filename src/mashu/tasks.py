@@ -508,8 +508,7 @@ def _check_budget(
         [row for row in seated if row["task_id"] != task_id], scope_id=scope_id
     )
     reported = [
-        {"task_id": row["task_id"], "name": row["name"], "tokens": row["tokens"]}
-        for row in others
+        {"task_id": row["task_id"], "name": row["name"], "tokens": row["tokens"]} for row in others
     ]
     breakdown = sorted(
         [*reported, {"task_id": task_id, "name": name, "tokens": cost}],
@@ -576,10 +575,17 @@ def task_update(
     open_questions: list[str] | None = None,
     blockers: list[str] | None = None,
     next_actions: list[str] | None = None,
+    name: str | None = None,
+    project: UUID | str | None = None,
 ) -> dict[str, Any]:
-    """Replace the current state whole, and extend the lease by having done so."""
+    """Replace current state and optionally edit its task label and project."""
     _lock(cur)
     task = _require_open(cur, task_id)
+    current = task_get(cur, task_id)
+    new_name = task["name"] if name is None else name.strip()
+    if not new_name:
+        raise MashuError("a task needs a name: it is what the duplicate match reads")
+    home = projects.require_project(cur, task["project_id"] if project is None else project)
     state = _state_of(
         goal=goal,
         approach=approach,
@@ -589,9 +595,8 @@ def task_update(
         next_actions=next_actions,
     )
     _check_limits(state)
-    verdict = _gate(*_texts(state))
+    verdict = _gate(new_name, *_texts(state))
 
-    current = task_get(cur, task_id)
     if current["state"]["updated_at"] != expect_updated_at:
         raise StaleStateError(
             "this state was replaced by "
@@ -600,8 +605,35 @@ def task_update(
             current,
         )
 
-    home = projects.require_project(cur, task["project_id"])
-    _check_budget(cur, task_id=task_id, name=task["name"], state=state, scope_id=home["scope_id"])
+    identity_changed = new_name != task["name"] or home["project_id"] != task["project_id"]
+    if identity_changed:
+        candidates = similar_open_tasks(
+            cur,
+            project_id=home["project_id"],
+            name=new_name,
+            goal=state["goal"],
+        )
+        hits = [
+            row
+            for row in candidates
+            if row["task"]["task_id"] != task_id and row["score"] >= config.match_threshold()
+        ]
+        if hits:
+            named = ", ".join(
+                f"{row['task']['name']} ({str(row['task']['task_id'])[:8]})" for row in hits
+            )
+            raise DuplicateTaskError(
+                f"{len(hits)} open task(s) in '{home['name']}' already read like this: "
+                f"{named}. Keep this task's name/project distinct.",
+                hits,
+            )
+
+    _check_budget(cur, task_id=task_id, name=new_name, state=state, scope_id=home["scope_id"])
+
+    cur.execute(
+        "UPDATE task SET name = %s, project_id = %s WHERE task_id = %s",
+        (new_name, home["project_id"], task_id),
+    )
 
     cur.execute(
         """
@@ -619,7 +651,18 @@ def task_update(
         cur,
         "task_state_replaced",
         actor,
-        detail={"task_id": str(task_id), "tokens": state_cost(task["name"], state)},
+        detail={
+            "task_id": str(task_id),
+            "tokens": state_cost(new_name, state),
+            "from_name": task["name"] if new_name != task["name"] else None,
+            "to_name": new_name if new_name != task["name"] else None,
+            "from_project_id": (
+                str(task["project_id"]) if home["project_id"] != task["project_id"] else None
+            ),
+            "to_project_id": (
+                str(home["project_id"]) if home["project_id"] != task["project_id"] else None
+            ),
+        },
     )
     return {**task_get(cur, task_id), **_gate_report(verdict)}
 

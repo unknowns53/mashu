@@ -233,6 +233,36 @@ def test_touch_reactivates_a_dormant_task(dsn, monkeypatch):
     assert get_task(dsn, task_id)["activity"] == "active"
 
 
+def test_task_name_project_and_current_state_can_be_edited(dsn, monkeypatch, capsys):
+    task_id = make_task(dsn, "old rail wording")
+    keys(
+        monkeypatch,
+        "e",
+        "new rail wording",
+        "",
+        "ship the new rail",
+        "-",
+        "fitted for trial",
+        "load certified? | paint complete?",
+        "-",
+        "run trial | publish report",
+        "q",
+    )
+
+    assert work_ui.run(dsn) == 0
+
+    row = get_task(dsn, task_id)
+    assert row["task"]["name"] == "new rail wording"
+    assert row["task"]["project_name"] == "enrai"
+    assert row["state"]["goal"] == "ship the new rail"
+    assert row["state"]["approach"] is None
+    assert row["state"]["status_text"] == "fitted for trial"
+    assert row["state"]["open_questions"] == ["load certified?", "paint complete?"]
+    assert row["state"]["blockers"] == []
+    assert row["state"]["next_actions"] == ["run trial", "publish report"]
+    assert "edited task" in capsys.readouterr().out
+
+
 def test_close_can_accept_a_standing_proposal(dsn, monkeypatch):
     task_id = make_task(dsn, "finish the rail", proposal=True)
     keys(monkeypatch, "c", "y", "q")
@@ -289,6 +319,19 @@ def test_project_view_shows_counts_and_creates_an_optionally_scoped_project(
     out = capsys.readouterr().out
     assert "1a  0d  0c" in out
     assert "shipyard" in out
+
+
+def test_project_name_and_scope_can_be_edited(dsn, monkeypatch, capsys):
+    with db.transaction(dsn) as cur:
+        scopes.create_scope(cur, name="repository", actor="user")
+    keys(monkeypatch, "e", "enrai renamed", "repository", "q")
+
+    assert work_ui.run(dsn, initial_view="projects") == 0
+
+    with db.transaction(dsn) as cur:
+        row = projects.show_project(cur, "enrai renamed")
+    assert row["scope_name"] == "repository"
+    assert "edited project" in capsys.readouterr().out
 
 
 def test_refused_project_write_becomes_a_note_and_changes_nothing(dsn, monkeypatch, capsys):

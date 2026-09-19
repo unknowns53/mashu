@@ -30,8 +30,8 @@ _HELP = """
   y  admit it. The next question is where it is delivered from: enter takes
      the default, and 'g ACTION' puts it in front of that act instead.
 
-  e  open the proposed text in an editor first, and admit what you wrote.
-     Yours is what is kept; the candidate keeps what was proposed.
+  e  edit the pending candidate and keep it in the queue. This does not admit
+     it. After a capacity refusal, shorten it here and press y to try again.
 
   r  turn it down, with a reason. The same pain will be reported again, and
      the reason is what tells the next reader this was considered.
@@ -217,12 +217,9 @@ def _delivery(row: dict[str, Any]) -> tuple[str, str | None]:
     raise MashuError("delivery must be empty or 'g ACTION'")
 
 
-def _admit(dsn: str | None, row: dict[str, Any], *, edit: bool = False) -> str:
+def _admit(dsn: str | None, row: dict[str, Any]) -> str:
     """Admit one candidate in a transaction of its own."""
-    content = row["content"]
     try:
-        if edit:
-            content = _editor_text(content)
         delivery, guard_action = _delivery(row)
         with db.transaction(dsn) as cur:
             nominations.admit(
@@ -231,10 +228,25 @@ def _admit(dsn: str | None, row: dict[str, Any], *, edit: bool = False) -> str:
                 actor="user",
                 delivery=delivery,
                 guard_action=guard_action,
-                content=content,
             )
     except MashuError as refusal:
         # Keep the candidate selected when admission is refused.
+        return screen.danger(f"  {refusal}")
+    return ""
+
+
+def _revise(dsn: str | None, row: dict[str, Any]) -> str:
+    """Persist revised wording while leaving the candidate pending."""
+    try:
+        content = _editor_text(row["content"])
+        with db.transaction(dsn) as cur:
+            nominations.revise(
+                cur,
+                row["nomination_id"],
+                content=content,
+                actor="user",
+            )
+    except MashuError as refusal:
         return screen.danger(f"  {refusal}")
     return ""
 
@@ -311,7 +323,7 @@ def _move(at: int, total: int, key: str) -> int:
 
 def _feedback(verb: str, row: dict[str, Any]) -> str:
     """Name the durable decision on the next screen, including at the end."""
-    words = {"y": "admitted", "e": "admitted", "r": "declined", "s": "deferred"}
+    words = {"y": "admitted", "e": "edited", "r": "declined", "s": "deferred"}
     return screen.success(f"  {words[verb]} {_short(row['nomination_id'])}")
 
 
@@ -444,7 +456,7 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
             note = _admit(dsn, decided)
             verb = "y"
         elif key == "e":
-            note = _admit(dsn, decided, edit=True)
+            note = _revise(dsn, decided)
             verb = "e"
         elif key in ("r", "s"):
             reason = screen.typed("  why turn it down? " if key == "r" else "  why put it off? ")

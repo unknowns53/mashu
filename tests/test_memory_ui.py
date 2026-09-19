@@ -239,6 +239,31 @@ def test_temporary_add_is_global_and_rejects_an_out_of_range_lifetime(dsn, monke
     assert rows[0]["created_by"] == "user"
 
 
+def test_temporary_context_can_be_edited_in_place(dsn, monkeypatch, capsys):
+    with db.transaction(dsn) as cur:
+        scope = scopes.require_scope(cur, "deployments")
+        context = temporary.put_temporary(
+            cur,
+            content="the release is frozen",
+            actor="user",
+            days=2,
+            scope_id=scope["scope_id"],
+        )
+    keys(monkeypatch, "3", "e", "the release is frozen until Friday", "-", "q")
+
+    assert memory_ui.run(dsn) == 0
+
+    with db.transaction(dsn) as cur:
+        cur.execute(
+            "SELECT content, scope_id FROM temporary_context WHERE context_id = %s",
+            (context["context_id"],),
+        )
+        row = cur.fetchone()
+    assert row["content"] == "the release is frozen until Friday"
+    assert row["scope_id"] is None
+    assert "revised temporary" in capsys.readouterr().out
+
+
 def test_retired_conflict_shows_the_reason_and_does_not_override_without_yes(
     dsn, monkeypatch, capsys
 ):

@@ -10,6 +10,7 @@ from uuid import UUID
 import psycopg
 
 from mashu import events
+from mashu.errors import MashuError
 
 
 def normalise(path: str) -> str:
@@ -53,6 +54,48 @@ def remove_route(cur: psycopg.Cursor, *, path_prefix: str, actor: str) -> bool:
         return False
     events.record(cur, "route_removed", actor, detail={"path_prefix": prefix})
     return True
+
+
+def update_route(
+    cur: psycopg.Cursor,
+    route_id: UUID,
+    *,
+    path_prefix: str,
+    scope_id: UUID | None,
+    actor: str,
+) -> dict[str, Any]:
+    """Edit a selected route atomically, preserving its identity."""
+    prefix = normalise(path_prefix)
+    cur.execute("SELECT * FROM route WHERE route_id = %s FOR UPDATE", (route_id,))
+    current = cur.fetchone()
+    if current is None:
+        raise MashuError(f"no route {route_id}")
+    cur.execute("SELECT route_id FROM route WHERE path_prefix = %s", (prefix,))
+    taken = cur.fetchone()
+    if taken is not None and taken["route_id"] != route_id:
+        raise MashuError(f"route '{prefix}' already exists")
+
+    cur.execute(
+        """
+        UPDATE route SET path_prefix = %s, scope_id = %s, created_by = %s
+        WHERE route_id = %s RETURNING *
+        """,
+        (prefix, scope_id, actor, route_id),
+    )
+    row = cur.fetchone()
+    events.record(
+        cur,
+        "route_updated",
+        actor,
+        detail={
+            "route_id": str(route_id),
+            "from_path": current["path_prefix"],
+            "to_path": prefix,
+            "from_scope_id": str(current["scope_id"]) if current["scope_id"] else None,
+            "to_scope_id": str(scope_id) if scope_id else None,
+        },
+    )
+    return row
 
 
 def all_routes(cur: psycopg.Cursor) -> list[dict[str, Any]]:

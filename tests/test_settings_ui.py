@@ -284,6 +284,20 @@ def test_scope_errors_stay_on_the_page_as_feedback(
     assert "already exists" in capsys.readouterr().out
 
 
+def test_scope_name_and_summary_can_be_edited(dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    with db.transaction(dsn) as cur:
+        scope = scopes.create_scope(cur, name="old scope", summary="old summary", actor="user")
+    keys(monkeypatch, "e", "q")
+    answers(monkeypatch, "new scope", "new summary")
+
+    settings_ui._scopes_page(dsn)
+
+    with db.transaction(dsn) as cur:
+        row = scopes.require_scope(cur, "new scope")
+    assert row["scope_id"] == scope["scope_id"]
+    assert row["summary"] == "new summary"
+
+
 def test_routes_can_be_added_ignored_and_removed(dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
     with db.transaction(dsn) as cur:
         scopes.create_scope(cur, name="route scope", actor="user")
@@ -300,6 +314,26 @@ def test_routes_can_be_added_ignored_and_removed(dsn: str, monkeypatch: pytest.M
 
     rows = settings_ui._route_rows(dsn)
     assert [(row["path_prefix"], row["scope_id"]) for row in rows] == [("/tmp/i", None)]
+
+
+def test_route_path_and_destination_can_be_edited(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with db.transaction(dsn) as cur:
+        scope = scopes.create_scope(cur, name="route scope", actor="user")
+        route = routing.add_route(
+            cur, path_prefix="/tmp/old", scope_id=scope["scope_id"], actor="user"
+        )
+    keys(monkeypatch, "e", "q")
+    answers(monkeypatch, "/tmp/new", "-")
+
+    settings_ui._routes_page(dsn)
+
+    rows = settings_ui._route_rows(dsn)
+    assert len(rows) == 1
+    assert rows[0]["route_id"] == route["route_id"]
+    assert rows[0]["path_prefix"] == "/tmp/new"
+    assert rows[0]["scope_id"] is None
 
 
 def test_schema_apply_is_confirmed_and_reports_a_noop(

@@ -20,7 +20,7 @@ _VIEWS = {"1": "active", "2": "retired", "3": "temporary"}
 _TABS = "  1 active   2 retired   3 temporary"
 _KEYS = (
     "  ↑↓/jk move   Home/End   PgUp/PgDn   / search   ⏎ why   ← back   q leave\n"
-    "  n remember   p temporary   e revise   r retire   d delivery"
+    "  n remember   p temporary   e edit   r retire   d delivery"
 )
 _ITEM_KEYS = "  space read on   b page back   ← list   q leave"
 
@@ -392,6 +392,29 @@ def _revise(dsn: str | None, row: dict[str, Any]) -> str:
     return screen.success(f"  ✓ revised {_short(row['memory_id'])}")
 
 
+def _revise_temporary(dsn: str | None, row: dict[str, Any]) -> str:
+    content = _editor_text(row["content"])
+    current_scope = row.get("scope_name")
+    scope_prompt = (
+        f"  scope name [enter={current_scope}; '-' means every scope]: "
+        if current_scope
+        else "  scope name [empty means every scope]: "
+    )
+    entered_scope = _optional(scope_prompt)
+    scope_name = current_scope if entered_scope is None else entered_scope
+    if scope_name == "-":
+        scope_name = None
+    with db.transaction(dsn) as cur:
+        temporary.revise(
+            cur,
+            row["context_id"],
+            content=content,
+            scope_id=_scope_id(cur, scope_name),
+            actor=ACTOR,
+        )
+    return screen.success(f"  ✓ revised temporary {_short(row['context_id'])}")
+
+
 def _retire(dsn: str | None, row: dict[str, Any]) -> str:
     reason = _required("  retirement reason [required]: ")
     if reason is None:
@@ -640,6 +663,12 @@ def run(dsn: str | None = None) -> int:
             selected[view] = _row_id(rows[moved], view)
             continue
 
+        if view == "temporary" and key == "e":
+            try:
+                note = _revise_temporary(dsn, row)
+            except MashuError as error:
+                note = screen.danger(f"  ✗ {error}")
+            continue
         if view != "active" or key not in {"e", "r", "d"}:
             continue
         try:

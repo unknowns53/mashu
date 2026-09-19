@@ -8,7 +8,7 @@ from uuid import UUID
 import psycopg
 
 from mashu import capacity, config, events, redact
-from mashu.errors import RefusedError
+from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
 #: Advisory lock class, in the namespace capacity.py opened.
@@ -21,7 +21,8 @@ _TOO_LONG = (
 )
 
 _UNEXPIRED = """
-SELECT scope_id, content, expires_at FROM temporary_context WHERE expires_at > now()
+SELECT context_id, scope_id, content, expires_at
+FROM temporary_context WHERE expires_at > now()
 """
 
 
@@ -53,12 +54,24 @@ def pushed_totals(cur: psycopg.Cursor) -> dict[str, Any]:
     }
 
 
-def _check_room(cur: psycopg.Cursor, *, content: str, scope_id: UUID | None) -> None:
+def _check_room(
+    cur: psycopg.Cursor,
+    *,
+    content: str,
+    scope_id: UUID | None,
+    exclude_context_id: UUID | None = None,
+) -> None:
     """Refuse a condition the share has no room for."""
     # Lock before checking capacity and hold it through the write.
     cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (capacity.LOCK_NAMESPACE, LOCK_TEMPORARY))
 
     always, scoped = _standing(cur)
+    if exclude_context_id is not None:
+        always = [row for row in always if row["context_id"] != exclude_context_id]
+        scoped = {
+            key: [row for row in rows if row["context_id"] != exclude_context_id]
+            for key, rows in scoped.items()
+        }
     if scope_id is None:
         heaviest = max(scoped.values(), key=_cost, default=[])
         against = always + heaviest
@@ -116,6 +129,56 @@ def put_temporary(
     if verdict.malformed:
         report["malformed"] = verdict.malformed
     return report
+
+
+def revise(
+    cur: psycopg.Cursor,
+    context_id: UUID,
+    *,
+    content: str,
+    scope_id: UUID | None,
+    actor: str,
+) -> dict[str, Any]:
+    """Replace a standing condition's editable text and scope, keeping its expiry."""
+    content = (content or "").strip()
+    if not content:
+        raise MashuError("temporary context cannot be empty")
+    verdict = redact.check(content)
+    if not verdict.allowed:
+        raise RefusedError(verdict.reason())
+    cur.execute(
+        "SELECT * FROM temporary_context WHERE context_id = %s AND expires_at > now() FOR UPDATE",
+        (context_id,),
+    )
+    current = cur.fetchone()
+    if current is None:
+        raise MashuError(f"no standing temporary context {context_id}")
+
+    _check_room(
+        cur,
+        content=content,
+        scope_id=scope_id,
+        exclude_context_id=context_id,
+    )
+    cur.execute(
+        """
+        UPDATE temporary_context SET content = %s, scope_id = %s
+        WHERE context_id = %s RETURNING *
+        """,
+        (content, scope_id, context_id),
+    )
+    row = cur.fetchone()
+    events.record(
+        cur,
+        "temporary_revised",
+        actor,
+        detail={
+            "context_id": str(context_id),
+            "from_scope_id": str(current["scope_id"]) if current["scope_id"] else None,
+            "to_scope_id": str(scope_id) if scope_id else None,
+        },
+    )
+    return {**row, **({"unchecked": True} if verdict.unchecked else {})}
 
 
 def active_temporary(cur: psycopg.Cursor, *, scope_id: UUID | None = None) -> list[dict[str, Any]]:

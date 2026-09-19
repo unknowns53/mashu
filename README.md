@@ -112,13 +112,13 @@ mashu
 | 領域 | TUI からできること |
 |---|---|
 | Attention | candidate の review、close proposal の判断、dormant Task の確認 |
-| Memories | active / retired Memory と Temporary Context の閲覧・検索、直接登録、revise、retire、delivery / guard の変更 |
-| Work | active / dormant / closed Task と Project の閲覧・検索、Task の履歴・artifact の確認、Task の create / touch / close / reopen、Project の作成 |
-| Settings & health | 容量と queue の状態、bootstrap preview、Scope の作成、route の追加・ignore・削除、migration の確認・適用 |
+| Memories | active / retired Memory と Temporary Context の閲覧・検索、直接登録、Memory / Temporary Context の編集、retire、delivery / guard の変更 |
+| Work | active / dormant / closed Task と Project の閲覧・検索、Task の履歴・artifact の確認、Task / Current State / Project の作成・編集、touch / close / reopen |
+| Settings & health | 容量と queue の状態、bootstrap preview、Scope と route の作成・編集・削除、migration の確認・適用 |
 
 各画面では矢印または j / k で移動し、Enter で開く。`/` のある一覧は部分検索できる。Esc または ← で一段戻り、q でその領域を閉じる。TUI は alternate screen 上で動くため、再描画した画面は terminal の履歴へ残らない。
 
-Agent が使うサブコマンドと MCP は変わらない。引数を付けたコマンドは従来どおり非対話で動作する。Current State と Task 履歴の書き込みなど Agent 側の操作は TUI に置かない。
+Agent が使うサブコマンドと MCP は変わらない。引数を付けたコマンドは従来どおり非対話で動作する。人は TUI から現行の本文・設定・Current State を訂正できる。Ledger、Memory revision、Task の checkpoint / attempt / decision / artifact、event_log は履歴なので編集しない。
 
 ### 恒久ルールを直接登録する
 
@@ -192,7 +192,7 @@ TUI の操作は次のとおり。
 | Enter | 選択した候補を開く |
 | Esc / ← | 詳細から一覧へ戻る。絞り込み中は解除 |
 | y | 確定。delivery を選ぶ |
-| e | 本文をエディタで直してから確定 |
+| e | pending の候補本文をエディタで直して保存。確定はせず、続けて y で再試行できる |
 | r | 理由を入力して却下 |
 | s | 理由を入力して保留 |
 | Space | 本文をページ送り |
@@ -200,6 +200,8 @@ TUI の操作は次のとおり。
 | q | 退出 |
 
 一覧では選択中の本文、evidence 数、退役済み Memory との衝突、以前の保留理由を preview できる。保留は却下ではなく、candidate を pending のまま一時的に一覧から隠す操作だ。途中で退出しても、済んだ決定は保存される。
+
+確定が容量超過で拒否された場合も候補は選択されたまま残る。`e` で本文を短くして保存し、`y` で同じ候補の確定をやり直せる。編集しても evidence と pending 状態は変わらず、編集自体も event_log に残る。
 
 ## 見る・変更する
 
@@ -289,7 +291,7 @@ mashu task reopen 1a2b3c4d
 Task の Current State には goal、approach、status、open questions、blockers、next actions が入る。Attempt、Decision、Checkpoint、Artifact Reference は履歴として別に残る。
 
 - Agent は MCP で Current State と履歴を更新する
-- User は CLI / TUI で Task を作成・touch・close・reopen できる
+- User は CLI / TUI で Task を作成・touch・close・reopen でき、TUI では Task 名・Project・Current State も訂正できる
 - open Task は活動が 14 日途切れると dormant になり、bootstrap から外れる。履歴は残る
 - dormant は終了ではない。task touch で活動期限を延長して戻せる
 - Task を closed にできるのは User だけ。outcome は completed、abandoned、superseded のいずれか

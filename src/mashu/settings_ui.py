@@ -298,6 +298,21 @@ def _confirm(question: str) -> bool:
         return False
 
 
+def _replacement(prompt: str, current: str | None, *, clearable: bool = True) -> str | None:
+    shown = current or "-"
+    clearing = "; '-' clears" if clearable else ""
+    try:
+        answer = input(f"  {prompt} [enter keeps {shown}{clearing}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return current
+    if not answer:
+        return current
+    if clearable and answer == "-":
+        return None
+    return answer
+
+
 def _scope_rows(dsn: str | None) -> list[dict[str, Any]]:
     with db.transaction(dsn) as cur:
         return scopes.list_scopes(cur)
@@ -315,9 +330,13 @@ def _scope_detail(row: dict[str, Any]) -> str:
 
 
 def _scopes_page(dsn: str | None) -> None:
-    at, note = 0, ""
+    at, note, selected = 0, "", None
     while True:
         rows = _scope_rows(dsn)
+        kept = next((index for index, row in enumerate(rows) if row["scope_id"] == selected), None)
+        if kept is not None:
+            at = kept
+        selected = None
         at = max(0, min(at, len(rows) - 1))
         lines = []
         for index, row in enumerate(rows):
@@ -330,7 +349,7 @@ def _scopes_page(dsn: str | None) -> None:
         detail = _scope_detail(rows[at]) if rows else "  No scopes yet. Press n to create one."
         keys = screen.trailer(
             detail,
-            "  n new scope   " + _LIST_KEYS.strip(),
+            "  n new scope   e edit   " + _LIST_KEYS.strip(),
             note,
         )
         screen.paint(screen.list_screen(_title("Scopes"), lines, at, keys))
@@ -348,6 +367,26 @@ def _scopes_page(dsn: str | None) -> None:
             at = 0
         elif key == "end":
             at = max(0, len(rows) - 1)
+        elif key == "e":
+            if not rows:
+                note = "  there is no scope to edit"
+                continue
+            row = rows[at]
+            selected = row["scope_id"]
+            name = _replacement("scope name", row["name"], clearable=False)
+            summary = _replacement("about", row.get("summary"))
+            try:
+                with db.transaction(dsn) as cur:
+                    scopes.update_scope(
+                        cur,
+                        row["scope_id"],
+                        name=name or row["name"],
+                        summary=summary,
+                        actor=ACTOR,
+                    )
+                note = f"  edited scope {name or row['name']}"
+            except MashuError as error:
+                note = f"  {error}"
         elif key == "n":
             name = _answer("  scope name: ", required=True)
             if name is None:
@@ -373,9 +412,13 @@ def _route_line(row: dict[str, Any]) -> str:
 
 
 def _routes_page(dsn: str | None) -> None:
-    at, note = 0, ""
+    at, note, selected = 0, "", None
     while True:
         rows = _route_rows(dsn)
+        kept = next((index for index, row in enumerate(rows) if row["route_id"] == selected), None)
+        if kept is not None:
+            at = kept
+        selected = None
         at = max(0, min(at, len(rows) - 1))
         lines = [
             screen.selected(_route_line(row)) if index == at else _route_line(row)
@@ -392,7 +435,7 @@ def _routes_page(dsn: str | None) -> None:
             detail = "  No routes yet. Add a scoped route with n or an ignored path with i."
         keys = screen.trailer(
             detail,
-            "  n scoped route   i ignore path   x remove   " + _LIST_KEYS.strip(),
+            "  n scoped route   i ignore path   e edit   x remove   " + _LIST_KEYS.strip(),
             note,
         )
         screen.paint(screen.list_screen(_title("Routes"), lines, at, keys))
@@ -410,6 +453,31 @@ def _routes_page(dsn: str | None) -> None:
             at = 0
         elif key == "end":
             at = max(0, len(rows) - 1)
+        elif key == "e":
+            if not rows:
+                note = "  there is no route to edit"
+                continue
+            row = rows[at]
+            selected = row["route_id"]
+            path = _replacement("directory path", row["path_prefix"], clearable=False)
+            scope_name = _replacement("scope", row.get("scope_name"))
+            try:
+                with db.transaction(dsn) as cur:
+                    scope_id = (
+                        scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
+                    )
+                    routing.update_route(
+                        cur,
+                        row["route_id"],
+                        path_prefix=path or row["path_prefix"],
+                        scope_id=scope_id,
+                        actor=ACTOR,
+                    )
+                destination = scope_name or "ignored"
+                edited_path = routing.normalise(path or row["path_prefix"])
+                note = f"  edited route {edited_path} → {destination}"
+            except MashuError as error:
+                note = f"  {error}"
         elif key == "n":
             path = _answer("  directory path: ", required=True)
             scope_name = _answer("  scope name: ", required=True)

@@ -267,6 +267,42 @@ def _require_pending(cur: psycopg.Cursor, nomination_id: UUID) -> dict[str, Any]
     return row
 
 
+def revise(
+    cur: psycopg.Cursor,
+    nomination_id: UUID,
+    *,
+    content: str,
+    actor: str,
+) -> dict[str, Any]:
+    """Replace a pending candidate's wording without deciding it."""
+    nomination = _require_pending(cur, nomination_id)
+    content = (content or "").strip()
+    if not content:
+        raise MashuError("a candidate cannot be empty")
+    verdict = redact.check(content)
+    if not verdict.allowed:
+        raise RefusedError(verdict.reason())
+    cur.execute(
+        """
+        UPDATE nomination SET content = %s
+        WHERE nomination_id = %s AND status = 'pending'
+        RETURNING *
+        """,
+        (content, nomination_id),
+    )
+    if cur.rowcount != 1:
+        raise MashuError(NOT_PENDING)
+    row = cur.fetchone()
+    events.record(
+        cur,
+        "nomination_revised",
+        actor,
+        nomination_id=nomination_id,
+        detail={"from_chars": len(nomination["content"]), "to_chars": len(content)},
+    )
+    return row
+
+
 def admit(
     cur: psycopg.Cursor,
     nomination_id: UUID,

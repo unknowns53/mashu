@@ -7,7 +7,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import events, redact
+from mashu import capacity, config, events, redact
 from mashu.errors import MashuError, RefusedError, UnknownProjectError
 
 
@@ -33,6 +33,67 @@ def create_project(
         "project_created",
         actor,
         detail={"project_id": str(row["project_id"]), "name": name},
+    )
+    return row
+
+
+def update_project(
+    cur: psycopg.Cursor,
+    project_id: UUID,
+    *,
+    name: str,
+    scope_id: UUID | None,
+    actor: str,
+) -> dict[str, Any]:
+    """Edit a project's label and delivery scope, retaining all of its tasks."""
+    # Local import avoids making the projects/tasks relationship circular at import time.
+    from mashu import tasks
+
+    name = (name or "").strip()
+    if not name:
+        raise MashuError("a project needs a name: it is what tasks are filed under")
+    verdict = redact.check(name)
+    if not verdict.allowed:
+        raise RefusedError(verdict.reason())
+
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(%s, %s)",
+        (capacity.LOCK_NAMESPACE, tasks.LOCK_PROJECT_STATE),
+    )
+    cur.execute("SELECT * FROM project WHERE project_id = %s FOR UPDATE", (project_id,))
+    current = cur.fetchone()
+    if current is None:
+        raise UnknownProjectError(f"no project '{project_id}'")
+    cur.execute("SELECT project_id FROM project WHERE name = %s", (name,))
+    taken = cur.fetchone()
+    if taken is not None and taken["project_id"] != project_id:
+        raise MashuError(f"project '{name}' already exists")
+
+    before = tasks.pushed_totals(cur)["worst"]
+    cur.execute(
+        "UPDATE project SET name = %s, scope_id = %s WHERE project_id = %s RETURNING *",
+        (name, scope_id, project_id),
+    )
+    row = cur.fetchone()
+    after = tasks.pushed_totals(cur)["worst"]
+    ceiling = config.project_capacity()
+    if after > ceiling and after >= before:
+        raise RefusedError(
+            f"the project state share seats {ceiling} tokens and this project edit "
+            f"would take the busiest scope from {before} to {after}; shorten its active "
+            "task state or move work out of that scope first"
+        )
+    events.record(
+        cur,
+        "project_updated",
+        actor,
+        detail={
+            "project_id": str(project_id),
+            "from_name": current["name"],
+            "to_name": name,
+            "from_scope_id": str(current["scope_id"]) if current["scope_id"] else None,
+            "to_scope_id": str(scope_id) if scope_id else None,
+        },
     )
     return row
 
