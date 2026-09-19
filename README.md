@@ -112,7 +112,7 @@ mashu
 | 領域 | TUI からできること |
 |---|---|
 | Attention | candidate の review、close proposal の判断、dormant Task の確認 |
-| Memories | active / retired Memory と Temporary Context の閲覧・検索、直接登録、Memory / Temporary Context の編集、retire、delivery / guard の変更 |
+| Memories | active / retired Memory と Temporary Context の閲覧・検索、直接登録、編集、always / scope と Temporary Context の相互変換、retire、delivery / guard の変更 |
 | Work | active / dormant / closed Task と Project の閲覧・検索、Task の履歴・artifact の確認、Task / Current State / Project の作成・編集、touch / close / reopen |
 | Settings & health | 容量と queue の状態、bootstrap preview、Scope と route の作成・編集・削除、migration の確認・適用 |
 
@@ -135,6 +135,8 @@ mashu remember "Check the remote before pushing" --delivery guard --action Bash
 配信先を省略したときは、scope も省略すれば always、scope を指定すれば scope になる。guard を選ぶときは action も指定する。
 
 期限つきの条件は --until で登録する。Temporary Context は review 不要で期限に消える。--until は delivery の指定と併用できず、期限は最大 14 日。
+
+Memories TUI では `c` で active な always / scope Memory を Temporary Context に変換できる。日数を入力すると元の Memory は変換理由つきで retire され、同じ本文と Scope の Temporary Context が有効になる。Temporary Context で `c` を押すと、同じ本文と Scope の active Memory に戻る。guard は action を失うため Temporary Context には変換しない。
 
 ~~~bash
 mashu remember "The staging host is down" --until 2d

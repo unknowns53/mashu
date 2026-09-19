@@ -181,6 +181,47 @@ def revise(
     return {**row, **({"unchecked": True} if verdict.unchecked else {})}
 
 
+def convert_to_memory(
+    cur: psycopg.Cursor,
+    context_id: UUID,
+    *,
+    actor: str,
+) -> dict[str, Any]:
+    """Replace a standing condition with a durable memory in one transaction."""
+    from mashu import memories
+
+    cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (capacity.LOCK_NAMESPACE, LOCK_TEMPORARY))
+    cur.execute(
+        "SELECT * FROM temporary_context WHERE context_id = %s AND expires_at > now() FOR UPDATE",
+        (context_id,),
+    )
+    current = cur.fetchone()
+    if current is None:
+        raise MashuError(f"no standing temporary context {context_id}")
+    delivery = "scope" if current["scope_id"] else "always"
+    memory = memories.remember(
+        cur,
+        content=current["content"],
+        actor=actor,
+        scope_id=current["scope_id"],
+        delivery=delivery,
+        override_retired=True,
+    )
+    cur.execute(
+        "UPDATE temporary_context SET expires_at = now() WHERE context_id = %s RETURNING *",
+        (context_id,),
+    )
+    ended = cur.fetchone()
+    events.record(
+        cur,
+        "temporary_converted_to_memory",
+        actor,
+        memory_id=memory["memory_id"],
+        detail={"context_id": str(context_id), "delivery": delivery},
+    )
+    return {"temporary": ended, "memory": memory}
+
+
 def active_temporary(cur: psycopg.Cursor, *, scope_id: UUID | None = None) -> list[dict[str, Any]]:
     """What still applies here. Expired rows are filtered, never deleted."""
     cur.execute(

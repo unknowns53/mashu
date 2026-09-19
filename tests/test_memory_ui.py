@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import io
 import os
 
@@ -262,6 +263,26 @@ def test_temporary_context_can_be_edited_in_place(dsn, monkeypatch, capsys):
     assert row["content"] == "the release is frozen until Friday"
     assert row["scope_id"] is None
     assert "revised temporary" in capsys.readouterr().out
+
+
+def test_memory_and_temporary_context_can_be_converted_both_ways(dsn, monkeypatch, capsys):
+    original = remember(dsn)
+    keys(monkeypatch, "c", "2", "c", "y", "q")
+
+    assert memory_ui.run(dsn) == 0
+
+    with db.transaction(dsn) as cur:
+        assert memories.get_memory(cur, original["memory_id"])["status"] == "retired"
+        cur.execute("SELECT * FROM temporary_context")
+        contexts = cur.fetchall()
+        assert len(contexts) == 1 and contexts[0]["expires_at"] <= dt.datetime.now(dt.UTC)
+        cur.execute("SELECT * FROM memory WHERE status = 'active'")
+        active = cur.fetchall()
+    assert len(active) == 1
+    assert active[0]["content"] == RULE
+    assert active[0]["delivery"] == "always"
+    out = capsys.readouterr().out
+    assert "to temporary" in out and "to memory" in out
 
 
 def test_retired_conflict_shows_the_reason_and_does_not_override_without_yes(

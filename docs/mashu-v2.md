@@ -214,6 +214,8 @@ bootstrap は「セッションの前提」を、guard は「判断の直前」�
 
 **書けるのは User だけである**（`mashu remember --until` または Memories TUI）。v1 は Agent の期限つき書き込みを「検索には載るが押し込みには載らない」形で許した。押し込む権限と書ける権限を分けるためである。v2 の Temporary Context は bootstrap で押し込まれる側にあるので、Agent が書けるなら 5.1 節の保証（Agent の書き込みが人の確定なしに他セッションへ届く経路は無い）がここだけ破れる。Agent が観測した期限つきの条件は痕跡に書く。日付つきの観測として検索には載り、押し込まれはしない。これは v1 と同じ線を、v2 の部品で引き直したものである。
 
+Memories TUI の `c` は、active な always / scope Memory と Temporary Context を相互変換する。Memory からの変換では期限を必須とし、元の Memory は変換理由を持つ tombstone にしてから、本文と Scope を保った Temporary Context を作る。逆変換では Temporary Context をその時点で終了し、同じ本文と Scope の active Memory を User の direct remember として作る。両操作は一つの transaction で行い、片方の容量判定が拒否した場合は元の行を有効なまま残す。guard は action という配送条件を Temporary Context へ移せないため対象外とする。
+
 ## 8. インターフェース
 
 ### 8.1 MCP Tool（6 つ）

@@ -139,6 +139,48 @@ def retire(cur: psycopg.Cursor, memory_id: UUID, *, reason: str, actor: str) -> 
     return {**row, **_gate_report(verdict)}
 
 
+def convert_to_temporary(
+    cur: psycopg.Cursor,
+    memory_id: UUID,
+    *,
+    days: float,
+    actor: str,
+) -> dict[str, Any]:
+    """Replace a pushed memory with an expiring condition in one transaction."""
+    from mashu import temporary
+
+    current = _require_active(cur, memory_id)
+    if current["delivery"] == "guard":
+        raise MashuError("a guard memory cannot become temporary because its action would be lost")
+    scope_id = current["scope_id"] if current["delivery"] == "scope" else None
+    context = temporary.put_temporary(
+        cur,
+        content=current["content"],
+        actor=actor,
+        days=days,
+        scope_id=scope_id,
+    )
+    until = context["expires_at"].date().isoformat()
+    retired = retire(
+        cur,
+        memory_id,
+        reason=f"converted to temporary context until {until}",
+        actor=actor,
+    )
+    events.record(
+        cur,
+        "memory_converted_to_temporary",
+        actor,
+        memory_id=memory_id,
+        detail={
+            "context_id": str(context["context_id"]),
+            "days": days,
+            "delivery": current["delivery"],
+        },
+    )
+    return {"memory": retired, "temporary": context}
+
+
 def revise(
     cur: psycopg.Cursor, memory_id: UUID, *, content: str, actor: str, note: str | None = None
 ) -> dict[str, Any]:

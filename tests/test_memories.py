@@ -1,9 +1,8 @@
-
 from __future__ import annotations
 
 import pytest
 
-from mashu import match, memories, scopes
+from mashu import match, memories, scopes, temporary
 from mashu.errors import MashuError, RefusedError, RetiredConflictError
 
 RULE = "never report a run as finished without the output that proves it"
@@ -249,3 +248,85 @@ def test_a_move_cannot_both_name_a_scope_and_clear_it(cur, scope_id):
             scope_id=scope_id,
             clear_scope=True,
         )
+
+
+def test_an_always_memory_can_become_temporary_and_back(cur):
+    original = memories.remember(cur, content=RULE, actor="user")
+
+    converted = memories.convert_to_temporary(cur, original["memory_id"], days=2, actor="user")
+    context = converted["temporary"]
+    assert converted["memory"]["status"] == "retired"
+    assert "converted to temporary context until" in converted["memory"]["retire_reason"]
+    assert context["scope_id"] is None
+    assert [row["context_id"] for row in temporary.active_temporary(cur)] == [context["context_id"]]
+
+    restored = temporary.convert_to_memory(cur, context["context_id"], actor="user")
+    assert restored["memory"]["content"] == RULE
+    assert restored["memory"]["delivery"] == "always"
+    assert restored["memory"]["status"] == "active"
+    assert temporary.active_temporary(cur) == []
+
+    cur.execute(
+        "SELECT event_type FROM event_log WHERE event_type LIKE '%%converted%%' ORDER BY event_id"
+    )
+    assert [row["event_type"] for row in cur.fetchall()] == [
+        "memory_converted_to_temporary",
+        "temporary_converted_to_memory",
+    ]
+
+
+def test_a_scoped_memory_keeps_its_scope_through_temporary_conversion(cur, scope_id):
+    original = memories.remember(
+        cur,
+        content=RULE,
+        actor="user",
+        scope_id=scope_id,
+        delivery="scope",
+    )
+
+    context = memories.convert_to_temporary(cur, original["memory_id"], days=1, actor="user")[
+        "temporary"
+    ]
+    assert context["scope_id"] == scope_id
+
+    restored = temporary.convert_to_memory(cur, context["context_id"], actor="user")["memory"]
+    assert restored["scope_id"] == scope_id
+    assert restored["delivery"] == "scope"
+
+
+def test_a_guard_memory_cannot_lose_its_action_by_becoming_temporary(cur):
+    memory = memories.remember(
+        cur,
+        content=RULE,
+        actor="user",
+        delivery="guard",
+        guard_action="Bash",
+    )
+
+    with pytest.raises(MashuError, match="action would be lost"):
+        memories.convert_to_temporary(cur, memory["memory_id"], days=1, actor="user")
+    assert memories.get_memory(cur, memory["memory_id"])["status"] == "active"
+
+
+def test_a_refused_conversion_keeps_its_source_active(cur, monkeypatch):
+    memory = memories.remember(cur, content=RULE, actor="user")
+    monkeypatch.setenv("MASHU_TEMPORARY_CAPACITY", "1")
+
+    with pytest.raises(RefusedError, match="temporary share"):
+        memories.convert_to_temporary(cur, memory["memory_id"], days=1, actor="user")
+    assert memories.get_memory(cur, memory["memory_id"])["status"] == "active"
+    assert temporary.active_temporary(cur) == []
+
+    monkeypatch.delenv("MASHU_TEMPORARY_CAPACITY")
+    context = temporary.put_temporary(
+        cur,
+        content="brief outage",
+        actor="user",
+        days=1,
+    )
+    monkeypatch.setenv("MASHU_CAPACITY", "1")
+    monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", "1")
+
+    with pytest.raises(RefusedError, match="seats 1 tokens"):
+        temporary.convert_to_memory(cur, context["context_id"], actor="user")
+    assert [row["context_id"] for row in temporary.active_temporary(cur)] == [context["context_id"]]

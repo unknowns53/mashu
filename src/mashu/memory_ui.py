@@ -20,7 +20,7 @@ _VIEWS = {"1": "active", "2": "retired", "3": "temporary"}
 _TABS = "  1 active   2 retired   3 temporary"
 _KEYS = (
     "  ↑↓/jk move   Home/End   PgUp/PgDn   / search   ⏎ why   ← back   q leave\n"
-    "  n remember   p temporary   e edit   r retire   d delivery"
+    "  n remember   p temporary   e edit   c convert   r retire   d delivery"
 )
 _ITEM_KEYS = "  space read on   b page back   ← list   q leave"
 
@@ -490,19 +490,26 @@ def _remember(dsn: str | None) -> tuple[str, UUID | None]:
             override = True
 
 
-def _temporary(dsn: str | None) -> tuple[str, UUID | None]:
-    content = _required("  temporary context [empty cancels]: ")
-    if content is None:
-        return screen.warning("  ! nothing recorded"), None
-    raw_days = _required("  days [more than 0, at most 14]: ")
+def _days() -> float | None:
+    raw_days = _required("  days [more than 0, at most 14; empty cancels]: ")
     if raw_days is None:
-        return screen.warning("  ! nothing recorded"), None
+        return None
     try:
         days = float(raw_days)
     except ValueError as error:
         raise MashuError("days must be a number greater than 0 and at most 14") from error
     if not 0 < days <= 14:
         raise MashuError("days must be greater than 0 and at most 14")
+    return days
+
+
+def _temporary(dsn: str | None) -> tuple[str, UUID | None]:
+    content = _required("  temporary context [empty cancels]: ")
+    if content is None:
+        return screen.warning("  ! nothing recorded"), None
+    days = _days()
+    if days is None:
+        return screen.warning("  ! nothing recorded"), None
     with db.transaction(dsn) as cur:
         row = temporary.put_temporary(
             cur,
@@ -512,6 +519,38 @@ def _temporary(dsn: str | None) -> tuple[str, UUID | None]:
             scope_id=None,
         )
     return screen.success(f"  ✓ temporary {_short(row['context_id'])}"), row["context_id"]
+
+
+def _convert_to_temporary(dsn: str | None, row: dict[str, Any]) -> tuple[str, UUID | None]:
+    if row["delivery"] == "guard":
+        return screen.warning("  ! guard memories cannot become temporary"), None
+    days = _days()
+    if days is None:
+        return screen.warning("  ! conversion cancelled"), None
+    with db.transaction(dsn) as cur:
+        converted = memories.convert_to_temporary(
+            cur,
+            row["memory_id"],
+            days=days,
+            actor=ACTOR,
+        )
+    context = converted["temporary"]
+    note = screen.success(
+        f"  ✓ converted {_short(row['memory_id'])} to temporary {_short(context['context_id'])}"
+    )
+    return note, context["context_id"]
+
+
+def _convert_to_memory(dsn: str | None, row: dict[str, Any]) -> tuple[str, UUID | None]:
+    if not _confirm(f"convert temporary {_short(row['context_id'])} to active memory?"):
+        return screen.warning("  ! conversion cancelled"), None
+    with db.transaction(dsn) as cur:
+        converted = temporary.convert_to_memory(cur, row["context_id"], actor=ACTOR)
+    memory = converted["memory"]
+    note = screen.success(
+        f"  ✓ converted {_short(row['context_id'])} to memory {_short(memory['memory_id'])}"
+    )
+    return note, memory["memory_id"]
 
 
 def _move(at: int, total: int, key: str, page: int) -> int:
@@ -665,6 +704,21 @@ def run(dsn: str | None = None) -> int:
             selected[view] = _row_id(rows[moved], view)
             continue
 
+        if key == "c":
+            try:
+                if view == "active":
+                    note, converted_id = _convert_to_temporary(dsn, row)
+                    if converted_id is not None:
+                        view, query, selected["temporary"] = "temporary", "", converted_id
+                elif view == "temporary":
+                    note, converted_id = _convert_to_memory(dsn, row)
+                    if converted_id is not None:
+                        view, query, selected["active"] = "active", "", converted_id
+                else:
+                    note = screen.warning("  ! retired memories cannot be converted")
+            except MashuError as error:
+                note = screen.danger(f"  ✗ {error}")
+            continue
         if view == "temporary" and key == "e":
             try:
                 note = _revise_temporary(dsn, row)
