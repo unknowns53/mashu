@@ -307,11 +307,11 @@ def _optional(prompt: str) -> str | None:
         return None
 
 
-def _editor_text(content: str) -> str:
+def _editor_text(content: str, *, title: str = "Edit memory") -> str:
     """Edit text only through an explicitly configured editor."""
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
     if not editor:
-        replacement = screen.editline("  revise existing content: ", content)
+        replacement = screen.edit_text(title, content)
         if not replacement:
             raise MashuError("revision cancelled")
         return replacement
@@ -395,7 +395,7 @@ def _revise(dsn: str | None, row: dict[str, Any]) -> str:
 
 
 def _revise_temporary(dsn: str | None, row: dict[str, Any]) -> str:
-    content = _editor_text(row["content"])
+    content = _editor_text(row["content"], title="Edit temporary context")
     current_scope = row.get("scope_name")
     scope_prompt = (
         f"  scope name [enter={current_scope}; '-' means every scope]: "

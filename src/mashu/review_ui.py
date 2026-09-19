@@ -188,9 +188,7 @@ def _item_text(row: dict[str, Any], place: int, total: int) -> str:
 def _editor_text(content: str) -> str:
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
     if not editor:
-        revised = screen.editline(
-            "  edit existing candidate [Enter saves; Ctrl+C cancels]: ", content
-        )
+        revised = screen.edit_text("Edit pending candidate", content)
         if revised is None:
             raise MashuError("edit cancelled")
         if not revised:

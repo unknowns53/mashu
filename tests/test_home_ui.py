@@ -35,6 +35,7 @@ class FakeReadline:
     def __init__(self) -> None:
         self.startup_hook = None
         self.inserted = None
+        self.redisplays = 0
 
     def set_startup_hook(self, hook=None) -> None:
         self.startup_hook = hook
@@ -43,7 +44,7 @@ class FakeReadline:
         self.inserted = value
 
     def redisplay(self) -> None:
-        pass
+        self.redisplays += 1
 
 
 def test_editline_starts_with_the_existing_value(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -60,7 +61,25 @@ def test_editline_starts_with_the_existing_value(monkeypatch: pytest.MonkeyPatch
 
     assert screen.editline("edit: ", "existing value") == "edited value"
     assert readline.inserted == "existing value"
+    assert readline.redisplays == 0
     assert readline.startup_hook is None
+
+
+def test_edit_text_shows_the_body_only_in_the_edit_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    painted: list[str] = []
+    opened: list[tuple[str, str]] = []
+    monkeypatch.setattr(screen, "paint", painted.append)
+    monkeypatch.setattr(
+        screen,
+        "editline",
+        lambda prompt, current: opened.append((prompt, current)) or "revised",
+    )
+
+    assert screen.edit_text("Edit memory", "the existing body") == "revised"
+    assert "the existing body" not in painted[0]
+    assert opened == [("  > ", "the existing body")]
 
 
 @pytest.fixture

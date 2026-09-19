@@ -209,7 +209,6 @@ def editline(prompt: str, current: str) -> str | None:
 
             def prefill() -> None:
                 readline_module.insert_text(current)
-                readline_module.redisplay()
 
             readline_module.set_startup_hook(prefill)
         except (ImportError, AttributeError):  # pragma: no cover - platform dependent
@@ -222,6 +221,20 @@ def editline(prompt: str, current: str) -> str | None:
     finally:
         if readline_module is not None:
             readline_module.set_startup_hook()
+
+
+def edit_text(title: str, current: str) -> str | None:
+    """Open a focused, single-copy editor for one existing body of text."""
+    paint(
+        "\n".join(
+            (
+                bold(title),
+                dim("Edit the existing text below. Enter saves; Ctrl+C cancels."),
+                "",
+            )
+        )
+    )
+    return editline("  > ", current)
 
 
 def paint(text: str) -> None:
