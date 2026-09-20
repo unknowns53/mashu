@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import datetime as dt
 import shutil
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
 from mashu import db, screen, task_actions, tasks
 from mashu.errors import MashuError
+
+
+@dataclass(frozen=True)
+class CloseScreenResult:
+    exit_code: int
+    note: str = ""
+
 
 #: Only a person reaches this screen; the CLI is the only way in.
 ACTOR = "user"
@@ -324,17 +332,24 @@ def run(
     *,
     project: str | None = None,
     task_id: UUID | None = None,
-) -> int:
-    """Work the list: the open tasks, and one decision at a time against them."""
+    return_result: bool = False,
+) -> int | CloseScreenResult:
+    """Work the list, optionally returning one-task feedback to a parent screen."""
+    if return_result and task_id is None:
+        raise ValueError("a returned close result needs one task")
     at, note, query = 0, "", ""
     selected_id = task_id
     while True:
         try:
             all_rows = _open_tasks(dsn, project, task_id)
         except MashuError as error:
+            if return_result:
+                return CloseScreenResult(1, screen.danger(f"  ✗ {error}"))
             print(error)
             return 1
         if not all_rows:
+            if return_result:
+                return CloseScreenResult(0, note or _NOTHING)
             if note:
                 print(note)
             print(_NOTHING)
@@ -357,6 +372,8 @@ def run(
         note = ""  # it has been read now; the next screen starts clean
 
         if key == "q":
+            if return_result:
+                return CloseScreenResult(0, screen.warning("  ! left open — close cancelled"))
             return 0
         if key == "/":
             searched = _search(query)
@@ -369,6 +386,8 @@ def run(
                 query = ""
                 at = 0
                 continue
+            if return_result:
+                return CloseScreenResult(0, screen.warning("  ! left open — close cancelled"))
             return 0
         if key == "?":
             _help()
@@ -408,6 +427,8 @@ def run(
         except MashuError as error:
             note = screen.danger(f"  ✗ {error}")
         if task_id is not None:
+            if return_result:
+                return CloseScreenResult(0, note)
             if note:
                 print(note)
             return 0
@@ -456,4 +477,4 @@ def _decide(dsn: str | None, row: dict[str, Any], key: str) -> str:
             f"  ✓ {_short(task_id)} renewed; nothing said about whether it is finished"
         )
 
-    return ""
+    return screen.warning("  ! no action — choose Enter, c, a, s, w or t")

@@ -610,7 +610,8 @@ def run(dsn: str | None = None, *, initial_view: str = "active") -> int:
                 elif view in ("active", "dormant") and key == "e":
                     note = _edit_task(dsn, row)
                 elif view in ("active", "dormant") and key == "c":
-                    close_ui.run(dsn, task_id=_task_id(row))
+                    result = close_ui.run(dsn, task_id=_task_id(row), return_result=True)
+                    note = result.note
                 elif view == "closed" and key == "o":
                     note = _reopen(dsn, row)
                 elif view == "projects" and key == "e":
