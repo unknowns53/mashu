@@ -68,7 +68,7 @@ append-only の記録。1 エントリが一度の痛みに対応する。
 
 照合先には優先順があり、先に当たったものが答えになる。
 
-1. **退役済み Memory**（tombstone）に閾値以上で当たった場合は「その主張は否定済みである」と理由つきで返し、**自動の昇格候補は作らない**。作れば否定済みの内容が、否定の理由を見ていない Review の前に候補として並び直す。否定を踏み越えるのは人だけであり、その経路は理由を見たうえでの CLI / TUI の direct remember である（5.3 節）。これが v1 の Layer 3 の後継である
+1. **退役済み Memory**（tombstone）に閾値以上で当たった場合も、退役理由・種別・後継または移動先を返す。invalidated / legacy との衝突は候補に添え、通常の incident / friction 条件による候補生成を止めない。理由を読まずに採用することは許さない（5.1 節）。out_of_scope / relocated は警告として示すが候補を止めない。superseded に対応する後継が同じ内容で active なら、active Memory に当たった場合として配信を調べる
 2. **active な Memory** に閾値以上で当たった場合も昇格候補を作らず、「この規則は既に配信されている。入口ではなく配信を疑え」と返す。これは 12 節の三度目の痛みそのものであり、実証基準が三度満たされたのではなく、**配信が失敗した**証拠である。同じ文に二つ目の席を与えても何も直らないので、候補は作らない。台帳行は残り、`delivery_failure_suspected` として event_log に記録され、`mashu status` が直近 30 日の件数を出す
 3. **pending の昇格候補** に閾値以上で当たった場合は、新しい候補を作らず**今回の台帳行を既存候補の evidence に追加する**（5.1 節）
 4. 類似の `friction` または痕跡が既にある場合、二度目が成立し、双方を根拠とする昇格候補を自動生成する。**二度目の相手になれるのは friction と痕跡だけ**である。incident はその時点で自分の候補を作り終えており、explicit / claimed は人の言明であって痛みではない。これらまで相手に数えると、一度も調べ直していないものが再導出を名乗る
@@ -100,9 +100,11 @@ v1 の投機的捕捉との関係。セッションから安く残すという�
 | delivery | `always` / `scope` / `guard:<action>` |
 | evidence | 根拠となる台帳エントリへの参照（1 件以上、必須）。参照先が実在する台帳エントリであることは DB のトリガが検証する。台帳は append-only なので、書き込み時に実在した参照は失われない |
 | status | `active` / `retired` |
-| retire_reason | 退役時のみ。tombstone として返る本文 |
+| retirement_kind / retire_reason | 退役時のみ。理由は必須。kind は `invalidated` / `superseded` / `out_of_scope` / `relocated` / `legacy` |
+| superseded_by | `superseded` の後継 Memory ID |
+| relocated_to_kind / relocated_to_id | `relocated` の移動先 |
 
-- v1 の Entity / Version / Proposal の三層は持たない。memory 行と append-only の revision 表（改訂履歴）、event_log で足りる
+- v1 の汎用 Entity / Version / Proposal の三層は持たない。本文の revision 表と、既存 Memory の retire / replace / restore だけを扱う `memory_change` を使う
 - **evidence の無い active な記憶は存在できない**（User 明示の場合は明示の記録そのものが evidence になる）
 - content の改訂は User のみが行い、revision に旧本文が残る
 - 個人識別情報（本名、所属、学籍番号、ホームディレクトリを含む絶対パス）を含む書き込みは入口で拒否する。パターン一覧はリポジトリ外の既存ファイル（commit hook と共用）を読む。一覧が見つからないときは「合格」ではなく「検査できなかった」と報告する
@@ -113,25 +115,28 @@ v1 の投機的捕捉との関係。セッションから安く残すという�
 
 1. 台帳の二度目照合（自動生成）
 2. `pain_report` の incident（自動生成）
-3. Agent が会話中の User の記録指示を運ぶ場合（`memory_nominate`。指示は kind = `claimed` の台帳エントリとして残り、それが evidence になる。created_by は Agent なので、誰が運んだかは Review の画面に出る）
+3. Agent が会話中の User の記録指示を運ぶ場合（`memory_nominate`。指示は kind = `claimed` の台帳エントリとして残り、それが evidence になる。明示指示がある場合は `memory_admit` まで続けて同じセッションで完了できる。実行者は Agent のまま記録し、承認根拠に短い原文と取得可能な会話参照を別に記録する）
 
-いずれも pending であり、User が 1 キーで確定するまで active にならない。**Memory については、Agent の書き込みが人の確定なしに他セッションへ届く経路は、v2 には一つも存在しない。** v1 が Layer 2 で許していた「未審査の本文の配信」は廃止する。この保証を意図的に緩和するのは v3 の Current State だけであり、緩和の理由と、それを size / 時間 / 提示の三方向で bound する仕方は `docs/mashu-v3.md` 3.1 節にある。
+incident / friction から自動生成した候補と、Agent 自身の追加・変更案は pending のまま残る。**明示指示を受けて Agent が実行する新規採用や変更には、別画面での再承認を要求しない。** 出所には `user_instruction` と指示の短い原文、会話参照を記録し、actor は Agent として残す。これは認証ではなく監査用の出所記録であり、サーバーは会話中に本当にその指示があったか検証できない。Agent 自身の有用性判断、confidence、反対が無かったことは承認ではない。MCP instructions と運用上の信頼でこの境界を守る。
 
-3 の経路が即時 active にならないのは、Agent の自己申告する「User がこう言った」が、外部から貼り付けられた文書内の指示と区別できないためである（v1 16.3 節と同じ論理）。**即時 active になる唯一の経路は、人が CLI（`mashu remember`）または dashboard の Memories から直接登録する操作である。**
+`memory_nominate` は新規採用候補を作るだけであり、明示指示の根拠を伴う `memory_admit` が必要である。MCP 側に会話の真正性を検証する仕組みはない。**Agent が独自に判断した採用・退役・置換・復帰は提案にとどめ、明示指示かサーバーに実装済みの条件が無ければ適用しない。**直接 CLI / TUI 操作は `user_direct` として Agent の実行とは区別する。
 
-確定時に User が delivery を選ぶ。件数が週数件のオーダーなので、1 件ごとに人が置き場を決めるコストは払える。
+`memory_nominate` は判断対象の `version` を返す。`memory_admit` は読み取った version を必須で受け取り、本文・scope・kind・evidence・conflict が変わっていれば適用を拒否する。admission の request ID には初回応答全体を保存し、後から Memory が編集・退役されても再送には同じ応答を返す。
+
+直接操作では User が delivery を選ぶ。会話中の明示指示から Agent が採用する場合は、nomination の Scope と既定 delivery を使い、必要な指定は提案に含める。
 
 **重複の防止は照合が担い、lock は同時到着だけを担う。**候補の生成前に pending の候補と照合し、閾値以上なら新規候補を作らず今回の台帳行を既存候補の evidence に追加する。同じ規則が待ち行列に二行並ぶと、人は二度決めて一つしか席を渡せず、しかも重複は読むまで見えない。ただし二度目・三度目の痛みを捨ててよいわけではない。**何回起きたかは、席を渡すかどうかの判断のほとんどを占める。**保留中（`deferred_at`）の候補に evidence が付いた場合は保留を解いて一覧へ戻す。保留は「今は決めない」という当時の状況についての判断であり、その後さらに痛んだなら状況が変わっている。保留の理由（`defer_reason`）は残し、次の読み手が自分の以前の言葉を新しい痛みの隣で読めるようにする。
 
-**退役済み Memory との衝突は、admission のすべての経路で人に見せる。**否定を踏み越えられるのは人だけだが、**人が否定されたことを知らずに踏み越えられる**なら、その保証は形だけになる。経路ごとの扱いは次のとおり。
+**退役済み Memory との衝突は、admission のすべての経路で確認する。**invalidated / legacy は conflict として理由を提示し、その判断を踏まえて採用する指示を記録する。経路ごとの扱いは次のとおり。
 
 | 経路 | 扱い |
 |---|---|
-| `pain_report`（1・2） | 自動候補を作らない（4.1 節）。Agent には退役理由が返る |
-| `memory_nominate`（3） | 候補は作り、衝突した tombstone の id を候補行の `conflicts` に記録する。Review の個別画面が退役理由を本文の直後・evidence の手前に出す。**退役済みの本文は出さない**（5.3 節） |
-| CLI / TUI の direct remember | 書き込みを止め、退役理由を見せたうえで再登録するか確認する。人の直接操作なので拒否はしない。踏み越えた事実は `memory_created` の detail に `overrides` として残る |
+| `pain_report`（1・2） | 通常の条件で候補を生成し、衝突した tombstone の id を `conflicts` に記録する。active な後継と一致すれば配信問題として扱う |
+| `memory_nominate`（3） | 候補に衝突した tombstone を記録する。invalidated / legacy はその conflict を踏まえた明示指示なしに採用できない。out_of_scope / relocated / superseded は警告として表示する |
+| `memory_admit` / `memory_change_apply` | nomination または proposal の version、対象、後継内容・Scope・evidence、conflict の現在状態を照合し、読み取り後に変わっていたら拒否する。適用承認根拠を event に保存する |
+| CLI / TUI の直接操作 | 直接操作として `user_direct` を保存する。invalidated / legacy の conflict は理由を見せ、対象 ID の明示的な確認を要求する |
 
-`memory_nominate` を握り潰しから候補生成へ変えたのは、握り潰しが否定済みの内容を Review 画面から遠ざけると同時に、**否定の事実を User の画面からも遠ざけていた**ためである。頼んだ本人は、自分の規則が既に否定されていたことも、その理由も知らないままになる。候補に衝突を積んで運べば、信頼境界（人の確定を経ずには配信されない）は破れないまま、判断に必要な材料が判断する人の前に揃う。
+衝突を候補に積んで運ぶことで、新しい反証は候補一覧から消えない。一方で invalidated / legacy は理由を確認して、それを踏まえて採用する明示指示がなければ適用されない。
 
 ### 5.2 席数（配信予算を上限でなく定員として使う）
 
@@ -151,9 +156,23 @@ always 層で拒否されたものには、scope 規則には無い出口が一�
 
 ### 5.3 退役
 
-- 退役は User のみが行い、理由が必須である
-- 退役後は tombstone（何が、なぜ否定されたか）だけが照合で返る。**本文はどの経路でも返さない。**Review の個別画面も `mashu show` も、返すのは退役理由だけである。本文を並べれば、否定された文言が、それを否定した理由のすぐ隣で流通し直す
-- 退役を覆せるのは CLI / TUI の direct remember だけであり、それは**理由を読んだうえでの操作**でなければならない。同種の本文を書こうとすると書き込みは一度止まり、退役理由が出て、続けるかを訊く。非対話 CLI は拒否して `--force` を案内し、TUI は同じ理由を画面に出して明示確認を求める。
+- 退役理由は必須で、理由の再入力は要求しない。状態は `active` / `retired` のまま保ち、退役理由の分類を `retirement_kind` に記録する。
+
+| retirement_kind | 意味 | 類似内容の再登場時 |
+|---|---|---|
+| `invalidated` | 内容に誤りがある | 理由を conflict として示し、採用にはそれを踏まえた明示指示が要る |
+| `superseded` | 後継 Memory に置き換えた | 後継 ID を示し、重複・矛盾を確認する |
+| `out_of_scope` | 適用条件が終了した | 警告として示し、再候補化は妨げない |
+| `relocated` | Temporary Context などへ移した | 移動先の種類と ID を示し、再候補化は妨げない |
+| `legacy` | 旧データで分類されていない | 旧理由を conflict として示す。自由文から自動分類しない |
+
+- `superseded` は後継 Memory ID を、`relocated` は移動先の種類と ID を保存する。自己参照、循環、存在しない参照は拒否する。
+- bootstrap と類似照合結果は退役本文を返さない。明示的な `memory_get` と管理画面では、本文・revision・evidence と retired 状態・理由・後継または移動先をまとめて返す。
+- 復帰は通常の本文・定員・重複・conflict 検査を通す。invalidated / legacy の復帰には、退役判断を覆す明示指示と理由を記録し、過去の退役 event は残す。
+- `replace` は一つの transaction で後継採用と旧 Memory 退役を行う。定員は完了後の active 集合に対して判定し、失敗時は元の active 集合を保つ。
+- Temporary Context への変換は `relocated` と移動先を記録する。逆変換はその移動済み行だけを扱い、無関係な invalidated / legacy の理由を一括上書きしない。
+- CLI の `mashu retire` は `--kind` を受け取る。省略した旧形式は `legacy` として記録し、自由文の理由から種別を推測しない。
+- Agent による提案の詳細には対象本文・種別・入力済み理由・根拠・後継・conflict を並べる。User の適用キー自体が `user_direct` の承認であり、同じ確認は重ねない。
 - 点検期日・stale 掃き出しは持たない。在庫が定員内なら User は bootstrap の内容を日常的に目にしており、腐った行に気づく点検器は人自身である。この前提が破れた（在庫が目視で追えない規模になった）なら、それは定員の設定が誤っている
 
 ## 6. 配信
@@ -212,13 +231,13 @@ bootstrap は「セッションの前提」を、guard は「判断の直前」�
 
 期限つきの条件（今週のメンテナンス、明日リセットされる quota）は、書いた時点で失効時刻が分かっており、Review も退役も要らず、期限で勝手に消える。window の上限は 14 日。それより長い主張は期限つきの顔をした恒久の主張なので、通常の実証経路へ回す。
 
-**書けるのは User だけである**（`mashu remember --until` または Memories TUI）。v1 は Agent の期限つき書き込みを「検索には載るが押し込みには載らない」形で許した。押し込む権限と書ける権限を分けるためである。v2 の Temporary Context は bootstrap で押し込まれる側にあるので、Agent が書けるなら 5.1 節の保証（Agent の書き込みが人の確定なしに他セッションへ届く経路は無い）がここだけ破れる。Agent が観測した期限つきの条件は痕跡に書く。日付つきの観測として検索には載り、押し込まれはしない。これは v1 と同じ線を、v2 の部品で引き直したものである。
+Temporary Context は既存の User 向け CLI / TUI から作成する。開始時点で expiry を指定した条件は、期限到来時に追加承認なしで配信対象から外れる。Agent が観測した期限つきの条件は trace に残す。期限管理は Temporary Context の既存実装を使い、Memory 専用の expiry や汎用条件 engine は作らない。
 
-Memories TUI の `c` は、active な always / scope Memory と Temporary Context を相互変換する。Memory からの変換では期限を必須とし、元の Memory は変換理由を持つ tombstone にしてから、本文と Scope を保った Temporary Context を作る。逆変換では Temporary Context をその時点で終了し、同じ本文と Scope の active Memory を User の direct remember として作る。両操作は一つの transaction で行い、片方の容量判定が拒否した場合は元の行を有効なまま残す。guard は action という配送条件を Temporary Context へ移せないため対象外とする。
+Memories TUI の `c` は、active な always / scope Memory と Temporary Context を相互変換する。Memory からの変換では期限を必須とし、元の Memory を `relocated` として移動先 ID とともに記録してから、本文と Scope を保った Temporary Context を作る。逆変換では Temporary Context をその時点で終了し、同じ本文と Scope の active Memory を作る。無関係な invalidated / legacy conflict は上書きせず、定員判定が拒否した場合は元の行を有効なまま残す。guard は action という配送条件を Temporary Context へ移せないため対象外とする。
 
 ## 8. インターフェース
 
-### 8.1 MCP Tool（6 つ）
+### 8.1 Memory 関連 MCP Tool
 
 | Tool | 役割 |
 |---|---|
@@ -226,10 +245,15 @@ Memories TUI の `c` は、active な always / scope Memory と Temporary Contex
 | `pain_report` | 痛みを台帳へ記録し、類似の台帳エントリ・痕跡・tombstone・active な記憶を返す。二度目・incident なら候補を生成 |
 | `trace_put` | 調べて分かったことを一行残す（4.2 節） |
 | `trace_search` | 痕跡の検索。日付と未検証の印を付けて返す |
-| `memory_list` | 指定 Scope の active な記憶を列挙する。知識を明示的に見にいく唯一の読み口 |
-| `memory_nominate` | 会話中の User の記録指示を候補として運ぶ（5.1 節の経路 3）。pending 止まりで、確定は人。退役済みと衝突する場合は候補に理由を積んで運ぶ |
+| `memory_list` | 指定 Scope の active な記憶を列挙する |
+| `memory_get` | 指定した Memory の本文、revision、evidence、退役情報を返す。退役本文は明示取得でのみ読む |
+| `memory_nominate` | 新規 Memory の pending 候補を作る。会話中の明示指示なら `memory_admit` と続けて同じセッションで完了できる |
+| `memory_admit` | 読み取った nomination version と承認根拠を必須にして採用する。実行者 Agent と `user_instruction` の出所を別に保存し、request replay には初回応答を返す |
+| `memory_change_propose` | retire / replace / restore 案を作成・更新する。replace は後継 nomination version と配信条件を固定する |
+| `memory_change_apply` | proposal version、対象 revision、conflict、承認根拠、request ID を照合して一度だけ適用する |
+| `memory_change_withdraw` | 不要になった pending Memory change を理由つきで取り下げる |
 
-**v3 でこの 6 つに Project State 系の Tool が加わる（`docs/mashu-v3.md` 13.1 節）。**6 つ自体は変わらない。変わるのは `session_bootstrap` の返却内容だけで、それは 6.1 節に書いてある。
+他の Project State 系 Tool は `docs/mashu-v3.md` 13.1 節に記す。`session_bootstrap` の返却内容は 6.1 節にある。
 
 v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` / `memory_propose` は対応する機構ごと廃止する。`scratch_put` / `scratch_get` は `trace_put` / `trace_search` が継ぐが、身分が変わる（4.2 節）。`context_put` に後継は居ない。Temporary Context は User 専用になり（7 節）、Agent の期限つき観測は痕跡が受ける。
 
@@ -239,11 +263,11 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 |---|---|
 | `mashu` | 人向け dashboard。Attention / Memories / Work / Settings & health を開く |
 | `mashu status` | 在庫と定員の使用量（always 層と、最も重い開き方の二つ）、pending 件数、台帳の直近、配信失敗の疑い件数 |
-| `mashu review` | pending の候補を一覧から選び、1 件ずつ全文と根拠を読んで編集・確定・却下・保留 |
-| `mashu remember <body>` | User 明示。CLI で即時 active にする経路。退役済みと衝突すると理由を出して確認する（`--force` で無条件） |
-| `mashu retire <id> --reason <r>` | 退役。理由必須 |
+| `mashu review` / `mashu review --changes` | nomination または Memory change proposal を読み、編集・適用・却下・取り下げ |
+| `mashu remember <body>` | User 明示。CLI で即時 active にする経路。invalidated / legacy conflict は理由を表示して個別 ID を確認する |
+| `mashu retire <id> --reason <r> [--kind K]` | 退役。理由必須。kind 省略の旧形式は `legacy` |
 | `mashu revise <id>` | 本文の改訂（User のみ） |
-| `mashu show <id>` | 記憶・候補・台帳エントリを 1 件、evidence と逆参照つきで全文表示 |
+| `mashu show <id>` | 記憶・候補・台帳・Memory change proposal を 1 件、根拠と履歴つきで表示 |
 | `mashu memories` | 記憶の一覧。既定は active、`--retired` で退役分と理由 |
 | `mashu pain` | 痛みの手動記録（CLI から） |
 | `mashu ledger` | 台帳の閲覧 |
@@ -254,33 +278,36 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 | `mashu bootstrap` | push される内容と token を表示 |
 | `mashu admin migrate` | migration 実行 |
 
-Review UI は一覧と個別の二画面で、v1 の「束」の段は持たない。束は日に百件を捌くための機構であり、週数件なら一覧から選んで 1 件ずつ読めば足りる。ただし一覧そのものは要る。何が待っているか見えなければ、10 分しか無い人がその 10 分を何に使うか選べない。一覧には選択中の本文、evidence 数、退役済み Memory との衝突数、保留理由を preview し、ID・kind・scope・本文・evidence で絞り込める。個別画面は本文全体・token 見積り・根拠の台帳エントリを同じ画面に置き、画面より長ければページ送りする（端末の底より下へは何も出さない）。退役済み Memory との衝突があれば、本文の直後・evidence の手前に退役理由を出す。判断そのものを誤らせうる唯一の情報なので、ページを送らないと見えない位置には置かない。決定は 1 件ずつその場で確定するので、途中で抜けても後ろは残る。定員などで store が拒んだときは、決定にならず同じ候補に留まり、拒否の文面がその場に出る。`e` は現在の候補本文を入力済みの欄で直接編集し、Enter で pending のまま保存する。Vim などの外部エディタは `VISUAL` / `EDITOR` を明示設定した場合だけ使う。したがって容量超過の拒否後も、その場で短くしてから `y` で確定を再試行できる。編集は evidence・scope・保留状態を変えず、`nomination_revised` として event_log に残す。
+Review UI は nomination と Memory change proposal の一覧・個別画面を持つ。Memory change の詳細では対象本文、対象 revision、退役種別、入力済み理由、evidence、conflict、後継または移動先を同時に読める。理由は編集して proposal version を更新できる。`y` で適用し、そのキー操作自体が直接承認になるため二度目の確認は挟まない。対象 revision や conflict が表示後に変わっていれば適用を止め、新しい情報を再読してから適用する。定員などで store が拒んだときは、決定にならず同じ proposal に留まり、拒否の文面がその場に出る。
 
 まとめて承認するキーは無い。席は 1 件ずつ、その根拠を見て渡す。決めずに退ける保留（`s`、理由必須）だけは別で、status は pending のまま `deferred_at` と理由を持ち、既定の一覧から外れる。決定ではないので pending の件数も短縮 ID での直接操作も変わらず、`mashu review --all` で一覧に戻る。
 
-dashboard の Memories では active / retired Memory と未失効の Temporary Context を閲覧・検索する。Memory の詳細には evidence と revision history を含める。User は direct remember、Memory と Temporary Context の編集、Temporary Context の登録、retire、delivery / guard の変更を 1 件ずつ実行できる。退役済み Memory と衝突する direct remember は退役理由を表示し、User が明示的に確認した場合だけ上書きする。
+dashboard の Memories では active / retired Memory と未失効の Temporary Context を閲覧・検索する。Memory の詳細には evidence、revision history、退役種別、後継または移動先を含める。User は direct remember、Memory と Temporary Context の編集、Temporary Context の登録、kind を選んだ retire、delivery / guard の変更を 1 件ずつ実行できる。提案 review は Attention と `mashu review --changes` から開ける。
 
 id を取る引数は、表示される短縮 ID（先頭 8 文字）の前方一致で解決する。一覧が短縮 ID しか出さない以上、完全 UUID しか受け付けない引数は、人に画面外の値を打たせることになる。4 文字未満の前置きと、複数行に当たる前置きは、候補を挙げて拒否する。
 
 `show` は Memory・candidate・台帳エントリを ID から非対話で読む経路として残す。dashboard の Memories でも Memory の evidence と revision history を読めるが、candidate と台帳エントリは対象にしない。台帳参照は記憶が席を占める理由そのものであり、どちらの経路でも退役前に確認できる状態を保つ。
 
-## 9. スキーマ（9 表）
+## 9. スキーマ（10 表）
 
 ```
 scope             台帳。User のみ作成
 route             cwd から scope への対応表
 ledger            痛みの記録。append-only
 trace             痕跡。自動失効
-memory            記憶。active / retired
+memory            記憶。active / retired と退役種別・後継・移動先
 memory_revision   本文の改訂履歴。append-only
 nomination        昇格候補。pending / admitted / declined
+memory_change     既存 Memory の retire / replace / restore proposal
 temporary_context 期限つき条件
 event_log         全操作の記録。append-only
 ```
 
 pgvector は使わない。拡張は pg_trgm のみ。埋め込みモデルへの依存が消えるので、`--extra embed` 相当の依存も消える。
 
-`nomination` は evidence（根拠の台帳行）のほかに `conflicts`（衝突した退役済み Memory の id）を持つ。配列なので外部キーは張らないが、Memory 行は削除されず退役するだけなので、書いた時点の id は後から必ず解決できる。
+`memory_nominate` が返す nomination は `version` と evidence（根拠の台帳行）のほかに `conflicts`（衝突した退役済み Memory の id）を持つ。本文・scope・kind・evidence・conflict が変わるたびに version を進め、`memory_admit` は読み取った version を必須で照合する。conflict 配列に外部キーは張らないが、Memory 行は削除されず退役するだけなので、書いた時点の id は後から必ず解決できる。
+
+`memory_change` は対象 Memory ID と revision、operation、変更内容、根拠、提案者、version、状態、承認根拠、idempotency request ID を保持する。replace 提案は読み取った後継 nomination version を受け取り、後継の本文、Scope、kind、evidence、conflicts の snapshot を保持する。提案前または適用前に後継が変わっていれば拒否し、再読と提案更新を要求する。後継の delivery・scope・guard action は提案に固定し、既定では旧 Memory から引き継ぐ。変更する場合は `successor_settings`（`delivery`・`scope_id`・`guard_action`）として提案 version に含め、適用 event にも記録する。旧 Memory の退役と後継採用は同じ transaction で確定する。`event_log` には退役種別・理由・移動先・actor と別の承認出所を判断時点の記録として保存する。承認出所は認証情報ではない。
 
 書き込みは直列化する。複数の MCP プロセスと CLI が同じ知識状態に同時に書くので、定員の判定と候補の生成は advisory lock を取ってから行う。取らなければ、残り 1 席に二人が同時に座れてしまう。
 

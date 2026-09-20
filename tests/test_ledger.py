@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import pytest
@@ -100,22 +99,77 @@ def test_a_banned_pattern_is_refused_and_nothing_is_written(cur):
     assert cur.fetchone()["n"] == 0
 
 
-def test_a_pain_landing_on_retired_knowledge_does_not_nominate(cur):
+@pytest.mark.parametrize("retirement_kind", ("invalidated", "legacy"))
+def test_a_new_incident_on_invalidated_or_legacy_retirement_keeps_a_conflicted_candidate(
+    cur, retirement_kind
+):
     from mashu import memories
 
     kept = memories.remember(cur, content=HOLE, actor="user")
     memories.retire(
-        cur, kept["memory_id"], reason="the migration step moved into the server", actor="user"
+        cur,
+        kept["memory_id"],
+        reason="the migration step moved into the server",
+        retirement_kind=retirement_kind,
+        actor="user",
     )
 
-    for kind in ("friction", "incident"):
-        got = report(cur, kind, SAME_HOLE)
-        assert got["tombstone_suppressed"] is True
-        assert got["nomination"] is None
-        assert got["matches"]["tombstones"][0]["retire_reason"]
+    friction = report(cur, "friction", SAME_HOLE)
+    assert friction["tombstone_suppressed"] is False
+    assert friction["nomination"] is None
+    assert friction["matches"]["tombstones"][0]["retire_reason"]
+
+    incident = report(cur, "incident", SAME_HOLE)
+    assert incident["nomination"] is not None
+    assert incident["nomination"]["conflicts"] == [kept["memory_id"]]
+    assert incident["retirement_conflicts"][0]["retirement_kind"] == retirement_kind
 
     cur.execute("SELECT count(*) AS n FROM nomination")
-    assert cur.fetchone()["n"] == 0
+    assert cur.fetchone()["n"] == 1
+
+
+@pytest.mark.parametrize("retirement_kind", ("out_of_scope", "relocated"))
+def test_out_of_scope_and_relocated_memories_do_not_suppress_new_candidates(cur, retirement_kind):
+    kept = memories.remember(cur, content=HOLE, actor="user")
+    if retirement_kind == "relocated":
+        destination = memories.convert_to_temporary(cur, kept["memory_id"], days=1, actor="user")[
+            "temporary"
+        ]
+    else:
+        memories.retire(
+            cur,
+            kept["memory_id"],
+            reason="the project left the deployment scope",
+            retirement_kind=retirement_kind,
+            actor="user",
+        )
+
+    got = report(cur, "incident", SAME_HOLE)
+    assert got["tombstone_suppressed"] is False
+    assert got["nomination"] is not None
+    assert got["nomination"]["conflicts"] == [kept["memory_id"]]
+    conflict = got["retirement_conflicts"][0]
+    assert conflict["retirement_kind"] == retirement_kind
+    if retirement_kind == "relocated":
+        assert conflict["relocated_to_id"] == destination["context_id"]
+
+
+def test_a_superseded_tombstone_with_an_active_successor_is_a_delivery_problem(cur):
+    old = memories.remember(cur, content=HOLE, actor="user")
+    successor = memories.remember(cur, content=HOLE, actor="user")
+    memories.retire(
+        cur,
+        old["memory_id"],
+        reason="replaced by the current deployment rule",
+        retirement_kind="superseded",
+        superseded_by=successor["memory_id"],
+        actor="user",
+    )
+
+    got = report(cur, "incident", HOLE)
+    assert got["delivery_suspect"] is True
+    assert got["nomination"] is None
+    assert got["retirement_conflicts"][0]["superseded_by"] == successor["memory_id"]
 
 
 def test_the_ledger_lists_the_scope_it_was_filtered_by(cur, scope_id):
@@ -146,13 +200,14 @@ def test_a_pain_landing_on_a_rule_already_delivered_indicts_the_delivery(cur):
     assert [row["ledger_id"] for row in seen] == [got["ledger_id"]]
 
 
-def test_a_retirement_is_read_before_an_active_rule_is(cur):
+def test_a_retirement_conflict_is_reported_without_suppressing_new_evidence(cur):
     kept = memories.remember(cur, content=HOLE, actor="user")
     memories.retire(cur, kept["memory_id"], reason="the step moved into the server", actor="user")
 
     got = report(cur, "friction", SAME_HOLE)
 
-    assert got["tombstone_suppressed"] is True
+    assert got["tombstone_suppressed"] is False
+    assert got["retirement_conflicts"][0]["retire_reason"] == "the step moved into the server"
     assert got["delivery_suspect"] is False
 
 

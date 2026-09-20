@@ -205,7 +205,6 @@ def convert_to_memory(
         actor=actor,
         scope_id=current["scope_id"],
         delivery=delivery,
-        override_retired=True,
     )
     cur.execute(
         "UPDATE temporary_context SET expires_at = now() WHERE context_id = %s RETURNING *",

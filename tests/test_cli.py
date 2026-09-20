@@ -2,10 +2,21 @@ from __future__ import annotations
 
 import json
 import os
+from uuid import uuid4
 
 import pytest
 
-from mashu import cli, config, db, nominations, projects, task_history, tasks
+from mashu import (
+    cli,
+    config,
+    db,
+    memories,
+    memory_changes,
+    nominations,
+    projects,
+    task_history,
+    tasks,
+)
 from mashu import traces as trace_domain
 from mashu.migrate import migrate
 
@@ -193,6 +204,57 @@ def test_a_candidate_can_be_read_then_admitted(run):
     assert nomination_id not in out
 
 
+def test_a_memory_change_can_be_read_applied_and_replayed_from_the_cli(run, committing_dsn):
+    with db.transaction(committing_dsn) as cur:
+        memory = memories.remember(
+            cur, content="the signer publishes the export manifest", actor="user"
+        )
+        detail = memories.memory_details(cur, memory["memory_id"])
+        proposal = memory_changes.propose(
+            cur,
+            target_memory_id=memory["memory_id"],
+            target_revision_id=detail["current_revision_id"],
+            target_updated_at=detail["updated_at"],
+            operation="retire",
+            retirement_kind="out_of_scope",
+            retire_reason="this export path has been removed",
+            evidence=[
+                {
+                    "kind": "ledger",
+                    "id": str(memory["evidence"][0]),
+                    "observation": "the export path has been removed",
+                }
+            ],
+            actor="agent",
+        )
+
+    _, listed, _ = run("review", "--changes", "--list")
+    assert "the signer publishes the export manifest" in listed
+    assert "this export path has been removed" in listed
+    request_id = uuid4()
+    command = (
+        "review",
+        "--apply-change",
+        str(proposal["change_id"]),
+        "--version",
+        "1",
+        "--request-id",
+        str(request_id),
+    )
+    code, first, _ = run(*command)
+    replay_code, replay, _ = run(*command)
+
+    assert code == replay_code == 0
+    assert first == replay
+    assert str(request_id) in first
+    with db.transaction(committing_dsn) as cur:
+        assert memories.get_memory(cur, memory["memory_id"])["status"] == "retired"
+        cur.execute(
+            "SELECT count(*) AS n FROM event_log WHERE event_type = 'memory_change_applied'"
+        )
+        assert cur.fetchone()["n"] == 1
+
+
 def test_a_candidate_can_be_turned_down_and_needs_a_reason_to_be(run):
     run("pain", "--kind", "incident", "--what", "built it wrong", "--prevention", CARRIED)
     _, out, _ = run("review", "--list")
@@ -302,11 +364,13 @@ def test_a_pain_that_lands_on_retired_knowledge_is_answered_with_the_reason(run)
         WITHDRAWN_RULE,
     )
     assert code == 0
-    assert "nomination  withheld" in out
-    assert "the vendored headers were dropped upstream" in out
+    assert "nomination  created" in out
 
     _, out, _ = run("review", "--list")
-    assert WITHDRAWN_RULE not in out
+    assert WITHDRAWN_RULE in out
+    assert "retired conflict" in out
+    assert "legacy" in out
+    assert "the vendored headers were dropped upstream" in out
 
 
 def test_a_refusal_leaves_by_the_error_channel_with_a_failing_code(run):
@@ -586,7 +650,7 @@ def test_a_carried_instruction_that_repeats_a_retirement_says_so_in_the_listing(
     assert carried["tombstone_conflict"] is True
 
     _, out, _ = run("review", "--list")
-    assert "contradicts retired" in out
+    assert "retired conflict" in out
     assert reason in out
 
     _, out, _ = run("show", str(carried["nomination"]["nomination_id"])[:8])
@@ -820,7 +884,7 @@ def test_a_store_behind_the_code_says_so_instead_of_raising(capsys, tmp_path):
         shutil.copy(path, partial / path.name)
     migrate(f"dbname={name}", partial)
 
-    code = cli.main(["--dsn", f"dbname={name}", "task", "list"])
+    code = cli.main(["--dsn", f"dbname={name}", "review", "--changes", "--list"])
     captured = capsys.readouterr()
     assert code == 1
     assert "behind the code" in captured.err

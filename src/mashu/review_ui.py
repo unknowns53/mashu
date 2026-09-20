@@ -9,6 +9,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from mashu import db, nominations, screen, tokens
 from mashu.errors import MashuError
@@ -94,7 +95,10 @@ def _queue_preview(row: dict[str, Any]) -> str:
     scope = row.get("scope_name") or "-"
     content = " ".join((row.get("content") or "").split()) or "(empty)"
     lines = [
-        screen.bold(f"  preview  {_short(row['nomination_id'])}  {row['kind']}  [{scope}]"),
+        screen.bold(
+            f"  preview  {_short(row['nomination_id'])}  v{row['version']}  "
+            f"{row['kind']}  [{scope}]"
+        ),
         screen.clip(f"  {content}", width - 1),
         screen.dim(f"  evidence: {evidence}  ·  conflicts: {conflicts}"),
     ]
@@ -147,7 +151,8 @@ def _item_text(row: dict[str, Any], place: int, total: int) -> str:
         screen.dim("─" * 4 + label + "─" * max(4, across - 4 - screen.cells(label))),
         screen.bold(
             f"{row['kind']}  [{row.get('scope_name') or '-'}]  "
-            f"{_short(row['nomination_id'])}  waiting {_days(row)} day(s)  tokens ~{cost}"
+            f"{_short(row['nomination_id'])}  v{row['version']}  "
+            f"waiting {_days(row)} day(s)  tokens ~{cost}"
         ),
         "",
     ]
@@ -166,10 +171,20 @@ def _item_text(row: dict[str, Any], place: int, total: int) -> str:
         when = retired.date().isoformat() if isinstance(retired, datetime) else str(retired or "")
         lines.append(
             screen.danger(
-                f"  ! contradicts a retired memory  {_short(conflict['memory_id'])}  {when}"
+                f"  ! retired conflict  {_short(conflict['memory_id'])}  "
+                f"{conflict.get('retirement_kind') or 'legacy'}  {when}"
             )
         )
         lines.append(screen.wrap(f"retired because: {conflict['retire_reason']}", indent="      "))
+        if conflict.get("superseded_by"):
+            lines.append(screen.wrap(f"successor: {conflict['superseded_by']}", indent="      "))
+        if conflict.get("relocated_to_id"):
+            lines.append(
+                screen.wrap(
+                    f"moved to {conflict['relocated_to_kind']}: {conflict['relocated_to_id']}",
+                    indent="      ",
+                )
+            )
     if row.get("conflict_rows"):
         lines.append("")
 
@@ -231,12 +246,64 @@ def _admit(dsn: str | None, row: dict[str, Any]) -> str:
     try:
         delivery, guard_action = _delivery(row)
         with db.transaction(dsn) as cur:
+            cur.execute(
+                "SELECT status, version, content FROM nomination "
+                "WHERE nomination_id = %s FOR UPDATE",
+                (row["nomination_id"],),
+            )
+            current = cur.fetchone()
+            if current is None or current["status"] != "pending":
+                raise MashuError(nominations.NOT_PENDING)
+            if current["version"] != row["version"]:
+                fresh = next(
+                    (
+                        item
+                        for item in nominations.pending_nominations(cur)
+                        if item["nomination_id"] == row["nomination_id"]
+                    ),
+                    None,
+                )
+                if fresh is not None:
+                    row.update(fresh)
+                return screen.warning(
+                    "  ! candidate changed; read the current wording and press y again"
+                )
+            current_conflicts = nominations.current_conflict_ids(cur, current["content"])
+            refreshed = nominations.refresh_conflicts(
+                cur, row["nomination_id"], current_conflicts, actor="user"
+            )
+            if refreshed is None:
+                raise MashuError(nominations.NOT_PENDING)
+            if refreshed["version"] != row["version"]:
+                fresh = next(
+                    (
+                        item
+                        for item in nominations.pending_nominations(cur)
+                        if item["nomination_id"] == row["nomination_id"]
+                    ),
+                    None,
+                )
+                if fresh is not None:
+                    row.update(fresh)
+                return screen.warning(
+                    "  ! retirement conflicts changed; read the updated candidate and press y again"
+                )
             nominations.admit(
                 cur,
                 row["nomination_id"],
                 actor="user",
                 delivery=delivery,
+                expected_version=row["version"],
                 guard_action=guard_action,
+                approval={
+                    "kind": "user_direct",
+                    "conflict_ids": [
+                        item["memory_id"]
+                        for item in row.get("conflict_rows", [])
+                        if item.get("retirement_kind") in ("invalidated", "legacy")
+                    ],
+                },
+                request_id=uuid4(),
             )
     except MashuError as refusal:
         # Keep the candidate selected when admission is refused.

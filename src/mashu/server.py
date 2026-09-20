@@ -11,6 +11,7 @@ from mashu import (
     bootstrap,
     db,
     memories,
+    memory_changes,
     nominations,
     projects,
     routing,
@@ -71,46 +72,41 @@ def _scope(cur: Any, name: str | None) -> tuple[UUID | None, str | None, bool]:
 
 
 def build_server() -> Any:
-    """Build the fifteen-tool MCP server used by an agent session."""
+    """Build the MCP server used by an agent session."""
     from mcp.server import MCPServer
 
     # MCP instructions provide calling guidance to connected clients.
     server = MCPServer(
         name="mashu",
         instructions=(
-            "Mashu keeps only knowledge whose absence has provably cost "
-            "something; everything merely useful was deliberately left out. "
-            "Call session_bootstrap once, first, at the start of every "
-            "session: knowledge is pushed, there is no search for it, and a "
-            "session that skips the call works blind without knowing it. "
-            "Then two habits while you work. trace_put one line for anything "
-            "you had to look up or derive — a dated observation that lets a "
-            "later repeat be proven. pain_report when missing or stale "
-            "knowledge actually cost something: wrong work (incident) or a "
-            "repeated lookup (friction); the second time is what turns a "
-            "pain into a candidate. If the user explicitly says to remember "
-            "something, carry it with memory_nominate — it waits for their "
-            "confirmation. Temporary, expiring conditions are recorded by "
-            "the user's own hand (mashu remember --until), not by agents. "
-            "Nothing you write becomes knowledge without a human decision, "
-            "and retired knowledge answers with the reason it was retired: "
-            "bring new grounds rather than re-deriving it. Four work verbs "
-            "keep Project State small: if you looked something up, trace_put; "
-            "if it hurt, pain_report; if the user said remember, "
-            "memory_nominate; at a break in the work, task_checkpoint. Use "
-            "attempt_record for the outcome of a failed try and decision_record "
-            "for a judgement whose reason would be costly to re-derive. Bootstrap "
-            "carries compact active-task cards, not full current state. Before "
-            "continuing any task, call task_get with the full task_id from its card. "
-            "A task state is what was last confirmed on its date, not current truth; "
-            "when that date is old, verify it against the repository and its artifacts "
-            "before working from it. Task completion is never the "
-            "agent's call: closing is the user's, via the CLI. When work you "
-            "finish looks like the end of its task, say so with "
-            "task_propose_close — the outcome you would choose and the "
-            "grounds for it — instead of writing 'this can be closed' into "
-            "the state, where the user has to read it back out and retype it. "
-            "The proposal decides nothing; it waits on the closing screen."
+            "Mashu pushes active Memory; call session_bootstrap first in every session. "
+            "Record lookups or derivations with trace_put. Use pain_report only when missing "
+            "or stale knowledge caused an incident or repeated lookup; incidents nominate "
+            "once, friction on the second occurrence. Use prevention_kind='work' and task_id "
+            "for one-time fixes. For an explicit user request to remember, call "
+            "memory_nominate then pass nomination.version as nomination_version to memory_admit, "
+            "approval_kind='user_instruction', a short "
+            "exact instruction quote, any available conversation_ref, and request_id. The Agent "
+            "executes it; this provenance is not authentication. Your own suggestion, "
+            "confidence, and user silence are not approval. For an existing Memory, call "
+            "memory_get before memory_change_propose. For replace, pass the successor nomination "
+            "version just read. If it changed, reread it and update the proposal. Preserve old "
+            "delivery settings by default; pass a complete successor_settings object with "
+            "delivery, scope_id, and guard_action only when the requested change includes new "
+            "delivery settings. If the changed successor no longer matches the user's explicit "
+            "instruction, get a new instruction before applying it. Your independent change "
+            "idea stays "
+            "pending. Apply only the exact change explicitly requested, with the same "
+            "user_instruction provenance and request_id. After success, briefly report the "
+            "target and reason; if it remains pending, say that review is needed. Invalidated "
+            "or legacy conflicts need "
+            "an instruction addressing those conflicts. Use policy approval only for a "
+            "server-registered condition. Temporary Context handles expiry. Use task_checkpoint "
+            "at work breaks; before continuing a task from a bootstrap card, call task_get with "
+            "its full id and verify old state against the repository and artifacts. Use "
+            "attempt_record for failed tries and decision_record for costly-to-rederive reasons. "
+            "Task completion remains the user's decision. If work looks done, use "
+            "task_propose_close with outcome and grounds; it changes no task state."
         ),
     )
 
@@ -130,7 +126,9 @@ def build_server() -> Any:
                 note = (
                     "Knowledge is pushed, not searched. Call trace_put for a "
                     "later re-derivation and pain_report when forgetting caused pain; "
-                    "nothing an agent writes becomes knowledge without a human decision. "
+                    "only an explicit user instruction can authorize memory_admit or "
+                    "memory_change_apply in the same session. The Agent executes it, and "
+                    "the stored instruction quote is provenance rather than authentication. "
                     + bootstrap.TASK_DETAIL_INSTRUCTION
                 )
                 if answer["schema_pending"]:
@@ -238,9 +236,10 @@ def build_server() -> Any:
 
     @server.tool()
     def memory_nominate(content: str, scope: str | None = None) -> dict[str, Any]:
-        """Submit an agent-carried user instruction for human review.
+        """Create or update a pending candidate for a new durable Memory.
 
-        This does not activate the rule.
+        This does not admit it. Use memory_admit in the same session only when an explicit
+        user instruction asks Mashu to remember this content.
         """
         try:
             with db.transaction() as cur:
@@ -252,6 +251,159 @@ def build_server() -> Any:
                     scope_id=scope_id,
                 )
                 return _plain({"ok": True, **answer})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def memory_get(memory_id: UUID) -> dict[str, Any]:
+        """Read one Memory body, revision, evidence, and its complete retirement record."""
+        try:
+            with db.transaction() as cur:
+                row = memories.memory_details(cur, memory_id)
+                if row is None:
+                    raise MashuError(f"no memory {memory_id}")
+                return _plain({"ok": True, "memory": row})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def memory_admit(
+        nomination_id: UUID,
+        nomination_version: int,
+        request_id: UUID,
+        approval_kind: str,
+        instruction: str,
+        conversation_ref: str | None = None,
+        conflict_ids: list[UUID] | None = None,
+        conflict_instruction: str | None = None,
+        delivery: str | None = None,
+        scope: str | None = None,
+        guard_action: str | None = None,
+    ) -> dict[str, Any]:
+        """Admit the exact nomination version with explicit instruction provenance."""
+        if approval_kind != "user_instruction":
+            return _failure(MashuError("MCP admission requires approval_kind='user_instruction'"))
+        try:
+            with db.transaction() as cur:
+                cur.execute("SELECT * FROM nomination WHERE nomination_id = %s", (nomination_id,))
+                nomination = cur.fetchone()
+                if nomination is None:
+                    raise MashuError(f"no nomination {nomination_id}")
+                scope_id = (
+                    scopes.require_scope(cur, scope)["scope_id"]
+                    if scope
+                    else nomination["scope_id"]
+                )
+                chosen_delivery = delivery or ("scope" if scope_id else "always")
+                result = nominations.admit(
+                    cur,
+                    nomination_id,
+                    actor=actor(),
+                    delivery=chosen_delivery,
+                    expected_version=nomination_version,
+                    scope_id=scope_id,
+                    scope_override=True,
+                    guard_action=guard_action,
+                    approval={
+                        "kind": approval_kind,
+                        "instruction": instruction,
+                        "conversation_ref": conversation_ref,
+                        "conflict_ids": conflict_ids or [],
+                        "conflict_instruction": conflict_instruction,
+                    },
+                    request_id=request_id,
+                )
+                return _plain({"ok": True, "memory": result})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def memory_change_propose(
+        target_memory_id: UUID,
+        target_revision_id: UUID,
+        target_updated_at: datetime,
+        operation: str,
+        evidence: list[dict[str, Any]],
+        change_id: UUID | None = None,
+        retirement_kind: str | None = None,
+        retire_reason: str | None = None,
+        successor_nomination_id: UUID | None = None,
+        successor_nomination_version: int | None = None,
+        successor_settings: dict[str, Any] | None = None,
+        relocated_to_kind: str | None = None,
+        relocated_to_id: UUID | None = None,
+        restore_reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Create or refresh a change proposal; replace requires the read successor version."""
+        try:
+            with db.transaction() as cur:
+                row = memory_changes.propose(
+                    cur,
+                    target_memory_id=target_memory_id,
+                    target_revision_id=target_revision_id,
+                    target_updated_at=target_updated_at,
+                    operation=operation,
+                    evidence=evidence,
+                    actor=actor(),
+                    retirement_kind=retirement_kind,
+                    retire_reason=retire_reason,
+                    successor_nomination_id=successor_nomination_id,
+                    successor_nomination_version=successor_nomination_version,
+                    successor_settings=successor_settings,
+                    relocated_to_kind=relocated_to_kind,
+                    relocated_to_id=relocated_to_id,
+                    restore_reason=restore_reason,
+                    change_id=change_id,
+                )
+                return _plain({"ok": True, "change": row})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def memory_change_apply(
+        change_id: UUID,
+        version: int,
+        request_id: UUID,
+        approval_kind: str,
+        instruction: str,
+        conversation_ref: str | None = None,
+        conflict_ids: list[UUID] | None = None,
+        conflict_instruction: str | None = None,
+        reversal_instruction: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply one exact proposal version with explicit user instruction provenance."""
+        if approval_kind != "user_instruction":
+            return _failure(MashuError("MCP apply requires approval_kind='user_instruction'"))
+        try:
+            with db.transaction() as cur:
+                result = memory_changes.apply(
+                    cur,
+                    change_id,
+                    version=version,
+                    request_id=request_id,
+                    approval={
+                        "kind": approval_kind,
+                        "instruction": instruction,
+                        "conversation_ref": conversation_ref,
+                        "conflict_ids": conflict_ids or [],
+                        "conflict_instruction": conflict_instruction,
+                        "reversal_instruction": reversal_instruction,
+                    },
+                    actor=actor(),
+                )
+                return _plain({"ok": True, **result})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def memory_change_withdraw(change_id: UUID, reason: str) -> dict[str, Any]:
+        """Withdraw an unneeded pending Memory change proposal."""
+        try:
+            with db.transaction() as cur:
+                row = memory_changes.decide(
+                    cur, change_id, status="withdrawn", actor=actor(), reason=reason
+                )
+                return _plain({"ok": True, "change": row})
         except MashuError as error:
             return _failure(error)
 

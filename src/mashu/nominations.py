@@ -6,20 +6,21 @@ from typing import Any
 from uuid import UUID
 
 import psycopg
+from psycopg.types.json import Jsonb
 
-from mashu import capacity, config, events, match, redact
+from mashu import approvals, capacity, config, events, match, redact
 from mashu.errors import MashuError, RefusedError
 
 KINDS = ("incident", "rederivation", "user_explicit")
 
 #: What the ledger records when an agent carries an instruction in (5.1).
-CLAIMED_WHAT = "a user instruction carried by an agent; confirm before it stands"
+CLAIMED_WHAT = "a user instruction carried by an agent; admission records its approval source"
 
 #: What an agent is told when the instruction it carries repeats something already withdrawn.
 _TOMBSTONE_NOTE = (
-    "this repeats a memory that was retired; the candidate carries the retire "
-    "reason to the review screen, where a person reads both. Tell the user "
-    "that the claim was withdrawn before, and why."
+    "this repeats retired memory; the candidate carries each retirement kind, reason, and "
+    "successor or destination. Invalidated and legacy conflicts require an explicit instruction "
+    "that addresses those conflicts before admission."
 )
 
 
@@ -60,6 +61,12 @@ def create_nomination(
         (content, scope_id, kind, list(evidence), list(conflicts or []) or None, actor),
     )
     row = cur.fetchone()
+    snapshot = _conflict_snapshot(cur, list(conflicts or []))
+    cur.execute(
+        "UPDATE nomination SET conflict_snapshot = %s WHERE nomination_id = %s RETURNING *",
+        (Jsonb(snapshot), row["nomination_id"]),
+    )
+    row = cur.fetchone()
     events.record(
         cur,
         "nomination_created",
@@ -67,6 +74,7 @@ def create_nomination(
         nomination_id=row["nomination_id"],
         detail={
             "kind": kind,
+            "version": row["version"],
             "evidence": [str(e) for e in evidence],
             "conflicts": [str(c) for c in conflicts or []],
         },
@@ -124,7 +132,40 @@ def add_evidence(
         detail={
             "evidence": len(updated["evidence"]),
             "conflicts": [str(c) for c in fresh_conflicts],
+            "version": updated["version"],
         },
+    )
+    return updated
+
+
+def refresh_conflicts(
+    cur: psycopg.Cursor,
+    nomination_id: UUID,
+    conflicts: list[UUID],
+    *,
+    actor: str,
+) -> dict[str, Any] | None:
+    """Replace the displayed conflict set with the current retired matches."""
+    cur.execute("SELECT * FROM nomination WHERE nomination_id = %s FOR UPDATE", (nomination_id,))
+    row = cur.fetchone()
+    if row is None or row["status"] != "pending":
+        return None
+    current = list(dict.fromkeys(conflicts))
+    snapshot = _conflict_snapshot(cur, current)
+    if set(row["conflicts"] or []) == set(current) and row["conflict_snapshot"] == snapshot:
+        return row
+    cur.execute(
+        "UPDATE nomination SET conflicts = %s, conflict_snapshot = %s "
+        "WHERE nomination_id = %s RETURNING *",
+        (current or None, Jsonb(snapshot), nomination_id),
+    )
+    updated = cur.fetchone()
+    events.record(
+        cur,
+        "nomination_conflicts_refreshed",
+        actor,
+        nomination_id=nomination_id,
+        detail={"conflicts": [str(item) for item in current], "version": updated["version"]},
     )
     return updated
 
@@ -166,7 +207,7 @@ def nominate_user_explicit(
         result["malformed"] = verdict.malformed
 
     # A retirement is not a veto on this path, it is something the reviewer has to be looking at.
-    tombstones = match.similar_tombstones(cur, content)
+    tombstones = match.similar_tombstones(cur, content, limit=None)
     conflicts = [row["memory_id"] for row in tombstones if row["score"] >= threshold]
     if conflicts:
         result["tombstone_conflict"] = True
@@ -179,6 +220,10 @@ def nominate_user_explicit(
             cur, waiting[0]["nomination_id"], ledger_id, actor=actor, conflicts=conflicts
         )
         if existing is not None:
+            existing = (
+                refresh_conflicts(cur, existing["nomination_id"], conflicts, actor=actor)
+                or existing
+            )
             result["nomination"] = existing
             result["nomination_existing"] = True
             return result
@@ -237,13 +282,38 @@ def _evidence_rows(cur: psycopg.Cursor, evidence: list[UUID]) -> list[dict[str, 
     return [by_id[e] for e in evidence if e in by_id]
 
 
+def _conflict_snapshot(cur: psycopg.Cursor, conflicts: list[UUID]) -> list[dict[str, Any]]:
+    rows = conflict_rows(cur, conflicts)
+    return [
+        {
+            "memory_id": str(row["memory_id"]),
+            "retirement_kind": row.get("retirement_kind") or "legacy",
+            "retire_reason": row["retire_reason"],
+            "superseded_by": str(row["superseded_by"]) if row.get("superseded_by") else None,
+            "relocated_to_kind": row.get("relocated_to_kind"),
+            "relocated_to_id": str(row["relocated_to_id"]) if row.get("relocated_to_id") else None,
+        }
+        for row in sorted(rows, key=lambda item: str(item["memory_id"]))
+    ]
+
+
+def current_conflict_ids(cur: psycopg.Cursor, content: str) -> list[UUID]:
+    """Every retired Memory that currently needs to be shown beside this body."""
+    return [
+        row["memory_id"]
+        for row in match.similar_tombstones(cur, content, limit=None)
+        if row["score"] >= config.match_threshold()
+    ]
+
+
 def conflict_rows(cur: psycopg.Cursor, conflicts: list[UUID] | None) -> list[dict[str, Any]]:
     """The retirements this candidate walks back into, as reasons only."""
     if not conflicts:
         return []
     cur.execute(
         """
-        SELECT memory_id, retire_reason, retired_at, delivery
+        SELECT memory_id, retire_reason, retired_at, retirement_kind, delivery,
+               superseded_by, relocated_to_kind, relocated_to_id
         FROM memory WHERE memory_id = ANY(%s)
         """,
         (list(conflicts),),
@@ -282,13 +352,15 @@ def revise(
     verdict = redact.check(content)
     if not verdict.allowed:
         raise RefusedError(verdict.reason())
+    conflict_ids = current_conflict_ids(cur, content)
+    snapshot = _conflict_snapshot(cur, conflict_ids)
     cur.execute(
         """
-        UPDATE nomination SET content = %s
+        UPDATE nomination SET content = %s, conflicts = %s, conflict_snapshot = %s
         WHERE nomination_id = %s AND status = 'pending'
         RETURNING *
         """,
-        (content, nomination_id),
+        (content, conflict_ids or None, Jsonb(snapshot), nomination_id),
     )
     if cur.rowcount != 1:
         raise MashuError(NOT_PENDING)
@@ -298,7 +370,12 @@ def revise(
         "nomination_revised",
         actor,
         nomination_id=nomination_id,
-        detail={"from_chars": len(nomination["content"]), "to_chars": len(content)},
+        detail={
+            "from_chars": len(nomination["content"]),
+            "to_chars": len(content),
+            "conflicts": [str(item) for item in conflict_ids],
+            "version": row["version"],
+        },
     )
     return row
 
@@ -309,14 +386,71 @@ def admit(
     *,
     actor: str,
     delivery: str,
+    expected_version: int,
     scope_id: UUID | None = None,
+    scope_override: bool = False,
     guard_action: str | None = None,
     content: str | None = None,
+    approval: dict[str, Any],
+    request_id: UUID,
+    exclude_memory_id: UUID | None = None,
 ) -> dict[str, Any]:
-    """Turn a candidate into a memory, carrying its evidence across."""
+    """Admit one read nomination version and replay its original response for the same request."""
+    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (str(request_id),))
+    cur.execute("SELECT * FROM nomination WHERE admit_request_id = %s", (request_id,))
+    replay = cur.fetchone()
+    request = approvals.json_value(
+        {
+            "nomination_id": str(nomination_id),
+            "expected_version": expected_version,
+            "delivery": delivery,
+            "scope_id": str(scope_id) if scope_id else None,
+            "scope_override": scope_override,
+            "guard_action": guard_action,
+            "content": content,
+            "exclude_memory_id": str(exclude_memory_id) if exclude_memory_id else None,
+            "approval": approval,
+        }
+    )
+    if replay is not None:
+        if replay["nomination_id"] != nomination_id or replay["admit_request"] != request:
+            raise MashuError("request_id was already used for a different Memory admission")
+        return replay["admit_result"]
+
     nomination = _require_pending(cur, nomination_id)
+    if nomination["version"] != expected_version:
+        raise MashuError(
+            "nomination version changed; read the current candidate before admitting it"
+        )
     final = nomination["content"] if content is None else content
-    home = nomination["scope_id"] if scope_id is None else scope_id
+    home = scope_id if scope_override else nomination["scope_id"] if scope_id is None else scope_id
+
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(%s, %s)",
+        (capacity.LOCK_NAMESPACE, capacity.LOCK_RETIREMENT),
+    )
+
+    current_conflicts = [
+        row
+        for row in match.similar_tombstones(cur, final, limit=None)
+        if row["score"] >= config.match_threshold()
+    ]
+    current_ids = {row["memory_id"] for row in current_conflicts}
+    current_snapshot = _conflict_snapshot(cur, [row["memory_id"] for row in current_conflicts])
+    if (
+        current_ids != set(nomination["conflicts"] or [])
+        or current_snapshot != nomination["conflict_snapshot"]
+    ):
+        raise MashuError(
+            "retirement conflicts changed since this nomination was read; read the updated "
+            "candidate and confirm it again"
+        )
+    blocking = [
+        row["memory_id"]
+        for row in current_conflicts
+        if row.get("retirement_kind") in ("invalidated", "legacy")
+    ]
+    approval_source = approvals.validate(approval, required_conflicts=blocking)
 
     if delivery not in ("always", "scope", "guard"):
         raise MashuError(f"unknown delivery '{delivery}'")
@@ -331,7 +465,23 @@ def admit(
     verdict = redact.check(final)
     if not verdict.allowed:
         raise RefusedError(verdict.reason())
-    admission = capacity.check_admission(cur, content=final, delivery=delivery, scope_id=home)
+    active = [
+        row
+        for row in match.similar_active_memories(cur, final)
+        if row["score"] >= config.match_threshold() and row["memory_id"] != exclude_memory_id
+    ]
+    if active:
+        raise MashuError(
+            "a similar active Memory already exists; resolve that Memory instead of admitting "
+            "another copy"
+        )
+    admission = capacity.check_admission(
+        cur,
+        content=final,
+        delivery=delivery,
+        scope_id=home,
+        exclude_memory_id=exclude_memory_id,
+    )
     if not admission["ok"]:
         raise RefusedError(admission["refusal"])
 
@@ -351,10 +501,20 @@ def admit(
     cur.execute(
         """
         UPDATE nomination
-        SET status = 'admitted', memory_id = %s, decided_by = %s, decided_at = now()
+        SET status = 'admitted', memory_id = %s, decided_by = %s, decided_at = now(),
+            approval_source = %s, admit_request_id = %s, admit_request = %s,
+            admit_result = %s
         WHERE nomination_id = %s AND status = 'pending'
         """,
-        (memory["memory_id"], actor, nomination_id),
+        (
+            memory["memory_id"],
+            actor,
+            Jsonb(approval_source),
+            request_id,
+            Jsonb(request),
+            Jsonb(approvals.json_value(memory)),
+            nomination_id,
+        ),
     )
     if cur.rowcount != 1:
         raise MashuError(NOT_PENDING)
@@ -365,7 +525,7 @@ def admit(
         actor,
         memory_id=memory["memory_id"],
         nomination_id=nomination_id,
-        detail={"delivery": delivery},
+        detail={"delivery": delivery, "approval_source": approval_source},
     )
     events.record(
         cur,
@@ -373,8 +533,9 @@ def admit(
         actor,
         memory_id=memory["memory_id"],
         nomination_id=nomination_id,
+        detail={"approval_source": approval_source, "request_id": str(request_id)},
     )
-    return memory
+    return approvals.json_value(memory)
 
 
 def decline(cur: psycopg.Cursor, nomination_id: UUID, *, actor: str, reason: str) -> dict[str, Any]:

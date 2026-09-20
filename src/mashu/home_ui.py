@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from mashu import (
     close_ui,
     db,
+    memory_change_ui,
     memory_ui,
     review_ui,
     screen,
@@ -17,10 +18,12 @@ from mashu import migrate as migration
 
 _KEYS = (
     "  ↑↓/jk move   ⏎ open   a attention   m memories   w work   s settings\n"
-    "  r review   d include deferred   t close tasks   ? help   q leave"
+    "  r review   d include deferred   c Memory changes   t close tasks   ? help   q leave"
 )
 
-_ATTENTION_KEYS = "  ↑↓/jk move   ⏎ open   r ready   d include deferred   ←/q dashboard"
+_ATTENTION_KEYS = (
+    "  ↑↓/jk move   ⏎ open   r ready   d include deferred   c Memory changes   ←/q dashboard"
+)
 
 _HELP = """
   Mashu opens here when it is run without a command.
@@ -30,6 +33,7 @@ _HELP = """
   a            open everything waiting for a person's attention
   m / w / s    open Memories, Work, or Settings & health directly
   r            open memory review directly
+  c            open proposed Memory changes
   d            review candidates including ones put off earlier
   t            open task closing directly
   ?            show this help
@@ -59,6 +63,7 @@ class Dashboard:
     scopes: int = 0
     routes: int = 0
     schema_pending: int = 0
+    memory_changes: int = 0
 
     @property
     def pending_review(self) -> int:
@@ -80,6 +85,9 @@ def _dashboard(dsn: str | None) -> Dashboard:
             """
         )
         review = cur.fetchone()
+
+        cur.execute("SELECT count(*) AS n FROM memory_change WHERE status = 'pending'")
+        memory_change_count = cur.fetchone()["n"]
 
         cur.execute(
             """
@@ -115,6 +123,7 @@ def _dashboard(dsn: str | None) -> Dashboard:
     return Dashboard(
         review_ready=review["ready"],
         review_deferred=review["deferred"],
+        memory_changes=memory_change_count,
         tasks_active=task["active"],
         tasks_dormant=task["dormant"],
         task_proposals=task["proposals"],
@@ -140,6 +149,8 @@ def _screen_text(state: Dashboard, at: int) -> str:
     attention_detail = f"{state.review_ready} ready"
     if state.review_deferred:
         attention_detail += f"  ·  {state.review_deferred} deferred"
+    if state.memory_changes:
+        attention_detail += f"  ·  {state.memory_changes} Memory change(s)"
     if state.task_proposals:
         attention_detail += f"  ·  {state.task_proposals} close proposal(s)"
     if state.tasks_dormant:
@@ -195,13 +206,14 @@ def _attention_text(state: Dashboard, at: int) -> str:
             f"{state.review_ready + state.review_deferred} including deferred",
             at == 1,
         ),
+        _choice("Memory changes", f"{state.memory_changes} proposal(s)", at == 2),
         _choice(
             "Close tasks",
             f"{state.task_proposals} proposal(s)  ·  "
             f"{state.tasks_active + state.tasks_dormant} open",
-            at == 2,
+            at == 3,
         ),
-        _choice("Dormant tasks", f"{state.tasks_dormant} task(s)", at == 3),
+        _choice("Dormant tasks", f"{state.tasks_dormant} task(s)", at == 4),
     ]
     return "\n".join(
         (
@@ -227,21 +239,23 @@ def _attention(dsn: str | None) -> None:
             at = max(0, at - 1)
             continue
         if key in ("down", "j"):
-            at = min(3, at + 1)
+            at = min(4, at + 1)
             continue
         if key == "home":
             at = 0
             continue
         if key == "end":
-            at = 3
+            at = 4
             continue
         if key == "r" or (key == "enter" and at == 0):
             review_ui.run(dsn)
         elif key == "d" or (key == "enter" and at == 1):
             review_ui.run(dsn, show_deferred=True)
-        elif key == "t" or (key == "enter" and at == 2):
+        elif key == "c" or (key == "enter" and at == 2):
+            memory_change_ui.run(dsn)
+        elif key == "t" or (key == "enter" and at == 3):
             close_ui.run(dsn)
-        elif key == "enter" and at == 3:
+        elif key == "enter" and at == 4:
             work_ui.run(dsn, initial_view="dormant")
 
 
@@ -289,6 +303,9 @@ def run(dsn: str | None = None) -> int:
             state = _dashboard(dsn)
         elif key == "d":
             review_ui.run(dsn, show_deferred=True)
+            state = _dashboard(dsn)
+        elif key == "c":
+            memory_change_ui.run(dsn)
             state = _dashboard(dsn)
         elif key == "t":
             close_ui.run(dsn)

@@ -8,7 +8,7 @@ v2 の中核原理
 
 は撤回しない。v3 が足すのは、それとは身分の異なる「現在の作業状態・試行・判断」を扱う **Project State** である。
 
-本書は v3.0 草稿を全面改稿した v3 の正本である。**Memory subsystem の正本は引き続き `docs/mashu-v2.md` であり、本書はそれを置き換えない。**本書が規定するのは Project State の追加と、bootstrap・token budget の統合、および v2 文書への修正点（12 節）だけである。実装も同じ関係にある。v2.1 のコードベース（9 表、migration 0001–0003、MCP Tool 6 つ）は書き直さず、そこへ増築する。
+本書は v3.0 草稿を全面改稿した v3 の正本である。**Memory subsystem の正本は引き続き `docs/mashu-v2.md` であり、本書はそれを置き換えない。**本書が規定するのは Project State の追加と、bootstrap・token budget の統合だけである。現在の Memory schema と信頼境界は v2 文書に記す。
 
 ## 1. なぜ Project State を足すか
 
@@ -55,22 +55,24 @@ Mashu
 |---|---|---|
 | 主目的 | 恒久的な失敗防止 | 作業の継続 |
 | 入口 | 損害の実証 | 作業の発生 |
-| 主な書き手 | User | Agent |
-| 人の確定 | 必須 | 不要 |
+| 主な書き手 | User の直接操作、または明示指示を運ぶ Agent | Agent |
+| 決定境界 | Agent 独自の案は pending。明示指示の実行は出所を記録するが、server は真正性を認証しない | 日々の state 更新に都度の承認は不要 |
 | 寿命 | 原則恒久 | 短い |
 | 更新 | 稀 | 頻繁 |
 | 腐敗対策 | 入口を絞る | lease による退場 |
 | bootstrap | 全量 push | active Task の索引 card のみ。Current State 全文は `task_get` |
 | 履歴 | revision | checkpoint / attempt / decision |
-| 終了 | retire（User・理由必須） | close（User）/ dormant（lease） |
+| 終了 | retire / replace / restore。理由と退役種別を記録 | close（User）/ dormant（lease） |
 
 Project State から Memory への昇格経路は作らない。作業中に恒久規則が見つかったなら、それは通常どおり `pain_report` / `memory_nominate` の実証経路を通る。
 
-### 3.1 信頼境界の緩和 — v3 が v2 の保証を破る唯一の点
+### 3.1 信頼境界 — 明示指示と Project State の継続更新
 
-v2 は「**Agent の書き込みが人の確定なしに他セッションへ届く経路は一つも存在しない**」を中核保証とした（v2 5.1 節）。Project State はこの保証を**意図的に緩和する**。Agent が書いた Current State のうち Task 名・goal・status・詳細件数からなる索引 card は、人の review を経ずに次のセッションの bootstrap へ push される。approach・open questions・blockers・next actions の本文は `task_get` で明示取得する。
+Memory の信頼境界は v2 5.1 節に定める。Agent は自分の判断で恒久 Memory を採用・退役・置換・復帰できない。Agent が独自に考えた変更は根拠つき proposal として pending に置く。一方、会話中のユーザー明示指示を Agent が運ぶ場合は、その指示を `user_instruction` として記録して同じセッションで実行できる。actor は Agent のまま残す。短い原文と会話参照は監査用であり、サーバーが指示の真正性を認証するものではない。Agent の有用性判断・confidence・ユーザーの沈黙は承認ではない。
 
-緩和する理由は、作業状態の性質にある。頻繁に変わるものに毎回人の確定を要求すれば書かれなくなり、書かれない state は存在しないのと同じである。週数件の Memory と違い、Review を挟む運用が成立しない。
+Project State は性質が異なる。Agent が書いた Current State のうち Task 名・goal・status・詳細件数からなる索引 card は、人の review を経ずに次のセッションの bootstrap へ push される。approach・open questions・blockers・next actions の本文は `task_get` で明示取得する。
+
+都度の承認を省く理由は、作業状態の性質にある。頻繁に変わるものに毎回人の確定を要求すれば書かれなくなり、書かれない state は存在しないのと同じである。恒久 Memory はこの性質を持たず、明示指示のない Agent の変更は proposal のまま残す。
 
 緩和の被害は三方向から bound する。
 
@@ -269,6 +271,7 @@ Agent の書き分けは次の四行に収まるように設計する。これ�
 調べて分かった            → trace_put
 痛かった                  → pain_report
 User が覚えてと言った     → memory_nominate
+明示指示による採用      → memory_admit
 作業の区切り              → task_checkpoint
 ```
 
@@ -297,7 +300,8 @@ attempt_record と decision_record は「失敗した試行の結末」「後か
 | task 作成・state・checkpoint・attempt・decision・artifact | ○ | ○ |
 | task close / reopen | × | ○ |
 | close proposal（提案のみ・決定ではない） | ○ | ○（取り下げ） |
-| Memory の active 化・revise・retire | × | ○ |
+| Memory admission / retire / replace / restore | 明示指示どおりの実行、または pending proposal | 直接操作 |
+| Memory revise / delivery / guard | × | ○ |
 | Temporary Context | × | ○ |
 | Scope / Route / delivery / guard | × | ○ |
 
@@ -307,24 +311,19 @@ v2 の入口拒否（`redact.py`、commit hook と共用の禁止パターン）
 
 ## 11. 自動処理は決定的なもののみ
 
-LLM background worker は置かない。存在する自動処理は、Trace expiry・Temporary Context expiry・lease の導出判定・token count・hard limit・重複照合・orphan reference check だけであり、いずれも決定的である。「この Task は終わったように見える」という LLM 判定はしない。
+LLM background worker や、利用頻度・経過日数・confidence による自律的な Memory 採用・退役は置かない。実行できるのは、明示指示に従った操作、登録済み Temporary Context の期限失効、承認済み置換に伴う旧 Memory の退役までである。その他の存在する自動処理は Trace expiry・lease の導出判定・token count・hard limit・重複照合・orphan reference check であり、決定的である。「この Task は終わったように見える」という LLM 判定はしない。
 
 ## 12. v2 文書への修正点
 
 v3 実装のマージ時に、`docs/mashu-v2.md` の次の箇所へ注記を入れる（前提を変えた実装と同じコミットで直す）。
 
-1. **5.1 節の保証文** — 「Agent の書き込みが人の確定なしに他セッションへ届く経路は一つも存在しない」は Memory についての保証に限定し、Current State の緩和（本書 3.1 節）への参照を付す
-2. **6.1 節の返却内容** — 「これで全部である」に active Task State の追加を反映する
-3. **8.1 節の Tool 数** — 6 つに Project State 系が加わる
-4. **2 節の置き場の分担** — 「作業状態は Obsidian・プロジェクト文書が持つ」を本書への参照に差し替える
-
-同時に、ユーザーのグローバル CLAUDE.md / AGENTS.md の「情報の置き場所」の層分担も同じタイミングで更新する。
+v2 の Memory 信頼境界と Tool は `docs/mashu-v2.md` を正本として更新する。Project State 側の本文は本書 3.1 節で、明示指示による Memory 実行と、Agent が自律判断で恒久化しない境界を説明する。
 
 ## 13. インターフェース追加
 
-### 13.1 MCP Tool（既存 6 + 追加 9）
+### 13.1 MCP Tool（Memory 関連 11 + Project State 関連 11）
 
-既存 6 つのうち `trace_put` / `trace_search` / `memory_list` / `memory_nominate` は変更しない。`session_bootstrap` は返却内容が広がり、`pain_report` は 9 節の二つの形を受けるため `prevention_kind`（`rule` 既定 / `work`）と `task_id` を取る。追加は
+Memory 関連 Tool は `docs/mashu-v2.md` 8.1 節に記す。`session_bootstrap` は返却内容が広がり、`pain_report` は 9 節の二つの形を受けるため `prevention_kind`（`rule` 既定 / `work`）と `task_id` を取る。Project State 関連の追加は
 
 | Tool | 役割 |
 |---|---|
@@ -361,17 +360,17 @@ dashboard は Attention / Memories / Work / Settings & health の四領域を持
 
 ## 14. スキーマ
 
-既存 9 表に 7 表を足して 16 表。migration は 0004 から追加する。0001–0003 の内容には触れないが、`ledger` には 0005 で 2 列を足し（`prevention_kind`、`filed_task`。9 節）、0006 で両者を結ぶ CHECK を張る（`filed_task` が非 NULL なら `prevention_kind='work'`）。台帳行そのものは append-only のままで、**提出先は行が書かれる前に決まり、後から書き込むことはできない**。矛盾した行を後から直す手段が無いことが、規約ではなく制約で持つ理由である。
+現在の Memory 10 表に Project State 7 表を加えて 17 表。Project State の migration は 0004 から始まる。`ledger` には 0005 で 2 列を足し（`prevention_kind`、`filed_task`。9 節）、0006 で両者を結ぶ CHECK を張る（`filed_task` が非 NULL なら `prevention_kind='work'`）。台帳行そのものは append-only のままで、**提出先は行が書かれる前に決まり、後から書き込むことはできない**。矛盾した行を後から直す手段が無いことが、規約ではなく制約で持つ理由である。
 
 ```text
 既存: scope route ledger trace memory memory_revision
-      nomination temporary_context event_log
+      nomination memory_change temporary_context event_log
 
 追加: project task task_state task_checkpoint
       attempt decision artifact_reference
 ```
 
-PostgreSQL の schema 分離（`memory.*` / `project.*`）は行わない。既存 9 表が public にある以上、途中から分離しても境界は語られない。**境界はコードの module boundary で持つ**（`projects.py` / `tasks.py` / `task_history.py` を新設し、既存 module に Project State のロジックを混ぜない）。拡張は引き続き pg_trgm のみで、pgvector は導入しない。
+PostgreSQL の schema 分離（`memory.*` / `project.*`）は行わない。既存表が public にある以上、途中から分離しても境界は語られない。**境界はコードの module boundary で持つ**（`projects.py` / `tasks.py` / `task_history.py` を新設し、既存 module に Project State のロジックを混ぜない）。拡張は引き続き pg_trgm のみで、pgvector は導入しない。
 
 並行書き込みは v2 と同じく advisory lock で直列化する。lock 対象に Task 生成時の重複照合と生成の間、および checkpoint（置換 + 凍結）の原子性を加える。lease に遷移が無い（7 節）ため、遷移の競合対策は不要である。
 
@@ -389,9 +388,12 @@ Task lifecycle:
   Current State 全文は card だけでは配信されず、着手前に task_get する
 
 Memory（v2 のまま）:
-  Agent は active な Memory を作れない
+  Agent 独自の Memory change は pending proposal に留まる
+  明示指示の実行では actor と承認根拠を別に記録する
+  MCP の承認出所は監査用であり、会話の真正性を認証しない
   active な Memory には必ず evidence がある
-  退役には理由が必須で、tombstone は再入場の前に提示される
+  退役には理由と retirement_kind が必須で、conflict を種類に応じて扱う
+  proposal version、対象 revision、conflict が変われば古い判断で適用できない
 
 Bootstrap:
   active な Memory と active な Task card だけが push される
@@ -443,12 +445,12 @@ event_log から最低限次を測れるようにする。active / dormant Task 
 
 Mashu v3 は、chat history の全保存・AI 日記・Git / Obsidian / Issue tracker の置き換え・document management・vector knowledge base・自律的な project manager・完了の自動判定・universal semantic memory のいずれでもない。
 
-Project State が入っても、speculative extraction・Session End Extraction・LLM sweeper・pgvector 既定・unified Knowledge Entity・未審査知識の配信・束 Review・stale の自動書き換え・AI による Memory admission・AI による Task 完了判定は復活させない。
+Project State が入っても、speculative extraction・Session End Extraction・LLM sweeper・pgvector 既定・unified Knowledge Entity・未審査知識の配信・束 Review・stale の自動書き換え・Agent の自律的な Memory 採用や退役・AI による Task 完了判定は復活させない。明示指示に従う Memory 操作は v2 の記録済み provenance を伴う。
 
 ## 19. 中心命題
 
 > **人間と Agent が毎回読むものは極小にする。大量に残すものは履歴として隔離する。恒久化するものには実証を要求する。そして現在の状態は、それが最後に確認された日付とともにしか語らせない。**
 
-Memory は少なく、強く、人が確定する。Current State は Agent が頻繁に置換するが、常時配信するのは小さな日付つき card だけで、全文は既知の Task IDから必要時に読む。履歴は残すが配信しない。Artifacts は複製せず参照する。Task の完了は人が決め、進行中かどうかは活動の証拠が決める。
+Memory は少なく、強く保つ。Agent 独自の案は pending とし、明示指示を受けた Agent の実行は出所を残すが、記録は認証ではない。Current State は Agent が頻繁に置換するが、常時配信するのは小さな日付つき card だけで、全文は既知の Task IDから必要時に読む。履歴は残すが配信しない。Artifacts は複製せず参照する。Task の完了は人が決め、進行中かどうかは活動の証拠が決める。
 
 > **沈黙を完了と解釈しない。だが沈黙した Task を永遠に現在として配信もしない。**

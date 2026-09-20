@@ -36,9 +36,12 @@ LIMIT %(limit)s
 
 # Only four columns, and content is not among them.
 _TOMBSTONES = """
-SELECT m.memory_id, m.retire_reason, m.retired_at, similarity(m.content, %(text)s) AS score
+SELECT m.memory_id, m.retire_reason, m.retired_at, m.retirement_kind,
+       m.superseded_by, m.relocated_to_kind, m.relocated_to_id,
+       similarity(m.content, %(text)s) AS score
 FROM memory m
 WHERE m.status = 'retired'
+  AND (%(exclude)s::uuid IS NULL OR m.memory_id <> %(exclude)s::uuid)
   AND similarity(m.content, %(text)s) >= %(floor)s
 ORDER BY score DESC, m.retired_at DESC
 LIMIT %(limit)s
@@ -82,9 +85,18 @@ def similar_traces(
     return cur.fetchall()
 
 
-def similar_tombstones(cur: psycopg.Cursor, text: str, *, limit: int = 3) -> list[dict[str, Any]]:
+def similar_tombstones(
+    cur: psycopg.Cursor,
+    text: str,
+    *,
+    exclude: UUID | None = None,
+    limit: int | None = 3,
+) -> list[dict[str, Any]]:
     """Retired memories this resembles, as reasons rather than as claims."""
-    cur.execute(_TOMBSTONES, {"text": text, "floor": _floor(), "limit": limit})
+    cur.execute(
+        _TOMBSTONES,
+        {"text": text, "floor": _floor(), "exclude": exclude, "limit": limit},
+    )
     return cur.fetchall()
 
 

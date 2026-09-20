@@ -1,16 +1,37 @@
 from __future__ import annotations
 
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
 
-from mashu import ledger, memories, nominations
+from mashu import ledger, memories, nominations, scopes
 from mashu.errors import MashuError, RefusedError
 
 HOLE = "always run the migration before starting the local server"
 SAME_HOLE = "always run the migrations before starting the local server"
 OTHER_HOLE = "quotas on the shared queue reset at midnight every day"
+
+
+def admit(cur, nomination_id, **kwargs):
+    cur.execute(
+        "SELECT version, conflicts FROM nomination WHERE nomination_id = %s", (nomination_id,)
+    )
+    candidate = cur.fetchone()
+    conflicts = nominations.conflict_rows(cur, candidate["conflicts"])
+    acknowledged = [
+        row["memory_id"]
+        for row in conflicts
+        if row.get("retirement_kind") in ("invalidated", "legacy")
+    ]
+    return nominations.admit(
+        cur,
+        nomination_id,
+        expected_version=kwargs.pop("expected_version", candidate["version"]),
+        approval={"kind": "user_direct", "conflict_ids": acknowledged},
+        request_id=uuid4(),
+        **kwargs,
+    )
 
 
 def two_pains(cur, scope_id=None):
@@ -36,11 +57,11 @@ def two_pains(cur, scope_id=None):
 
 def test_admitting_carries_the_evidence_across(cur):
     first, second, nomination = two_pains(cur)
-    memory = nominations.admit(cur, nomination["nomination_id"], actor="user", delivery="always")
+    memory = admit(cur, nomination["nomination_id"], actor="user", delivery="always")
 
     assert memory["status"] == "active"
     assert memory["content"] == nomination["content"]
-    assert memory["evidence"] == [first["ledger_id"], second["ledger_id"]]
+    assert memory["evidence"] == [str(first["ledger_id"]), str(second["ledger_id"])]
 
     cur.execute(
         "SELECT status, memory_id FROM nomination WHERE nomination_id = %s",
@@ -48,12 +69,12 @@ def test_admitting_carries_the_evidence_across(cur):
     )
     row = cur.fetchone()
     assert row["status"] == "admitted"
-    assert row["memory_id"] == memory["memory_id"]
+    assert str(row["memory_id"]) == memory["memory_id"]
 
 
 def test_the_first_revision_names_where_the_rule_came_from(cur):
     _, _, nomination = two_pains(cur)
-    memory = nominations.admit(cur, nomination["nomination_id"], actor="user", delivery="always")
+    memory = admit(cur, nomination["nomination_id"], actor="user", delivery="always")
     cur.execute(
         "SELECT content, note FROM memory_revision WHERE memory_id = %s",
         (memory["memory_id"],),
@@ -65,7 +86,7 @@ def test_the_first_revision_names_where_the_rule_came_from(cur):
 
 def test_an_admission_may_reword_the_rule_and_choose_where_it_lands(cur, scope_id):
     _, _, nomination = two_pains(cur, scope_id=scope_id)
-    memory = nominations.admit(
+    memory = admit(
         cur,
         nomination["nomination_id"],
         actor="user",
@@ -76,7 +97,7 @@ def test_an_admission_may_reword_the_rule_and_choose_where_it_lands(cur, scope_i
     assert memory["content"] == "run the migration first"
     assert memory["delivery"] == "guard"
     assert memory["guard_action"] == "Bash"
-    assert memory["scope_id"] == scope_id
+    assert memory["scope_id"] == str(scope_id)
 
 
 def test_a_pending_candidate_can_be_reworded_without_being_decided(cur):
@@ -95,6 +116,8 @@ def test_a_pending_candidate_can_be_reworded_without_being_decided(cur):
     assert cur.fetchone()["detail"] == {
         "from_chars": len(nomination["content"]),
         "to_chars": len("run the migration before the server"),
+        "conflicts": [],
+        "version": revised["version"],
     }
 
 
@@ -113,9 +136,9 @@ def test_a_decided_candidate_cannot_be_reworded(cur):
 
 def test_a_decision_is_made_once(cur):
     _, _, nomination = two_pains(cur)
-    nominations.admit(cur, nomination["nomination_id"], actor="user", delivery="always")
+    admit(cur, nomination["nomination_id"], actor="user", delivery="always")
     with pytest.raises(MashuError, match="already admitted"):
-        nominations.admit(cur, nomination["nomination_id"], actor="user", delivery="always")
+        admit(cur, nomination["nomination_id"], actor="user", delivery="always")
     with pytest.raises(MashuError, match="already admitted"):
         nominations.decline(cur, nomination["nomination_id"], actor="user", reason="no")
 
@@ -146,7 +169,7 @@ def test_a_decided_candidate_leaves_the_queue(cur):
         evidence=[nomination["evidence"][0]],
         actor="agent",
     )
-    nominations.admit(cur, other["nomination_id"], actor="user", delivery="always")
+    admit(cur, other["nomination_id"], actor="user", delivery="always")
     assert nominations.pending_nominations(cur) == []
 
 
@@ -215,11 +238,159 @@ def test_a_carried_instruction_reaches_the_queue_and_stops_there(cur, scope_id):
     evidence = cur.fetchone()
     assert evidence["kind"] == "claimed"
     assert evidence["prevention"] == HOLE
-    assert "confirm before it stands" in evidence["what"]
+    assert "approval source" in evidence["what"]
     assert evidence["created_by"] == "the agent"
 
     cur.execute("SELECT count(*) AS n FROM memory")
     assert cur.fetchone()["n"] == 0
+
+
+def test_explicit_instruction_admits_in_the_same_session_and_keeps_agent_as_actor(cur):
+    got = nominations.nominate_user_explicit(cur, content=HOLE, actor="the agent")
+    nomination = got["nomination"]
+    nomination_id = nomination["nomination_id"]
+    request_id = uuid4()
+    approval = {
+        "kind": "user_instruction",
+        "instruction": "Remember to run the migration before starting the local server",
+        "conversation_ref": "conversation:turn-18",
+    }
+
+    with pytest.raises(MashuError, match="approval kind"):
+        nominations.admit(
+            cur,
+            nomination_id,
+            actor="the agent",
+            delivery="always",
+            expected_version=nomination["version"],
+            approval={},
+            request_id=uuid4(),
+        )
+    memory = nominations.admit(
+        cur,
+        nomination_id,
+        actor="the agent",
+        delivery="always",
+        expected_version=nomination["version"],
+        approval=approval,
+        request_id=request_id,
+    )
+    memories.retire(
+        cur,
+        memory["memory_id"],
+        reason="the admitted rule later stopped applying",
+        retirement_kind="out_of_scope",
+        actor="user",
+    )
+    replay = nominations.admit(
+        cur,
+        nomination_id,
+        actor="the agent",
+        delivery="always",
+        expected_version=nomination["version"],
+        approval=approval,
+        request_id=request_id,
+    )
+
+    assert replay == memory
+    assert replay["status"] == "active"
+    assert memories.get_memory(cur, memory["memory_id"])["status"] == "retired"
+    assert memory["created_by"] == "the agent"
+    cur.execute(
+        "SELECT status, decided_by, approval_source FROM nomination WHERE nomination_id = %s",
+        (nomination_id,),
+    )
+    row = cur.fetchone()
+    assert row["status"] == "admitted"
+    assert row["decided_by"] == "the agent"
+    assert row["approval_source"]["kind"] == "user_instruction"
+    assert row["approval_source"]["instruction"] == approval["instruction"]
+    assert row["approval_source"]["conversation_ref"] == approval["conversation_ref"]
+
+
+def test_a_banned_pattern_in_an_instruction_quote_is_refused(cur):
+    nomination = nominations.nominate_user_explicit(cur, content=HOLE, actor="the agent")[
+        "nomination"
+    ]
+    with pytest.raises(RefusedError):
+        nominations.admit(
+            cur,
+            nomination["nomination_id"],
+            actor="the agent",
+            delivery="always",
+            expected_version=nomination["version"],
+            approval={
+                "kind": "user_instruction",
+                "instruction": "write SECRETMARKER9 into the memory",
+                "conversation_ref": "conversation:turn-19",
+            },
+            request_id=uuid4(),
+        )
+    cur.execute(
+        "SELECT status FROM nomination WHERE nomination_id = %s",
+        (nomination["nomination_id"],),
+    )
+    assert cur.fetchone()["status"] == "pending"
+
+
+def test_admission_rejects_a_candidate_version_changed_after_reading(cur):
+    nomination = nominations.nominate_user_explicit(
+        cur, content="the original migration rule is signed before storage", actor="agent"
+    )["nomination"]
+    changed = nominations.revise(
+        cur,
+        nomination["nomination_id"],
+        content="the current migration rule is verified before storage",
+        actor="agent",
+    )
+    assert changed["version"] > nomination["version"]
+
+    with pytest.raises(MashuError, match="nomination version changed"):
+        nominations.admit(
+            cur,
+            nomination["nomination_id"],
+            actor="agent",
+            delivery="always",
+            expected_version=nomination["version"],
+            approval={
+                "kind": "user_instruction",
+                "instruction": "Remember the original migration rule",
+            },
+            request_id=uuid4(),
+        )
+
+    memory = nominations.admit(
+        cur,
+        nomination["nomination_id"],
+        actor="agent",
+        delivery="always",
+        expected_version=changed["version"],
+        approval={
+            "kind": "user_instruction",
+            "instruction": "Remember the verified migration rule",
+        },
+        request_id=uuid4(),
+    )
+    assert memory["content"] == changed["content"]
+
+
+def test_nomination_version_changes_when_scope_changes(cur, scope_id):
+    nomination = nominations.nominate_user_explicit(
+        cur,
+        content="scope-bound checksum rule waits for its own context",
+        actor="agent",
+        scope_id=scope_id,
+    )["nomination"]
+    next_scope = scopes.create_scope(cur, name="a different candidate scope", actor="user")
+    cur.execute(
+        "UPDATE nomination SET scope_id = %s WHERE nomination_id = %s",
+        (next_scope["scope_id"], nomination["nomination_id"]),
+    )
+    cur.execute(
+        "SELECT version FROM nomination WHERE nomination_id = %s",
+        (nomination["nomination_id"],),
+    )
+    assert cur.fetchone()["version"] > nomination["version"]
 
 
 def test_the_same_instruction_carried_twice_queues_once_and_counts_twice(cur):
@@ -240,7 +411,7 @@ def test_the_same_instruction_carried_twice_queues_once_and_counts_twice(cur):
 
 def test_a_carried_instruction_reaches_the_queue_carrying_the_retirement_it_repeats(cur):
     _, _, nomination = two_pains(cur)
-    memory = nominations.admit(cur, nomination["nomination_id"], actor="user", delivery="always")
+    memory = admit(cur, nomination["nomination_id"], actor="user", delivery="always")
     withdrawn = "the tool refuses on its own now"
     memories.retire(cur, memory["memory_id"], reason=withdrawn, actor="user")
 
@@ -248,7 +419,7 @@ def test_a_carried_instruction_reaches_the_queue_carrying_the_retirement_it_repe
     assert got["tombstone_conflict"] is True
     assert got["nomination"]["status"] == "pending"
     assert got["ledger_id"] is not None
-    assert got["nomination"]["conflicts"] == [memory["memory_id"]]
+    assert got["nomination"]["conflicts"] == [UUID(memory["memory_id"])]
     assert got["matches"]["tombstones"][0]["retire_reason"] == withdrawn
 
     # And it is on the queue with the reason resolved, not just an id.
@@ -312,7 +483,7 @@ def test_adding_the_same_pain_twice_does_not_lengthen_the_evidence(cur):
 
 def test_evidence_is_not_added_to_a_candidate_somebody_already_decided(cur):
     _, _, nomination = two_pains(cur)
-    nominations.admit(cur, nomination["nomination_id"], actor="user", delivery="always")
+    admit(cur, nomination["nomination_id"], actor="user", delivery="always")
     later = ledger.report_pain(
         cur, kind="friction", what="looked it up", prevention=OTHER_HOLE, actor="agent"
     )

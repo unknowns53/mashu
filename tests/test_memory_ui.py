@@ -163,13 +163,14 @@ def test_revision_without_an_editor_uses_safe_line_input(dsn, monkeypatch, capsy
     assert f"revised {str(memory['memory_id'])[:8]}" in capsys.readouterr().out
 
 
-def test_retirement_requires_a_reason_and_confirmation(dsn, monkeypatch):
+def test_retirement_selects_a_kind_and_applies_after_entering_its_reason(dsn, monkeypatch):
     memory = remember(dsn)
-    keys(monkeypatch, "r", "", "r", "the runner checks this itself", "n", "r", "reason", "y", "q")
+    keys(monkeypatch, "r", "invalidated", "reason", "q")
 
     assert memory_ui.run(dsn) == 0
     row = memory_row(dsn, memory["memory_id"])
     assert row["status"] == "retired"
+    assert row["retirement_kind"] == "invalidated"
     assert row["retire_reason"] == "reason"
 
 

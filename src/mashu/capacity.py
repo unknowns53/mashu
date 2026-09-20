@@ -17,6 +17,8 @@ LOCK_NAMESPACE = 271828
 LOCK_ADMISSION = 1
 #: Serialises the pain pipeline: ledger insert, matching, and the nomination that may follow.
 LOCK_PAIN = 2
+#: Serialises retirement changes with conflict checks used during admission and restoration.
+LOCK_RETIREMENT = 5
 
 _PUSHED = """
 SELECT delivery, scope_id, content FROM memory

@@ -16,7 +16,7 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 
@@ -27,6 +27,7 @@ from mashu import (
     db,
     events,
     memories,
+    memory_changes,
     nominations,
     projects,
     routing,
@@ -65,6 +66,7 @@ _REFERENCE_TABLES = (
     ("memory", "memory_id"),
     ("nomination", "nomination_id"),
     ("ledger", "ledger_id"),
+    ("memory_change", "change_id"),
 )
 
 
@@ -371,7 +373,7 @@ def cmd_remember(args: argparse.Namespace) -> int:
         return 0
 
     delivery = args.delivery or ("scope" if args.scope else "always")
-    override = bool(args.force)
+    acknowledged: list[UUID] | None = None
     while True:
         try:
             with db.transaction(args.dsn) as cur:
@@ -383,46 +385,110 @@ def cmd_remember(args: argparse.Namespace) -> int:
                     scope_id=scope_id,
                     delivery=delivery,
                     guard_action=args.action,
-                    override_retired=override,
+                    acknowledged_conflicts=acknowledged,
                 )
             break
         except RetiredConflictError as conflict:
-            if not _confirm_override(conflict):
+            if args.force:
+                _print_retirement_conflicts(conflict)
+                acknowledged = [row["memory_id"] for row in conflict.tombstones]
+                continue
+            acknowledged = _confirm_override(conflict)
+            if acknowledged is None:
                 return 1
-            override = True
 
     _gate_warnings(row)
     if row.get("overrides"):
         print(f"overrode  {len(row['overrides'])} retirement(s)")
+    _print_retirement_warnings(row.get("retirement_warnings") or [])
     print(f"remembered  {row['memory_id']}")
     return 0
 
 
-def _confirm_override(conflict: RetiredConflictError) -> bool:
-    """Show what was withdrawn and why, then ask whether to write it back."""
+def _print_retirement_conflicts(conflict: RetiredConflictError) -> None:
+    """Show the exact invalidated or legacy conflicts that need acknowledgment."""
     print(str(conflict), file=sys.stderr)
     for row in conflict.tombstones:
         retired = row.get("retired_at")
         when = retired.date().isoformat() if isinstance(retired, datetime) else str(retired or "")
-        print(f"  retired {_short(row['memory_id'])}  {when}", file=sys.stderr)
-        print(f"    reason: {row['retire_reason']}", file=sys.stderr)
-    if not sys.stdin.isatty():
+        retirement_kind = row.get("retirement_kind") or "legacy"
         print(
-            "refusing to write it back unasked; pass --force once you have read the reason above",
+            f"  retired {_short(row['memory_id'])}  {retirement_kind}  {when}",
             file=sys.stderr,
         )
-        return False
+        print(f"    reason: {row['retire_reason']}", file=sys.stderr)
+        if row.get("superseded_by"):
+            print(f"    successor: {row['superseded_by']}", file=sys.stderr)
+        if row.get("relocated_to_id"):
+            print(
+                f"    moved to {row['relocated_to_kind']}: {row['relocated_to_id']}",
+                file=sys.stderr,
+            )
+
+
+def _confirm_override(conflict: RetiredConflictError) -> list[UUID] | None:
+    """Show the reasons and treat an affirmative direct action as acknowledgment."""
+    _print_retirement_conflicts(conflict)
+    if not sys.stdin.isatty():
+        print(
+            "refusing to write it back without a direct acknowledgment; review the reasons and "
+            "retry with --force",
+            file=sys.stderr,
+        )
+        return None
     try:
-        answer = input("write it back anyway? [y/N] ").strip().lower()
+        answer = (
+            input("write it back after reading these retirement reasons? [y/N] ").strip().lower()
+        )
     except (EOFError, KeyboardInterrupt):
-        return False
-    return answer in ("y", "yes")
+        return None
+    return [row["memory_id"] for row in conflict.tombstones] if answer in ("y", "yes") else None
+
+
+def _print_retirement_warnings(rows: list[dict[str, Any]]) -> None:
+    for row in rows:
+        kind = row.get("retirement_kind") or "legacy"
+        print(f"warning  retired {kind}  {_short(row['memory_id'])}")
+        print(f"  reason: {row['retire_reason']}")
+        if row.get("superseded_by"):
+            print(f"  successor: {row['superseded_by']}")
+        if row.get("relocated_to_id"):
+            print(f"  moved to {row['relocated_to_kind']}: {row['relocated_to_id']}")
 
 
 def cmd_retire(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
         memory_id = _memory_ref(cur, args.memory_id)
-        row = memories.retire(cur, memory_id, reason=args.reason, actor=ACTOR)
+        row = memories.retire(
+            cur,
+            memory_id,
+            reason=args.reason,
+            actor=ACTOR,
+            retirement_kind=args.kind or "legacy",
+            superseded_by=(
+                _resolve(
+                    cur,
+                    args.superseded_by,
+                    table="memory",
+                    id_col="memory_id",
+                    label="successor memory",
+                )
+                if args.superseded_by
+                else None
+            ),
+            relocated_to_kind="temporary_context" if args.temporary_context else None,
+            relocated_to_id=(
+                _resolve(
+                    cur,
+                    args.temporary_context,
+                    table="temporary_context",
+                    id_col="context_id",
+                    label="temporary context",
+                )
+                if args.temporary_context
+                else None
+            ),
+        )
     _gate_warnings(row)
     print(f"retired  {row['memory_id']}")
     return 0
@@ -572,6 +638,88 @@ def _show_memory(cur: Any, memory_id: UUID) -> None:
     print("revisions")
     for revision in cur.fetchall():
         print(f"  {_date(revision['created_at'])}  {revision['content']}")
+    if row["status"] == "retired":
+        _field("retirement kind", row.get("retirement_kind") or "legacy")
+        _field("successor", row.get("superseded_by") or "-")
+        if row.get("relocated_to_id"):
+            _field(
+                "moved to",
+                f"{row['relocated_to_kind']}  {row['relocated_to_id']}",
+            )
+    cur.execute(
+        """
+        SELECT event_type, actor, detail, created_at
+        FROM event_log
+        WHERE memory_id = %s
+          AND event_type IN ('memory_retired', 'memory_restored', 'memory_retirement_classified')
+        ORDER BY event_id
+        """,
+        (memory_id,),
+    )
+    history = cur.fetchall()
+    if history:
+        print("retirement history")
+        for event in history:
+            _field("event", f"{event['event_type']}  {_date(event['created_at'])}")
+            _field("actor", event["actor"])
+            detail = event.get("detail") or {}
+            if detail.get("approval_source"):
+                _field("approval", detail["approval_source"])
+
+
+def _show_memory_change(cur: Any, change_id: UUID) -> None:
+    row = memory_changes.get(cur, change_id)
+    if row is None:
+        raise MashuError(f"no memory change {change_id}")
+    _field("memory change", row["change_id"])
+    _field("operation", row["operation"])
+    _field("status", row["status"])
+    _field("version", row["version"])
+    _field("proposed", f"{row['proposed_by']}  {_date(row['proposed_at'])}")
+    _field("target", f"{row['target_memory_id']}  revision {row['target_revision_id']}")
+    print("target body")
+    print(f"  {row['target']['content']}")
+    if row["operation"] in ("retire", "replace"):
+        _field("retirement kind", row["retirement_kind"])
+        _field("retire reason", row["retire_reason"])
+    if row["operation"] == "restore":
+        _field("restore reason", row["restore_reason"])
+    if row.get("successor"):
+        _field("successor nomination", row["successor_nomination_id"])
+        _field("successor version", row["successor_snapshot"]["version"])
+        print(f"  proposed  {row['successor_snapshot']['content']}")
+        _field("candidate scope", row["successor_snapshot"]["scope_id"] or "-")
+        _field("candidate kind", row["successor_snapshot"]["kind"])
+        _field("candidate evidence", ", ".join(row["successor_snapshot"]["evidence"]))
+        _field(
+            "replacement delivery",
+            f"guard: {row['successor_guard_action']}"
+            if row["successor_delivery"] == "guard"
+            else row["successor_delivery"],
+        )
+        _field("replacement scope", row["successor_scope_id"] or "-")
+        if row.get("successor_changed"):
+            print(f"  current v{row['successor']['version']}  {row['successor']['content']}")
+            _field("current candidate scope", row["successor"]["scope_id"] or "-")
+            _field("candidate status", "changed since proposal; refresh and reread")
+    if row.get("relocated_to_id"):
+        _field("destination", f"{row['relocated_to_kind']}  {row['relocated_to_id']}")
+    if row["status"] == "applied":
+        _field("applied by", row["decided_by"] or "-")
+        _field("approval", row["approval_source"] or "-")
+        _field("request", row["apply_request_id"] or "-")
+    print("evidence")
+    for evidence in row.get("evidence", []):
+        reference = evidence.get("id") or evidence.get("ref") or "-"
+        print(f"  {evidence['kind']}  {reference}")
+        if evidence.get("observation"):
+            print(f"    {evidence['observation']}")
+    print("retirement conflicts")
+    for conflict in row.get("conflicts", []):
+        print(
+            f"  {conflict['memory_id']}  {conflict.get('retirement_kind') or 'legacy'}  "
+            f"{conflict['retire_reason']}"
+        )
 
 
 def _show_nomination(cur: Any, nomination_id: UUID) -> None:
@@ -587,14 +735,26 @@ def _show_nomination(cur: Any, nomination_id: UUID) -> None:
     _field("nomination", row["nomination_id"])
     _field("kind", row["kind"])
     _field("status", row["status"])
+    _field("version", row["version"])
     _field("scope", row["scope_name"] or "-")
     print("content")
     print(f"  {row['content']}")
     # Show retirement conflicts before the evidence list.
     for conflict in nominations.conflict_rows(cur, row["conflicts"]):
-        print(f"! contradicts retired {_short(conflict['memory_id'])}")
+        print(
+            f"! contradicts retired {_short(conflict['memory_id'])}  "
+            f"{conflict.get('retirement_kind') or 'legacy'}"
+        )
         print(f"  retired because: {conflict['retire_reason']}")
+        if conflict.get("superseded_by"):
+            print(f"  successor: {conflict['superseded_by']}")
+        if conflict.get("relocated_to_id"):
+            print(f"  moved to {conflict['relocated_to_kind']}: {conflict['relocated_to_id']}")
     _print_evidence(cur, row["evidence"])
+    if row["status"] == "admitted":
+        _field("executed by", row["decided_by"] or "-")
+        _field("approval", row["approval_source"] or "-")
+        _field("request", row["admit_request_id"] or "-")
     if row["status"] == "declined":
         _field("declined", row["decision_reason"] or "-")
 
@@ -625,7 +785,12 @@ def _show_ledger(cur: Any, ledger_id: UUID) -> None:
         print(f"  {cite['held_in']:<10}  {_short(cite['row_id'])}  {cite['status']}")
 
 
-_SHOW = {"memory": _show_memory, "nomination": _show_nomination, "ledger": _show_ledger}
+_SHOW = {
+    "memory": _show_memory,
+    "nomination": _show_nomination,
+    "ledger": _show_ledger,
+    "memory_change": _show_memory_change,
+}
 
 
 def cmd_show(args: argparse.Namespace) -> int:
@@ -716,14 +881,26 @@ def _print_pending(rows: list[dict[str, Any]]) -> None:
     if not rows:
         print("nothing waiting for review")
     for row in rows:
-        print(f"{row['nomination_id']}  {row['kind']}  {row.get('scope_name') or '-'}")
+        print(
+            f"{row['nomination_id']}  v{row['version']}  {row['kind']}  "
+            f"{row.get('scope_name') or '-'}"
+        )
         print(f"  {row['content']}")
         if row.get("deferred_at"):
             print(f"  deferred: {row.get('defer_reason') or ''}")
         # Above the evidence here too.
         for conflict in row.get("conflict_rows", []):
-            print(f"  ! contradicts retired {_short(conflict['memory_id'])}")
+            print(
+                f"  ! retired conflict {_short(conflict['memory_id'])}  "
+                f"{conflict.get('retirement_kind') or 'legacy'}"
+            )
             print(f"    retired because: {conflict['retire_reason']}")
+            if conflict.get("superseded_by"):
+                print(f"    successor: {conflict['superseded_by']}")
+            if conflict.get("relocated_to_id"):
+                print(
+                    f"    moved to {conflict['relocated_to_kind']}: {conflict['relocated_to_id']}"
+                )
         for evidence in row.get("evidence_rows", []):
             print(
                 f"  evidence {evidence['kind']} {evidence.get('created_at', '')}: "
@@ -731,28 +908,149 @@ def _print_pending(rows: list[dict[str, Any]]) -> None:
             )
 
 
+def _pending_change_by_ref(cur: Any, value: str) -> dict[str, Any]:
+    wanted = _resolve(
+        cur,
+        value,
+        table="memory_change",
+        id_col="change_id",
+        label="pending memory change",
+        extra_where="status = 'pending'",
+    )
+    row = memory_changes.get(cur, wanted)
+    if row is None or row["status"] != "pending":
+        raise MashuError(f"pending memory change '{value}' not found")
+    return row
+
+
+def _print_memory_changes(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        print("nothing waiting for Memory change review")
+    for row in rows:
+        print(
+            f"{row['change_id']}  {row['operation']}  v{row['version']}  "
+            f"{row.get('retirement_kind') or '-'}  target {row['target_memory_id']} "
+            f"revision {row['target_revision_id']}  proposed by {row['proposed_by']} "
+            f"{_date(row['proposed_at'])}"
+        )
+        print(f"  {row['target']['content']}")
+        if row["operation"] in ("retire", "replace"):
+            print(f"  retirement reason: {row['retire_reason']}")
+        if row["operation"] == "restore":
+            print(f"  restore reason: {row['restore_reason']}")
+        if row.get("successor"):
+            print(f"  successor: {row['successor']['content']}")
+        for conflict in row.get("conflicts", []):
+            print(
+                f"  ! {conflict.get('retirement_kind') or 'legacy'} conflict "
+                f"{conflict['memory_id']}: {conflict['retire_reason']}"
+            )
+        for evidence in row.get("evidence", []):
+            print(
+                f"  evidence {evidence['kind']}: {evidence.get('id') or evidence.get('ref') or '-'}"
+            )
+
+
 def cmd_review(args: argparse.Namespace) -> int:
+    if args.changes and (
+        args.admit
+        or args.decline
+        or args.apply_change
+        or args.decline_change
+        or args.withdraw_change
+    ):
+        raise MashuError("--changes cannot be combined with an admission or Memory change decision")
+    with db.transaction(args.dsn) as cur:
+        pending_schema = migration.pending(cur)
+    if pending_schema:
+        raise MashuError(
+            f"store is behind the code: {', '.join(pending_schema)} not applied; "
+            "run 'mashu admin migrate'"
+        )
+    if args.apply_change:
+        if args.version is None:
+            raise MashuError("--apply-change requires --version from the proposal you reviewed")
+        with db.transaction(args.dsn) as cur:
+            change_id = _resolve(
+                cur,
+                args.apply_change,
+                table="memory_change",
+                id_col="change_id",
+                label="memory change",
+            )
+            change = memory_changes.get(cur, change_id)
+            request_id = args.request_id or uuid4()
+            result = memory_changes.apply(
+                cur,
+                change_id,
+                version=args.version,
+                request_id=request_id,
+                approval={
+                    "kind": "user_direct",
+                    "conflict_ids": args.ack_conflict or [],
+                },
+                actor=ACTOR,
+            )
+        target = result.get("memory") or {}
+        suffix = f" → {target['memory_id']}" if result["operation"] == "replace" else ""
+        print(f"{result['operation']}  {change['target_memory_id']}{suffix}\nrequest  {request_id}")
+        return 0
+    if args.decline_change or args.withdraw_change:
+        if not args.reason:
+            raise MashuError("--decline-change and --withdraw-change require --reason")
+        status = "declined" if args.decline_change else "withdrawn"
+        reference = args.decline_change or args.withdraw_change
+        with db.transaction(args.dsn) as cur:
+            change = _pending_change_by_ref(cur, reference)
+            memory_changes.decide(
+                cur,
+                change["change_id"],
+                status=status,
+                actor=ACTOR,
+                reason=args.reason,
+            )
+        print(f"{status}  {change['change_id']}")
+        return 0
     if args.list:
         with db.transaction(args.dsn) as cur:
-            rows = nominations.pending_nominations(cur, include_deferred=args.all)
-        _print_pending(rows)
+            if args.changes:
+                rows = memory_changes.pending(cur)
+            else:
+                rows = nominations.pending_nominations(cur, include_deferred=args.all)
+        _print_memory_changes(rows) if args.changes else _print_pending(rows)
         return 0
+    if args.changes:
+        from mashu import memory_change_ui
+
+        return memory_change_ui.run(args.dsn)
     if args.admit:
         with db.transaction(args.dsn) as cur:
-            nomination = _pending_by_id(cur, args.admit)
+            nomination_id = _resolve(
+                cur,
+                args.admit,
+                table="nomination",
+                id_col="nomination_id",
+                label="nomination",
+            )
+            cur.execute("SELECT * FROM nomination WHERE nomination_id = %s", (nomination_id,))
+            nomination = cur.fetchone()
             scope_id = _scope(cur, args.scope) if args.scope else None
             delivery = args.delivery or (
                 "scope" if (args.scope or nomination.get("scope_id")) else "always"
             )
+            request_id = args.request_id or uuid4()
             row = nominations.admit(
                 cur,
                 nomination["nomination_id"],
                 actor=ACTOR,
                 delivery=delivery,
+                expected_version=nomination["version"],
                 scope_id=scope_id,
                 guard_action=args.action,
+                approval={"kind": "user_direct", "conflict_ids": args.ack_conflict or []},
+                request_id=request_id,
             )
-        print(f"admitted  {row['memory_id']}")
+        print(f"admitted  {row['memory_id']}\nrequest  {request_id}")
         return 0
     if args.decline:
         if not args.reason:
@@ -1312,7 +1610,21 @@ def build_parser() -> argparse.ArgumentParser:
         examples=('mashu retire 1a2b3c4d --reason "The service no longer exists"',),
     )
     retire.add_argument("memory_id", help=_REF_HELP)
-    retire.add_argument("--reason", required=True, help="why it is wrong; later matches read this")
+    retire.add_argument(
+        "--reason", required=True, help="why it is retired; later matches read this"
+    )
+    retire.add_argument(
+        "--kind",
+        choices=("invalidated", "superseded", "out_of_scope", "relocated", "legacy"),
+        help="why it is retired; omission records legacy for compatibility",
+    )
+    retire.add_argument(
+        "--superseded-by", help="successor Memory ID or unique prefix for superseded"
+    )
+    retire.add_argument(
+        "--temporary-context",
+        help="destination Temporary Context ID or unique prefix for relocated",
+    )
     retire.set_defaults(func=cmd_retire)
 
     revise = _command(
@@ -1427,13 +1739,15 @@ def build_parser() -> argparse.ArgumentParser:
         "review",
         "decide the pending candidates, one at a time",
         description=(
-            "Open the interactive review UI, list its queue non-interactively, or decide one "
-            "candidate by reference. Admission and rejection are User decisions."
+            "Open the interactive review UI for pending Memory nominations or proposed changes, "
+            "list either queue, or make direct CLI User decisions by reference."
         ),
         examples=(
             "mashu review",
             "mashu review --list --all",
             "mashu review --admit 1a2b3c4d --delivery scope --scope deployment",
+            "mashu review --changes",
+            "mashu review --changes --list",
             'mashu review --decline 1a2b3c4d --reason "Too specific to one run"',
         ),
     )
@@ -1441,6 +1755,22 @@ def build_parser() -> argparse.ArgumentParser:
     review_group.add_argument("--list", action="store_true", help="print the queue and stop")
     review_group.add_argument("--admit", metavar="REF", help=f"admit one candidate: {_REF_HELP}")
     review_group.add_argument("--decline", metavar="REF", help=f"turn one down: {_REF_HELP}")
+    review_group.add_argument(
+        "--apply-change", metavar="REF", help=f"apply one reviewed Memory change: {_REF_HELP}"
+    )
+    review_group.add_argument(
+        "--decline-change", metavar="REF", help=f"decline one Memory change: {_REF_HELP}"
+    )
+    review_group.add_argument(
+        "--withdraw-change", metavar="REF", help=f"withdraw one Memory change: {_REF_HELP}"
+    )
+    review.add_argument("--changes", action="store_true", help="open or list Memory changes")
+    review.add_argument("--version", type=int, help="proposal version shown by review --changes")
+    review.add_argument(
+        "--request-id",
+        type=UUID,
+        help="reuse this UUID to replay one nomination admission or Memory change apply",
+    )
     review.add_argument(
         "--delivery",
         choices=("always", "scope", "guard"),
@@ -1448,6 +1778,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     review.add_argument("--scope", help="the scope the admitted memory belongs to")
     review.add_argument("--action", help="the tool it stands in front of, for guard")
+    review.add_argument(
+        "--ack-conflict",
+        action="append",
+        type=UUID,
+        help="explicitly acknowledge a displayed invalidated or legacy conflict (repeat per id)",
+    )
     review.add_argument("--reason", help="why it is turned down; required with --decline")
     review.add_argument(
         "--all", action="store_true", help="include the candidates that were put off"

@@ -79,6 +79,12 @@ def report_pain(
         "tombstones": match.similar_tombstones(cur, prevention),
         "memories": match.similar_active_memories(cur, prevention),
     }
+    retirement_conflicts = [
+        row
+        for row in match.similar_tombstones(cur, prevention, limit=None)
+        if row["score"] >= config.match_threshold()
+    ]
+    conflict_ids = [row["memory_id"] for row in retirement_conflicts]
     result: dict[str, Any] = {
         "ledger_id": ledger_id,
         "unchecked": verdict.unchecked,
@@ -86,6 +92,7 @@ def report_pain(
         "nomination": None,
         "nomination_existing": False,
         "tombstone_suppressed": False,
+        "retirement_conflicts": retirement_conflicts,
         "delivery_suspect": False,
         "prevention_kind": prevention_kind,
         "filed_task": filed_task,
@@ -107,17 +114,6 @@ def report_pain(
         return result
 
     threshold = config.match_threshold()
-
-    # A pain that lands on retired knowledge does not nominate.
-    best_tombstone = matches["tombstones"][0] if matches["tombstones"] else None
-    if best_tombstone and best_tombstone["score"] >= threshold:
-        result["tombstone_suppressed"] = True
-        result["note"] = (
-            "a retired memory already covers this; its retire reason is the answer. "
-            "No nomination was created. If the retirement itself is wrong, that is a "
-            "human decision to make with the reason in view (mashu remember)."
-        )
-        return result
 
     # Record a delivery failure when an active rule did not prevent the pain.
     delivered = matches["memories"][0] if matches["memories"] else None
@@ -145,9 +141,15 @@ def report_pain(
     waiting = match.similar_pending_nominations(cur, prevention, limit=1)
     if waiting and waiting[0]["score"] >= threshold:
         existing = nominations.add_evidence(
-            cur, waiting[0]["nomination_id"], ledger_id, actor=actor
+            cur, waiting[0]["nomination_id"], ledger_id, actor=actor, conflicts=conflict_ids
         )
         if existing is not None:
+            existing = (
+                nominations.refresh_conflicts(
+                    cur, existing["nomination_id"], conflict_ids, actor=actor
+                )
+                or existing
+            )
             result["nomination"] = existing
             result["nomination_existing"] = True
             return result
@@ -160,6 +162,7 @@ def report_pain(
             evidence=[ledger_id],
             actor=actor,
             scope_id=scope_id,
+            conflicts=conflict_ids,
         )
         return result
 
@@ -172,6 +175,7 @@ def report_pain(
             evidence=[prior, ledger_id],
             actor=actor,
             scope_id=scope_id,
+            conflicts=conflict_ids,
         )
     return result
 

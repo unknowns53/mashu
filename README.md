@@ -15,7 +15,7 @@ Mashu には、恒久的な Memory だけでなく、現在の作業状態を扱
 
 | 種類 | 役割 | 別のセッションに届くか | 寿命 |
 |---|---|---|---|
-| Memory | 今後も守る恒久ルール | User が確定した後、bootstrap または guard で届く | 原則恒久 |
+| Memory | 今後も守る恒久ルール | 直接操作または明示指示の実行後、bootstrap または guard で届く | 原則恒久 |
 | Project State | Project / Task の現在地、試行、判断、成果物の参照先 | active Task の短い card だけ届き、詳細は task_get で読む | close または Activity Lease が切れるまで |
 | Trace | 調べて分かったことを残す日付つきの観測 | 届かない。検索で明示的に読む | 既定 30 日 |
 | Ledger | 忘却によって起きた事故や再調査の記録 | 届かない | append-only |
@@ -39,16 +39,22 @@ Memory 以外の記録は、Memory の代わりではない。便利なメモや
          └─ 既存の Trace / friction と照合できれば candidate
 
 User が会話中に「覚えて」と言った
-    └─ memory_nominate → pending candidate
+    └─ memory_nominate → memory_admit → active Memory（同じセッションで完了）
 
-User が CLI / TUI で Memory を直接登録した
-    └─ active Memory（--until なしの場合。唯一の即時経路）
+Agent が既存 Memory の変更を考えた
+    └─ memory_get → memory_change_propose → pending proposal
+         └─ User の明示指示があれば memory_change_apply
+
+User が CLI / TUI で Memory を直接登録・変更した
+    └─ active Memory / retired Memory（user_direct として記録）
 
 pending candidate
     └─ mashu review → active Memory → bootstrap / guard
 ~~~
 
-Agent が書いた candidate は、人が review で確定するまで配信されない。Project State は別扱いで、Agent が更新した active Task の card は、人の review を経ずに次のセッションへ届く。Current State 全文は常時注入せず、card の完全な task_id から `task_get` で明示取得する。
+incident / friction から自動生成された candidate と Agent 独自の提案は pending に留まる。ユーザーが会話中に明示した記録・変更指示は `memory_admit` / `memory_change_apply` に渡し、同じセッションで実行できる。実行者は Agent のまま記録し、指示の原文と会話参照を別に保存する。これは監査用で、サーバーが会話の真正性を認証するものではない。Agent の有用性判断・confidence・ユーザーの沈黙は承認として扱わない。Project State は別扱いで、Agent が更新した active Task の card は次のセッションへ届く。Current State 全文は常時注入せず、card の完全な task_id から `task_get` で明示取得する。
+
+`memory_nominate` の応答には nomination `version` が含まれる。`memory_admit` はそれを `nomination_version` として必須で受け取り、本文・scope・根拠・conflict が読み取り後に変わっていれば拒否する。同じ request ID の再送は、Memory が後から編集・退役されていても初回の採用応答を返す。replace は後継 nomination の内容と旧 Memory の配信条件を提案に固定し、配信条件を変える場合は `successor_settings` に `delivery`・`scope_id`・`guard_action` をまとめて proposal に含める。
 
 一度直せば以後は覚えなくてよい変更は、Memory ではなく Task の next_actions に記録する。pain の prevention-kind を work にするとこの扱いになる。
 
@@ -124,7 +130,7 @@ Agent が使うサブコマンドと MCP は変わらない。引数を付けた
 
 ### 恒久ルールを直接登録する
 
-User が CLI の `mashu remember` または dashboard の Memories から直接登録した内容は、review を待たずに active Memory になる。
+User が CLI の `mashu remember` または dashboard の Memories から直接登録した内容は、review を待たずに active Memory になる。会話中に「覚えて」と明示された内容は `memory_nominate` の直後に `memory_admit` を呼べる。
 
 ~~~bash
 mashu remember "Run migrations before restarting the service"
@@ -136,7 +142,7 @@ mashu remember "Check the remote before pushing" --delivery guard --action Bash
 
 期限つきの条件は --until で登録する。Temporary Context は review 不要で期限に消える。--until は delivery の指定と併用できず、期限は最大 14 日。
 
-Memories TUI では `c` で active な always / scope Memory を Temporary Context に変換できる。日数を入力すると元の Memory は変換理由つきで retire され、同じ本文と Scope の Temporary Context が有効になる。Temporary Context で `c` を押すと、同じ本文と Scope の active Memory に戻る。guard は action を失うため Temporary Context には変換しない。
+Memories TUI では `c` で active な always / scope Memory を Temporary Context に変換できる。日数を入力すると元の Memory は `relocated` と移動先 ID を記録して retire され、同じ本文と Scope の Temporary Context が有効になる。Temporary Context で `c` を押すと、同じ本文と Scope の active Memory に戻る。無関係な invalidated / legacy conflict は上書きしない。guard は action を失うため Temporary Context には変換しない。
 
 ~~~bash
 mashu remember "The staging host is down" --until 2d
@@ -182,9 +188,14 @@ mashu review --list
 mashu review --list --all
 mashu review --admit 1a2b3c4d --delivery scope --scope deployment
 mashu review --decline 1a2b3c4d --reason "Too specific to one run"
+mashu review --changes
+mashu review --changes --list
+mashu review --apply-change 1a2b3c4d --version 2
 ~~~
 
-既定では保留中の candidate を表示しない。--all を付けると保留分も一覧に戻る。確定・却下は User の操作で、Agent からは実行しない。
+既定では保留中の nomination を表示しない。--all を付けると保留分も一覧に戻る。変更 proposal は `mashu review --changes` で確認し、対象本文・revision・理由・根拠・後継・conflict を読み、入力済みの理由を編集して適用できる。TUI の `y` は直接操作の承認でもあるため、適用後に同じ確認を重ねない。Agent は明示指示なしに apply しない。
+
+非対話で適用する場合は、画面で読んだ version を `--version` に指定する。出力された request ID を再送時に `--request-id` へ渡すと同じ結果が返る。
 
 TUI の操作は次のとおり。
 
@@ -203,6 +214,8 @@ TUI の操作は次のとおり。
 | ? | キーの説明 |
 | q | 退出 |
 
+`mashu review --changes` の TUI は提案を一件ずつ開き、`y` で適用、`e` で理由編集、`d` で却下、`w` で取り下げる。対象 Memory の revision や conflict が変わっていれば適用できず、最新情報を読み直して proposal を更新する。
+
 一覧では選択中の本文、evidence 数、退役済み Memory との衝突、以前の保留理由を preview できる。保留は却下ではなく、candidate を pending のまま一時的に一覧から隠す操作だ。途中で退出しても、済んだ決定は保存される。
 
 確定が容量超過で拒否された場合も候補は選択されたまま残る。`e` で本文を短くして保存し、`y` で同じ候補の確定をやり直せる。編集しても evidence と pending 状態は変わらず、編集自体も event_log に残る。
@@ -213,12 +226,13 @@ TUI の操作は次のとおり。
 |---|---|
 | mashu status | schema、容量、pending 件数、最近の ledger、配信失敗の疑いを表示 |
 | mashu bootstrap | 現在のディレクトリのセッションへ配信される内容と token 数を表示 |
-| mashu show REF | Memory、candidate、Ledger の 1 件を全文で表示 |
+| mashu show REF | Memory、candidate、Ledger、Memory change proposal の 1 件を根拠・履歴つきで表示 |
 | mashu memories | active Memory の一覧を表示 |
 | mashu memories --retired | 退役済み Memory と退役理由を表示 |
 | mashu ledger | Ledger を新しい順に表示 |
 | mashu trace [QUERY] | Trace を表示・検索 |
-| mashu retire REF --reason REASON | Memory を退役させ、理由を tombstone として残す |
+| mashu retire REF --reason REASON [--kind KIND] | Memory を退役させる。kind を省略した旧形式は `legacy` として記録する |
+| mashu review --changes | retire / replace / restore の pending proposal を TUI で読む |
 | mashu revise REF | Memory を改訂する。旧本文は revision history に残る |
 | mashu deliver REF always\|scope\|guard | active Memory の配信先を変更する |
 | mashu guard ACTION | ACTION の直前に配信する Memory を表示する |
@@ -321,7 +335,7 @@ claude mcp add mashu \
 
 Agent 名は serve の --agent、または MASHU_AGENT で指定する。別の MCP client を使う場合も、同じく mashu serve を stdio server として登録する。
 
-MCP tool は 15 個ある。
+MCP tool は 22 個ある。
 
 | 分類 | Tool | 役割 |
 |---|---|---|
@@ -330,7 +344,12 @@ MCP tool は 15 個ある。
 | Knowledge | trace_put | 調べて分かったことを日付つき Trace に残す |
 | Knowledge | trace_search | Trace だけを検索する |
 | Knowledge | memory_list | 指定 Scope の active Memory を一覧する |
-| Knowledge | memory_nominate | User の「覚えて」を pending candidate に運ぶ |
+| Knowledge | memory_get | 指定 Memory の本文、revision、evidence、退役種別・理由・後継を読む |
+| Knowledge | memory_nominate | 新規 Memory の pending candidate を作る |
+| Knowledge | memory_admit | 読み取った nomination version と承認根拠を必須にして採用する。request replay は初回応答を返す |
+| Knowledge | memory_change_propose | retire / replace / restore を作成または更新する。replace は後継の内容・version と配信条件を固定する |
+| Knowledge | memory_change_apply | proposal の version と対象・conflict・承認根拠を照合して適用する |
+| Knowledge | memory_change_withdraw | 不要になった pending proposal を取り下げる |
 | Project State | project_list | Project と Task 件数を一覧する |
 | Project State | task_create | 類似する open Task を確認して Task を作る |
 | Project State | task_get | Task の Current State 全文を取得し、指定した履歴だけ展開する。着手前に必須 |
@@ -340,17 +359,20 @@ MCP tool は 15 個ある。
 | Project State | attempt_record | 試したことと結果を追記する |
 | Project State | decision_record | 判断と、その理由を追記する |
 | Project State | artifact_link | 外部成果物の原典を Task にリンクする |
+| Project State | task_propose_close | Task の終了案を理由つきで置く |
+| Project State | task_withdraw_close_proposal | close proposal を取り下げる |
 
 Agent が守る基本の動詞は次の四つだ。
 
 ~~~text
 調べて分かった          → trace_put
 実際に困った            → pain_report
-User が「覚えて」と言った → memory_nominate
+User が「覚えて」と言った → memory_nominate → memory_admit
+User が既存 Memory の変更を指示 → memory_get → memory_change_propose → memory_change_apply
 作業の区切り            → task_checkpoint
 ~~~
 
-Attempt は失敗した試行の結末、Decision は理由を失うと再導出コストが高い判断に使う。Temporary Context の登録、Memory の直接登録、review、Task の close / reopen は User の CLI / TUI 操作だ。終わったと思ったら status_text にそう書くのではなく task_propose_close を使う。前者は User に読み直しと打ち直しをさせ、後者は 1 打鍵で決まる。
+Attempt は失敗した試行の結末、Decision は理由を失うと再導出コストが高い判断に使う。Agent が独自に考えた Memory 変更は提案に留め、明示指示があった場合だけ MCP から適用する。ユーザーの会話指示の出所は記録されるが、認証されるわけではない。Temporary Context の登録、直接 Memory 操作、proposal review、Task の close / reopen は User の CLI / TUI 操作だ。終わったと思ったら status_text にそう書くのではなく task_propose_close を使う。前者は User に読み直しと打ち直しをさせ、後者は 1 打鍵で決まる。
 
 ### PreToolUse hook で guard を有効にする
 
@@ -435,7 +457,7 @@ approach、open questions、blockers、next actions の本文、および Trace�
 - 禁止パターンはリポジトリ外の .git-banned-patterns に置く。MASHU_BANNED_PATTERNS で場所を変更できる
 - 禁止パターンの一覧が見つからない場合は、検査を通すのではなく「検査できない」として扱う
 - Ledger、Memory の revision history、event_log は append-only で、DB の trigger が書き換えを拒否する
-- 退役した Memory は本文を返さず、「何が、なぜ否定されたか」という理由だけを返す。再登録したい場合は、理由を読んだ User が `mashu remember --force` を実行するか、Memories TUI で確認する
+- bootstrap と類似照合結果は退役した Memory の本文を返さない。明示的な `memory_get` / `mashu show` では管理判断のため全文・revision・evidence と退役種別・理由・後継または移動先を返す。invalidated / legacy conflict を採用するには理由を踏まえた明示指示が要る
 
 ## 開発
 

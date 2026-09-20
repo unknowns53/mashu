@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 
 from mashu import match, memories, scopes, temporary
@@ -58,7 +60,13 @@ def test_the_gate_says_when_it_did_not_run(cur, monkeypatch, tmp_path):
 
     monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(tmp_path / "absent"))
     # REVISED matches the retired text, so conflict handling runs first.
-    rewritten = memories.remember(cur, content=REVISED, actor="user", override_retired=True)
+    tombstone = match.similar_tombstones(cur, REVISED)[0]
+    rewritten = memories.remember(
+        cur,
+        content=REVISED,
+        actor="user",
+        acknowledged_conflicts=[tombstone["memory_id"]],
+    )
     assert rewritten["unchecked"] is True
 
 
@@ -69,7 +77,16 @@ def test_a_retired_rule_answers_with_why_it_was_withdrawn_and_never_with_itself(
     found = match.similar_tombstones(cur, RULE)
     assert [row["memory_id"] for row in found] == [memory["memory_id"]]
     assert found[0]["retire_reason"] == WITHDRAWN
-    assert set(found[0]) == {"memory_id", "retire_reason", "retired_at", "score"}
+    assert {
+        "memory_id",
+        "retire_reason",
+        "retired_at",
+        "retirement_kind",
+        "superseded_by",
+        "relocated_to_kind",
+        "relocated_to_id",
+        "score",
+    } == set(found[0])
 
 
 def test_a_revision_keeps_what_the_rule_used_to_say(cur):
@@ -91,11 +108,46 @@ def test_a_revision_keeps_what_the_rule_used_to_say(cur):
 def test_a_withdrawn_rule_is_not_edited_back_into_life(cur):
     memory = memories.remember(cur, content=RULE, actor="user")
     memories.retire(cur, memory["memory_id"], reason="superseded", actor="user")
+    assert memories.get_memory(cur, memory["memory_id"])["retirement_kind"] == "legacy"
 
     with pytest.raises(MashuError, match="retired"):
         memories.revise(cur, memory["memory_id"], content=REVISED, actor="user")
     with pytest.raises(MashuError, match="retired"):
         memories.retire(cur, memory["memory_id"], reason="again", actor="user")
+
+
+def test_superseded_links_must_exist_and_cannot_form_cycles(cur):
+    first = memories.remember(cur, content="the loader checks the schema fingerprint", actor="user")
+    second = memories.remember(cur, content="the decoder checks the payload checksum", actor="user")
+    memories.retire(
+        cur,
+        first["memory_id"],
+        reason="the decoder rule replaces this loader rule",
+        retirement_kind="superseded",
+        superseded_by=second["memory_id"],
+        actor="user",
+    )
+
+    with pytest.raises(MashuError, match="cycle"):
+        memories.retire(
+            cur,
+            second["memory_id"],
+            reason="the loader rule replaces the decoder rule",
+            retirement_kind="superseded",
+            superseded_by=first["memory_id"],
+            actor="user",
+        )
+    assert memories.get_memory(cur, second["memory_id"])["status"] == "active"
+
+    with pytest.raises(MashuError, match="no successor memory"):
+        memories.retire(
+            cur,
+            second["memory_id"],
+            reason="the next rule replaces the decoder rule",
+            retirement_kind="superseded",
+            superseded_by=uuid4(),
+            actor="user",
+        )
 
 
 def test_moving_a_rule_to_the_act_gate_needs_the_act(cur):
@@ -191,7 +243,12 @@ def test_writing_a_retired_rule_back_stops_to_show_why_it_was_withdrawn(cur):
     cur.execute("SELECT count(*) AS n FROM memory WHERE status = 'active'")
     assert cur.fetchone()["n"] == 0
 
-    written = memories.remember(cur, content=REVISED, actor="user", override_retired=True)
+    written = memories.remember(
+        cur,
+        content=REVISED,
+        actor="user",
+        acknowledged_conflicts=[kept["memory_id"]],
+    )
     assert written["status"] == "active"
     assert [row["memory_id"] for row in written["overrides"]] == [kept["memory_id"]]
 
@@ -292,6 +349,26 @@ def test_a_scoped_memory_keeps_its_scope_through_temporary_conversion(cur, scope
     restored = temporary.convert_to_memory(cur, context["context_id"], actor="user")["memory"]
     assert restored["scope_id"] == scope_id
     assert restored["delivery"] == "scope"
+
+
+def test_temporary_round_trip_does_not_override_an_unrelated_invalidated_memory(cur):
+    source = memories.remember(cur, content=RULE, actor="user")
+    unrelated = memories.remember(cur, content=REVISED, actor="user")
+    memories.retire(
+        cur,
+        unrelated["memory_id"],
+        reason="the required output now comes from the build service",
+        retirement_kind="invalidated",
+        actor="user",
+    )
+    context = memories.convert_to_temporary(cur, source["memory_id"], days=2, actor="user")[
+        "temporary"
+    ]
+
+    with pytest.raises(RetiredConflictError):
+        temporary.convert_to_memory(cur, context["context_id"], actor="user")
+    assert memories.get_memory(cur, source["memory_id"])["retirement_kind"] == "relocated"
+    assert [row["context_id"] for row in temporary.active_temporary(cur)] == [context["context_id"]]
 
 
 def test_a_guard_memory_cannot_lose_its_action_by_becoming_temporary(cur):

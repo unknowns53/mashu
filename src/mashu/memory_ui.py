@@ -147,8 +147,18 @@ def _detail(row: dict[str, Any], view: str, limit: int = 8) -> str:
             _field("guard", row.get("guard_action") or "-"),
         ]
         if view == "retired":
+            lines.append(_field("kind", row.get("retirement_kind") or "legacy"))
             lines.append(_field("retired", _date(row.get("retired_at"))))
             lines.append(_field("reason", row.get("retire_reason") or "-"))
+            if row.get("superseded_by"):
+                lines.append(_field("successor", row["superseded_by"]))
+            if row.get("relocated_to_id"):
+                lines.append(
+                    _field(
+                        "moved to",
+                        f"{row['relocated_to_kind']} {row['relocated_to_id']}",
+                    )
+                )
         lines.extend(
             [
                 screen.bold("  content"),
@@ -180,10 +190,15 @@ def _full_detail(row: dict[str, Any]) -> str:
         lines.extend(
             [
                 _field("retired", _date(row.get("retired_at"))),
+                _field("kind", row.get("retirement_kind") or "legacy"),
                 screen.bold("  retirement reason"),
                 screen.wrap(row.get("retire_reason") or "-", indent="    "),
             ]
         )
+        if row.get("superseded_by"):
+            lines.append(_field("successor", row["superseded_by"]))
+        if row.get("relocated_to_id"):
+            lines.append(_field("moved to", f"{row['relocated_to_kind']} {row['relocated_to_id']}"))
     lines.extend([screen.bold("  content"), screen.wrap(row["content"], indent="    "), ""])
 
     lines.append(screen.accent("  evidence"))
@@ -340,6 +355,33 @@ def _scope_id(cur: Any, name: str | None) -> UUID | None:
     return scopes.require_scope(cur, name)["scope_id"] if name else None
 
 
+def _resolve_id(cur: Any, value: str, *, table: str, column: str, label: str) -> UUID:
+    text = value.strip().lower()
+    try:
+        exact = UUID(text)
+    except ValueError:
+        exact = None
+    if exact is not None:
+        cur.execute(f"SELECT {column} AS item_id FROM {table} WHERE {column} = %s", (exact,))
+        row = cur.fetchone()
+        if row:
+            return row["item_id"]
+        raise MashuError(f"no {label} {value}")
+    if len(text) < 4:
+        raise MashuError(f"{label} prefix needs at least four characters")
+    cur.execute(
+        f"SELECT {column} AS item_id FROM {table} "
+        f"WHERE {column}::text LIKE %s ORDER BY {column} LIMIT 2",
+        (f"{text}%",),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        raise MashuError(f"no {label} begins with '{value}'")
+    if len(rows) > 1:
+        raise MashuError(f"{label} prefix '{value}' is ambiguous")
+    return rows[0]["item_id"]
+
+
 def _delivery_answers(
     default: str = "always",
     *,
@@ -418,13 +460,62 @@ def _revise_temporary(dsn: str | None, row: dict[str, Any]) -> str:
 
 
 def _retire(dsn: str | None, row: dict[str, Any]) -> str:
+    choices = ("invalidated", "superseded", "out_of_scope", "relocated", "legacy")
+    retirement_kind = (
+        screen.editline(f"  retirement kind [{'/'.join(choices)}]: ", "") or ""
+    ).strip()
+    if retirement_kind not in choices:
+        return screen.warning("  ! left active — choose a supported retirement kind")
+    successor_ref = None
+    context_ref = None
+    if retirement_kind == "superseded":
+        successor_ref = _required("  successor Memory ID [required]: ")
+        if successor_ref is None:
+            return screen.warning("  ! left active — successor Memory is required")
+    if retirement_kind == "relocated":
+        context_ref = _required("  Temporary Context ID [required]: ")
+        if context_ref is None:
+            return screen.warning("  ! left active — destination Temporary Context is required")
     reason = _required("  retirement reason [required]: ")
     if reason is None:
         return screen.warning("  ! left active — retirement needs a reason")
-    if not _confirm(f"retire {_short(row['memory_id'])}?"):
-        return screen.warning("  ! left active — retirement was not confirmed")
-    with db.transaction(dsn) as cur:
-        memories.retire(cur, row["memory_id"], reason=reason, actor=ACTOR)
+    try:
+        with db.transaction(dsn) as cur:
+            superseded_by = (
+                _resolve_id(
+                    cur,
+                    successor_ref,
+                    table="memory",
+                    column="memory_id",
+                    label="successor Memory",
+                )
+                if successor_ref
+                else None
+            )
+            relocated_to_id = (
+                _resolve_id(
+                    cur,
+                    context_ref,
+                    table="temporary_context",
+                    column="context_id",
+                    label="Temporary Context",
+                )
+                if context_ref
+                else None
+            )
+            memories.retire(
+                cur,
+                row["memory_id"],
+                reason=reason,
+                actor=ACTOR,
+                retirement_kind=retirement_kind,
+                superseded_by=superseded_by,
+                relocated_to_kind="temporary_context" if relocated_to_id else None,
+                relocated_to_id=relocated_to_id,
+                approval_source={"kind": "user_direct"},
+            )
+    except MashuError as refusal:
+        return screen.danger(f"  {refusal}")
     return screen.success(f"  ✓ retired {_short(row['memory_id'])}")
 
 
@@ -469,7 +560,7 @@ def _remember(dsn: str | None) -> tuple[str, UUID | None]:
     if answers is None:
         return screen.warning("  ! nothing remembered"), None
     delivery, scope_name, action = answers
-    override = False
+    acknowledged: list[UUID] | None = None
     while True:
         try:
             with db.transaction(dsn) as cur:
@@ -480,14 +571,29 @@ def _remember(dsn: str | None) -> tuple[str, UUID | None]:
                     scope_id=_scope_id(cur, scope_name),
                     delivery=delivery,
                     guard_action=action,
-                    override_retired=override,
+                    acknowledged_conflicts=acknowledged,
                 )
-            return screen.success(f"  ✓ remembered {_short(row['memory_id'])}"), row["memory_id"]
+            message = screen.success(f"  ✓ remembered {_short(row['memory_id'])}")
+            for warning in row.get("retirement_warnings", []):
+                message += "\n" + screen.warning(
+                    f"  ! {warning.get('retirement_kind') or 'legacy'} retirement "
+                    f"{_short(warning['memory_id'])}: {warning['retire_reason']}"
+                )
+                if warning.get("superseded_by"):
+                    message += "\n" + screen.wrap(
+                        f"successor: {warning['superseded_by']}", indent="    "
+                    )
+                if warning.get("relocated_to_id"):
+                    message += "\n" + screen.wrap(
+                        f"moved to {warning['relocated_to_kind']}: {warning['relocated_to_id']}",
+                        indent="    ",
+                    )
+            return message, row["memory_id"]
         except RetiredConflictError as conflict:
             print(_conflict_text(conflict))
-            if not _confirm("write it back despite the retirement reason?"):
+            if not _confirm("write it back after reading these retirement reasons?"):
                 return screen.warning("  ! nothing remembered — retirement kept"), None
-            override = True
+            acknowledged = [row["memory_id"] for row in conflict.tombstones]
 
 
 def _days() -> float | None:

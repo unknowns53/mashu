@@ -335,8 +335,8 @@ def test_a_candidate_that_walks_back_a_retirement_says_so_above_its_evidence(
     assert review_ui.run(dsn) == 0
 
     out = capsys.readouterr().out
-    assert "contradicts a retired memory" in out
+    assert "retired conflict" in out
     assert "conflicts: 1" in out
     assert withdrawn in out
     assert OTHER not in out
-    assert out.index("contradicts a retired memory") < out.rindex("evidence")
+    assert out.index("retired conflict") < out.rindex("evidence")
