@@ -21,8 +21,7 @@ from uuid import UUID, uuid4
 import psycopg
 
 from mashu import (
-    bootstrap,
-    capacity,
+    application,
     config,
     db,
     events,
@@ -30,8 +29,10 @@ from mashu import (
     memory_changes,
     nominations,
     projects,
+    references,
     routing,
     scopes,
+    task_actions,
     task_history,
     tasks,
     temporary,
@@ -51,15 +52,6 @@ from mashu.errors import DuplicateTaskError, MashuError, RefusedError, RetiredCo
 ACTOR = "user"
 GUARD_HOLD = 2
 _DAYS = re.compile(r"^(\d+(?:\.\d+)?)(?:d)?$")
-
-#: Characters accepted in a UUID reference or prefix.
-_HEX_REF = re.compile(r"[0-9a-f][0-9a-f-]*")
-
-#: Minimum length for a UUID prefix.
-_MIN_PREFIX = 4
-
-#: How many colliding ids an ambiguity refusal will name before it stops.
-_AMBIGUITY_LIMIT = 10
 
 #: The tables `show` reaches into, in the order it reports collisions.
 _REFERENCE_TABLES = (
@@ -102,49 +94,21 @@ def _plain(value: Any) -> Any:
 
 def _lookup(cur: Any, ref: str, *, table: str, id_col: str, extra_where: str = "") -> list[UUID]:
     """Every id in one table that this reference could be naming."""
-    text = (ref or "").strip().lower()
-    try:
-        exact: str | None = str(UUID(text))
-    except (ValueError, AttributeError):
-        exact = None
-    if exact is None:
-        if not _HEX_REF.fullmatch(text):
-            raise MashuError(
-                f"'{ref}' is not an id, nor the front of one; use a full UUID or a prefix "
-                f"with at least {_MIN_PREFIX} hexadecimal characters"
-            )
-        if len(text) < _MIN_PREFIX:
-            raise MashuError(
-                f"'{ref}' is too short to name a row; provide at least {_MIN_PREFIX} ID characters"
-            )
-    clause = f"{id_col} = %(exact)s::uuid" if exact else f"{id_col}::text LIKE %(prefix)s || '%%'"
-    if extra_where:
-        clause = f"{clause} AND {extra_where}"
-    cur.execute(
-        f"SELECT {id_col} AS found FROM {table} WHERE {clause} ORDER BY {id_col} LIMIT %(limit)s",
-        {"exact": exact, "prefix": text, "limit": _AMBIGUITY_LIMIT},
-    )
-    return [row["found"] for row in cur.fetchall()]
+    return references.matching_ids(cur, ref, table=table, column=id_col, extra_where=extra_where)
 
 
 def _resolve(
     cur: Any, ref: str, *, table: str, id_col: str, label: str, extra_where: str = ""
 ) -> UUID:
     """The one row this reference names, or a refusal saying why it is not one."""
-    try:
-        return UUID((ref or "").strip())
-    except (ValueError, AttributeError):
-        pass
-    found = _lookup(cur, ref, table=table, id_col=id_col, extra_where=extra_where)
-    if not found:
-        raise MashuError(f"no {label} begins with '{ref}'; check the ID or try another prefix")
-    if len(found) > 1:
-        named = "  ".join(_short(value) for value in found)
-        raise MashuError(
-            f"'{ref}' names more than one {label}: {named}\n"
-            "Use a longer ID prefix to select one row."
-        )
-    return found[0]
+    return references.resolve_id(
+        cur,
+        ref,
+        table=table,
+        column=id_col,
+        label=label,
+        extra_where=extra_where,
+    )
 
 
 def _memory_ref(cur: Any, ref: str) -> UUID:
@@ -160,7 +124,7 @@ def _project_ref(cur: Any, ref: str) -> UUID:
     row = projects.get_project(cur, ref)
     if row is not None:
         return row["project_id"]
-    if _HEX_REF.fullmatch((ref or "").strip().lower()):
+    if references.is_uuid_ref(ref):
         return _resolve(cur, ref, table="project", id_col="project_id", label="project")
     return projects.require_project(cur, ref)["project_id"]
 
@@ -170,12 +134,7 @@ def _scope(cur: Any, name: str | None) -> UUID | None:
 
 
 def _routed_scope(cur: Any) -> tuple[UUID | None, str | None, bool]:
-    scope_id, routed = routing.resolve(cur, os.getcwd())
-    if scope_id is None:
-        return None, None, routed
-    cur.execute("SELECT name FROM scope WHERE scope_id = %s", (scope_id,))
-    row = cur.fetchone()
-    return scope_id, row["name"] if row else None, routed
+    return application.routed_scope(cur, os.getcwd())
 
 
 def _short(value: Any) -> str:
@@ -291,75 +250,48 @@ def _print_state_rows(rows: list[dict[str, Any]]) -> None:
 
 def cmd_status(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
-        cur.execute(
-            "SELECT delivery, count(*) AS count FROM memory "
-            "WHERE status = 'active' GROUP BY delivery ORDER BY delivery"
-        )
-        counts = {row["delivery"]: row["count"] for row in cur.fetchall()}
-        totals = capacity.bootstrap_totals(cur)
-        cur.execute("SELECT count(*) AS count FROM trace WHERE expires_at > now()")
-        trace_count = cur.fetchone()["count"]
-        cur.execute(
-            "SELECT count(*) AS count FROM ledger WHERE created_at >= now() - interval '30 days'"
-        )
-        ledger_count = cur.fetchone()["count"]
-        # Count delivery-failure reports from the last 30 days.
-        cur.execute(
-            "SELECT count(*) AS count FROM event_log "
-            "WHERE event_type = 'delivery_failure_suspected' "
-            "AND created_at >= now() - interval '30 days'"
-        )
-        suspect_count = cur.fetchone()["count"]
-        pending = nominations.pending_nominations(cur)
-        scope_rows = scopes.list_scopes(cur)
-        # Add active task and temporary-context costs to the status report.
-        state_totals = tasks.pushed_totals(cur)
-        temporary_totals = temporary.pushed_totals(cur)
-        # Check migrations before querying tables introduced by newer schema versions.
-        unapplied = migration.pending(cur)
+        status = application.status_snapshot(cur)
 
-    if unapplied:
-        print(f"schema  {len(unapplied)} MIGRATION(S) PENDING: {', '.join(unapplied)}")
+    if status.schema_pending:
+        print(
+            f"schema  {len(status.schema_pending)} MIGRATION(S) PENDING: "
+            f"{', '.join(status.schema_pending)}"
+        )
         print("        writes against the new columns fail until 'mashu admin migrate'")
     else:
         print("schema  up to date")
-    active = "  ".join(f"{key}={counts.get(key, 0)}" for key in ("always", "scope", "guard"))
+    active = "  ".join(
+        f"{key}={status.memory_counts.get(key, 0)}" for key in ("always", "scope", "guard")
+    )
     print(f"active  {active}")
     print(
-        f"tokens  always={totals['always']}/{config.always_capacity()}  "
-        f"worst={totals['worst']}/{config.capacity()}"
+        f"tokens  always={status.memory_always_tokens}/{config.always_capacity()}  "
+        f"worst={status.memory_worst_tokens}/{config.capacity()}"
     )
     print(
-        f"cards   active={state_totals['count']}  "
-        f"worst={state_totals['worst']}/{config.project_capacity()}"
+        f"cards   active={status.active_states}  "
+        f"worst={status.state_worst_tokens}/{config.project_capacity()}"
     )
-    print(f"temporary  tokens={temporary_totals['worst']}/{config.temporary_capacity()}")
-    print(f"pending {len(pending)}")
-    print(f"traces  unexpired={trace_count}")
-    print(f"ledger  last_30_days={ledger_count}")
-    print(f"delivery  suspected_failures_30d={suspect_count}")
+    print(f"temporary  tokens={status.temporary_tokens}/{config.temporary_capacity()}")
+    print(f"pending {status.pending_ready + status.pending_deferred}")
+    print(f"traces  unexpired={status.traces}")
+    print(f"ledger  last_30_days={status.ledger_30d}")
+    print(f"delivery  suspected_failures_30d={status.delivery_failures_30d}")
     print("scopes")
     print("name                         active  push_tokens")
-    for row in scope_rows:
+    for row in status.scope_rows:
         print(f"{row['name'][:28]:28}  {row['n_active']:6}  {row['push_tokens']:11}")
     return 0
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
-        scope_id, scope_name, routed = _routed_scope(cur)
-        answer = bootstrap.session_bootstrap(
-            cur,
-            actor=ACTOR,
-            scope_id=scope_id,
-            scope_name=scope_name,
-            routed=routed,
-        )
+        answer = application.bootstrap_preview(cur, cwd=os.getcwd(), actor=ACTOR)
     unapplied = answer.get("schema_pending") or []
     if unapplied:
         print(f"schema    {len(unapplied)} MIGRATION(S) PENDING: {', '.join(unapplied)}")
         print("          writes against the new columns fail until 'mashu admin migrate'")
-    routed_text = str(answer.get("routed", routed)).lower()
+    routed_text = str(answer.get("routed", False)).lower()
     print(f"scope     {answer.get('scope') or '-'}  routed={routed_text}")
     _print_memory_rows(answer.get("always", []), heading="always")
     _print_memory_rows(answer.get("scoped", []), heading="scoped")
@@ -491,7 +423,7 @@ def cmd_retire(args: argparse.Namespace) -> int:
             memory_id,
             reason=args.reason,
             actor=ACTOR,
-            retirement_kind=args.kind or "legacy",
+            retirement_kind=args.kind,
             superseded_by=(
                 _resolve(
                     cur,
@@ -1112,7 +1044,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         if not args.reason:
             raise MashuError(
                 "--decline requires --reason. Example: "
-                f"mashu review --decline {args.decline} --reason \"outdated\""
+                f'mashu review --decline {args.decline} --reason "outdated"'
             )
         with db.transaction(args.dsn) as cur:
             nomination = _pending_by_id(cur, args.decline)
@@ -1195,11 +1127,6 @@ def cmd_guard(args: argparse.Namespace) -> int:
 def cmd_scope(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
         if args.add:
-            if args.about is None:
-                raise MashuError(
-                    "--add requires --about. Example: "
-                    "mashu scope --add <name> --about \"what this scope covers\""
-                )
             row = scopes.create_scope(cur, name=args.add, summary=args.about, actor=ACTOR)
             print(f"created  {row['name']}")
             return 0
@@ -1215,14 +1142,10 @@ def cmd_route(args: argparse.Namespace) -> int:
         if args.add:
             if args.scope is None:
                 raise MashuError(
-                    "--add requires --scope. Example: "
-                    "mashu route --add <path> --scope <name>"
+                    "--add requires --scope. Example: mashu route --add <path> --scope <name>"
                 )
-            row = routing.add_route(
-                cur,
-                path_prefix=args.add,
-                scope_id=_scope(cur, args.scope),
-                actor=ACTOR,
+            row = application.set_route(
+                cur, path_prefix=args.add, scope_name=args.scope, actor=ACTOR
             )
             print(f"route  {row['path_prefix']}  {args.scope}")
             return 0
@@ -1231,7 +1154,7 @@ def cmd_route(args: argparse.Namespace) -> int:
                 raise MashuError(
                     "--ignore cannot be combined with --scope; ignored paths are unscoped"
                 )
-            row = routing.add_route(cur, path_prefix=args.ignore, scope_id=None, actor=ACTOR)
+            row = application.ignore_route(cur, path_prefix=args.ignore, actor=ACTOR)
             print(f"ignored  {row['path_prefix']}")
             return 0
         if args.remove:
@@ -1239,7 +1162,7 @@ def cmd_route(args: argparse.Namespace) -> int:
                 raise MashuError(
                     "--remove cannot be combined with --scope; omit --scope to remove the route"
                 )
-            removed = routing.remove_route(cur, path_prefix=args.remove, actor=ACTOR)
+            removed = application.remove_route(cur, path_prefix=args.remove, actor=ACTOR)
             print("removed" if removed else "not found")
             return 0
         rows = routing.all_routes(cur)
@@ -1409,36 +1332,7 @@ def cmd_task_show(args: argparse.Namespace) -> int:
 
 def _task_project(cur: Any, given: str | None) -> UUID:
     """The project named, or the one this working directory already belongs to."""
-    if given:
-        return _project_ref(cur, given)
-    scope_id, scope_name, _ = _routed_scope(cur)
-    if scope_id is not None:
-        cur.execute(
-            "SELECT project_id, name FROM project "
-            "WHERE scope_id = %s AND archived_at IS NULL ORDER BY name",
-            (scope_id,),
-        )
-        rows = cur.fetchall()
-        if len(rows) == 1:
-            return rows[0]["project_id"]
-        if len(rows) > 1:
-            named = ", ".join(row["name"] for row in rows)
-            raise MashuError(
-                f"scope '{scope_name}' holds more than one project ({named}): "
-                "choose one with --project <name>"
-            )
-    cur.execute("SELECT name FROM project WHERE archived_at IS NULL ORDER BY name")
-    project_rows = cur.fetchall()
-    if not project_rows:
-        raise MashuError(
-            "there are no open projects. Create one with 'mashu project create <name>', "
-            "then assign the task with 'mashu task create <task> --project <project>'"
-        )
-    known = ", ".join(row["name"] for row in project_rows)
-    raise MashuError(
-        f"mashu task create needs --project <name>; available projects: {known}. "
-        "Example: mashu task create <name> --project <project>"
-    )
+    return task_actions.resolve_task_project(cur, given, cwd=os.getcwd())
 
 
 def cmd_task_create(args: argparse.Namespace) -> int:
@@ -1497,7 +1391,9 @@ def cmd_task_close(args: argparse.Namespace) -> int:
     for ref in args.ref:
         with db.transaction(args.dsn) as cur:
             task_id = _task_ref(cur, ref)
-            row = tasks.close(cur, task_id, outcome=args.outcome, actor=ACTOR, reason=args.reason)
+            row = task_actions.close_task(
+                cur, task_id, outcome=args.outcome, actor=ACTOR, reason=args.reason
+            )
         _gate_warnings(row)
         print(f"closed  {_short(task_id)}  {row['task']['outcome']}")
     return 0
@@ -1688,7 +1584,9 @@ def build_parser() -> argparse.ArgumentParser:
         sub,
         "retire",
         "withdraw a memory, leaving the reason as its tombstone",
-        examples=('mashu retire 1a2b3c4d --reason "The service no longer exists"',),
+        examples=(
+            'mashu retire 1a2b3c4d --kind invalidated --reason "The service no longer exists"',
+        ),
     )
     retire.add_argument("memory_id", help=_REF_HELP)
     retire.add_argument(
@@ -1696,8 +1594,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     retire.add_argument(
         "--kind",
-        choices=("invalidated", "superseded", "out_of_scope", "relocated", "legacy"),
-        help="why it is retired; omission records legacy for compatibility",
+        choices=("invalidated", "superseded", "out_of_scope", "relocated"),
+        required=True,
+        help="why it is retired",
     )
     retire.add_argument(
         "--superseded-by", help="successor Memory ID or unique prefix for superseded"
@@ -1934,12 +1833,16 @@ def build_parser() -> argparse.ArgumentParser:
         "scope",
         "the scope register",
         description=(
-            "List scopes, or create one with both --add and --about. Creation is User-only."
+            "List scopes, or create one with --add and an optional --about. Creation is User-only."
         ),
-        examples=("mashu scope", 'mashu scope --add deployment --about "Production releases"'),
+        examples=(
+            "mashu scope",
+            "mashu scope --add deployment",
+            'mashu scope --add deployment --about "Production releases"',
+        ),
     )
     scope.add_argument("--add", metavar="NAME", help="create a scope with this name")
-    scope.add_argument("--about", metavar="LINE", help="what the scope covers; required with --add")
+    scope.add_argument("--about", metavar="LINE", help="what the scope covers")
     scope.set_defaults(func=cmd_scope)
 
     route = _command(

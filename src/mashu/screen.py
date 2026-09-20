@@ -9,6 +9,7 @@ import sys
 import textwrap
 import unicodedata
 from contextlib import contextmanager
+from dataclasses import dataclass
 from functools import wraps
 
 try:
@@ -22,6 +23,19 @@ except ImportError:  # pragma: no cover - these are absent on Windows
 
 #: The width text is laid out at when the terminal is wider than reads well.
 WIDTH = 88
+
+
+@dataclass(frozen=True)
+class Submitted:
+    text: str
+
+
+@dataclass(frozen=True)
+class Cancelled:
+    pass
+
+
+InputResult = Submitted | Cancelled
 
 # TUI entry points can be nested (the dashboard opens review and close screens).
 # The alternate buffer therefore belongs to the outermost active session only.
@@ -187,20 +201,19 @@ def _byte(descriptor: int) -> str:
     return raw.decode("utf-8", "replace") if raw else "\x04"
 
 
-def typed(prompt: str) -> str | None:
+def typed(prompt: str) -> InputResult:
     """A line, for the parts of a decision that cannot be a keystroke."""
     try:
         answer = input(prompt).strip()
     except (EOFError, KeyboardInterrupt):
         print()
-        return None
+        return Cancelled()
     if not answer:
         print("  never mind")
-        return None
-    return answer
+    return Submitted(answer)
 
 
-def editline(prompt: str, current: str) -> str | None:
+def editline(prompt: str, current: str) -> InputResult:
     """Read a line with the current value already in an interactive input buffer."""
     readline_module = None
     if sys.stdin.isatty():
@@ -214,16 +227,16 @@ def editline(prompt: str, current: str) -> str | None:
         except (ImportError, AttributeError):  # pragma: no cover - platform dependent
             readline_module = None
     try:
-        return input(prompt).strip()
+        return Submitted(input(prompt).strip())
     except (EOFError, KeyboardInterrupt):
         print()
-        return None
+        return Cancelled()
     finally:
         if readline_module is not None:
             readline_module.set_startup_hook()
 
 
-def edit_text(title: str, current: str) -> str | None:
+def edit_text(title: str, current: str) -> InputResult:
     """Open a focused, single-copy editor for one existing body of text."""
     paint(
         "\n".join(

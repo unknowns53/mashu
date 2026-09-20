@@ -13,7 +13,7 @@ from mashu import approvals, capacity, config, events, match, memories, nominati
 from mashu.errors import MashuError, RefusedError
 
 OPERATIONS = ("retire", "replace", "restore")
-RETIREMENT_KINDS = ("invalidated", "superseded", "out_of_scope", "relocated", "legacy")
+RETIREMENT_KINDS = ("invalidated", "superseded", "out_of_scope", "relocated")
 BLOCKING_KINDS = ("invalidated", "legacy")
 
 
@@ -169,6 +169,7 @@ def _validate_change(
     relocated_to_kind: str | None,
     relocated_to_id: UUID | None,
     restore_reason: str | None,
+    allow_legacy: bool = False,
 ) -> dict[str, Any]:
     if operation not in OPERATIONS:
         raise MashuError(f"operation must be one of {', '.join(OPERATIONS)}")
@@ -194,8 +195,9 @@ def _validate_change(
         verdict = redact.check(retire_reason)
         if not verdict.allowed:
             raise RefusedError(verdict.reason())
-        if retirement_kind not in RETIREMENT_KINDS:
-            raise MashuError(f"retirement_kind must be one of {', '.join(RETIREMENT_KINDS)}")
+        allowed_kinds = RETIREMENT_KINDS + (("legacy",) if allow_legacy else ())
+        if retirement_kind not in allowed_kinds:
+            raise MashuError(f"retirement_kind must be one of {', '.join(allowed_kinds)}")
     if operation == "replace":
         if retirement_kind != "superseded" or successor_nomination_id is None:
             raise MashuError(
@@ -275,6 +277,7 @@ def propose(
         relocated_to_kind=relocated_to_kind,
         relocated_to_id=relocated_to_id,
         restore_reason=restore_reason,
+        allow_legacy=bool(current and current["retirement_kind"] == "legacy"),
     )
     if operation == "replace":
         if successor_nomination_version is None:
@@ -554,6 +557,7 @@ def apply(
             relocated_to_kind=change["relocated_to_kind"],
             relocated_to_id=change["relocated_to_id"],
             approval_source=approval_source,
+            _legacy_compat=change["retirement_kind"] == "legacy",
         )
         result = {"operation": "retire", "memory": retired}
     elif change["operation"] == "replace":

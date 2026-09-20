@@ -167,9 +167,9 @@ def _edit_reason(dsn: str | None, row: dict[str, Any]) -> str:
     field = "restore_reason" if row["operation"] == "restore" else "retire_reason"
     current = row[field] or ""
     edited = screen.editline(f"  {field} [enter keeps current]: ", current)
-    if edited is None:
+    if isinstance(edited, screen.Cancelled):
         return screen.warning("  ! proposal unchanged")
-    reason = edited or current
+    reason = edited.text or current
     if not reason:
         return screen.warning("  ! proposal unchanged — reason is required")
     try:
@@ -298,12 +298,14 @@ def _refresh(dsn: str | None, row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _decide(dsn: str | None, row: dict[str, Any], status: str) -> str:
-    reason = screen.typed(f"  why {status} this proposal? ")
-    if reason is None:
+    answer = screen.typed(f"  why {status} this proposal? ")
+    if isinstance(answer, screen.Cancelled) or not answer.text:
         return screen.warning("  ! proposal left pending")
     try:
         with db.transaction(dsn) as cur:
-            memory_changes.decide(cur, row["change_id"], status=status, actor="user", reason=reason)
+            memory_changes.decide(
+                cur, row["change_id"], status=status, actor="user", reason=answer.text
+            )
     except MashuError as refusal:
         return screen.danger(f"  {refusal}")
     return screen.success(f"  ✓ {status} {_short(row['change_id'])}")

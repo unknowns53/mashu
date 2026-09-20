@@ -59,10 +59,23 @@ def test_editline_starts_with_the_existing_value(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr("builtins.input", edit)
 
-    assert screen.editline("edit: ", "existing value") == "edited value"
+    assert screen.editline("edit: ", "existing value") == screen.Submitted("edited value")
     assert readline.inserted == "existing value"
     assert readline.redisplays == 0
     assert readline.startup_hook is None
+
+
+def test_editline_distinguishes_an_empty_submission_from_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+    assert screen.editline("edit: ", "existing") == screen.Submitted("")
+
+    def cancel(_prompt: str) -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", cancel)
+    assert screen.editline("edit: ", "existing") == screen.Cancelled()
 
 
 def test_edit_text_shows_the_body_only_in_the_edit_buffer(
@@ -74,10 +87,10 @@ def test_edit_text_shows_the_body_only_in_the_edit_buffer(
     monkeypatch.setattr(
         screen,
         "editline",
-        lambda prompt, current: opened.append((prompt, current)) or "revised",
+        lambda prompt, current: opened.append((prompt, current)) or screen.Submitted("revised"),
     )
 
-    assert screen.edit_text("Edit memory", "the existing body") == "revised"
+    assert screen.edit_text("Edit memory", "the existing body") == screen.Submitted("revised")
     assert "the existing body" not in painted[0]
     assert opened == [("  > ", "the existing body")]
 
@@ -119,6 +132,7 @@ def test_dashboard_collects_review_task_memory_and_project_counts(
             retired["memory_id"],
             reason="the dashboard test needs a retired count",
             actor="user",
+            retirement_kind="invalidated",
         )
         temporary.put_temporary(
             cur,

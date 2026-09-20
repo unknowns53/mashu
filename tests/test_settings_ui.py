@@ -272,6 +272,37 @@ def test_scope_page_creates_a_scope_with_its_summary(
     assert row["summary"] == "Release and rollback knowledge"
 
 
+def test_scope_summary_is_optional_when_the_line_is_submitted_empty(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keys(monkeypatch, "n", "q")
+    answers(monkeypatch, "deployment", "")
+
+    settings_ui._scopes_page(dsn)
+
+    with db.transaction(dsn) as cur:
+        row = scopes.require_scope(cur, "deployment")
+    assert row["summary"] is None
+
+
+def test_ctrl_c_at_an_optional_scope_summary_cancels_creation(
+    dsn: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    keys(monkeypatch, "n", "q")
+
+    def answer(prompt: str) -> str:
+        if prompt == "  scope name: ":
+            return "deployment"
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", answer)
+    settings_ui._scopes_page(dsn)
+
+    with db.transaction(dsn) as cur:
+        assert scopes.get_scope(cur, "deployment") is None
+    assert "scope creation cancelled" in capsys.readouterr().out
+
+
 def test_scope_errors_stay_on_the_page_as_feedback(
     dsn: str,
     monkeypatch: pytest.MonkeyPatch,

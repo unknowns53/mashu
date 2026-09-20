@@ -144,7 +144,7 @@ def test_every_command_help_has_a_description_and_an_example(path, capsys):
         (("review",), ("interactive review UI", "User decisions")),
         (("deliver",), ("Scope delivery requires --scope", "guard delivery requires --action")),
         (("guard",), ("exits 2", "empty gate exits 0")),
-        (("scope",), ("both --add and --about", "User-only")),
+        (("scope",), ("optional --about", "User-only")),
         (("route",), ("--add requires --scope", "--ignore")),
         (("task", "close"), ("explicit outcome", "User's decision")),
         (("serve",), ("MCP stdio server", "MASHU_AGENT")),
@@ -408,10 +408,35 @@ def test_status_says_where_the_schema_stands_before_it_reports_any_count(run):
     assert out.splitlines()[0] == "schema  up to date"
 
 
+def test_a_scope_can_be_created_without_a_summary(run, committing_dsn):
+    code, out, _ = run("scope", "--add", "scope without a summary")
+    assert code == 0 and out.strip() == "created  scope without a summary"
+    with db.transaction(committing_dsn) as cur:
+        cur.execute("SELECT summary FROM scope WHERE name = %s", ("scope without a summary",))
+        assert cur.fetchone()["summary"] is None
+
+
+def test_retirement_requires_a_non_legacy_kind(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["retire", NOWHERE, "--reason", "old rule"])
+    assert "following arguments are required: --kind" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit):
+        cli.main(["retire", NOWHERE, "--kind", "legacy", "--reason", "old rule"])
+    assert "invalid choice" in capsys.readouterr().err
+
+
 def test_a_pain_that_lands_on_retired_knowledge_is_answered_with_the_reason(run):
     _, out, _ = run("remember", WITHDRAWN_RULE)
     memory_id = remembered_id(out)
-    run("retire", memory_id, "--reason", "the vendored headers were dropped upstream")
+    run(
+        "retire",
+        memory_id,
+        "--kind",
+        "invalidated",
+        "--reason",
+        "the vendored headers were dropped upstream",
+    )
 
     code, out, _ = run(
         "pain",
@@ -428,12 +453,12 @@ def test_a_pain_that_lands_on_retired_knowledge_is_answered_with_the_reason(run)
     _, out, _ = run("review", "--list")
     assert WITHDRAWN_RULE in out
     assert "retired conflict" in out
-    assert "legacy" in out
+    assert "invalidated" in out
     assert "the vendored headers were dropped upstream" in out
 
 
 def test_a_refusal_leaves_by_the_error_channel_with_a_failing_code(run):
-    code, out, err = run("retire", "not-a-uuid", "--reason", "whatever")
+    code, out, err = run("retire", "not-a-uuid", "--kind", "invalidated", "--reason", "whatever")
     assert code == 1
     assert out == ""
     assert "not an id" in err
@@ -455,11 +480,13 @@ def test_the_short_id_that_is_printed_is_the_one_that_can_be_typed_back(run):
     code, _, err = run("show", "abc")
     assert code == 1 and "too short" in err
 
-    code, _, err = run("retire", NOWHERE, "--reason", "there is no such row")
+    code, _, err = run(
+        "retire", NOWHERE, "--kind", "invalidated", "--reason", "there is no such row"
+    )
     assert code == 1 and "no memory begins with" in err
 
     code, _, err = run("show", NOWHERE)
-    assert code == 1 and "nothing here answers to" in err
+    assert code == 1 and "no memory, nomination" in err
 
 
 def test_a_prefix_two_rows_answer_to_is_refused_with_both_of_them(run, committing_dsn):
@@ -479,7 +506,7 @@ def test_a_prefix_two_rows_answer_to_is_refused_with_both_of_them(run, committin
                 (memory_id, TWIN, [ledger_id]),
             )
 
-    code, _, err = run("retire", "abcd", "--reason", "whichever it is")
+    code, _, err = run("retire", "abcd", "--kind", "invalidated", "--reason", "whichever it is")
     assert code == 1
     assert "names more than one memory" in err
     assert "abcd0001" in err and "abcd0002" in err
@@ -549,7 +576,14 @@ def test_the_memories_listing_holds_the_active_set_and_can_be_narrowed(run):
     assert code == 0
     assert SCOPED in out and LISTED not in out
 
-    run("retire", memory_id[:8], "--reason", "the scheduler grew a timezone column")
+    run(
+        "retire",
+        memory_id[:8],
+        "--kind",
+        "invalidated",
+        "--reason",
+        "the scheduler grew a timezone column",
+    )
 
     code, out, _ = run("memories")
     assert code == 0 and LISTED not in out
@@ -654,7 +688,7 @@ def test_writing_a_retired_rule_back_is_stopped_until_the_reason_has_been_read(r
     _, out, _ = run("remember", REVIVED)
     memory_id = remembered_id(out)
     reason = "the replica lost its audit table in the last schema change"
-    run("retire", memory_id, "--reason", reason)
+    run("retire", memory_id, "--kind", "invalidated", "--reason", reason)
 
     code, out, err = run("remember", REVIVED)
     assert code == 1
@@ -703,7 +737,7 @@ def test_a_carried_instruction_that_repeats_a_retirement_says_so_in_the_listing(
     _, out, _ = run("remember", CARRIED_BACK)
     memory_id = remembered_id(out)
     reason = "the batch job runs unattended now and has no session to borrow"
-    run("retire", memory_id, "--reason", reason)
+    run("retire", memory_id, "--kind", "invalidated", "--reason", reason)
 
     with db.transaction(committing_dsn) as cur:
         carried = nominations.nominate_user_explicit(cur, content=CARRIED_BACK, actor="agent")
@@ -865,6 +899,28 @@ def test_ending_a_task_needs_an_outcome_and_can_be_taken_back(run):
 
     code, out, _ = run("task", "touch", short)
     assert code == 0 and out.startswith("touched")
+
+
+def test_cli_outcome_selection_does_not_implicitly_accept_a_close_proposal(run, committing_dsn):
+    project_name = "explicit close project"
+    task_name = "explicit close remains a human outcome"
+    run("project", "create", project_name)
+    _, out, _ = run("task", "create", task_name, "--project", project_name)
+    short = created_task(out)
+    with db.transaction(committing_dsn) as cur:
+        task_id = cli._task_ref(cur, short)
+        tasks.propose_close(
+            cur,
+            task_id,
+            outcome="completed",
+            reason="an agent proposed this outcome",
+            actor="agent",
+        )
+
+    code, out, _ = run("task", "close", short, "--outcome", "completed")
+    assert code == 0 and out.startswith("closed")
+    with db.transaction(committing_dsn) as cur:
+        assert tasks.task_get(cur, task_id)["task"]["close_reason"] is None
 
 
 def test_a_task_whose_lease_has_run_out_is_listed_only_when_it_is_asked_for(run, committing_dsn):

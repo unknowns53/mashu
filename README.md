@@ -231,7 +231,7 @@ TUI の操作は次のとおり。
 | mashu memories --retired | 退役済み Memory と退役理由を表示 |
 | mashu ledger | Ledger を新しい順に表示 |
 | mashu trace [QUERY] | Trace を表示・検索 |
-| mashu retire REF --reason REASON [--kind KIND] | Memory を退役させる。kind を省略した旧形式は `legacy` として記録する |
+| mashu retire REF --kind KIND --reason REASON | `invalidated` / `superseded` / `out_of_scope` / `relocated` の理由を付けて Memory を退役させる。`legacy` は既存データと移行専用 |
 | mashu review --changes | retire / replace / restore の pending proposal を TUI で読む |
 | mashu revise REF | Memory を改訂する。旧本文は revision history に残る |
 | mashu deliver REF always\|scope\|guard | active Memory の配信先を変更する |
@@ -274,6 +274,7 @@ Scope は Memory の配信範囲、Project は Task の所属先だ。似てい�
 
 ~~~bash
 mashu scope
+mashu scope --add deployment
 mashu scope --add deployment --about "Production releases"
 
 mashu route
@@ -283,6 +284,7 @@ mashu route --remove /work/service
 ~~~
 
 route は作業ディレクトリの path prefix と Scope を対応づける。bootstrap は現在の cwd から Scope を解決する。無関係なディレクトリを --ignore で明示的に unscoped にもできる。
+Scope の summary は任意で、CLI と Settings TUI のどちらでも省略できる。
 
 ## Project と Task
 
@@ -305,7 +307,9 @@ mashu task close 1a2b3c4d 5e6f7a8b --outcome superseded
 mashu task reopen 1a2b3c4d
 ~~~
 
-`mashu task close` を引数なしで叩くと決定の画面が開く。open な Task が 1 行ずつ並び、選択中の goal、status、approach、open questions、blockers、next actions と close proposal を一覧の下で読める。↑↓ または j / k で移動し、`/` で ID、Task 名、Project、Current State、proposal の理由を絞り込む。c / a / s で outcome を選ぶ。Agent が終了を提案している Task は先頭に集まり、Enter で提案をそのまま受理する。まとめて閉じる鍵は無い。
+`mashu task create` は `--project` を省略できる。cwd の route から一意に決まる Project、または開いている Project が一つだけならそれを使う。候補が複数なら選択を求める。Work TUI でも同じ候補解決を使い、一件だけならその Project を既定値として表示する。
+
+`mashu task close` を引数なしで叩くと決定の画面が開く。open な Task が 1 行ずつ並び、選択中の goal、status、approach、open questions、blockers、next actions と close proposal を一覧の下で読める。↑↓ または j / k で移動し、`/` で ID、Task 名、Project、Current State、proposal の理由を絞り込む。c / a / s で outcome を選ぶ。Agent が終了を提案している Task は先頭に集まり、Enter で表示中の proposal を受理する。Work 画面の `c` も選択中の一件を同じ close 画面で開く。proposal と state が表示後に変わっていたら受理を拒否し、stale proposal の確認は受理するときだけ行う。c / a / s で明示的に選んだ outcome は proposal を暗黙に受理しない。reason 入力の Ctrl+C は close 全体を取り消す。まとめて閉じる鍵は無い。
 
 Task の Current State には goal、approach、status、open questions、blockers、next actions が入る。Attempt、Decision、Checkpoint、Artifact Reference は履歴として別に残る。
 

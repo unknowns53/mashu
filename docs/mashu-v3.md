@@ -352,6 +352,8 @@ mashu pain --prevention-kind {rule,work} [--task <id>]   9 節の二つの形
 
 dashboard は Attention / Memories / Work / Settings & health の四領域を持ち、各画面から戻るたびに件数を再集計する。Attention は review、close proposal、dormant Task を扱う。Work は active / dormant / closed Task と Project を閲覧・検索し、Current State、proposal、全履歴、artifact を表示する。User は Task の create / touch / close / reopen に加え、open Task の名前・所属 Project・Current State と Project の名前・Scope を編集できる。編集入力は現在値を入力バッファへ入れて開き、全文の再入力ではなく既存値の部分修正として扱う。現在値を人が訂正する経路であり、checkpoint / attempt / decision / artifact の追記履歴は編集しない。Settings & health は status、現在の cwd に対する bootstrap preview、Scope と route の作成・編集、migration を扱う。引数つき CLI と MCP の契約は変えない。
 
+Work の `c` は選択中の Task だけを同じ close decision screen で開く。専用一覧、Work、CLI の `task close <id> --outcome ...` は、明示 outcome と proposal acceptance を別操作にする。proposal acceptance は画面に出した proposal と state を transaction 内で再照合する。stale 確認は proposal を受理するときだけで、reason の入力中に Ctrl+C を受けたら変更しない。
+
 短縮 ID の解決は既存の規則（表示される先頭 8 文字、4 文字未満と多重一致は候補を挙げて拒否）を共用する。
 
 ### 13.3 配送

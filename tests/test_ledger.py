@@ -112,6 +112,7 @@ def test_a_new_incident_on_invalidated_or_legacy_retirement_keeps_a_conflicted_c
         reason="the migration step moved into the server",
         retirement_kind=retirement_kind,
         actor="user",
+        _legacy_compat=retirement_kind == "legacy",
     )
 
     friction = report(cur, "friction", SAME_HOLE)
@@ -202,7 +203,13 @@ def test_a_pain_landing_on_a_rule_already_delivered_indicts_the_delivery(cur):
 
 def test_a_retirement_conflict_is_reported_without_suppressing_new_evidence(cur):
     kept = memories.remember(cur, content=HOLE, actor="user")
-    memories.retire(cur, kept["memory_id"], reason="the step moved into the server", actor="user")
+    memories.retire(
+        cur,
+        kept["memory_id"],
+        reason="the step moved into the server",
+        actor="user",
+        retirement_kind="invalidated",
+    )
 
     got = report(cur, "friction", SAME_HOLE)
 

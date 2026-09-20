@@ -28,9 +28,21 @@ def test_a_rule_recorded_by_hand_is_active_at_once_and_carries_its_own_evidence(
 def test_retiring_needs_a_reason_because_the_reason_is_all_that_survives(cur):
     memory = memories.remember(cur, content=RULE, actor="user")
     with pytest.raises(MashuError, match="reason"):
-        memories.retire(cur, memory["memory_id"], reason="  ", actor="user")
+        memories.retire(
+            cur,
+            memory["memory_id"],
+            reason="  ",
+            actor="user",
+            retirement_kind="invalidated",
+        )
 
-    retired = memories.retire(cur, memory["memory_id"], reason=WITHDRAWN, actor="user")
+    retired = memories.retire(
+        cur,
+        memory["memory_id"],
+        reason=WITHDRAWN,
+        actor="user",
+        retirement_kind="invalidated",
+    )
     assert retired["status"] == "retired"
     assert retired["retire_reason"] == WITHDRAWN
     assert retired["retired_at"] is not None
@@ -40,7 +52,11 @@ def test_a_reason_carrying_a_banned_pattern_does_not_retire_anything(cur):
     memory = memories.remember(cur, content=RULE, actor="user")
     with pytest.raises(RefusedError):
         memories.retire(
-            cur, memory["memory_id"], reason="superseded by SECRETMARKER9", actor="user"
+            cur,
+            memory["memory_id"],
+            reason="superseded by SECRETMARKER9",
+            actor="user",
+            retirement_kind="invalidated",
         )
 
     assert memories.get_memory(cur, memory["memory_id"])["status"] == "active"
@@ -55,7 +71,13 @@ def test_the_gate_says_when_it_did_not_run(cur, monkeypatch, tmp_path):
     broken = tmp_path / "broken-patterns"
     broken.write_text("SECRETMARKER\\d+\n(unclosed\n", encoding="utf-8")
     monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(broken))
-    retired = memories.retire(cur, memory["memory_id"], reason=WITHDRAWN, actor="user")
+    retired = memories.retire(
+        cur,
+        memory["memory_id"],
+        reason=WITHDRAWN,
+        actor="user",
+        retirement_kind="invalidated",
+    )
     assert retired["malformed"] == 1
 
     monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(tmp_path / "absent"))
@@ -72,7 +94,13 @@ def test_the_gate_says_when_it_did_not_run(cur, monkeypatch, tmp_path):
 
 def test_a_retired_rule_answers_with_why_it_was_withdrawn_and_never_with_itself(cur):
     memory = memories.remember(cur, content=RULE, actor="user")
-    memories.retire(cur, memory["memory_id"], reason=WITHDRAWN, actor="user")
+    memories.retire(
+        cur,
+        memory["memory_id"],
+        reason=WITHDRAWN,
+        actor="user",
+        retirement_kind="invalidated",
+    )
 
     found = match.similar_tombstones(cur, RULE)
     assert [row["memory_id"] for row in found] == [memory["memory_id"]]
@@ -107,13 +135,39 @@ def test_a_revision_keeps_what_the_rule_used_to_say(cur):
 
 def test_a_withdrawn_rule_is_not_edited_back_into_life(cur):
     memory = memories.remember(cur, content=RULE, actor="user")
-    memories.retire(cur, memory["memory_id"], reason="superseded", actor="user")
+    memories.retire(
+        cur,
+        memory["memory_id"],
+        reason="superseded",
+        actor="user",
+        retirement_kind="legacy",
+        _legacy_compat=True,
+    )
     assert memories.get_memory(cur, memory["memory_id"])["retirement_kind"] == "legacy"
 
     with pytest.raises(MashuError, match="retired"):
         memories.revise(cur, memory["memory_id"], content=REVISED, actor="user")
     with pytest.raises(MashuError, match="retired"):
-        memories.retire(cur, memory["memory_id"], reason="again", actor="user")
+        memories.retire(
+            cur,
+            memory["memory_id"],
+            reason="again",
+            actor="user",
+            retirement_kind="invalidated",
+        )
+
+
+def test_new_retirements_cannot_be_marked_legacy(cur):
+    memory = memories.remember(cur, content=RULE, actor="user")
+    with pytest.raises(MashuError, match="reserved for existing data and migration"):
+        memories.retire(
+            cur,
+            memory["memory_id"],
+            reason=WITHDRAWN,
+            actor="user",
+            retirement_kind="legacy",
+        )
+    assert memories.get_memory(cur, memory["memory_id"])["status"] == "active"
 
 
 def test_superseded_links_must_exist_and_cannot_form_cycles(cur):
@@ -231,7 +285,13 @@ def test_listing_a_scope_shows_what_lives_there_by_whatever_route(cur, scope_id)
 
 def test_writing_a_retired_rule_back_stops_to_show_why_it_was_withdrawn(cur):
     kept = memories.remember(cur, content=RULE, actor="user")
-    memories.retire(cur, kept["memory_id"], reason=WITHDRAWN, actor="user")
+    memories.retire(
+        cur,
+        kept["memory_id"],
+        reason=WITHDRAWN,
+        actor="user",
+        retirement_kind="invalidated",
+    )
 
     with pytest.raises(RetiredConflictError) as raised:
         memories.remember(cur, content=REVISED, actor="user")
@@ -261,7 +321,13 @@ def test_writing_a_retired_rule_back_stops_to_show_why_it_was_withdrawn(cur):
 
 def test_an_unrelated_rule_is_not_stopped_by_somebody_elses_retirement(cur):
     kept = memories.remember(cur, content=RULE, actor="user")
-    memories.retire(cur, kept["memory_id"], reason=WITHDRAWN, actor="user")
+    memories.retire(
+        cur,
+        kept["memory_id"],
+        reason=WITHDRAWN,
+        actor="user",
+        retirement_kind="invalidated",
+    )
 
     written = memories.remember(
         cur, content="quotas on the shared queue reset at midnight every day", actor="user"

@@ -7,7 +7,7 @@ import shutil
 from typing import Any
 from uuid import UUID
 
-from mashu import db, screen, tasks
+from mashu import db, screen, task_actions, tasks
 from mashu.errors import MashuError
 
 #: Only a person reaches this screen; the CLI is the only way in.
@@ -267,18 +267,14 @@ def _help() -> None:
         offset = more
 
 
-def _reason(row: dict[str, Any], outcome: str) -> str | None:
+def _reason(row: dict[str, Any], outcome: str) -> screen.InputResult:
     """The grounds for a close, where an empty line is an answer."""
     proposal = row.get("proposal")
     if proposal and proposal["outcome"] == outcome:
         prompt = f"  reason [⏎ keeps: {screen.clip(proposal['reason'], 48)}]: "
     else:
         prompt = "  reason [⏎ for none]: "
-    try:
-        return input(prompt).strip() or None
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return None
+    return screen.editline(prompt, "")
 
 
 def _confirm(question: str) -> bool:
@@ -289,26 +285,52 @@ def _confirm(question: str) -> bool:
         return False
 
 
-def _close(dsn: str | None, row: dict[str, Any], outcome: str, reason: str | None) -> str:
+def _close(
+    dsn: str | None,
+    row: dict[str, Any],
+    outcome: str,
+    reason: str | None,
+    *,
+    accept_proposal: bool = False,
+) -> str:
     task_id = row["task"]["task_id"]
     with db.transaction(dsn) as cur:
-        tasks.close(cur, task_id, outcome=outcome, actor=ACTOR, reason=reason)
+        if accept_proposal:
+            task_actions.accept_close_proposal(
+                cur,
+                task_id,
+                expected_proposal=row["proposal"],
+                expected_state=row["state"]["updated_at"],
+                actor=ACTOR,
+            )
+        else:
+            task_actions.close_task(cur, task_id, outcome=outcome, actor=ACTOR, reason=reason)
     return screen.success(f"  ✓ closed  {_short(task_id)}  {outcome}")
 
 
-def _open_tasks(dsn: str | None, project: str | None) -> list[dict[str, Any]]:
+def _open_tasks(
+    dsn: str | None, project: str | None, task_id: UUID | None = None
+) -> list[dict[str, Any]]:
     with db.transaction(dsn) as cur:
-        return _order(tasks.task_list(cur, project=project, activity="open"))
+        rows = tasks.task_list(cur, project=project, activity="open")
+    if task_id is not None:
+        rows = [row for row in rows if _task_id(row) == task_id]
+    return _order(rows)
 
 
 @screen.fullscreen
-def run(dsn: str | None = None, *, project: str | None = None) -> int:
+def run(
+    dsn: str | None = None,
+    *,
+    project: str | None = None,
+    task_id: UUID | None = None,
+) -> int:
     """Work the list: the open tasks, and one decision at a time against them."""
     at, note, query = 0, "", ""
-    selected_id: UUID | None = None
+    selected_id = task_id
     while True:
         try:
-            all_rows = _open_tasks(dsn, project)
+            all_rows = _open_tasks(dsn, project, task_id)
         except MashuError as error:
             print(error)
             return 1
@@ -385,6 +407,10 @@ def run(dsn: str | None = None, *, project: str | None = None) -> int:
             note = _decide(dsn, row, key)
         except MashuError as error:
             note = screen.danger(f"  ✗ {error}")
+        if task_id is not None:
+            if note:
+                print(note)
+            return 0
 
 
 def _decide(dsn: str | None, row: dict[str, Any], key: str) -> str:
@@ -401,11 +427,17 @@ def _decide(dsn: str | None, row: dict[str, Any], key: str) -> str:
             f"the state was written after this was proposed; close as {proposal['outcome']}?"
         ):
             return screen.warning("  ! left open — stale proposal was not accepted")
-        return _close(dsn, row, proposal["outcome"], None)
+        return _close(dsn, row, proposal["outcome"], proposal["reason"], accept_proposal=True)
 
     if key in _OUTCOME_KEYS:
         outcome = _OUTCOME_KEYS[key]
-        return _close(dsn, row, outcome, _reason(row, outcome))
+        answer = _reason(row, outcome)
+        if isinstance(answer, screen.Cancelled):
+            return screen.warning("  ! left open — close cancelled")
+        reason = answer.text or (
+            proposal["reason"] if proposal and proposal["outcome"] == outcome else None
+        )
+        return _close(dsn, row, outcome, reason)
 
     if key == "w":
         if not proposal:

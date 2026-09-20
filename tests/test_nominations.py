@@ -413,7 +413,9 @@ def test_a_carried_instruction_reaches_the_queue_carrying_the_retirement_it_repe
     _, _, nomination = two_pains(cur)
     memory = admit(cur, nomination["nomination_id"], actor="user", delivery="always")
     withdrawn = "the tool refuses on its own now"
-    memories.retire(cur, memory["memory_id"], reason=withdrawn, actor="user")
+    memories.retire(
+        cur, memory["memory_id"], reason=withdrawn, actor="user", retirement_kind="invalidated"
+    )
 
     got = nominations.nominate_user_explicit(cur, content=SAME_HOLE, actor="agent")
     assert got["tombstone_conflict"] is True

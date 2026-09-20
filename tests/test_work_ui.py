@@ -6,7 +6,7 @@ import os
 import psycopg
 import pytest
 
-from mashu import db, projects, scopes, task_history, tasks, work_ui
+from mashu import db, projects, routing, scopes, task_history, tasks, work_ui
 from mashu.migrate import migrate
 
 ADMIN_DSN = os.environ.get("MASHU_ADMIN_DSN", "dbname=postgres")
@@ -217,13 +217,43 @@ def test_duplicate_task_is_forced_only_after_explicit_confirmation(dsn, monkeypa
 
 
 def test_new_task_is_created_by_the_user_and_remains_selected(dsn, monkeypatch, capsys):
-    keys(monkeypatch, "n", "fit the hatch", "enrai", "close without binding", "q")
+    keys(monkeypatch, "n", "fit the hatch", "", "close without binding", "q")
     assert work_ui.run(dsn) == 0
     with db.transaction(dsn) as cur:
         row = tasks.task_list(cur)[0]
     assert row["task"]["created_by"] == "user"
     assert row["state"]["goal"] == "close without binding"
     assert "fit the hatch" in capsys.readouterr().out
+
+
+def test_task_creation_asks_for_a_project_only_when_more_than_one_is_available(dsn, monkeypatch):
+    with db.transaction(dsn) as cur:
+        projects.create_project(cur, name="drydock", actor="user")
+    keys(monkeypatch, "n", "build the crane", "", "q")
+
+    assert work_ui.run(dsn) == 0
+    with db.transaction(dsn) as cur:
+        assert tasks.task_list(cur) == []
+
+    keys(monkeypatch, "n", "build the crane", "drydock", "", "q")
+    assert work_ui.run(dsn) == 0
+    with db.transaction(dsn) as cur:
+        made = tasks.task_list(cur)
+    assert len(made) == 1 and made[0]["task"]["project_name"] == "drydock"
+
+
+def test_task_creation_prefers_the_only_project_in_the_routed_scope(dsn, monkeypatch, tmp_path):
+    with db.transaction(dsn) as cur:
+        scope = scopes.create_scope(cur, name="shipyard", actor="user")
+        projects.create_project(cur, name="hull work", scope_id=scope["scope_id"], actor="user")
+        routing.add_route(cur, path_prefix=str(tmp_path), scope_id=scope["scope_id"], actor="user")
+    monkeypatch.chdir(tmp_path)
+    keys(monkeypatch, "n", "inspect the keel", "", "", "q")
+
+    assert work_ui.run(dsn) == 0
+    with db.transaction(dsn) as cur:
+        made = tasks.task_list(cur)
+    assert len(made) == 1 and made[0]["task"]["project_name"] == "hull work"
 
 
 def test_touch_reactivates_a_dormant_task(dsn, monkeypatch):
@@ -266,7 +296,7 @@ def test_task_name_project_and_current_state_can_be_edited(dsn, monkeypatch, cap
 
 def test_close_can_accept_a_standing_proposal(dsn, monkeypatch):
     task_id = make_task(dsn, "finish the rail", proposal=True)
-    keys(monkeypatch, "c", "y", "q")
+    keys(monkeypatch, "c", "enter", "q")
 
     assert work_ui.run(dsn) == 0
     closed = get_task(dsn, task_id)
@@ -285,11 +315,11 @@ def test_stale_proposal_needs_a_second_confirmation(dsn, monkeypatch, capsys):
             expect_updated_at=row["state"]["updated_at"],
             status_text="one more load test is needed",
         )
-    keys(monkeypatch, "c", "y", "n", "q")
+    keys(monkeypatch, "c", "enter", "n", "q")
 
     assert work_ui.run(dsn) == 0
     assert get_task(dsn, task_id)["task"]["status"] == "open"
-    assert "stale proposal was not confirmed" in capsys.readouterr().out
+    assert "stale proposal was not accepted" in capsys.readouterr().out
 
 
 def test_task_can_be_closed_without_a_proposal_and_reopened(dsn, monkeypatch):

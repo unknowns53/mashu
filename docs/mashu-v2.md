@@ -171,7 +171,7 @@ always 層で拒否されたものには、scope 規則には無い出口が一�
 - 復帰は通常の本文・定員・重複・conflict 検査を通す。invalidated / legacy の復帰には、退役判断を覆す明示指示と理由を記録し、過去の退役 event は残す。
 - `replace` は一つの transaction で後継採用と旧 Memory 退役を行う。定員は完了後の active 集合に対して判定し、失敗時は元の active 集合を保つ。
 - Temporary Context への変換は `relocated` と移動先を記録する。逆変換はその移動済み行だけを扱い、無関係な invalidated / legacy の理由を一括上書きしない。
-- CLI の `mashu retire` は `--kind` を受け取る。省略した旧形式は `legacy` として記録し、自由文の理由から種別を推測しない。
+- CLI と TUI の新しい退役操作は `--kind` / 種別選択を必須にする。`legacy` は既存データと移行用で、新しい退役理由には使わない。
 - Agent による提案の詳細には対象本文・種別・入力済み理由・根拠・後継・conflict を並べる。User の適用キー自体が `user_direct` の承認であり、同じ確認は重ねない。
 - 点検期日・stale 掃き出しは持たない。在庫が定員内なら User は bootstrap の内容を日常的に目にしており、腐った行に気づく点検器は人自身である。この前提が破れた（在庫が目視で追えない規模になった）なら、それは定員の設定が誤っている
 
@@ -265,7 +265,7 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 | `mashu status` | 在庫と定員の使用量（always 層と、最も重い開き方の二つ）、pending 件数、台帳の直近、配信失敗の疑い件数 |
 | `mashu review` / `mashu review --changes` | nomination または Memory change proposal を読み、編集・適用・却下・取り下げ |
 | `mashu remember <body>` | User 明示。CLI で即時 active にする経路。invalidated / legacy conflict は理由を表示して個別 ID を確認する |
-| `mashu retire <id> --reason <r> [--kind K]` | 退役。理由必須。kind 省略の旧形式は `legacy` |
+| `mashu retire <id> --kind K --reason <r>` | 退役。kind と理由が必須。`legacy` は既存データと移行用 |
 | `mashu revise <id>` | 本文の改訂（User のみ） |
 | `mashu show <id>` | 記憶・候補・台帳・Memory change proposal を 1 件、根拠と履歴つきで表示 |
 | `mashu memories` | 記憶の一覧。既定は active、`--retired` で退役分と理由 |

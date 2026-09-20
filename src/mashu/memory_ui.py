@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from mashu import db, memories, scopes, screen, temporary
+from mashu import db, memories, references, scopes, screen, temporary
 from mashu.errors import MashuError, RetiredConflictError
 
 ACTOR = "user"
@@ -327,9 +327,9 @@ def _editor_text(content: str, *, title: str = "Edit memory") -> str:
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
     if not editor:
         replacement = screen.edit_text(title, content)
-        if not replacement:
+        if isinstance(replacement, screen.Cancelled) or not replacement.text:
             raise MashuError("revision cancelled")
-        return replacement
+        return replacement.text
     command = shlex.split(editor)
     if not command:
         raise MashuError("editor command is empty")
@@ -356,30 +356,13 @@ def _scope_id(cur: Any, name: str | None) -> UUID | None:
 
 
 def _resolve_id(cur: Any, value: str, *, table: str, column: str, label: str) -> UUID:
-    text = value.strip().lower()
-    try:
-        exact = UUID(text)
-    except ValueError:
-        exact = None
-    if exact is not None:
-        cur.execute(f"SELECT {column} AS item_id FROM {table} WHERE {column} = %s", (exact,))
-        row = cur.fetchone()
-        if row:
-            return row["item_id"]
-        raise MashuError(f"no {label} {value}")
-    if len(text) < 4:
-        raise MashuError(f"{label} prefix needs at least four characters")
-    cur.execute(
-        f"SELECT {column} AS item_id FROM {table} "
-        f"WHERE {column}::text LIKE %s ORDER BY {column} LIMIT 2",
-        (f"{text}%",),
+    return references.resolve_id(
+        cur,
+        value,
+        table=table,
+        column=column,
+        label=label,
     )
-    rows = cur.fetchall()
-    if not rows:
-        raise MashuError(f"no {label} begins with '{value}'")
-    if len(rows) > 1:
-        raise MashuError(f"{label} prefix '{value}' is ambiguous")
-    return rows[0]["item_id"]
 
 
 def _delivery_answers(
@@ -389,7 +372,10 @@ def _delivery_answers(
     action_default: str | None = None,
 ) -> tuple[str, str | None, str | None] | None:
     """Ask for a route and its route-specific fields before opening a transaction."""
-    chosen = screen.editline("  delivery [always/scope/guard; edit existing]: ", default) or default
+    chosen_answer = screen.editline("  delivery [always/scope/guard; edit existing]: ", default)
+    if isinstance(chosen_answer, screen.Cancelled):
+        return None
+    chosen = chosen_answer.text or default
     chosen = chosen.casefold()
     if chosen not in memories.DELIVERIES:
         raise MashuError("delivery must be always, scope, or guard")
@@ -402,7 +388,9 @@ def _delivery_answers(
             else "  scope name [required]: "
         )
         entered_scope = screen.editline(prompt, scope_default or "")
-        scope_name = entered_scope or scope_default
+        if isinstance(entered_scope, screen.Cancelled):
+            return None
+        scope_name = entered_scope.text or scope_default
         if scope_name is None:
             return None
     elif chosen == "guard":
@@ -412,7 +400,9 @@ def _delivery_answers(
             else "  guard action [required]: "
         )
         entered_action = screen.editline(action_prompt, action_default or "")
-        action = entered_action or action_default
+        if isinstance(entered_action, screen.Cancelled):
+            return None
+        action = entered_action.text or action_default
         if action is None:
             return None
         scope_prompt = (
@@ -421,7 +411,9 @@ def _delivery_answers(
             else "  scope name [empty means every scope]: "
         )
         entered_scope = screen.editline(scope_prompt, scope_default or "")
-        scope_name = scope_default if not entered_scope else entered_scope
+        if isinstance(entered_scope, screen.Cancelled):
+            return None
+        scope_name = scope_default if not entered_scope.text else entered_scope.text
         if scope_name == "-":
             scope_name = None
     elif scope_default:
@@ -445,7 +437,9 @@ def _revise_temporary(dsn: str | None, row: dict[str, Any]) -> str:
         else "  scope name [empty means every scope]: "
     )
     entered_scope = screen.editline(scope_prompt, current_scope or "")
-    scope_name = current_scope if not entered_scope else entered_scope
+    if isinstance(entered_scope, screen.Cancelled):
+        return screen.warning("  ! temporary context unchanged")
+    scope_name = current_scope if not entered_scope.text else entered_scope.text
     if scope_name == "-":
         scope_name = None
     with db.transaction(dsn) as cur:
@@ -460,10 +454,11 @@ def _revise_temporary(dsn: str | None, row: dict[str, Any]) -> str:
 
 
 def _retire(dsn: str | None, row: dict[str, Any]) -> str:
-    choices = ("invalidated", "superseded", "out_of_scope", "relocated", "legacy")
-    retirement_kind = (
-        screen.editline(f"  retirement kind [{'/'.join(choices)}]: ", "") or ""
-    ).strip()
+    choices = ("invalidated", "superseded", "out_of_scope", "relocated")
+    answer = screen.editline(f"  retirement kind [{'/'.join(choices)}]: ", "")
+    if isinstance(answer, screen.Cancelled):
+        return screen.warning("  ! retirement cancelled; Memory remains active")
+    retirement_kind = answer.text
     if retirement_kind not in choices:
         return screen.warning("  ! left active — choose a supported retirement kind")
     successor_ref = None

@@ -7,7 +7,7 @@ import os
 import psycopg
 import pytest
 
-from mashu import db, memories, memory_ui, scopes, temporary
+from mashu import db, memories, memory_ui, scopes, screen, temporary
 from mashu.migrate import migrate
 
 ADMIN_DSN = os.environ.get("MASHU_ADMIN_DSN", "dbname=postgres")
@@ -60,6 +60,7 @@ def test_views_show_active_retired_and_unexpired_temporary_rows(dsn, monkeypatch
             retired["memory_id"],
             reason="the deployer enforces this now",
             actor="user",
+            retirement_kind="invalidated",
         )
         scope = scopes.require_scope(cur, "deployments")
         context = temporary.put_temporary(
@@ -172,6 +173,17 @@ def test_retirement_selects_a_kind_and_applies_after_entering_its_reason(dsn, mo
     assert row["status"] == "retired"
     assert row["retirement_kind"] == "invalidated"
     assert row["retire_reason"] == "reason"
+
+
+def test_retirement_cancellation_and_legacy_selection_leave_the_memory_active(dsn, monkeypatch):
+    memory = remember(dsn)
+    monkeypatch.setattr(screen, "editline", lambda *_args: screen.Cancelled())
+    assert "cancelled" in memory_ui._retire(dsn, memory)
+    assert memory_row(dsn, memory["memory_id"])["status"] == "active"
+
+    monkeypatch.setattr(screen, "editline", lambda *_args: screen.Submitted("legacy"))
+    assert "choose a supported" in memory_ui._retire(dsn, memory)
+    assert memory_row(dsn, memory["memory_id"])["status"] == "active"
 
 
 def test_delivery_can_be_changed_to_a_global_guard(dsn, monkeypatch):
@@ -296,6 +308,7 @@ def test_retired_conflict_shows_the_reason_and_does_not_override_without_yes(
             memory["memory_id"],
             reason="the service now enforces this",
             actor="user",
+            retirement_kind="invalidated",
         )
     keys(monkeypatch, "n", RULE, "", "n", "q")
 
@@ -311,7 +324,13 @@ def test_retired_conflict_shows_the_reason_and_does_not_override_without_yes(
 def test_retired_conflict_is_overridden_only_after_explicit_yes(dsn, monkeypatch):
     memory = remember(dsn)
     with db.transaction(dsn) as cur:
-        memories.retire(cur, memory["memory_id"], reason="old advice", actor="user")
+        memories.retire(
+            cur,
+            memory["memory_id"],
+            reason="old advice",
+            actor="user",
+            retirement_kind="invalidated",
+        )
     keys(monkeypatch, "n", RULE, "", "yes", "q")
 
     assert memory_ui.run(dsn) == 0

@@ -89,6 +89,19 @@ def test_opening_a_candidate_and_pressing_y_admits_it_where_it_belongs(dsn, monk
     assert nomination_row(dsn, nomination["nomination_id"])["status"] == "admitted"
 
 
+def test_ctrl_c_at_admission_delivery_keeps_the_candidate_pending(dsn, monkeypatch):
+    nomination = a_candidate(dsn, RULE)
+
+    def cancel(_prompt: str) -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", cancel)
+
+    assert "admission cancelled" in review_ui._admit(dsn, nomination)
+    assert nomination_row(dsn, nomination["nomination_id"])["status"] == "pending"
+    assert memory_rows(dsn) == []
+
+
 def test_turning_one_down_keeps_the_reason_that_was_typed_for_it(dsn, monkeypatch, capsys):
     nomination = a_candidate(dsn, RULE)
     keys(monkeypatch, "", "r", "the tool refuses on its own now")
@@ -317,7 +330,13 @@ def test_a_candidate_that_walks_back_a_retirement_says_so_above_its_evidence(
         from mashu import memories
 
         kept = memories.remember(cur, content=OTHER, actor="user")
-        memories.retire(cur, kept["memory_id"], reason=withdrawn, actor="user")
+        memories.retire(
+            cur,
+            kept["memory_id"],
+            reason=withdrawn,
+            actor="user",
+            retirement_kind="invalidated",
+        )
         # Keep the existing candidate so the repeated pain carries its conflict.
         pain = ledger.report_pain(
             cur, kind="friction", what="looked it up", prevention=RULE, actor="agent"

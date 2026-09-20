@@ -290,6 +290,7 @@ def test_restore_rechecks_capacity_duplicates_and_keeps_retirement_history(cur):
         reason="the adapter was expected to reject unsigned manifests",
         retirement_kind="legacy",
         actor="user",
+        _legacy_compat=True,
     )
     detail = memories.memory_details(cur, memory["memory_id"])
     proposal = memory_changes.propose(
@@ -335,6 +336,7 @@ def test_restore_refuses_a_duplicate_active_memory(cur):
         reason="this rule is no longer needed",
         retirement_kind="legacy",
         actor="user",
+        _legacy_compat=True,
     )
     memories.remember(
         cur,

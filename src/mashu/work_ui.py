@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 import shutil
 from typing import Any
 from uuid import UUID
 
-from mashu import config, db, projects, scopes, screen, task_history, tasks
+from mashu import close_ui, config, db, projects, scopes, screen, task_actions, task_history, tasks
 from mashu.errors import DuplicateTaskError, MashuError
 
 ACTOR = "user"
 VIEWS = ("active", "dormant", "closed", "projects")
 _VIEW_KEYS = {str(number): view for number, view in enumerate(VIEWS, 1)}
-_OUTCOMES = {"c": "completed", "a": "abandoned", "s": "superseded"}
 
 _TASK_KEYS = (
     "  1 active  2 dormant  3 closed  4 projects   ↑↓/jk move   Home/End   PgUp/PgDn\n"
@@ -353,16 +353,33 @@ def _create_task(dsn: str | None) -> tuple[str, UUID | None]:
     name = _readline("  task name [empty cancels]: ")
     if not name:
         return screen.warning("  ! task creation cancelled"), None
-    project = _readline("  project [empty cancels]: ")
-    if not project:
+
+    with db.transaction(dsn) as cur:
+        choices = task_actions.task_project_choices(cur, cwd=os.getcwd())
+    if not choices.projects:
+        try:
+            with db.transaction(dsn) as cur:
+                task_actions.resolve_task_project(cur, None, cwd=os.getcwd())
+        except MashuError as error:
+            return screen.warning(f"  ! {error}"), None
+    default_project = choices.projects[0]["name"] if len(choices.projects) == 1 else None
+    if default_project:
+        prompt = f"  project [enter={default_project}; empty cancels]: "
+    else:
+        names = " / ".join(row["name"] for row in choices.projects)
+        prompt = f"  project [{names}; empty cancels]: "
+    project_ref = _readline(prompt)
+    if project_ref is None or (not project_ref and default_project is None):
         return screen.warning("  ! task creation cancelled"), None
+    project_ref = project_ref or default_project
     goal = _readline("  goal [optional]: ")
     if goal is None:
         return screen.warning("  ! task creation cancelled"), None
     try:
         with db.transaction(dsn) as cur:
+            project_id = task_actions.resolve_task_project(cur, project_ref, cwd=os.getcwd())
             created = tasks.task_create(
-                cur, project=project, name=name, goal=goal or None, actor=ACTOR
+                cur, project=project_id, name=name, goal=goal or None, actor=ACTOR
             )
     except DuplicateTaskError as error:
         print(_duplicate_candidates(error))
@@ -370,7 +387,12 @@ def _create_task(dsn: str | None) -> tuple[str, UUID | None]:
             return screen.warning("  ! left existing tasks alone"), None
         with db.transaction(dsn) as cur:
             created = tasks.task_create(
-                cur, project=project, name=name, goal=goal or None, actor=ACTOR, force=True
+                cur,
+                project=project_id,
+                name=name,
+                goal=goal or None,
+                actor=ACTOR,
+                force=True,
             )
     task_id = _task_id(created)
     return screen.success(f"  ✓ created task  {_short(task_id)}"), task_id
@@ -390,42 +412,60 @@ def _create_project(dsn: str | None) -> tuple[str, UUID | None]:
     return note, created["project_id"]
 
 
-def _replacement(label: str, current: str | None, *, clearable: bool = True) -> str | None:
+def _replacement(
+    label: str, current: str | None, *, clearable: bool = True
+) -> str | None | screen.Cancelled:
     clearing = "; '-' clears" if clearable else ""
     answer = screen.editline(f"  {label} [edit existing{clearing}]: ", current or "")
-    if answer is None or answer == "":
+    if isinstance(answer, screen.Cancelled):
+        return answer
+    if answer.text == "":
         return current
-    if clearable and answer == "-":
+    if clearable and answer.text == "-":
         return None
-    return answer
+    return answer.text
 
 
-def _replacement_list(label: str, current: list[str]) -> list[str]:
+def _replacement_list(label: str, current: list[str]) -> list[str] | screen.Cancelled:
     answer = screen.editline(
         f"  {label} [edit existing; ' | ' separates; '-' clears]: ",
         " | ".join(current),
     )
-    if answer is None or answer == "":
+    if isinstance(answer, screen.Cancelled):
+        return answer
+    if answer.text == "":
         return current
-    if answer == "-":
+    if answer.text == "-":
         return []
-    return [item.strip() for item in answer.split("|") if item.strip()]
+    return [item.strip() for item in answer.text.split("|") if item.strip()]
 
 
 def _edit_task(dsn: str | None, row: dict[str, Any]) -> str:
     task, state = row["task"], row["state"]
     name = _replacement("task name", task["name"], clearable=False)
+    if isinstance(name, screen.Cancelled):
+        return screen.warning("  ! task edit cancelled")
     project_name = _replacement("project", task["project_name"], clearable=False)
-    edited = {
-        "goal": _replacement("goal", state.get("goal")),
-        "approach": _replacement("approach", state.get("approach")),
-        "status_text": _replacement("status", state.get("status_text")),
-        "open_questions": _replacement_list(
-            "open questions", list(state.get("open_questions") or [])
-        ),
-        "blockers": _replacement_list("blockers", list(state.get("blockers") or [])),
-        "next_actions": _replacement_list("next actions", list(state.get("next_actions") or [])),
-    }
+    if isinstance(project_name, screen.Cancelled):
+        return screen.warning("  ! task edit cancelled")
+    goal = _replacement("goal", state.get("goal"))
+    if isinstance(goal, screen.Cancelled):
+        return screen.warning("  ! task edit cancelled")
+    approach = _replacement("approach", state.get("approach"))
+    if isinstance(approach, screen.Cancelled):
+        return screen.warning("  ! task edit cancelled")
+    status = _replacement("status", state.get("status_text"))
+    if isinstance(status, screen.Cancelled):
+        return screen.warning("  ! task edit cancelled")
+    open_questions = _replacement_list("open questions", list(state.get("open_questions") or []))
+    if isinstance(open_questions, screen.Cancelled):
+        return screen.warning("  ! task edit cancelled")
+    blockers = _replacement_list("blockers", list(state.get("blockers") or []))
+    if isinstance(blockers, screen.Cancelled):
+        return screen.warning("  ! task edit cancelled")
+    next_actions = _replacement_list("next actions", list(state.get("next_actions") or []))
+    if isinstance(next_actions, screen.Cancelled):
+        return screen.warning("  ! task edit cancelled")
     with db.transaction(dsn) as cur:
         tasks.task_update(
             cur,
@@ -434,14 +474,23 @@ def _edit_task(dsn: str | None, row: dict[str, Any]) -> str:
             expect_updated_at=state["updated_at"],
             name=name,
             project=project_name,
-            **edited,
+            goal=goal,
+            approach=approach,
+            status_text=status,
+            open_questions=open_questions,
+            blockers=blockers,
+            next_actions=next_actions,
         )
     return screen.success(f"  ✓ edited task  {_short(task['task_id'])}")
 
 
 def _edit_project(dsn: str | None, row: dict[str, Any]) -> str:
     name = _replacement("project name", row["name"], clearable=False)
+    if isinstance(name, screen.Cancelled):
+        return screen.warning("  ! project edit cancelled")
     scope_name = _replacement("scope", row.get("scope_name"))
+    if isinstance(scope_name, screen.Cancelled):
+        return screen.warning("  ! project edit cancelled")
     with db.transaction(dsn) as cur:
         scope_id = scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
         projects.update_project(
@@ -459,52 +508,6 @@ def _touch(dsn: str | None, row: dict[str, Any]) -> str:
     with db.transaction(dsn) as cur:
         tasks.touch(cur, task_id, actor=ACTOR)
     return screen.success(f"  ✓ renewed  {_short(task_id)}")
-
-
-def _close_task(dsn: str | None, row: dict[str, Any]) -> str:
-    proposal = row.get("proposal")
-    outcome: str | None = None
-    if proposal:
-        choice = _readline(
-            f"  accept proposed {proposal['outcome']}? [y / c completed / a abandoned / "
-            "s superseded / empty cancels]: "
-        )
-        if choice is None or not choice:
-            return screen.warning("  ! left open")
-        outcome = (
-            proposal["outcome"]
-            if choice.casefold().startswith("y")
-            else _OUTCOMES.get(choice[0].lower())
-        )
-    else:
-        choice = _readline(
-            "  close as [c completed / a abandoned / s superseded / empty cancels]: "
-        )
-        if choice is None or not choice:
-            return screen.warning("  ! left open")
-        outcome = _OUTCOMES.get(choice[0].lower())
-    if outcome is None:
-        return screen.warning("  ! left open — choose c, a, or s")
-    if (
-        proposal
-        and proposal["stale"]
-        and not _confirm("the state changed after this proposal; close anyway?")
-    ):
-        return screen.warning("  ! left open — stale proposal was not confirmed")
-
-    accepted = bool(
-        proposal and outcome == proposal["outcome"] and choice.casefold().startswith("y")
-    )
-    reason: str | None = None
-    if not accepted:
-        reason = _readline("  reason [optional]: ")
-        if reason is None:
-            return screen.warning("  ! left open")
-        reason = reason or None
-    task_id = _task_id(row)
-    with db.transaction(dsn) as cur:
-        tasks.close(cur, task_id, outcome=outcome, reason=reason, actor=ACTOR)
-    return screen.success(f"  ✓ closed  {_short(task_id)}  {outcome}")
 
 
 def _reopen(dsn: str | None, row: dict[str, Any]) -> str:
@@ -607,7 +610,7 @@ def run(dsn: str | None = None, *, initial_view: str = "active") -> int:
                 elif view in ("active", "dormant") and key == "e":
                     note = _edit_task(dsn, row)
                 elif view in ("active", "dormant") and key == "c":
-                    note = _close_task(dsn, row)
+                    close_ui.run(dsn, task_id=_task_id(row))
                 elif view == "closed" and key == "o":
                     note = _reopen(dsn, row)
                 elif view == "projects" and key == "e":

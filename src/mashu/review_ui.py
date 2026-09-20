@@ -204,11 +204,11 @@ def _editor_text(content: str) -> str:
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
     if not editor:
         revised = screen.edit_text("Edit pending candidate", content)
-        if revised is None:
+        if isinstance(revised, screen.Cancelled):
             raise MashuError("edit cancelled")
-        if not revised:
+        if not revised.text:
             raise MashuError("a candidate cannot be empty")
-        return revised
+        return revised.text
     command = shlex.split(editor)
     if not command:
         raise MashuError("editor command is empty")
@@ -227,13 +227,13 @@ def _editor_text(content: str) -> str:
         path.unlink(missing_ok=True)
 
 
-def _delivery(row: dict[str, Any]) -> tuple[str, str | None]:
+def _delivery(row: dict[str, Any]) -> tuple[str, str | None] | None:
     """Where the admitted memory is delivered from, asked once, at admission."""
     print("delivery: enter for the default, or 'g ACTION' for a guard", flush=True)
-    try:
-        answer = input("> ").strip()
-    except (EOFError, KeyboardInterrupt):
-        answer = ""
+    submitted = screen.editline("> ", "")
+    if isinstance(submitted, screen.Cancelled):
+        return None
+    answer = submitted.text
     if not answer:
         return ("scope" if row.get("scope_id") else "always"), None
     if answer.startswith("g ") and answer[2:].strip():
@@ -244,7 +244,10 @@ def _delivery(row: dict[str, Any]) -> tuple[str, str | None]:
 def _admit(dsn: str | None, row: dict[str, Any]) -> str:
     """Admit one candidate in a transaction of its own."""
     try:
-        delivery, guard_action = _delivery(row)
+        choice = _delivery(row)
+        if choice is None:
+            return screen.warning("  ! admission cancelled")
+        delivery, guard_action = choice
         with db.transaction(dsn) as cur:
             cur.execute(
                 "SELECT status, version, content FROM nomination "
@@ -515,11 +518,11 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
                 reading = True
                 back, scroll = [], 0
             elif key == "s":
-                reason = screen.typed("  why put it off? ")
-                if reason is None:
+                answer = screen.typed("  why put it off? ")
+                if isinstance(answer, screen.Cancelled) or not answer.text:
                     continue
                 decided = rows[at]
-                note = _decide(dsn, decided, "s", reason)
+                note = _decide(dsn, decided, "s", answer.text)
                 if not note:
                     note = _feedback("s", decided)
                     all_rows, hidden = _queue(dsn, show_deferred)
@@ -535,10 +538,10 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
             note = _revise(dsn, decided)
             verb = "e"
         elif key in ("r", "s"):
-            reason = screen.typed("  why turn it down? " if key == "r" else "  why put it off? ")
-            if reason is None:
+            answer = screen.typed("  why turn it down? " if key == "r" else "  why put it off? ")
+            if isinstance(answer, screen.Cancelled) or not answer.text:
                 continue
-            note = _decide(dsn, decided, key, reason)
+            note = _decide(dsn, decided, key, answer.text)
             verb = key
         else:
             continue

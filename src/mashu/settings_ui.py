@@ -8,15 +8,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from mashu import (
-    bootstrap,
-    capacity,
+    application,
     config,
     db,
     routing,
     scopes,
     screen,
-    tasks,
-    temporary,
 )
 from mashu import migrate as migration
 from mashu.errors import MashuError
@@ -74,74 +71,26 @@ class Health:
 def _health(dsn: str | None) -> Health:
     """Collect the status page in one consistent database snapshot."""
     with db.transaction(dsn) as cur:
-        schema_pending = tuple(migration.pending(cur))
-        cur.execute(
-            """
-            SELECT delivery, count(*) AS n FROM memory
-            WHERE status = 'active' GROUP BY delivery ORDER BY delivery
-            """
-        )
-        memory_counts = {row["delivery"]: row["n"] for row in cur.fetchall()}
-        memory_totals = capacity.bootstrap_totals(cur)
-        state_totals = tasks.pushed_totals(cur)
-        temporary_totals = temporary.pushed_totals(cur)
-
-        cur.execute(
-            """
-            SELECT count(*) FILTER (WHERE deferred_at IS NULL) AS ready,
-                   count(*) FILTER (WHERE deferred_at IS NOT NULL) AS deferred
-            FROM nomination WHERE status = 'pending'
-            """
-        )
-        pending = cur.fetchone()
-        cur.execute("SELECT count(*) AS n FROM trace WHERE expires_at > now()")
-        traces = cur.fetchone()["n"]
-        cur.execute(
-            "SELECT count(*) AS n FROM ledger WHERE created_at >= now() - interval '30 days'"
-        )
-        ledger_30d = cur.fetchone()["n"]
-        cur.execute(
-            """
-            SELECT count(*) AS n FROM event_log
-            WHERE event_type = 'delivery_failure_suspected'
-              AND created_at >= now() - interval '30 days'
-            """
-        )
-        delivery_failures = cur.fetchone()["n"]
-        cur.execute("SELECT count(*) AS n FROM scope")
-        scope_count = cur.fetchone()["n"]
-        cur.execute(
-            """
-            SELECT count(*) FILTER (
-                       WHERE status = 'open' AND now() <= active_until
-                   ) AS active,
-                   count(*) FILTER (
-                       WHERE status = 'open' AND now() > active_until
-                   ) AS dormant,
-                   count(*) FILTER (WHERE status = 'closed') AS closed
-            FROM task
-            """
-        )
-        task_counts = cur.fetchone()
+        snapshot = application.status_snapshot(cur)
 
     return Health(
-        schema_pending=schema_pending,
-        memory_counts=memory_counts,
-        memory_always_tokens=memory_totals["always"],
-        memory_worst_tokens=memory_totals["worst"],
-        active_states=state_totals["count"],
-        state_worst_tokens=state_totals["worst"],
-        temporary_count=temporary_totals["count"],
-        temporary_tokens=temporary_totals["worst"],
-        pending_ready=pending["ready"],
-        pending_deferred=pending["deferred"],
-        traces=traces,
-        ledger_30d=ledger_30d,
-        delivery_failures_30d=delivery_failures,
-        scope_count=scope_count,
-        tasks_active=task_counts["active"],
-        tasks_dormant=task_counts["dormant"],
-        tasks_closed=task_counts["closed"],
+        schema_pending=snapshot.schema_pending,
+        memory_counts=snapshot.memory_counts,
+        memory_always_tokens=snapshot.memory_always_tokens,
+        memory_worst_tokens=snapshot.memory_worst_tokens,
+        active_states=snapshot.active_states,
+        state_worst_tokens=snapshot.state_worst_tokens,
+        temporary_count=snapshot.temporary_count,
+        temporary_tokens=snapshot.temporary_tokens,
+        pending_ready=snapshot.pending_ready,
+        pending_deferred=snapshot.pending_deferred,
+        traces=snapshot.traces,
+        ledger_30d=snapshot.ledger_30d,
+        delivery_failures_30d=snapshot.delivery_failures_30d,
+        scope_count=snapshot.scope_count,
+        tasks_active=snapshot.tasks_active,
+        tasks_dormant=snapshot.tasks_dormant,
+        tasks_closed=snapshot.tasks_closed,
     )
 
 
@@ -182,19 +131,7 @@ def _health_text(value: Health) -> str:
 def _bootstrap_preview(dsn: str | None) -> dict[str, Any]:
     """Build the same payload a session started in the current directory receives."""
     with db.transaction(dsn) as cur:
-        scope_id, routed = routing.resolve(cur, os.getcwd())
-        scope_name = None
-        if scope_id is not None:
-            cur.execute("SELECT name FROM scope WHERE scope_id = %s", (scope_id,))
-            row = cur.fetchone()
-            scope_name = row["name"] if row else None
-        return bootstrap.session_bootstrap(
-            cur,
-            actor=ACTOR,
-            scope_id=scope_id,
-            scope_name=scope_name,
-            routed=routed,
-        )
+        return application.bootstrap_preview(cur, cwd=os.getcwd(), actor=ACTOR)
 
 
 def _memory_lines(label: str, rows: list[dict[str, Any]]) -> list[str]:
@@ -281,15 +218,13 @@ def _help() -> None:
     _read_page("Settings & health help", _HELP.strip(), allow_help=False)
 
 
-def _answer(prompt: str, *, required: bool = False) -> str | None:
+def _answer(prompt: str) -> screen.InputResult:
     try:
         value = input(prompt).strip()
     except (EOFError, KeyboardInterrupt):
         print()
-        return None
-    if required and not value:
-        return None
-    return value or None
+        return screen.Cancelled()
+    return screen.Submitted(value)
 
 
 def _confirm(question: str) -> bool:
@@ -300,16 +235,18 @@ def _confirm(question: str) -> bool:
         return False
 
 
-def _replacement(prompt: str, current: str | None, *, clearable: bool = True) -> str | None:
+def _replacement(
+    prompt: str, current: str | None, *, clearable: bool = True
+) -> str | None | screen.Cancelled:
     clearing = "; '-' clears" if clearable else ""
     answer = screen.editline(f"  {prompt} [edit existing{clearing}]: ", current or "")
-    if answer is None:
+    if isinstance(answer, screen.Cancelled):
+        return answer
+    if not answer.text:
         return current
-    if not answer:
-        return current
-    if clearable and answer == "-":
+    if clearable and answer.text == "-":
         return None
-    return answer
+    return answer.text
 
 
 def _scope_rows(dsn: str | None) -> list[dict[str, Any]]:
@@ -374,6 +311,9 @@ def _scopes_page(dsn: str | None) -> None:
             selected = row["scope_id"]
             name = _replacement("scope name", row["name"], clearable=False)
             summary = _replacement("about", row.get("summary"))
+            if isinstance(name, screen.Cancelled) or isinstance(summary, screen.Cancelled):
+                note = "  scope unchanged"
+                continue
             try:
                 with db.transaction(dsn) as cur:
                     scopes.update_scope(
@@ -387,15 +327,26 @@ def _scopes_page(dsn: str | None) -> None:
             except MashuError as error:
                 note = f"  {error}"
         elif key == "n":
-            name = _answer("  scope name: ", required=True)
-            if name is None:
+            name_answer = _answer("  scope name: ")
+            if isinstance(name_answer, screen.Cancelled):
+                note = "  scope creation cancelled"
+                continue
+            if not name_answer.text:
                 note = "  a scope needs a name"
                 continue
-            summary = _answer("  about [optional]: ")
+            summary_answer = _answer("  about [optional]: ")
+            if isinstance(summary_answer, screen.Cancelled):
+                note = "  scope creation cancelled"
+                continue
             try:
                 with db.transaction(dsn) as cur:
-                    scopes.create_scope(cur, name=name, summary=summary, actor=ACTOR)
-                note = f"  created scope {name}"
+                    scopes.create_scope(
+                        cur,
+                        name=name_answer.text,
+                        summary=summary_answer.text or None,
+                        actor=ACTOR,
+                    )
+                note = f"  created scope {name_answer.text}"
             except MashuError as error:
                 note = f"  {error}"
 
@@ -460,16 +411,16 @@ def _routes_page(dsn: str | None) -> None:
             selected = row["route_id"]
             path = _replacement("directory path", row["path_prefix"], clearable=False)
             scope_name = _replacement("scope", row.get("scope_name"))
+            if isinstance(path, screen.Cancelled) or isinstance(scope_name, screen.Cancelled):
+                note = "  route unchanged"
+                continue
             try:
                 with db.transaction(dsn) as cur:
-                    scope_id = (
-                        scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
-                    )
-                    routing.update_route(
+                    application.update_route(
                         cur,
                         row["route_id"],
                         path_prefix=path or row["path_prefix"],
-                        scope_id=scope_id,
+                        scope_name=scope_name,
                         actor=ACTOR,
                     )
                 destination = scope_name or "ignored"
@@ -478,29 +429,43 @@ def _routes_page(dsn: str | None) -> None:
             except MashuError as error:
                 note = f"  {error}"
         elif key == "n":
-            path = _answer("  directory path: ", required=True)
-            scope_name = _answer("  scope name: ", required=True)
-            if path is None or scope_name is None:
+            path_answer = _answer("  directory path: ")
+            if isinstance(path_answer, screen.Cancelled):
+                note = "  route creation cancelled"
+                continue
+            if not path_answer.text:
+                note = "  a scoped route needs a path and a scope"
+                continue
+            scope_answer = _answer("  scope name: ")
+            if isinstance(scope_answer, screen.Cancelled):
+                note = "  route creation cancelled"
+                continue
+            if not scope_answer.text:
                 note = "  a scoped route needs both a path and a scope"
                 continue
             try:
                 with db.transaction(dsn) as cur:
-                    scope = scopes.require_scope(cur, scope_name)
-                    routing.add_route(
-                        cur, path_prefix=path, scope_id=scope["scope_id"], actor=ACTOR
+                    application.set_route(
+                        cur,
+                        path_prefix=path_answer.text,
+                        scope_name=scope_answer.text,
+                        actor=ACTOR,
                     )
-                note = f"  routed {routing.normalise(path)} to {scope_name}"
+                note = f"  routed {routing.normalise(path_answer.text)} to {scope_answer.text}"
             except MashuError as error:
                 note = f"  {error}"
         elif key == "i":
-            path = _answer("  directory path to ignore: ", required=True)
-            if path is None:
+            path_answer = _answer("  directory path to ignore: ")
+            if isinstance(path_answer, screen.Cancelled):
+                note = "  route creation cancelled"
+                continue
+            if not path_answer.text:
                 note = "  an ignored route needs a path"
                 continue
             try:
                 with db.transaction(dsn) as cur:
-                    routing.add_route(cur, path_prefix=path, scope_id=None, actor=ACTOR)
-                note = f"  ignoring {routing.normalise(path)}"
+                    application.ignore_route(cur, path_prefix=path_answer.text, actor=ACTOR)
+                note = f"  ignoring {routing.normalise(path_answer.text)}"
             except MashuError as error:
                 note = f"  {error}"
         elif key == "x":
@@ -513,7 +478,7 @@ def _routes_page(dsn: str | None) -> None:
                 continue
             try:
                 with db.transaction(dsn) as cur:
-                    removed = routing.remove_route(cur, path_prefix=path, actor=ACTOR)
+                    removed = application.remove_route(cur, path_prefix=path, actor=ACTOR)
                 note = f"  removed {path}" if removed else f"  no route {path}"
             except MashuError as error:
                 note = f"  {error}"

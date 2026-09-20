@@ -209,11 +209,12 @@ def retire(
     *,
     reason: str,
     actor: str,
-    retirement_kind: str = "legacy",
+    retirement_kind: str,
     superseded_by: UUID | None = None,
     relocated_to_kind: str | None = None,
     relocated_to_id: UUID | None = None,
     approval_source: dict[str, Any] | None = None,
+    _legacy_compat: bool = False,
 ) -> dict[str, Any]:
     """Withdraw a rule, leaving the reason behind as the tombstone."""
     _require_active(cur, memory_id)
@@ -225,6 +226,8 @@ def retire(
         raise MashuError("retiring needs a reason: the reason is what later readers are given")
     if retirement_kind not in ("invalidated", "superseded", "out_of_scope", "relocated", "legacy"):
         raise MashuError("unknown retirement kind")
+    if retirement_kind == "legacy" and not _legacy_compat:
+        raise MashuError("legacy retirement kind is reserved for existing data and migration")
     if retirement_kind == "superseded":
         if superseded_by is None or superseded_by == memory_id:
             raise MashuError("superseded retirement needs a different successor Memory")

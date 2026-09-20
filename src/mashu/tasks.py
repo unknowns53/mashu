@@ -254,6 +254,7 @@ def _proposal(row: dict[str, Any]) -> dict[str, Any] | None:
     return {
         "outcome": row["proposed_outcome"],
         "reason": row["proposed_reason"],
+        "state_at": row["proposed_against"],
         "proposed_at": row["proposed_at"],
         "proposed_by": row["proposed_by"],
         "on_date": row["proposed_at"].date(),
@@ -783,6 +784,13 @@ def touch(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, Any]:
     return task_get(cur, task_id)
 
 
+def lock_close_snapshot(cur: psycopg.Cursor, task_id: UUID) -> dict[str, Any]:
+    """Lock an open task and return the state and proposal that still stand on it."""
+    _lock(cur)
+    _require_open(cur, task_id)
+    return task_get(cur, task_id)
+
+
 # ending, which is a person's judgement (6)
 
 #: What a proposed reason may run to.
@@ -853,6 +861,7 @@ def close(
     """End a task, on an outcome somebody chose."""
     if outcome not in OUTCOMES:
         raise MashuError(f"outcome must be one of {', '.join(OUTCOMES)}")
+    reason = reason.strip() if reason and reason.strip() else None
     _lock(cur)
     task = _require_open(cur, task_id)
     cur.execute(
@@ -860,8 +869,6 @@ def close(
         (task_id,),
     )
     proposal = cur.fetchone()
-    if reason is None and proposal is not None and proposal["outcome"] == outcome:
-        reason = proposal["reason"]
     verdict = _gate(reason)
     what_changed = f"closed as {outcome}" + (f": {reason}" if reason else "")
     from mashu import task_history

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from mashu import projects, tasks
+from mashu import projects, task_actions, tasks
 from mashu.errors import ClosedTaskError, MashuError, OverLimitError, RefusedError
 
 MERGED = "deleted before the merge d178ecb7, nothing on main references it"
@@ -113,9 +113,22 @@ def test_a_closed_task_cannot_be_proposed_about(cur, task):
 
 def test_closing_on_the_proposed_outcome_keeps_the_grounds_that_were_written(cur, task):
     task_id = task["task"]["task_id"]
+    displayed = proposed(cur, task_id)
+    row = task_actions.accept_close_proposal(
+        cur,
+        task_id,
+        expected_proposal=displayed["proposal"],
+        expected_state=displayed["state"]["updated_at"],
+        actor="user",
+    )
+    assert row["task"]["close_reason"] == MERGED
+
+
+def test_explicit_close_does_not_accept_the_proposal_reason_implicitly(cur, task):
+    task_id = task["task"]["task_id"]
     proposed(cur, task_id)
     row = tasks.close(cur, task_id, outcome="completed", actor="user")
-    assert row["task"]["close_reason"] == MERGED
+    assert row["task"]["close_reason"] is None
 
 
 def test_a_reason_typed_at_the_close_wins_over_the_proposed_one(cur, task):
@@ -139,6 +152,41 @@ def test_closing_answers_the_proposal_and_takes_it_away(cur, task):
     tasks.close(cur, task_id, outcome="completed", actor="user")
     cur.execute("SELECT count(*) AS n FROM task_close_proposal WHERE task_id = %s", (task_id,))
     assert cur.fetchone()["n"] == 0
+
+
+@pytest.mark.parametrize("change", ["state", "proposal", "withdraw"])
+def test_accepting_a_proposal_rejects_a_snapshot_that_changed(cur, task, change):
+    task_id = task["task"]["task_id"]
+    displayed = proposed(cur, task_id)
+    if change == "state":
+        state = tasks.task_get(cur, task_id)
+        tasks.task_update(
+            cur,
+            task_id,
+            actor="agent",
+            expect_updated_at=state["state"]["updated_at"],
+            status_text="work is needed again",
+        )
+    elif change == "proposal":
+        tasks.propose_close(
+            cur,
+            task_id,
+            outcome="abandoned",
+            reason="the replacement was cancelled",
+            actor="agent",
+        )
+    else:
+        tasks.withdraw_proposal(cur, task_id, actor="agent")
+
+    with pytest.raises(MashuError, match="changed"):
+        task_actions.accept_close_proposal(
+            cur,
+            task_id,
+            expected_proposal=displayed["proposal"],
+            expected_state=displayed["state"]["updated_at"],
+            actor="user",
+        )
+    assert tasks.task_get(cur, task_id)["task"]["status"] == "open"
 
 
 def test_the_event_log_says_a_close_answered_a_proposal(cur, task):
