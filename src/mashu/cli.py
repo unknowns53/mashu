@@ -70,6 +70,24 @@ _REFERENCE_TABLES = (
 )
 
 
+class _MashuArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._mashu_arguments: list[str] = []
+
+    def error(self, message: str) -> None:
+        is_task_close = any(
+            self._mashu_arguments[index : index + 2] == ["task", "close"]
+            for index in range(len(self._mashu_arguments) - 1)
+        )
+        if is_task_close and message.startswith("unrecognized arguments:"):
+            message += (
+                "\nFor task close, pass --outcome followed by completed, abandoned, or "
+                "superseded. Example: mashu task close 1a2b3c4d --outcome completed"
+            )
+        super().error(message)
+
+
 def _plain(value: Any) -> Any:
     if isinstance(value, UUID):
         return str(value)
@@ -91,10 +109,13 @@ def _lookup(cur: Any, ref: str, *, table: str, id_col: str, extra_where: str = "
         exact = None
     if exact is None:
         if not _HEX_REF.fullmatch(text):
-            raise MashuError(f"'{ref}' is not an id, nor the front of one")
+            raise MashuError(
+                f"'{ref}' is not an id, nor the front of one; use a full UUID or a prefix "
+                f"with at least {_MIN_PREFIX} hexadecimal characters"
+            )
         if len(text) < _MIN_PREFIX:
             raise MashuError(
-                f"'{ref}' is too short to name a row: give at least {_MIN_PREFIX} characters"
+                f"'{ref}' is too short to name a row; provide at least {_MIN_PREFIX} ID characters"
             )
     clause = f"{id_col} = %(exact)s::uuid" if exact else f"{id_col}::text LIKE %(prefix)s || '%%'"
     if extra_where:
@@ -116,10 +137,13 @@ def _resolve(
         pass
     found = _lookup(cur, ref, table=table, id_col=id_col, extra_where=extra_where)
     if not found:
-        raise MashuError(f"no {label} begins with '{ref}'")
+        raise MashuError(f"no {label} begins with '{ref}'; check the ID or try another prefix")
     if len(found) > 1:
         named = "  ".join(_short(value) for value in found)
-        raise MashuError(f"'{ref}' names more than one {label}: {named}")
+        raise MashuError(
+            f"'{ref}' names more than one {label}: {named}\n"
+            "Use a longer ID prefix to select one row."
+        )
     return found[0]
 
 
@@ -221,7 +245,9 @@ def _editor_text(content: str) -> str:
         try:
             subprocess.run([*command, str(path)], check=True)
         except (OSError, subprocess.CalledProcessError) as error:
-            raise MashuError("editor could not be run") from error
+            raise MashuError(
+                f"editor could not be run with {shlex.join(command)}: {error}"
+            ) from error
         return path.read_text(encoding="utf-8")
     finally:
         path.unlink(missing_ok=True)
@@ -230,10 +256,10 @@ def _editor_text(content: str) -> str:
 def _parse_days(value: str) -> float:
     match = _DAYS.fullmatch(value.strip())
     if match is None:
-        raise MashuError("--until expects N, Nd, or N.5d")
+        raise MashuError("--until expects N, Nd, or N.5d; for example, use --until 1.5d")
     days = float(match.group(1))
     if not 0 < days <= 14:
-        raise RefusedError("temporary context must be more than 0 and no more than 14 days")
+        raise RefusedError("--until must be greater than 0 and no more than 14 days")
     return days
 
 
@@ -363,7 +389,8 @@ def cmd_remember(args: argparse.Namespace) -> int:
             or args.force
         ):
             raise MashuError(
-                "--until cannot be combined with --scope, --delivery, --action, or --force"
+                "--until cannot be combined with --scope, --delivery, --action, or --force; "
+                "omit those options when recording a temporary condition"
             )
         days = _parse_days(args.until)
         with db.transaction(args.dsn) as cur:
@@ -510,6 +537,11 @@ def cmd_revise(args: argparse.Namespace) -> int:
 
 
 def cmd_pain(args: argparse.Namespace) -> int:
+    if args.task and args.prevention_kind != "work":
+        raise MashuError(
+            "--task can only be used with --prevention-kind work. Add --prevention-kind work "
+            "to file one-time work on a task, or remove --task for a rule."
+        )
     with db.transaction(args.dsn) as cur:
         row = ledger_domain.report_pain(
             cur,
@@ -802,10 +834,16 @@ def cmd_show(args: argparse.Namespace) -> int:
             for value in _lookup(cur, args.ref, table=table, id_col=id_col)
         ]
         if not found:
-            raise MashuError(f"nothing here answers to '{args.ref}'")
+            raise MashuError(
+                f"no memory, nomination, ledger row, or Memory change matches '{args.ref}'; "
+                "check the ID or try a longer prefix"
+            )
         if len(found) > 1:
             listed = "\n".join(f"  {table}  {_short(value)}" for table, value in found)
-            raise MashuError(f"'{args.ref}' names more than one row:\n{listed}")
+            raise MashuError(
+                f"'{args.ref}' names more than one row:\n{listed}\n"
+                "Use a longer ID prefix to select one row."
+            )
         table, value = found[0]
         _SHOW[table](cur, value)
     return 0
@@ -959,7 +997,10 @@ def cmd_review(args: argparse.Namespace) -> int:
         or args.decline_change
         or args.withdraw_change
     ):
-        raise MashuError("--changes cannot be combined with an admission or Memory change decision")
+        raise MashuError(
+            "--changes opens the Memory change queue by itself. Remove --changes to make an "
+            "admission or change decision, or remove the decision option to review changes."
+        )
     with db.transaction(args.dsn) as cur:
         pending_schema = migration.pending(cur)
     if pending_schema:
@@ -969,7 +1010,11 @@ def cmd_review(args: argparse.Namespace) -> int:
         )
     if args.apply_change:
         if args.version is None:
-            raise MashuError("--apply-change requires --version from the proposal you reviewed")
+            raise MashuError(
+                "--apply-change requires --version from the proposal you reviewed; "
+                "get it with 'mashu review --changes --list'. Example: "
+                f"mashu review --apply-change {args.apply_change} --version <version>"
+            )
         with db.transaction(args.dsn) as cur:
             change_id = _resolve(
                 cur,
@@ -997,7 +1042,12 @@ def cmd_review(args: argparse.Namespace) -> int:
         return 0
     if args.decline_change or args.withdraw_change:
         if not args.reason:
-            raise MashuError("--decline-change and --withdraw-change require --reason")
+            decision = "--decline-change" if args.decline_change else "--withdraw-change"
+            reference = args.decline_change or args.withdraw_change
+            raise MashuError(
+                f"{decision} requires --reason. Example: mashu review {decision} {reference} "
+                '--reason "no longer needed"'
+            )
         status = "declined" if args.decline_change else "withdrawn"
         reference = args.decline_change or args.withdraw_change
         with db.transaction(args.dsn) as cur:
@@ -1025,7 +1075,11 @@ def cmd_review(args: argparse.Namespace) -> int:
         return memory_change_ui.run(args.dsn)
     if args.admit:
         if args.version is None:
-            raise MashuError("--admit requires --version from the candidate you reviewed")
+            raise MashuError(
+                "--admit requires --version from the candidate you reviewed; "
+                "get it with 'mashu review --list'. Example: "
+                f"mashu review --admit {args.admit} --version <version>"
+            )
         with db.transaction(args.dsn) as cur:
             nomination_id = _resolve(
                 cur,
@@ -1056,7 +1110,10 @@ def cmd_review(args: argparse.Namespace) -> int:
         return 0
     if args.decline:
         if not args.reason:
-            raise MashuError("--decline requires --reason")
+            raise MashuError(
+                "--decline requires --reason. Example: "
+                f"mashu review --decline {args.decline} --reason \"outdated\""
+            )
         with db.transaction(args.dsn) as cur:
             nomination = _pending_by_id(cur, args.decline)
             nominations.decline(cur, nomination["nomination_id"], actor=ACTOR, reason=args.reason)
@@ -1139,7 +1196,10 @@ def cmd_scope(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
         if args.add:
             if args.about is None:
-                raise MashuError("--add requires --about")
+                raise MashuError(
+                    "--add requires --about. Example: "
+                    "mashu scope --add <name> --about \"what this scope covers\""
+                )
             row = scopes.create_scope(cur, name=args.add, summary=args.about, actor=ACTOR)
             print(f"created  {row['name']}")
             return 0
@@ -1154,7 +1214,10 @@ def cmd_route(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
         if args.add:
             if args.scope is None:
-                raise MashuError("--add requires --scope")
+                raise MashuError(
+                    "--add requires --scope. Example: "
+                    "mashu route --add <path> --scope <name>"
+                )
             row = routing.add_route(
                 cur,
                 path_prefix=args.add,
@@ -1165,13 +1228,17 @@ def cmd_route(args: argparse.Namespace) -> int:
             return 0
         if args.ignore:
             if args.scope is not None:
-                raise MashuError("--ignore cannot be combined with --scope")
+                raise MashuError(
+                    "--ignore cannot be combined with --scope; ignored paths are unscoped"
+                )
             row = routing.add_route(cur, path_prefix=args.ignore, scope_id=None, actor=ACTOR)
             print(f"ignored  {row['path_prefix']}")
             return 0
         if args.remove:
             if args.scope is not None:
-                raise MashuError("--remove cannot be combined with --scope")
+                raise MashuError(
+                    "--remove cannot be combined with --scope; omit --scope to remove the route"
+                )
             removed = routing.remove_route(cur, path_prefix=args.remove, actor=ACTOR)
             print("removed" if removed else "not found")
             return 0
@@ -1358,11 +1425,20 @@ def _task_project(cur: Any, given: str | None) -> UUID:
             named = ", ".join(row["name"] for row in rows)
             raise MashuError(
                 f"scope '{scope_name}' holds more than one project ({named}): "
-                "say which with --project"
+                "choose one with --project <name>"
             )
     cur.execute("SELECT name FROM project WHERE archived_at IS NULL ORDER BY name")
-    known = ", ".join(row["name"] for row in cur.fetchall()) or "none yet"
-    raise MashuError(f"say which project this task belongs to with --project (open: {known})")
+    project_rows = cur.fetchall()
+    if not project_rows:
+        raise MashuError(
+            "there are no open projects. Create one with 'mashu project create <name>', "
+            "then assign the task with 'mashu task create <task> --project <project>'"
+        )
+    known = ", ".join(row["name"] for row in project_rows)
+    raise MashuError(
+        f"mashu task create needs --project <name>; available projects: {known}. "
+        "Example: mashu task create <name> --project <project>"
+    )
 
 
 def cmd_task_create(args: argparse.Namespace) -> int:
@@ -1386,7 +1462,11 @@ def cmd_task_create(args: argparse.Namespace) -> int:
                 f"  {_short(found['task_id'])}  {candidate['heading']}  {found['name']}",
                 file=sys.stderr,
             )
-        print("pass --force to open a second task for the same work anyway", file=sys.stderr)
+        print(
+            "add --force to this mashu task create command only if you intend to open a "
+            "second task",
+            file=sys.stderr,
+        )
         return 1
     _gate_warnings(row)
     print(f"task  {_short(row['task']['task_id'])}  {row['task']['name']}")
@@ -1409,10 +1489,9 @@ def cmd_task_close(args: argparse.Namespace) -> int:
         return close_ui.run(args.dsn, project=args.project)
     if not args.outcome:
         raise MashuError(
-            f"close requires --outcome ({', '.join(tasks.OUTCOMES)}): 'closed' on its own "
-            "says only that nobody is working on this, which the lease already says and "
-            "says reversibly. `mashu task close` with no task named opens the screen "
-            "that asks for an outcome one task at a time"
+            f"Choose an outcome with --outcome: {', '.join(tasks.OUTCOMES)}.\n"
+            f"Example: mashu task close {' '.join(args.ref)} --outcome completed\n"
+            "For the interactive chooser, run mashu task close with no task ID."
         )
     # Commit each task separately so a later invalid reference does not undo earlier closes.
     for ref in args.ref:
@@ -1547,7 +1626,7 @@ def _command(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _MashuArgumentParser(
         prog="mashu",
         description="The knowledge state that keeps only what forgetting has cost something.",
         epilog=_TOP_LEVEL_HELP,
@@ -2070,7 +2149,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    parser._mashu_arguments = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(parser._mashu_arguments)
     try:
         if args.command is None:
             from mashu import home_ui
