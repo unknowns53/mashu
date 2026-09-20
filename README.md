@@ -186,7 +186,7 @@ incident は 1 回で candidate になる。friction は、過去の Trace ま�
 mashu review
 mashu review --list
 mashu review --list --all
-mashu review --admit 1a2b3c4d --delivery scope --scope deployment
+mashu review --admit 1a2b3c4d --version 3 --delivery scope --scope deployment
 mashu review --decline 1a2b3c4d --reason "Too specific to one run"
 mashu review --changes
 mashu review --changes --list
@@ -195,7 +195,7 @@ mashu review --apply-change 1a2b3c4d --version 2
 
 既定では保留中の nomination を表示しない。--all を付けると保留分も一覧に戻る。変更 proposal は `mashu review --changes` で確認し、対象本文・revision・理由・根拠・後継・conflict を読み、入力済みの理由を編集して適用できる。TUI の `y` は直接操作の承認でもあるため、適用後に同じ確認を重ねない。Agent は明示指示なしに apply しない。
 
-非対話で適用する場合は、画面で読んだ version を `--version` に指定する。出力された request ID を再送時に `--request-id` へ渡すと同じ結果が返る。
+非対話で採用・変更を適用する場合は、一覧や詳細で読んだ version を `--version` に指定する。候補が読み取り後に変わっていれば `--admit` は拒否され、pending のまま残る。出力された request ID を再送時に `--request-id` へ渡すと同じ結果が返る。
 
 TUI の操作は次のとおり。
 

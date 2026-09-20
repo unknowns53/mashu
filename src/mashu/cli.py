@@ -1024,6 +1024,8 @@ def cmd_review(args: argparse.Namespace) -> int:
 
         return memory_change_ui.run(args.dsn)
     if args.admit:
+        if args.version is None:
+            raise MashuError("--admit requires --version from the candidate you reviewed")
         with db.transaction(args.dsn) as cur:
             nomination_id = _resolve(
                 cur,
@@ -1044,7 +1046,7 @@ def cmd_review(args: argparse.Namespace) -> int:
                 nomination["nomination_id"],
                 actor=ACTOR,
                 delivery=delivery,
-                expected_version=nomination["version"],
+                expected_version=args.version,
                 scope_id=scope_id,
                 guard_action=args.action,
                 approval={"kind": "user_direct", "conflict_ids": args.ack_conflict or []},
@@ -1745,7 +1747,7 @@ def build_parser() -> argparse.ArgumentParser:
         examples=(
             "mashu review",
             "mashu review --list --all",
-            "mashu review --admit 1a2b3c4d --delivery scope --scope deployment",
+            "mashu review --admit 1a2b3c4d --version 3 --delivery scope --scope deployment",
             "mashu review --changes",
             "mashu review --changes --list",
             'mashu review --decline 1a2b3c4d --reason "Too specific to one run"',
@@ -1753,7 +1755,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     review_group = review.add_mutually_exclusive_group()
     review_group.add_argument("--list", action="store_true", help="print the queue and stop")
-    review_group.add_argument("--admit", metavar="REF", help=f"admit one candidate: {_REF_HELP}")
+    review_group.add_argument(
+        "--admit",
+        metavar="REF",
+        help=f"admit one candidate at the displayed --version: {_REF_HELP}",
+    )
     review_group.add_argument("--decline", metavar="REF", help=f"turn one down: {_REF_HELP}")
     review_group.add_argument(
         "--apply-change", metavar="REF", help=f"apply one reviewed Memory change: {_REF_HELP}"
@@ -1765,7 +1771,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--withdraw-change", metavar="REF", help=f"withdraw one Memory change: {_REF_HELP}"
     )
     review.add_argument("--changes", action="store_true", help="open or list Memory changes")
-    review.add_argument("--version", type=int, help="proposal version shown by review --changes")
+    review.add_argument(
+        "--version",
+        type=int,
+        help="nomination version shown by review --list, or change version shown by --changes",
+    )
     review.add_argument(
         "--request-id",
         type=UUID,

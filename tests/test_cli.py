@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -67,6 +67,15 @@ def pending_id(out: str, content: str) -> str:
     for index, line in enumerate(lines):
         if line.strip() == content and index and not lines[index - 1].startswith(" "):
             return lines[index - 1].split()[0]
+    raise AssertionError(f"no pending nomination proposing {content!r} in:\n{out}")
+
+
+def pending_version(out: str, content: str) -> int:
+    """The nomination version shown with a candidate in `review --list`."""
+    lines = out.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() == content and index and not lines[index - 1].startswith(" "):
+            return int(lines[index - 1].split()[1].removeprefix("v"))
     raise AssertionError(f"no pending nomination proposing {content!r} in:\n{out}")
 
 
@@ -195,13 +204,63 @@ def test_a_candidate_can_be_read_then_admitted(run):
     code, out, _ = run("review", "--list")
     assert code == 0
     nomination_id = pending_id(out, QUOTA)
+    version = pending_version(out, QUOTA)
     assert "evidence incident" in out
 
-    code, out, _ = run("review", "--admit", nomination_id)
+    code, out, _ = run("review", "--admit", nomination_id, "--version", str(version))
     assert code == 0 and out.startswith("admitted")
 
     code, out, _ = run("review", "--list")
     assert nomination_id not in out
+
+
+def test_admit_requires_the_reviewed_version_and_keeps_a_stale_candidate_pending(
+    run, committing_dsn
+):
+    original = f"check the release checksum before switching versions {uuid4()}"
+    revised = f"skip the checksum before switching release versions {uuid4()}"
+    code, _, _ = run(
+        "pain",
+        "--kind",
+        "incident",
+        "--what",
+        "switched to an unverified package",
+        "--prevention",
+        original,
+    )
+    assert code == 0
+
+    _, listed, _ = run("review", "--list")
+    nomination_id = pending_id(listed, original)
+    reviewed_version = pending_version(listed, original)
+
+    code, _, error = run("review", "--admit", nomination_id)
+    assert code == 1
+    assert "--version" in error
+
+    with db.transaction(committing_dsn) as cur:
+        changed = nominations.revise(
+            cur,
+            UUID(nomination_id),
+            content=revised,
+            actor="user",
+        )
+    assert changed["version"] > reviewed_version
+
+    code, _, error = run("review", "--admit", nomination_id, "--version", str(reviewed_version))
+    assert code == 1
+    assert "nomination version changed" in error
+    with db.transaction(committing_dsn) as cur:
+        cur.execute(
+            "SELECT status, content FROM nomination WHERE nomination_id = %s",
+            (UUID(nomination_id),),
+        )
+        row = cur.fetchone()
+    assert row["status"] == "pending"
+    assert row["content"] == revised
+
+    code, _, _ = run("review", "--admit", nomination_id, "--version", str(changed["version"]))
+    assert code == 0
 
 
 def test_a_memory_change_can_be_read_applied_and_replayed_from_the_cli(run, committing_dsn):
@@ -449,13 +508,14 @@ def test_what_a_memory_rests_on_can_still_be_read_after_it_is_admitted(run):
 
     _, out, _ = run("review", "--list")
     nomination_id = pending_id(out, EVIDENCED)
+    version = pending_version(out, EVIDENCED)
 
     code, out, _ = run("show", nomination_id[:8])
     assert code == 0
     assert "pending" in out
     assert EVIDENCED in out
 
-    code, out, _ = run("review", "--admit", nomination_id[:8])
+    code, out, _ = run("review", "--admit", nomination_id[:8], "--version", str(version))
     assert code == 0
     memory_id = out.split()[1]
 
