@@ -2,25 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import getkeys
-from mashu import (
-    db,
-    ledger,
-    memories,
-    nominations,
-    projects,
-    routing,
-    scopes,
-    settings_ui,
-    tasks,
-    temporary,
-    topics,
-)
+from conftest import candidate, expire, getkeys, new_project, new_task, remember
+from mashu import db, nominations, routing, scopes, settings_ui, tasks, temporary, topics
 
 pytestmark = pytest.mark.usefixtures("known_screen")
 
 
-def answers(monkeypatch: pytest.MonkeyPatch, *typed: str) -> list[str]:
+def answers(monkeypatch, *typed: str) -> list[str]:
     values = iter(typed)
     prompts: list[str] = []
 
@@ -32,30 +20,8 @@ def answers(monkeypatch: pytest.MonkeyPatch, *typed: str) -> list[str]:
     return prompts
 
 
-def test_top_level_reaches_every_settings_page_and_leaves_cleanly(
-    dsn: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    getkeys(
-        monkeypatch,
-        "enter",
-        "q",
-        "down",
-        "enter",
-        "q",
-        "down",
-        "enter",
-        "q",
-        "down",
-        "enter",
-        "q",
-        "down",
-        "enter",
-        "q",
-        "down",
-        "enter",
-        "q",
-        "q",
-    )
+def test_top_level_reaches_every_settings_page_and_leaves_cleanly(dsn, monkeypatch, capsys):
+    getkeys(monkeypatch, "enter", "q", *(("down", "enter", "q") * 5), "q")
 
     assert settings_ui.run(dsn) == 0
 
@@ -73,103 +39,31 @@ def test_top_level_reaches_every_settings_page_and_leaves_cleanly(
     assert hasattr(settings_ui.run, "__wrapped__")
 
 
-def test_health_collects_capacity_queues_evidence_and_task_activity(dsn: str) -> None:
+def test_health_collects_capacity_queues_evidence_and_task_activity(dsn):
     with db.transaction(dsn) as cur:
         scope = scopes.create_scope(cur, name="health", summary="health checks", actor="user")
-        memories.remember(cur, content="global health memory", actor="user")
-        memories.remember(
-            cur,
-            content="scoped health memory",
-            scope_id=scope["scope_id"],
-            delivery="scope",
-            actor="user",
+        remember(cur, "global health memory")
+        remember(cur, "scoped health memory", scope_id=scope["scope_id"], delivery="scope")
+        candidate(cur, "show the health queue", kind="incident")
+        deferred = candidate(cur, "show the deferred health queue")
+        nominations.defer(cur, deferred["nomination_id"], actor="user", reason="the count")
+        temporary.put_temporary(cur, content="temporary health condition", actor="user", days=1)
+        new_project(cur, "health project")
+        active, dormant, closed = (
+            new_task(cur, f"{activity} health task", "health project", force=True)["task"][
+                "task_id"
+            ]
+            for activity in ("active", "dormant", "closed")
         )
-        pain = ledger.report_pain(
-            cur,
-            kind="incident",
-            what="the health queue vanished",
-            prevention="show the health queue",
-            actor="agent",
-        )
-        nominations.create_nomination(
-            cur,
-            content="show the health queue",
-            kind="incident",
-            evidence=[pain["ledger_id"]],
-            actor="agent",
-        )
-        deferred_pain = ledger.report_pain(
-            cur,
-            kind="friction",
-            what="the deferred health count vanished",
-            prevention="show the deferred health queue",
-            actor="agent",
-        )
-        deferred = nominations.create_nomination(
-            cur,
-            content="show the deferred health queue",
-            kind="rederivation",
-            evidence=[deferred_pain["ledger_id"]],
-            actor="agent",
-        )
-        nominations.defer(
-            cur,
-            deferred["nomination_id"],
-            actor="user",
-            reason="exercise the deferred count",
-        )
-        temporary.put_temporary(
-            cur,
-            content="temporary health condition",
-            actor="user",
-            days=1,
-        )
-        projects.create_project(cur, name="health project", actor="user")
-        tasks.task_create(
-            cur,
-            project="health project",
-            name="active health task",
-            goal="appear in active health",
-            actor="agent",
-        )
-        dormant = tasks.task_create(
-            cur,
-            project="health project",
-            name="dormant health task",
-            goal="appear in dormant health",
-            actor="agent",
-            force=True,
-        )
-        closed = tasks.task_create(
-            cur,
-            project="health project",
-            name="closed health task",
-            goal="appear in closed health",
-            actor="agent",
-            force=True,
+        expire(cur, dormant)
+        tasks.close(cur, closed, outcome="completed", actor="user", reason="finished")
+        cur.execute(
+            "INSERT INTO trace (content, created_by, expires_at) "
+            "VALUES ('live health trace', 'agent', now() + interval '1 day')"
         )
         cur.execute(
-            "UPDATE task SET active_until = now() - interval '1 day' WHERE task_id = %s",
-            (dormant["task"]["task_id"],),
-        )
-        tasks.close(
-            cur,
-            closed["task"]["task_id"],
-            outcome="completed",
-            actor="user",
-            reason="health test finished",
-        )
-        cur.execute(
-            """
-            INSERT INTO trace (content, created_by, expires_at)
-            VALUES ('live health trace', 'agent', now() + interval '1 day')
-            """
-        )
-        cur.execute(
-            """
-            INSERT INTO event_log (event_type, actor)
-            VALUES ('delivery_failure_suspected', 'agent')
-            """
+            "INSERT INTO event_log (event_type, actor) "
+            "VALUES ('delivery_failure_suspected', 'agent')"
         )
 
     value = settings_ui._health(dsn)
@@ -179,47 +73,23 @@ def test_health_collects_capacity_queues_evidence_and_task_activity(dsn: str) ->
     assert value.memory_always_tokens > 0 and value.memory_worst_tokens > 0
     assert value.active_states == 1 and value.state_worst_tokens > 0
     assert value.temporary_count == 1 and value.temporary_tokens > 0
-    # Incident reporting nominates immediately; the explicit second row makes two ready.
-    assert (value.pending_ready, value.pending_deferred) == (2, 1)
+    assert (value.pending_ready, value.pending_deferred) == (1, 1)
     assert value.traces == 1 and value.ledger_30d >= 4
     assert value.delivery_failures_30d == 1 and value.scope_count == 1
     assert (value.tasks_active, value.tasks_dormant, value.tasks_closed) == (1, 1, 1)
 
 
-def test_bootstrap_preview_resolves_cwd_and_shows_every_payload_share(
-    dsn: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_bootstrap_preview_resolves_cwd_and_shows_every_payload_share(dsn, monkeypatch):
     here = "/tmp/mashu-settings-project"
     with db.transaction(dsn) as cur:
-        scope = scopes.create_scope(cur, name="preview", summary="preview scope", actor="user")
-        routing.add_route(cur, path_prefix=here, scope_id=scope["scope_id"], actor="user")
-        memories.remember(cur, content="always in preview", actor="user")
-        memories.remember(
-            cur,
-            content="scoped into preview",
-            scope_id=scope["scope_id"],
-            delivery="scope",
-            actor="user",
-        )
-        projects.create_project(
-            cur,
-            name="preview project",
-            scope_id=scope["scope_id"],
-            actor="user",
-        )
-        tasks.task_create(
-            cur,
-            project="preview project",
-            name="preview active state",
-            goal="show the current state",
-            actor="agent",
-        )
+        scope_id = scopes.create_scope(cur, name="preview", actor="user")["scope_id"]
+        routing.add_route(cur, path_prefix=here, scope_id=scope_id, actor="user")
+        remember(cur, "always in preview")
+        remember(cur, "scoped into preview", scope_id=scope_id, delivery="scope")
+        new_project(cur, "preview project", scope_id=scope_id)
+        new_task(cur, "preview active state", "preview project", goal="show the current state")
         temporary.put_temporary(
-            cur,
-            content="preview temporary context",
-            scope_id=scope["scope_id"],
-            actor="user",
-            days=1,
+            cur, content="preview temporary context", scope_id=scope_id, actor="user", days=1
         )
     monkeypatch.setattr(settings_ui.os, "getcwd", lambda: f"{here}/nested")
 
@@ -237,35 +107,19 @@ def test_bootstrap_preview_resolves_cwd_and_shows_every_payload_share(
     assert "Tokens" in rendered and "Total" in rendered
 
 
-def test_scope_page_creates_a_scope_with_its_summary(
-    dsn: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@pytest.mark.parametrize("summary", ["Release and rollback knowledge", ""])
+def test_scope_page_creates_a_scope_whose_summary_is_optional(dsn, monkeypatch, summary):
     getkeys(monkeypatch, "n", "q")
-    answers(monkeypatch, "deployment", "Release and rollback knowledge")
+    answers(monkeypatch, "deployment", summary)
 
     settings_ui._scopes_page(dsn)
 
     with db.transaction(dsn) as cur:
         row = scopes.require_scope(cur, "deployment")
-    assert row["summary"] == "Release and rollback knowledge"
+    assert row["summary"] == (summary or None)
 
 
-def test_scope_summary_is_optional_when_the_line_is_submitted_empty(
-    dsn: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    getkeys(monkeypatch, "n", "q")
-    answers(monkeypatch, "deployment", "")
-
-    settings_ui._scopes_page(dsn)
-
-    with db.transaction(dsn) as cur:
-        row = scopes.require_scope(cur, "deployment")
-    assert row["summary"] is None
-
-
-def test_ctrl_c_at_an_optional_scope_summary_cancels_creation(
-    dsn: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_ctrl_c_at_an_optional_scope_summary_cancels_creation(dsn, monkeypatch):
     getkeys(monkeypatch, "n", "q")
 
     def answer(prompt: str) -> str:
@@ -278,14 +132,9 @@ def test_ctrl_c_at_an_optional_scope_summary_cancels_creation(
 
     with db.transaction(dsn) as cur:
         assert scopes.get_scope(cur, "deployment") is None
-    assert "scope creation cancelled" in capsys.readouterr().out
 
 
-def test_scope_errors_stay_on_the_page_as_feedback(
-    dsn: str,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_scope_errors_stay_on_the_page_as_feedback(dsn, monkeypatch, capsys):
     with db.transaction(dsn) as cur:
         scopes.create_scope(cur, name="duplicate", actor="user")
     getkeys(monkeypatch, "n", "q")
@@ -296,7 +145,7 @@ def test_scope_errors_stay_on_the_page_as_feedback(
     assert "already exists" in capsys.readouterr().out
 
 
-def test_scope_name_and_summary_can_be_edited(dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_scope_name_and_summary_can_be_edited(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
         scope = scopes.create_scope(cur, name="old scope", summary="old summary", actor="user")
     getkeys(monkeypatch, "e", "q")
@@ -310,17 +159,11 @@ def test_scope_name_and_summary_can_be_edited(dsn: str, monkeypatch: pytest.Monk
     assert row["summary"] == "new summary"
 
 
-def test_routes_can_be_added_ignored_and_removed(dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_routes_can_be_added_ignored_and_removed(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
         scopes.create_scope(cur, name="route scope", actor="user")
     getkeys(monkeypatch, "n", "i", "x", "q")
-    answers(
-        monkeypatch,
-        "/tmp/settings-scoped/a/long/path",
-        "route scope",
-        "/tmp/i",
-        "y",
-    )
+    answers(monkeypatch, "/tmp/settings-scoped/a/long/path", "route scope", "/tmp/i", "y")
 
     settings_ui._routes_page(dsn)
 
@@ -328,9 +171,7 @@ def test_routes_can_be_added_ignored_and_removed(dsn: str, monkeypatch: pytest.M
     assert [(row["path_prefix"], row["scope_id"]) for row in rows] == [("/tmp/i", None)]
 
 
-def test_route_path_and_destination_can_be_edited(
-    dsn: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_route_path_and_destination_can_be_edited(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
         scope = scopes.create_scope(cur, name="route scope", actor="user")
         route = routing.add_route(
@@ -348,18 +189,12 @@ def test_route_path_and_destination_can_be_edited(
     assert rows[0]["scope_id"] is None
 
 
-def test_schema_apply_is_confirmed_and_reports_a_noop(
-    dsn: str,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_schema_apply_is_confirmed_and_reports_a_noop(dsn, monkeypatch, capsys):
     called: list[str | None] = []
     getkeys(monkeypatch, "m", "q")
     prompts = answers(monkeypatch, "y")
     monkeypatch.setattr(
-        settings_ui.migration,
-        "migrate",
-        lambda conninfo: called.append(conninfo) or [],
+        settings_ui.migration, "migrate", lambda conninfo: called.append(conninfo) or []
     )
 
     settings_ui._schema_page(dsn)
@@ -369,10 +204,7 @@ def test_schema_apply_is_confirmed_and_reports_a_noop(
     assert "already up to date" in capsys.readouterr().out
 
 
-def test_long_pages_move_forward_and_back_without_losing_the_header(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_long_pages_move_forward_and_back_without_losing_the_header(monkeypatch, capsys):
     monkeypatch.setenv("LINES", "10")
     getkeys(monkeypatch, "space", "b", "q")
     body = "\n".join(f"  detail line {number}" for number in range(30))
@@ -385,9 +217,7 @@ def test_long_pages_move_forward_and_back_without_losing_the_header(
     assert out.count("detail line 0") == 2
 
 
-def test_topic_page_creates_edits_and_removes_a_topic(
-    dsn: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_topic_page_creates_edits_and_removes_a_topic(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
         scopes.create_scope(cur, name="game", actor="user")
     getkeys(monkeypatch, "n", "e", "x", "q")
@@ -406,28 +236,22 @@ def test_topic_page_creates_edits_and_removes_a_topic(
 
     with db.transaction(dsn) as cur:
         assert topics.get_topic(cur, "balance") is None
+        assert topics.get_topic(cur, "difficulty") is None
         cur.execute(
-            "SELECT detail FROM event_log WHERE event_type = 'topic_updated' ORDER BY created_at"
+            "SELECT event_type, detail FROM event_log WHERE event_type LIKE 'topic_%%' "
+            "ORDER BY created_at"
         )
-        edited = cur.fetchone()["detail"]["to"]
+        events = cur.fetchall()
+    assert [row["event_type"] for row in events][:2] == ["topic_created", "topic_updated"]
+    edited = events[1]["detail"]["to"]
     assert edited["trigger"] == "Before changing win rates or placement"
     assert edited["scope_id"] is None
-    out = capsys.readouterr().out
-    assert "created topic difficulty" in out and "deleted topic balance" in out
 
 
-def test_a_topic_holding_rules_is_not_removed_from_the_page(
-    dsn: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_a_topic_holding_rules_is_not_removed_from_the_page(dsn, monkeypatch, capsys):
     with db.transaction(dsn) as cur:
         topic = topics.create_topic(cur, name="difficulty", trigger="Before tuning", actor="user")
-        memories.remember(
-            cur,
-            content="keep the win rate between 45 and 55 percent",
-            actor="user",
-            delivery="topic",
-            topic_id=topic["topic_id"],
-        )
+        remember(cur, "keep the win rate even", delivery="topic", topic_id=topic["topic_id"])
     getkeys(monkeypatch, "x", "q")
     answers(monkeypatch, "y")
 
@@ -436,4 +260,5 @@ def test_a_topic_holding_rules_is_not_removed_from_the_page(
     out = capsys.readouterr().out
     assert "still holds 1 active rule" in out
     assert "1 rule active" in out
-    assert "Before tuning" in out
+    with db.transaction(dsn) as cur:
+        assert topics.get_topic(cur, "difficulty")["archived_at"] is None

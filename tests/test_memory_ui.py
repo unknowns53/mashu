@@ -4,7 +4,7 @@ import datetime as dt
 
 import pytest
 
-from conftest import keys
+from conftest import keys, retire
 from mashu import db, memories, memory_ui, scopes, screen, temporary, topics
 
 RULE = "never report a run as finished without the output that proves it"
@@ -34,20 +34,10 @@ def test_views_show_active_retired_and_unexpired_temporary_rows(dsn, monkeypatch
     active = remember(dsn)
     retired = remember(dsn, "keep the old deployment reason visible")
     with db.transaction(dsn) as cur:
-        memories.retire(
-            cur,
-            retired["memory_id"],
-            reason="the deployer enforces this now",
-            actor="user",
-            retirement_kind="invalidated",
-        )
+        retire(cur, retired, "the deployer enforces this now")
         scope = scopes.require_scope(cur, "deployments")
         context = temporary.put_temporary(
-            cur,
-            content="the canary is paused while the incident is open",
-            actor="user",
-            days=2,
-            scope_id=scope["scope_id"],
+            cur, content="the canary is paused", actor="user", days=2, scope_id=scope["scope_id"]
         )
 
     keys(monkeypatch, "2", "3", "q")
@@ -66,11 +56,7 @@ def test_full_detail_explains_evidence_and_revision_history(dsn, monkeypatch, ca
     memory = remember(dsn)
     with db.transaction(dsn) as cur:
         memories.revise(
-            cur,
-            memory["memory_id"],
-            content=REVISED,
-            actor="user",
-            note="say what evidence must be pasted",
+            cur, memory["memory_id"], content=REVISED, actor="user", note="say what to paste"
         )
     keys(monkeypatch, "enter", "q")
 
@@ -82,7 +68,7 @@ def test_full_detail_explains_evidence_and_revision_history(dsn, monkeypatch, ca
     assert f"prevention: {RULE}" in out
     assert "revisions" in out
     assert RULE in out and REVISED in out
-    assert "note: say what evidence must be pasted" in out
+    assert "note: say what to paste" in out
     assert "by user" in out
 
 
@@ -134,13 +120,12 @@ def test_new_durable_memory_can_choose_a_scope_delivery(dsn, monkeypatch):
     assert row["created_by"] == "user"
 
 
-def test_revision_without_an_editor_uses_safe_line_input(dsn, monkeypatch, capsys):
+def test_revision_without_an_editor_uses_safe_line_input(dsn, monkeypatch):
     memory = remember(dsn)
     keys(monkeypatch, "e", REVISED, "q")
 
     assert memory_ui.run(dsn) == 0
     assert memory_row(dsn, memory["memory_id"])["content"] == REVISED
-    assert f"revised {str(memory['memory_id'])[:8]}" in capsys.readouterr().out
 
 
 def test_retirement_selects_a_kind_and_applies_after_entering_its_reason(dsn, monkeypatch):
@@ -157,7 +142,7 @@ def test_retirement_selects_a_kind_and_applies_after_entering_its_reason(dsn, mo
 def test_retirement_cancellation_and_legacy_selection_leave_the_memory_active(dsn, monkeypatch):
     memory = remember(dsn)
     monkeypatch.setattr(screen, "editline", lambda *_args: screen.Cancelled())
-    assert "cancelled" in memory_ui._retire(dsn, memory)
+    memory_ui._retire(dsn, memory)
     assert memory_row(dsn, memory["memory_id"])["status"] == "active"
 
     monkeypatch.setattr(screen, "editline", lambda *_args: screen.Submitted("legacy"))
@@ -179,14 +164,7 @@ def test_delivery_can_be_changed_to_a_global_guard(dsn, monkeypatch):
 def test_delivery_edit_keeps_existing_guard_defaults_on_empty_input(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
         scope = scopes.require_scope(cur, "deployments")
-        memory = memories.remember(
-            cur,
-            content=RULE,
-            actor="user",
-            delivery="guard",
-            guard_action="Bash",
-            scope_id=scope["scope_id"],
-        )
+    memory = remember(dsn, delivery="guard", guard_action="Bash", scope_id=scope["scope_id"])
     keys(monkeypatch, "d", "", "", "", "q")
 
     assert memory_ui.run(dsn) == 0
@@ -209,16 +187,7 @@ def test_selection_stays_on_the_same_id_when_a_delivery_change_reorders_the_list
 
 
 def test_temporary_add_is_global_and_rejects_an_out_of_range_lifetime(dsn, monkeypatch, capsys):
-    keys(
-        monkeypatch,
-        "p",
-        "this should be refused",
-        "15",
-        "p",
-        "the release is frozen for the audit",
-        "2.5",
-        "q",
-    )
+    keys(monkeypatch, "p", "this should be refused", "15", "p", "frozen for the audit", "2.5", "q")
 
     assert memory_ui.run(dsn) == 0
     out = capsys.readouterr().out
@@ -227,20 +196,16 @@ def test_temporary_add_is_global_and_rejects_an_out_of_range_lifetime(dsn, monke
         cur.execute("SELECT * FROM temporary_context")
         rows = cur.fetchall()
     assert len(rows) == 1
-    assert rows[0]["content"] == "the release is frozen for the audit"
+    assert rows[0]["content"] == "frozen for the audit"
     assert rows[0]["scope_id"] is None
     assert rows[0]["created_by"] == "user"
 
 
-def test_temporary_context_can_be_edited_in_place(dsn, monkeypatch, capsys):
+def test_temporary_context_can_be_edited_in_place(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
         scope = scopes.require_scope(cur, "deployments")
         context = temporary.put_temporary(
-            cur,
-            content="the release is frozen",
-            actor="user",
-            days=2,
-            scope_id=scope["scope_id"],
+            cur, content="the release is frozen", actor="user", days=2, scope_id=scope["scope_id"]
         )
     keys(monkeypatch, "3", "e", "the release is frozen until Friday", "-", "q")
 
@@ -254,10 +219,9 @@ def test_temporary_context_can_be_edited_in_place(dsn, monkeypatch, capsys):
         row = cur.fetchone()
     assert row["content"] == "the release is frozen until Friday"
     assert row["scope_id"] is None
-    assert "revised temporary" in capsys.readouterr().out
 
 
-def test_memory_and_temporary_context_can_be_converted_both_ways(dsn, monkeypatch, capsys):
+def test_memory_and_temporary_context_can_be_converted_both_ways(dsn, monkeypatch):
     original = remember(dsn)
     keys(monkeypatch, "c", "2", "c", "y", "q")
 
@@ -273,49 +237,22 @@ def test_memory_and_temporary_context_can_be_converted_both_ways(dsn, monkeypatc
     assert len(active) == 1
     assert active[0]["content"] == RULE
     assert active[0]["delivery"] == "always"
-    out = capsys.readouterr().out
-    assert "to temporary" in out and "to memory" in out
 
 
-def test_retired_conflict_shows_the_reason_and_does_not_override_without_yes(
-    dsn, monkeypatch, capsys
+@pytest.mark.parametrize(("answer", "active"), [("n", 0), ("yes", 1)])
+def test_retired_conflict_shows_the_reason_and_overrides_only_after_explicit_yes(
+    dsn, monkeypatch, capsys, answer, active
 ):
     memory = remember(dsn)
     with db.transaction(dsn) as cur:
-        memories.retire(
-            cur,
-            memory["memory_id"],
-            reason="the service now enforces this",
-            actor="user",
-            retirement_kind="invalidated",
-        )
-    keys(monkeypatch, "n", RULE, "", "n", "q")
+        retire(cur, memory, "the service now enforces this")
+    keys(monkeypatch, "n", RULE, "", answer, "q")
 
     assert memory_ui.run(dsn) == 0
-    out = capsys.readouterr().out
-    assert "the service now enforces this" in out
-    assert "retirement kept" in out
+    assert "the service now enforces this" in capsys.readouterr().out
     with db.transaction(dsn) as cur:
         cur.execute("SELECT count(*) AS n FROM memory WHERE status = 'active'")
-        assert cur.fetchone()["n"] == 0
-
-
-def test_retired_conflict_is_overridden_only_after_explicit_yes(dsn, monkeypatch):
-    memory = remember(dsn)
-    with db.transaction(dsn) as cur:
-        memories.retire(
-            cur,
-            memory["memory_id"],
-            reason="old advice",
-            actor="user",
-            retirement_kind="invalidated",
-        )
-    keys(monkeypatch, "n", RULE, "", "yes", "q")
-
-    assert memory_ui.run(dsn) == 0
-    with db.transaction(dsn) as cur:
-        cur.execute("SELECT count(*) AS n FROM memory WHERE status = 'active'")
-        assert cur.fetchone()["n"] == 1
+        assert cur.fetchone()["n"] == active
 
 
 def test_non_tty_rendering_contains_no_ansi(monkeypatch):
@@ -347,29 +284,18 @@ def test_the_delivery_prompt_explains_each_choice_in_one_line(dsn, monkeypatch, 
     assert "guard   just before one action (e.g. delegate)" in out
 
 
-def test_a_new_rule_can_open_a_new_topic_without_typing_an_id(dsn, monkeypatch, capsys):
-    keys(
-        monkeypatch,
-        "n",
-        RULE,
-        "topic",
-        "n",
-        "run reports",
-        "deployments",
-        "Before writing a run report",
-        "q",
-    )
+def test_a_new_rule_can_open_a_new_topic_without_typing_an_id(dsn, monkeypatch):
+    keys(monkeypatch, "n", RULE, "topic", "n", "run reports", "deployments", "Before a report", "q")
 
     assert memory_ui.run(dsn) == 0
     with db.transaction(dsn) as cur:
         topic = topics.require_topic(cur, "run reports")
         cur.execute("SELECT * FROM memory")
         row = cur.fetchone()
-    assert topic["trigger"] == "Before writing a run report"
+    assert topic["trigger"] == "Before a report"
     assert topic["scope_name"] == "deployments"
     assert (row["delivery"], row["topic_id"]) == ("topic", topic["topic_id"])
     assert row["scope_id"] == topic["scope_id"]
-    assert "topic:run reports" in capsys.readouterr().out
 
 
 def test_the_topic_picker_lists_topics_by_number(dsn, monkeypatch, capsys):

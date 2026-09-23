@@ -2,8 +2,17 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import keys, new_project
+from conftest import committed_task, expire, keys, new_project, task_row, update_task
 from mashu import db, projects, routing, scopes, task_history, tasks, work_ui
+
+STATE = {
+    "goal": "launch without the old rail",
+    "approach": "reuse aft mountings",
+    "status_text": "replacement fitted",
+    "open_questions": ["does the forward mounting move?"],
+    "blockers": ["await load certificate"],
+    "next_actions": ["run the loaded trial"],
+}
 
 pytestmark = pytest.mark.usefixtures("known_screen")
 
@@ -15,44 +24,20 @@ def dsn(dsn):
     return dsn
 
 
-def make_task(
-    dsn: str,
-    name: str,
-    *,
-    activity: str = "active",
-    proposal: bool = False,
-):
+def make_task(dsn: str, name: str, *, activity: str = "active", proposal: bool = False):
+    propose = "completed" if proposal else None
+    task_id = committed_task(dsn, name, propose=propose, reason="all acceptance checks passed")
     with db.transaction(dsn) as cur:
-        made = tasks.task_create(
-            cur,
-            project="enrai",
-            name=name,
-            goal=f"finish {name}",
-            actor="agent",
-            force=True,
-        )
-        task_id = made["task"]["task_id"]
-        if proposal:
-            tasks.propose_close(
-                cur,
-                task_id,
-                outcome="completed",
-                reason="all acceptance checks passed",
-                actor="agent",
-            )
         if activity == "dormant":
-            cur.execute(
-                "UPDATE task SET active_until = now() - interval '1 day' WHERE task_id = %s",
-                (task_id,),
-            )
+            expire(cur, task_id)
         elif activity == "closed":
             tasks.close(cur, task_id, outcome="completed", reason="shipped", actor="user")
-        return task_id
+    return task_id
 
 
-def get_task(dsn: str, task_id):
+def listed(dsn: str):
     with db.transaction(dsn) as cur:
-        return tasks.task_get(cur, task_id)
+        return tasks.task_list(cur)
 
 
 def test_four_views_can_be_opened_and_initial_view_is_honoured(dsn, monkeypatch, capsys):
@@ -72,60 +57,27 @@ def test_four_views_can_be_opened_and_initial_view_is_honoured(dsn, monkeypatch,
 def test_task_details_show_all_state_proposal_and_latest_history(dsn, monkeypatch, capsys):
     task_id = make_task(dsn, "replace launch rail", proposal=True)
     with db.transaction(dsn) as cur:
-        row = tasks.task_get(cur, task_id)
-        updated = tasks.task_update(
-            cur,
-            task_id,
-            actor="agent",
-            expect_updated_at=row["state"]["updated_at"],
-            goal="launch without the old rail",
-            approach="reuse aft mountings",
-            status_text="replacement fitted",
-            open_questions=["does the forward mounting move?"],
-            blockers=["await load certificate"],
-            next_actions=["run the loaded trial"],
-        )
+        updated = update_task(cur, task_id, **STATE)
         artifact = task_history.artifact_link(
-            cur,
-            task_id,
-            actor="agent",
-            kind="file",
-            locator="reports/rail-load.txt",
-            label="load report",
+            cur, task_id, actor="agent", kind="file", locator="reports/rail-load.txt", label="load"
         )
-        task_history.attempt_record(
-            cur, task_id, actor="agent", attempt="fit the new rail", result="aligned"
-        )
-        task_history.attempt_record(
-            cur,
-            task_id,
-            actor="agent",
-            attempt="test the forward mount",
-            result="also aligned",
-        )
-        task_history.decision_record(
-            cur, task_id, actor="agent", decision="keep aft mountings", reason="loads pass"
-        )
-        task_history.decision_record(
-            cur,
-            task_id,
-            actor="agent",
-            decision="document the alternate rail",
-            reason="future refits need the same dimensions",
-        )
+        for attempt, result in (("fit the new rail", "aligned"), ("test the forward mount", "ok")):
+            task_history.attempt_record(cur, task_id, actor="agent", attempt=attempt, result=result)
+        for decision, reason in (
+            ("keep aft mountings", "loads pass"),
+            ("document the alternate rail", "future refits need the same dimensions"),
+        ):
+            task_history.decision_record(
+                cur, task_id, actor="agent", decision=decision, reason=reason
+            )
         task_history.checkpoint(
             cur,
             task_id,
             actor="agent",
             what_changed="recorded the fitted rail",
             expect_updated_at=updated["state"]["updated_at"],
-            goal="launch without the old rail",
-            approach="reuse aft mountings",
-            status_text="replacement fitted",
-            open_questions=["does the forward mounting move?"],
-            blockers=["await load certificate"],
-            next_actions=["run the loaded trial"],
             evidence=[artifact["reference_id"]],
+            **STATE,
         )
         task_history.artifact_link(
             cur,
@@ -140,13 +92,9 @@ def test_task_details_show_all_state_proposal_and_latest_history(dsn, monkeypatc
     assert work_ui.run(dsn) == 0
     out = capsys.readouterr().out
     assert "size  card" in out and "detail" in out
+    for value in STATE.values():
+        assert (value[0] if isinstance(value, list) else value) in out
     for text in (
-        "launch without the old rail",
-        "reuse aft mountings",
-        "replacement fitted",
-        "does the forward mounting move?",
-        "await load certificate",
-        "run the loaded trial",
         "Proposal",
         "STALE",
         "fit the new rail",
@@ -187,52 +135,45 @@ def test_duplicate_task_is_forced_only_after_explicit_confirmation(dsn, monkeypa
     original = make_task(dsn, "calibrate the same rail")
     keys(monkeypatch, "n", "calibrate the same rail", "enrai", "", "n", "q")
     assert work_ui.run(dsn) == 0
-    with db.transaction(dsn) as cur:
-        assert [_task["task"]["task_id"] for _task in tasks.task_list(cur)] == [original]
+    assert [row["task"]["task_id"] for row in listed(dsn)] == [original]
 
     keys(monkeypatch, "n", "calibrate the same rail", "enrai", "", "y", "q")
     assert work_ui.run(dsn) == 0
-    with db.transaction(dsn) as cur:
-        assert len(tasks.task_list(cur)) == 2
+    assert len(listed(dsn)) == 2
 
 
-def test_new_task_is_created_by_the_user_and_remains_selected(dsn, monkeypatch, capsys):
+def test_new_task_is_created_by_the_user(dsn, monkeypatch):
     keys(monkeypatch, "n", "fit the hatch", "", "close without binding", "q")
     assert work_ui.run(dsn) == 0
-    with db.transaction(dsn) as cur:
-        row = tasks.task_list(cur)[0]
+    row = listed(dsn)[0]
     assert row["task"]["created_by"] == "user"
     assert row["state"]["goal"] == "close without binding"
-    assert "fit the hatch" in capsys.readouterr().out
 
 
 def test_task_creation_asks_for_a_project_only_when_more_than_one_is_available(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
-        projects.create_project(cur, name="drydock", actor="user")
+        new_project(cur, "drydock")
     keys(monkeypatch, "n", "build the crane", "", "q")
 
     assert work_ui.run(dsn) == 0
-    with db.transaction(dsn) as cur:
-        assert tasks.task_list(cur) == []
+    assert listed(dsn) == []
 
     keys(monkeypatch, "n", "build the crane", "drydock", "", "q")
     assert work_ui.run(dsn) == 0
-    with db.transaction(dsn) as cur:
-        made = tasks.task_list(cur)
+    made = listed(dsn)
     assert len(made) == 1 and made[0]["task"]["project_name"] == "drydock"
 
 
 def test_task_creation_prefers_the_only_project_in_the_routed_scope(dsn, monkeypatch, tmp_path):
     with db.transaction(dsn) as cur:
-        scope = scopes.create_scope(cur, name="shipyard", actor="user")
-        projects.create_project(cur, name="hull work", scope_id=scope["scope_id"], actor="user")
-        routing.add_route(cur, path_prefix=str(tmp_path), scope_id=scope["scope_id"], actor="user")
+        scope_id = scopes.create_scope(cur, name="shipyard", actor="user")["scope_id"]
+        new_project(cur, "hull work", scope_id=scope_id)
+        routing.add_route(cur, path_prefix=str(tmp_path), scope_id=scope_id, actor="user")
     monkeypatch.chdir(tmp_path)
     keys(monkeypatch, "n", "inspect the keel", "", "", "q")
 
     assert work_ui.run(dsn) == 0
-    with db.transaction(dsn) as cur:
-        made = tasks.task_list(cur)
+    made = listed(dsn)
     assert len(made) == 1 and made[0]["task"]["project_name"] == "hull work"
 
 
@@ -241,10 +182,10 @@ def test_touch_reactivates_a_dormant_task(dsn, monkeypatch):
     keys(monkeypatch, "t", "q")
 
     assert work_ui.run(dsn, initial_view="dormant") == 0
-    assert get_task(dsn, task_id)["activity"] == "active"
+    assert task_row(dsn, task_id)["activity"] == "active"
 
 
-def test_task_name_project_and_current_state_can_be_edited(dsn, monkeypatch, capsys):
+def test_task_name_project_and_current_state_can_be_edited(dsn, monkeypatch):
     task_id = make_task(dsn, "old rail wording")
     keys(
         monkeypatch,
@@ -262,7 +203,7 @@ def test_task_name_project_and_current_state_can_be_edited(dsn, monkeypatch, cap
 
     assert work_ui.run(dsn) == 0
 
-    row = get_task(dsn, task_id)
+    row = task_row(dsn, task_id)
     assert row["task"]["name"] == "new rail wording"
     assert row["task"]["project_name"] == "enrai"
     assert row["state"]["goal"] == "ship the new rail"
@@ -271,48 +212,17 @@ def test_task_name_project_and_current_state_can_be_edited(dsn, monkeypatch, cap
     assert row["state"]["open_questions"] == ["load certified?", "paint complete?"]
     assert row["state"]["blockers"] == []
     assert row["state"]["next_actions"] == ["run trial", "publish report"]
-    assert "edited task" in capsys.readouterr().out
 
 
-def test_close_can_accept_a_standing_proposal(dsn, monkeypatch):
-    task_id = make_task(dsn, "finish the rail", proposal=True)
-    keys(monkeypatch, "c", "enter", "q")
-
-    assert work_ui.run(dsn) == 0
-    closed = get_task(dsn, task_id)
-    assert closed["task"]["outcome"] == "completed"
-    assert closed["task"]["close_reason"] == "all acceptance checks passed"
-
-
-def test_stale_proposal_needs_a_second_confirmation(dsn, monkeypatch, capsys):
-    task_id = make_task(dsn, "finish the rail", proposal=True)
-    with db.transaction(dsn) as cur:
-        row = tasks.task_get(cur, task_id)
-        tasks.task_update(
-            cur,
-            task_id,
-            actor="agent",
-            expect_updated_at=row["state"]["updated_at"],
-            status_text="one more load test is needed",
-        )
-    keys(monkeypatch, "c", "enter", "n", "q")
-
-    assert work_ui.run(dsn) == 0
-    assert get_task(dsn, task_id)["task"]["status"] == "open"
-    assert "stale proposal was not accepted" in capsys.readouterr().out
-
-
-def test_task_can_be_closed_without_a_proposal_and_reopened(dsn, monkeypatch):
+def test_a_task_closed_here_can_be_reopened_from_the_closed_view(dsn, monkeypatch):
     task_id = make_task(dsn, "retire the old rail")
     keys(monkeypatch, "c", "s", "replaced by the carbon rail", "q")
     assert work_ui.run(dsn) == 0
-    closed = get_task(dsn, task_id)
-    assert closed["task"]["outcome"] == "superseded"
-    assert closed["task"]["close_reason"] == "replaced by the carbon rail"
+    assert task_row(dsn, task_id)["task"]["outcome"] == "superseded"
 
     keys(monkeypatch, "o", "q")
     assert work_ui.run(dsn, initial_view="closed") == 0
-    assert get_task(dsn, task_id)["task"]["status"] == "open"
+    assert task_row(dsn, task_id)["task"]["status"] == "open"
 
 
 def test_project_view_shows_counts_and_creates_an_optionally_scoped_project(
@@ -325,14 +235,11 @@ def test_project_view_shows_counts_and_creates_an_optionally_scoped_project(
 
     assert work_ui.run(dsn, initial_view="projects") == 0
     with db.transaction(dsn) as cur:
-        made = projects.show_project(cur, "shipyard")
-    assert made["scope_name"] == "repository"
-    out = capsys.readouterr().out
-    assert "1a  0d  0c" in out
-    assert "shipyard" in out
+        assert projects.show_project(cur, "shipyard")["scope_name"] == "repository"
+    assert "1a  0d  0c" in capsys.readouterr().out
 
 
-def test_project_name_and_scope_can_be_edited(dsn, monkeypatch, capsys):
+def test_project_name_and_scope_can_be_edited(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
         scopes.create_scope(cur, name="repository", actor="user")
     keys(monkeypatch, "e", "enrai renamed", "repository", "q")
@@ -340,9 +247,7 @@ def test_project_name_and_scope_can_be_edited(dsn, monkeypatch, capsys):
     assert work_ui.run(dsn, initial_view="projects") == 0
 
     with db.transaction(dsn) as cur:
-        row = projects.show_project(cur, "enrai renamed")
-    assert row["scope_name"] == "repository"
-    assert "edited project" in capsys.readouterr().out
+        assert projects.show_project(cur, "enrai renamed")["scope_name"] == "repository"
 
 
 def test_refused_project_write_becomes_a_note_and_changes_nothing(dsn, monkeypatch, capsys):

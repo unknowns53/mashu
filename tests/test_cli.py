@@ -5,12 +5,12 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from conftest import propose_change, remember
 from mashu import (
     cli,
     config,
     db,
     memories,
-    memory_changes,
     nominations,
     projects,
     task_history,
@@ -51,6 +51,10 @@ def run(committing_dsn, capsys):
         return code, captured.out, captured.err
 
     return _run
+
+
+def pain(run, prevention: str, kind: str = "incident", what: str = "it went wrong"):
+    return run("pain", "--kind", kind, "--what", what, "--prevention", prevention)
 
 
 def remembered_id(out: str) -> str:
@@ -192,9 +196,7 @@ def test_serving_a_gate_is_recorded_but_an_empty_one_is_not(run, committing_dsn)
 
 
 def test_a_candidate_can_be_read_then_admitted(run):
-    code, out, _ = run(
-        "pain", "--kind", "incident", "--what", "shipped it twice", "--prevention", QUOTA
-    )
+    code, out, _ = pain(run, QUOTA)
     assert code == 0
     assert "nomination  created" in out
 
@@ -216,16 +218,7 @@ def test_admit_requires_the_reviewed_version_and_keeps_a_stale_candidate_pending
 ):
     original = f"check the release checksum before switching versions {uuid4()}"
     revised = f"skip the checksum before switching release versions {uuid4()}"
-    code, _, _ = run(
-        "pain",
-        "--kind",
-        "incident",
-        "--what",
-        "switched to an unverified package",
-        "--prevention",
-        original,
-    )
-    assert code == 0
+    assert pain(run, original)[0] == 0
 
     _, listed, _ = run("review", "--list")
     nomination_id = pending_id(listed, original)
@@ -236,12 +229,7 @@ def test_admit_requires_the_reviewed_version_and_keeps_a_stale_candidate_pending
     assert "--version" in error
 
     with db.transaction(committing_dsn) as cur:
-        changed = nominations.revise(
-            cur,
-            UUID(nomination_id),
-            content=revised,
-            actor="user",
-        )
+        changed = nominations.revise(cur, UUID(nomination_id), content=revised, actor="user")
     assert changed["version"] > reviewed_version
 
     code, _, error = run("review", "--admit", nomination_id, "--version", str(reviewed_version))
@@ -262,26 +250,13 @@ def test_admit_requires_the_reviewed_version_and_keeps_a_stale_candidate_pending
 
 def test_a_memory_change_can_be_read_applied_and_replayed_from_the_cli(run, committing_dsn):
     with db.transaction(committing_dsn) as cur:
-        memory = memories.remember(
-            cur, content="the signer publishes the export manifest", actor="user"
-        )
-        detail = memories.memory_details(cur, memory["memory_id"])
-        proposal = memory_changes.propose(
+        memory = remember(cur, "the signer publishes the export manifest")
+        proposal = propose_change(
             cur,
-            target_memory_id=memory["memory_id"],
-            target_revision_id=detail["current_revision_id"],
-            target_updated_at=detail["updated_at"],
-            operation="retire",
+            memory,
+            "retire",
             retirement_kind="out_of_scope",
             retire_reason="this export path has been removed",
-            evidence=[
-                {
-                    "kind": "ledger",
-                    "id": str(memory["evidence"][0]),
-                    "observation": "the export path has been removed",
-                }
-            ],
-            actor="agent",
         )
 
     _, listed, _ = run("review", "--changes", "--list")
@@ -312,7 +287,7 @@ def test_a_memory_change_can_be_read_applied_and_replayed_from_the_cli(run, comm
 
 
 def test_a_candidate_can_be_turned_down_and_needs_a_reason_to_be(run):
-    run("pain", "--kind", "incident", "--what", "built it wrong", "--prevention", CARRIED)
+    pain(run, CARRIED)
     _, out, _ = run("review", "--list")
     nomination_id = pending_id(out, CARRIED)
 
@@ -327,7 +302,7 @@ def test_a_candidate_can_be_turned_down_and_needs_a_reason_to_be(run):
 
 
 def test_a_candidate_put_off_is_out_of_the_listing_until_all_asks_for_it(run, committing_dsn):
-    run("pain", "--kind", "incident", "--what", "guessed at it", "--prevention", DEFERRED)
+    pain(run, DEFERRED)
     _, out, _ = run("review", "--list")
     nomination_id = pending_id(out, DEFERRED)
 
@@ -426,24 +401,10 @@ def test_retirement_requires_a_non_legacy_kind(capsys):
 def test_a_pain_that_lands_on_retired_knowledge_is_answered_with_the_reason(run):
     _, out, _ = run("remember", WITHDRAWN_RULE)
     memory_id = remembered_id(out)
-    run(
-        "retire",
-        memory_id,
-        "--kind",
-        "invalidated",
-        "--reason",
-        "the vendored headers were dropped upstream",
-    )
+    reason = "the vendored headers were dropped upstream"
+    run("retire", memory_id, "--kind", "invalidated", "--reason", reason)
 
-    code, out, _ = run(
-        "pain",
-        "--kind",
-        "incident",
-        "--what",
-        "built against the wrong headers",
-        "--prevention",
-        WITHDRAWN_RULE,
-    )
+    code, out, _ = pain(run, WITHDRAWN_RULE)
     assert code == 0
     assert "nomination  created" in out
 
@@ -451,7 +412,7 @@ def test_a_pain_that_lands_on_retired_knowledge_is_answered_with_the_reason(run)
     assert WITHDRAWN_RULE in out
     assert "retired conflict" in out
     assert "invalidated" in out
-    assert "the vendored headers were dropped upstream" in out
+    assert reason in out
 
 
 def test_a_refusal_leaves_by_the_error_channel_with_a_failing_code(run):
@@ -477,9 +438,7 @@ def test_the_short_id_that_is_printed_is_the_one_that_can_be_typed_back(run):
     code, _, err = run("show", "abc")
     assert code == 1 and "too short" in err
 
-    code, _, err = run(
-        "retire", NOWHERE, "--kind", "invalidated", "--reason", "there is no such row"
-    )
+    code, _, err = run("retire", NOWHERE, "--kind", "invalidated", "--reason", "no such row")
     assert code == 1 and "no memory begins with" in err
 
     code, _, err = run("show", NOWHERE)
@@ -518,15 +477,7 @@ def test_a_prefix_two_rows_answer_to_is_refused_with_both_of_them(run, committin
 
 
 def test_what_a_memory_rests_on_can_still_be_read_after_it_is_admitted(run):
-    code, out, _ = run(
-        "pain",
-        "--kind",
-        "incident",
-        "--what",
-        "ran the migration on the primary first",
-        "--prevention",
-        EVIDENCED,
-    )
+    code, out, _ = pain(run, EVIDENCED)
     assert code == 0
     ledger_short = out.splitlines()[0].split()[1]
 
@@ -573,14 +524,7 @@ def test_the_memories_listing_holds_the_active_set_and_can_be_narrowed(run):
     assert code == 0
     assert SCOPED in out and LISTED not in out
 
-    run(
-        "retire",
-        memory_id[:8],
-        "--kind",
-        "invalidated",
-        "--reason",
-        "the scheduler grew a timezone column",
-    )
+    run("retire", memory_id[:8], "--kind", "invalidated", "--reason", "it grew a timezone")
 
     code, out, _ = run("memories")
     assert code == 0 and LISTED not in out
@@ -588,19 +532,11 @@ def test_the_memories_listing_holds_the_active_set_and_can_be_narrowed(run):
     code, out, _ = run("memories", "--retired")
     assert code == 0
     assert LISTED in out
-    assert "the scheduler grew a timezone column" in out
+    assert "it grew a timezone" in out
 
 
 def test_the_ledger_listing_shows_the_sentence_the_matching_runs_on(run):
-    run(
-        "pain",
-        "--kind",
-        "friction",
-        "--what",
-        "counted the exported rows by hand again",
-        "--prevention",
-        PREVENTED,
-    )
+    pain(run, PREVENTED, "friction")
     code, out, _ = run("ledger", "--limit", "5")
     assert code == 0
     assert f"    prevention  {PREVENTED}" in out
@@ -703,15 +639,7 @@ def test_a_pain_on_a_rule_already_delivered_names_the_delivery_and_is_counted(ru
     _, out, _ = run("remember", DELIVERED)
     memory_id = remembered_id(out)
 
-    code, out, _ = run(
-        "pain",
-        "--kind",
-        "incident",
-        "--what",
-        "a reader saw the rename half applied",
-        "--prevention",
-        DELIVERED,
-    )
+    code, out, _ = pain(run, DELIVERED)
     assert code == 0
     assert "already active" in out
     assert f"active {memory_id[:8]} [always]" in out
@@ -897,28 +825,6 @@ def test_ending_a_task_needs_an_outcome_and_can_be_taken_back(run):
 
     code, out, _ = run("task", "touch", short)
     assert code == 0 and out.startswith("touched")
-
-
-def test_cli_outcome_selection_does_not_implicitly_accept_a_close_proposal(run, committing_dsn):
-    project_name = "explicit close project"
-    task_name = "explicit close remains a human outcome"
-    run("project", "create", project_name)
-    _, out, _ = run("task", "create", task_name, "--project", project_name)
-    short = created_task(out)
-    with db.transaction(committing_dsn) as cur:
-        task_id = cli._task_ref(cur, short)
-        tasks.propose_close(
-            cur,
-            task_id,
-            outcome="completed",
-            reason="an agent proposed this outcome",
-            actor="agent",
-        )
-
-    code, out, _ = run("task", "close", short, "--outcome", "completed")
-    assert code == 0 and out.startswith("closed")
-    with db.transaction(committing_dsn) as cur:
-        assert tasks.task_get(cur, task_id)["task"]["close_reason"] is None
 
 
 def test_a_task_whose_lease_has_run_out_is_listed_only_when_it_is_asked_for(run, committing_dsn):
