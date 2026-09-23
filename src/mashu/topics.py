@@ -56,6 +56,11 @@ def _clean(name: str | None, trigger: str | None) -> tuple[str, str]:
     return name, trigger
 
 
+def validate_new(name: str | None, trigger: str | None) -> tuple[str, str]:
+    """The cleaned name and trigger a topic would be created with, or the refusal."""
+    return _clean(name, trigger)
+
+
 def _names(cur: psycopg.Cursor) -> str:
     cur.execute("SELECT name FROM topic WHERE archived_at IS NULL ORDER BY name")
     known = [row["name"] for row in cur.fetchall()]

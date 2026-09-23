@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 
-from mashu import bootstrap, match, memories, memory_changes, nominations, scopes
+from mashu import bootstrap, match, memories, memory_changes, nominations, scopes, topics
 from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
@@ -706,3 +706,196 @@ def test_changed_successor_delivery_is_part_of_the_proposal_version(cur):
     )
     assert applied["memory"]["delivery"] == "scope"
     assert applied["memory"]["scope_id"] == str(new_scope["scope_id"])
+
+
+def _propose_redeliver(cur, memory, settings, *, change_id=None):
+    detail = memories.memory_details(cur, memory["memory_id"])
+    return memory_changes.propose(
+        cur,
+        target_memory_id=memory["memory_id"],
+        target_revision_id=detail["current_revision_id"],
+        target_updated_at=detail["updated_at"],
+        operation="redeliver",
+        successor_settings=settings,
+        evidence=[
+            {
+                "kind": "ledger",
+                "id": str(memory["evidence"][0]),
+                "observation": "the rule only matters while calibrating difficulty",
+            }
+        ],
+        actor="agent",
+        change_id=change_id,
+    )
+
+
+def _topic_settings(name, trigger=None, scope_id=None):
+    settings = {"delivery": "topic", "scope_id": scope_id, "guard_action": None, "topic": name}
+    if trigger is not None:
+        settings["topic_trigger"] = trigger
+    return settings
+
+
+def test_redeliver_moves_a_rule_into_an_existing_topic_without_touching_its_body(cur):
+    memory = _memory(cur)
+    topics.create_topic(cur, name="calibration", trigger="Before calibrating", actor="user")
+    proposal = _propose_redeliver(cur, memory, _topic_settings("calibration"))
+    assert proposal["delivery_move"] == ["delivery: always -> topic:calibration"]
+    assert memories.get_memory(cur, memory["memory_id"])["delivery"] == "always"
+
+    result = memory_changes.apply(
+        cur,
+        proposal["change_id"],
+        version=proposal["version"],
+        request_id=uuid4(),
+        approval=_approval("Move it into the calibration topic"),
+        actor="agent",
+    )
+
+    moved = memories.get_memory(cur, memory["memory_id"])
+    assert result["operation"] == "redeliver"
+    assert moved["delivery"] == "topic"
+    assert moved["content"] == RULE
+    assert moved["memory_id"] == memory["memory_id"]
+    cur.execute(
+        "SELECT detail FROM event_log WHERE event_type = 'delivery_changed' AND memory_id = %s",
+        (memory["memory_id"],),
+    )
+    assert cur.fetchone()["detail"]["approval_source"]["kind"] == "user_instruction"
+
+
+def test_redeliver_opens_a_described_topic_when_applied(cur, scope_id):
+    memory = _memory(cur)
+    proposal = _propose_redeliver(
+        cur, memory, _topic_settings("calibration", "Before calibrating", scope_id)
+    )
+    assert topics.get_topic(cur, "calibration") is None
+    assert proposal["delivery_move"][1] == (
+        "opens topic calibration for test scope: Before calibrating"
+    )
+
+    memory_changes.apply(
+        cur,
+        proposal["change_id"],
+        version=proposal["version"],
+        request_id=uuid4(),
+        approval=_approval("Put it in a new calibration topic"),
+        actor="agent",
+    )
+
+    topic = topics.get_topic(cur, "calibration")
+    moved = memories.get_memory(cur, memory["memory_id"])
+    assert topic["scope_id"] == scope_id
+    assert topic["created_by"] == "agent"
+    assert moved["topic_id"] == topic["topic_id"]
+    assert moved["scope_id"] == scope_id
+
+
+def test_redeliver_refuses_a_topic_opened_differently_after_the_proposal(cur):
+    memory = _memory(cur)
+    proposal = _propose_redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))
+    topics.create_topic(cur, name="calibration", trigger="Before tuning", actor="user")
+
+    with pytest.raises(MashuError, match="opened differently"):
+        memory_changes.apply(
+            cur,
+            proposal["change_id"],
+            version=proposal["version"],
+            request_id=uuid4(),
+            approval=_approval("Put it in a new calibration topic"),
+            actor="agent",
+        )
+    assert memories.get_memory(cur, memory["memory_id"])["delivery"] == "always"
+
+
+def test_redeliver_refuses_a_target_changed_after_the_proposal(cur, scope_id):
+    memory = _memory(cur)
+    proposal = _propose_redeliver(
+        cur, memory, {"delivery": "scope", "scope_id": scope_id, "guard_action": None}
+    )
+    memories.revise(cur, memory["memory_id"], content=UPDATED, actor="user")
+
+    with pytest.raises(MashuError, match="changed after this proposal was read"):
+        memory_changes.apply(
+            cur,
+            proposal["change_id"],
+            version=proposal["version"],
+            request_id=uuid4(),
+            approval=_approval("Scope it"),
+            actor="agent",
+        )
+
+
+def test_redeliver_replays_its_first_answer_for_the_same_request(cur, scope_id):
+    memory = _memory(cur)
+    proposal = _propose_redeliver(
+        cur, memory, {"delivery": "scope", "scope_id": scope_id, "guard_action": None}
+    )
+    request_id = uuid4()
+    first = memory_changes.apply(
+        cur,
+        proposal["change_id"],
+        version=proposal["version"],
+        request_id=request_id,
+        approval=_approval("Scope it"),
+        actor="agent",
+    )
+    again = memory_changes.apply(
+        cur,
+        proposal["change_id"],
+        version=proposal["version"],
+        request_id=request_id,
+        approval=_approval("Scope it"),
+        actor="agent",
+    )
+    assert again == first
+
+
+def test_redeliver_over_a_topic_bound_leaves_everything_as_it_was(cur, monkeypatch):
+    memory = _memory(cur)
+    proposal = _propose_redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))
+    monkeypatch.setenv("MASHU_TOPIC_CAPACITY", "1")
+
+    with pytest.raises(RefusedError), cur.connection.transaction():
+        memory_changes.apply(
+            cur,
+            proposal["change_id"],
+            version=proposal["version"],
+            request_id=uuid4(),
+            approval=_approval("Put it in a new calibration topic"),
+            actor="agent",
+        )
+
+    assert topics.get_topic(cur, "calibration") is None
+    assert memories.get_memory(cur, memory["memory_id"])["delivery"] == "always"
+    assert memory_changes.get(cur, proposal["change_id"])["status"] == "pending"
+
+
+def test_redeliver_refuses_a_move_that_changes_nothing_or_carries_retirement(cur):
+    memory = _memory(cur)
+    with pytest.raises(MashuError, match="as they are"):
+        _propose_redeliver(
+            cur, memory, {"delivery": "always", "scope_id": None, "guard_action": None}
+        )
+    topics.create_topic(cur, name="calibration", trigger="Before calibrating", actor="user")
+    with pytest.raises(MashuError, match="already exists"):
+        _propose_redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))
+    detail = memories.memory_details(cur, memory["memory_id"])
+    with pytest.raises(MashuError, match="only changes delivery settings"):
+        memory_changes.propose(
+            cur,
+            target_memory_id=memory["memory_id"],
+            target_revision_id=detail["current_revision_id"],
+            target_updated_at=detail["updated_at"],
+            operation="redeliver",
+            retire_reason="not a retirement",
+            successor_settings=_topic_settings("calibration"),
+            evidence=[
+                {
+                    "kind": "ledger",
+                    "id": str(memory["evidence"][0]),
+                    "observation": "moving it",
+                }
+            ],
+            actor="agent",
+        )

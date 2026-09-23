@@ -383,14 +383,17 @@ def build_server() -> Any:
         relocated_to_id: UUID | None = None,
         restore_reason: str | None = None,
     ) -> dict[str, Any]:
-        """Create or refresh a change proposal; replace requires the read successor version.
+        """Create or refresh a retire, replace, restore, or redeliver proposal.
 
         Call memory_get first. For replace, pass the successor nomination version just
         read; if it changed, reread it and update the proposal. Old delivery settings carry
         over by default; pass a complete `successor_settings` object with `delivery`,
         `scope_id`, and `guard_action` only when the requested change includes new
-        delivery settings. For `delivery='topic'` add `topic` with an existing topic name
-        and pass that topic's scope_id or null.
+        delivery settings. `redeliver` changes only those settings of an active Memory
+        and requires `successor_settings`; its evidence observations say why. For
+        `delivery='topic'` add `topic`: an existing topic takes that topic's scope_id or
+        null, and a new topic also needs `topic_trigger` (one sentence saying when to read
+        it) with `scope_id` naming where it is listed, or null for every session.
         """
         try:
             with db.transaction() as cur:

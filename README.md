@@ -43,7 +43,7 @@ User が会話中に「覚えて」と言った
          └─ 未読の pending candidate に合流した、または invalidated / legacy と衝突した
               └─ 採用せず停止 → 返った nomination を読み、memory_admit（nomination_id）
 
-Agent が既存 Memory の変更を考えた
+Agent が既存 Memory の変更を考えた（退役・置換・復帰・配信先の移動）
     └─ memory_get → memory_change_propose → pending proposal
          └─ User の明示指示があれば memory_change_apply
 
@@ -234,7 +234,7 @@ TUI の操作は次のとおり。
 | mashu ledger | Ledger を新しい順に表示 |
 | mashu trace [QUERY] | Trace を表示・検索 |
 | mashu retire REF --kind KIND --reason REASON | `invalidated` / `superseded` / `out_of_scope` / `relocated` の理由を付けて Memory を退役させる。`legacy` は既存データと移行専用 |
-| mashu review --changes | retire / replace / restore の pending proposal を TUI で読む |
+| mashu review --changes | retire / replace / restore / redeliver の pending proposal を TUI で読む |
 | mashu revise REF | Memory を改訂する。旧本文は revision history に残る |
 | mashu deliver REF always\|scope\|topic\|guard | active Memory の配信先を変更する。topic は --topic NAME で指定する |
 | mashu topic | topic の一覧・作成・編集・archive。`mashu topic show NAME` で本文を読む |
@@ -375,7 +375,7 @@ MCP tool は 19 個ある。
 | Knowledge | memory_get | 指定 Memory の本文、revision、evidence、退役種別・理由・後継を読む |
 | Knowledge | memory_nominate | 新規 Memory の pending candidate を作る。replace の後継に使う |
 | Knowledge | memory_admit | 承認根拠を必須にして採用する。`content` を渡せば候補の作成と採用を 1 回で行い、読むべき候補や conflict があれば止まる。止まった候補は `nomination_id` と読み取った version で採用する。request replay は初回応答を返す |
-| Knowledge | memory_change_propose | retire / replace / restore を作成または更新する。replace は後継の内容・version と配信条件を固定する |
+| Knowledge | memory_change_propose | retire / replace / restore / redeliver を作成または更新する。redeliver は本文を変えずに配信条件だけを移し、新しい topic も作れる。replace は後継の内容・version と配信条件を固定する |
 | Knowledge | memory_change_apply | proposal の version と対象・conflict・承認根拠を照合して適用する |
 | Knowledge | memory_change_withdraw | 不要になった pending proposal を取り下げる |
 | Project State | project_list | Project と Task 件数を一覧する |

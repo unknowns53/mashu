@@ -33,7 +33,7 @@ def _summary(row: dict[str, Any]) -> str:
         or ""
     )
     return screen.clip(
-        f" {_short(row['change_id'])}  {row['operation']:<7} "
+        f" {_short(row['change_id'])}  {row['operation']:<9} "
         f"{row.get('retirement_kind') or '-':<12}  {_short(row['target_memory_id'])}  {body}",
         screen.terminal_width() - 1,
     )
@@ -89,6 +89,11 @@ def _detail(row: dict[str, Any], place: int, total: int) -> str:
         )
     if row["operation"] == "restore":
         lines.extend([screen.accent("  restore reason"), screen.wrap(row["restore_reason"]), ""])
+    if row["operation"] == "redeliver":
+        first, *rest = row["delivery_move"]
+        lines.append(screen.accent(f"  {first}"))
+        lines.extend(screen.wrap(line, indent="    ") for line in rest)
+        lines.append("")
     if successor:
         lines.extend(
             [
@@ -108,10 +113,9 @@ def _detail(row: dict[str, Any], place: int, total: int) -> str:
             if candidate_evidence
             else "    candidate evidence: none"
         )
-        delivery = row["successor_delivery"]
-        label = f"guard: {row['successor_guard_action']}" if delivery == "guard" else delivery
-        lines.append(screen.accent(f"  replacement delivery: {label}"))
-        lines.append(f"    scope: {row['successor_scope_id'] or '-'}")
+        first, *rest = row["delivery_move"]
+        lines.append(screen.accent(f"  {first}"))
+        lines.extend(screen.wrap(line, indent="    ") for line in rest)
         if row.get("successor_changed"):
             lines.append(
                 screen.warning(
@@ -164,6 +168,10 @@ def _detail(row: dict[str, Any], place: int, total: int) -> str:
 
 
 def _edit_reason(dsn: str | None, row: dict[str, Any]) -> str:
+    if row["operation"] == "redeliver":
+        return screen.warning(
+            "  ! a redeliver proposal has no reason to edit; its evidence says why"
+        )
     field = "restore_reason" if row["operation"] == "restore" else "retire_reason"
     current = row[field] or ""
     edited = screen.editline(f"  {field} [enter keeps current]: ", current)
@@ -232,6 +240,7 @@ def _apply(dsn: str | None, row: dict[str, Any]) -> str:
     return screen.success(
         f"  ✓ {result['operation']} {_short(row['target_memory_id'])}"
         + (f" → {_short(body['memory_id'])}" if result["operation"] == "replace" else "")
+        + (f"  {row['delivery_move'][0]}" if result["operation"] == "redeliver" else "")
     )
 
 

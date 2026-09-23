@@ -141,7 +141,7 @@ def test_replace_detail_shows_the_successor_snapshot_and_delivery(dsn):
         )
         detail = memory_change_ui._detail(proposal, 1, 1)
         assert "verify the signed archive envelope before extraction" in detail
-        assert "replacement delivery: guard: deploy" in detail
+        assert "replacement delivery: guard:deploy" in detail
         assert f"candidate version: {successor['version']}" in detail
         assert "candidate scope: -" in detail
         assert "candidate kind: user_explicit" in detail
@@ -156,3 +156,35 @@ def test_replace_detail_shows_the_successor_snapshot_and_delivery(dsn):
         detail = memory_change_ui._detail(stale, 1, 1)
         assert "successor nomination changed after this proposal was read" in detail
         assert "verify the archive envelope and checksum before extraction" in detail
+
+
+def test_redeliver_detail_shows_where_the_rule_moves_and_the_topic_it_opens(cur, scope_id):
+    memory = memories.remember(cur, content="keep ship stats fixed when tuning", actor="user")
+    detail = memories.memory_details(cur, memory["memory_id"])
+    proposal = memory_changes.propose(
+        cur,
+        target_memory_id=memory["memory_id"],
+        target_revision_id=detail["current_revision_id"],
+        target_updated_at=detail["updated_at"],
+        operation="redeliver",
+        successor_settings={
+            "delivery": "topic",
+            "scope_id": scope_id,
+            "guard_action": None,
+            "topic": "calibration",
+            "topic_trigger": "Before calibrating difficulty",
+        },
+        evidence=[
+            {
+                "kind": "ledger",
+                "id": str(memory["evidence"][0]),
+                "observation": "only calibration sessions need it",
+            }
+        ],
+        actor="agent",
+    )
+
+    shown = memory_change_ui._detail(proposal, 1, 1)
+    assert "delivery: always -> topic:calibration" in shown
+    assert "opens topic calibration for test scope: Before calibrating difficulty" in shown
+    assert "redeliver" in memory_change_ui._summary(proposal)

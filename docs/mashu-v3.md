@@ -303,10 +303,10 @@ task_checkpoint の `attempts` と `decisions` は「失敗した試行の結末
 | task 作成・state・checkpoint・attempt・decision・artifact | ○ | ○ |
 | task close / reopen | × | ○ |
 | close proposal（提案のみ・決定ではない） | ○ | ○（取り下げ） |
-| Memory admission / retire / replace / restore | 明示指示どおりの実行、または pending proposal | 直接操作 |
-| Memory revise / delivery / guard | × | ○ |
+| Memory admission / retire / replace / restore / redeliver | 明示指示どおりの実行、または pending proposal | 直接操作 |
+| Memory revise | × | ○ |
 | Temporary Context | × | ○ |
-| Scope / Route / delivery / guard | × | ○ |
+| Scope / Route / Topic | × | ○（Topic は適用された redeliver / replace 提案でも作られる） |
 
 ## 10. PII と入口拒否
 

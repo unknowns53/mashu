@@ -22,7 +22,7 @@ from mashu import (
 )
 from mashu.errors import MashuError, RefusedError
 
-OPERATIONS = ("retire", "replace", "restore")
+OPERATIONS = ("retire", "replace", "restore", "redeliver")
 RETIREMENT_KINDS = ("invalidated", "superseded", "out_of_scope", "relocated")
 BLOCKING_KINDS = ("invalidated", "legacy")
 
@@ -85,7 +85,7 @@ def _successor_snapshot(row: dict[str, Any]) -> dict[str, Any]:
 
 
 _SETTING_KEYS = {"delivery", "scope_id", "guard_action"}
-_TOPIC_KEYS = {"topic"}
+_TOPIC_KEYS = {"topic", "topic_trigger"}
 
 
 def _successor_settings(
@@ -102,7 +102,7 @@ def _successor_settings(
     ):
         raise MashuError(
             "successor_settings must specify delivery, scope_id, and guard_action together, "
-            "plus topic for delivery 'topic'"
+            "plus topic for delivery 'topic' and topic_trigger when that topic is new"
         )
     delivery = requested["delivery"]
     if delivery not in memories.DELIVERIES:
@@ -134,12 +134,23 @@ def _successor_settings(
         "topic_trigger": None,
     }
     name = requested.get("topic")
+    trigger = requested.get("topic_trigger")
     if delivery != "topic":
-        if name is not None:
+        if name is not None or trigger is not None:
             raise MashuError("successor topic only applies to topic delivery")
         return settings
     if not isinstance(name, str) or not name.strip():
         raise MashuError("successor delivery 'topic' needs a topic name")
+    topic = topics.get_topic(cur, name)
+    if topic is None and trigger is not None:
+        # Applying the proposal opens the topic, so the reviewer reads what it will say.
+        new_name, new_trigger = topics.validate_new(name, trigger)
+        settings.update(topic_name=new_name, topic_trigger=new_trigger)
+        return settings
+    if topic is not None and trigger is not None:
+        raise MashuError(
+            f"topic '{topic['name']}' already exists; omit topic_trigger to file under it"
+        )
     topic = topics.require_topic(cur, name)
     if scope_id is not None and scope_id != topic["scope_id"]:
         raise MashuError(
@@ -180,6 +191,8 @@ def requested_settings(row: dict[str, Any]) -> dict[str, Any] | None:
     }
     if row["successor_topic_name"] is not None:
         settings["topic"] = row["successor_topic_name"]
+    if row["successor_topic_trigger"] is not None:
+        settings["topic_trigger"] = row["successor_topic_trigger"]
     return settings
 
 
@@ -191,10 +204,33 @@ def _settings_event(settings: dict[str, Any] | None) -> dict[str, Any] | None:
     )
 
 
-def _successor_topic(cur: psycopg.Cursor, change: dict[str, Any]) -> UUID | None:
-    """The open topic a proposal files its Memory under, unchanged since it was read."""
+def _successor_topic(cur: psycopg.Cursor, change: dict[str, Any], actor: str) -> UUID | None:
+    """The open topic a proposal files its Memory under, unchanged since it was read.
+
+    A proposal that describes a new topic opens it here, inside the applying transaction.
+    """
     if change["successor_delivery"] != "topic":
         return None
+    if change["successor_topic_id"] is None:
+        existing = topics.get_topic(cur, change["successor_topic_name"])
+        if existing is None:
+            return topics.create_topic(
+                cur,
+                name=change["successor_topic_name"],
+                trigger=change["successor_topic_trigger"],
+                scope_id=change["successor_scope_id"],
+                actor=actor,
+            )["topic_id"]
+        if (
+            existing["archived_at"] is not None
+            or existing["trigger"] != change["successor_topic_trigger"]
+            or existing["scope_id"] != change["successor_scope_id"]
+        ):
+            raise MashuError(
+                f"topic '{existing['name']}' was opened differently after this proposal was "
+                "read; read it and update the proposal"
+            )
+        return topics.lock_open_topic(cur, existing["topic_id"])["topic_id"]
     topic = topics.lock_open_topic(cur, change["successor_topic_id"])
     if topic["scope_id"] != change["successor_scope_id"]:
         raise MashuError(
@@ -260,6 +296,27 @@ def _validate_change(
 ) -> dict[str, Any]:
     if operation not in OPERATIONS:
         raise MashuError(f"operation must be one of {', '.join(OPERATIONS)}")
+    if operation == "redeliver":
+        if any(
+            value is not None
+            for value in (
+                retirement_kind,
+                retire_reason,
+                successor_nomination_id,
+                relocated_to_kind,
+                relocated_to_id,
+                restore_reason,
+            )
+        ):
+            raise MashuError(
+                "redeliver only changes delivery settings; its evidence says why, so "
+                "retirement, successor, and restore fields do not apply"
+            )
+        if target["status"] != "active":
+            raise MashuError(
+                f"memory {target['memory_id']} is {target['status']}; redeliver needs active memory"
+            )
+        return {}
     if operation == "restore" and any(
         value is not None
         for value in (
@@ -375,11 +432,20 @@ def propose(
             )
         successor_settings = _successor_settings(cur, target, successor_settings)
         successor_snapshot = _successor_snapshot(successor)
+    elif operation == "redeliver":
+        if successor_nomination_version is not None:
+            raise MashuError("successor_nomination_version only applies to replace")
+        if successor_settings is None:
+            raise MashuError("redeliver needs successor_settings naming the new delivery")
+        successor_settings = _successor_settings(cur, target, successor_settings)
+        if successor_settings == stored_settings_of_memory(cur, target):
+            raise MashuError("redeliver would leave the delivery settings as they are")
+        successor_snapshot = None
     else:
         if successor_nomination_version is not None:
             raise MashuError("successor_nomination_version only applies to replace")
         if successor_settings is not None:
-            raise MashuError("successor_settings only applies to replace")
+            raise MashuError("successor_settings only applies to replace and redeliver")
         successor_snapshot = None
     basis = _validate_evidence(cur, evidence)
     conflicts = (
@@ -507,9 +573,55 @@ def propose(
     return _detail(cur, row)
 
 
+def _delivery_label(delivery: str, guard_action: str | None, topic_name: str | None) -> str:
+    if delivery == "guard":
+        return f"guard:{guard_action or '-'}"
+    if delivery == "topic":
+        return f"topic:{topic_name or '-'}"
+    return delivery
+
+
+def _scope_name(cur: psycopg.Cursor, scope_id: UUID | None) -> str:
+    if scope_id is None:
+        return "every session"
+    cur.execute("SELECT name FROM scope WHERE scope_id = %s", (scope_id,))
+    row = cur.fetchone()
+    return row["name"] if row else str(scope_id)
+
+
+def _delivery_move(
+    cur: psycopg.Cursor, row: dict[str, Any], target: dict[str, Any] | None
+) -> list[str]:
+    """What a proposal does to delivery, in the words both review screens print."""
+    if row["successor_delivery"] is None:
+        return []
+    after = _delivery_label(
+        row["successor_delivery"], row["successor_guard_action"], row["successor_topic_name"]
+    )
+    if row["successor_delivery"] == "scope":
+        after += f" ({_scope_name(cur, row['successor_scope_id'])})"
+    lines = []
+    if target is not None and row["operation"] == "redeliver":
+        before = _delivery_label(
+            target["delivery"], target.get("guard_action"), target.get("topic_name")
+        )
+        if target["delivery"] == "scope":
+            before += f" ({target.get('scope_name') or '-'})"
+        lines.append(f"delivery: {before} -> {after}")
+    else:
+        lines.append(f"replacement delivery: {after}")
+    if row["successor_topic_trigger"] is not None:
+        lines.append(
+            f"opens topic {row['successor_topic_name']} for "
+            f"{_scope_name(cur, row['successor_scope_id'])}: {row['successor_topic_trigger']}"
+        )
+    return lines
+
+
 def _detail(cur: psycopg.Cursor, row: dict[str, Any]) -> dict[str, Any]:
     target = memories.memory_details(cur, row["target_memory_id"])
     row["target"] = target
+    row["delivery_move"] = _delivery_move(cur, row, target)
     row["conflicts"] = nominations.conflict_rows(cur, row["conflict_ids"])
     if row["successor_nomination_id"] is not None:
         cur.execute(
@@ -667,7 +779,7 @@ def apply(
             scope_id=change["successor_scope_id"],
             scope_override=True,
             guard_action=change["successor_guard_action"],
-            topic_id=_successor_topic(cur, change),
+            topic_id=_successor_topic(cur, change, actor),
             approval=approval_source,
             request_id=request_id,
             exclude_memory_id=target["memory_id"],
@@ -682,6 +794,19 @@ def apply(
             approval_source=approval_source,
         )
         result = {"operation": "replace", "memory": admitted, "retired": retired}
+    elif change["operation"] == "redeliver":
+        moved = memories.set_delivery(
+            cur,
+            target["memory_id"],
+            actor=actor,
+            delivery=change["successor_delivery"],
+            guard_action=change["successor_guard_action"],
+            scope_id=change["successor_scope_id"],
+            clear_scope=change["successor_scope_id"] is None,
+            topic_id=_successor_topic(cur, change, actor),
+            approval_source=approval_source,
+        )
+        result = {"operation": "redeliver", "memory": moved}
     else:
         restored = memories.restore(
             cur,

@@ -665,17 +665,6 @@ def _show_memory(cur: Any, memory_id: UUID) -> None:
                 _field("approval", detail["approval_source"])
 
 
-def _successor_delivery_label(row: dict[str, Any]) -> str:
-    """A proposal's delivery settings, read the same way a Memory's are."""
-    return _delivery_label(
-        {
-            "delivery": row["successor_delivery"],
-            "guard_action": row["successor_guard_action"],
-            "topic_name": row["successor_topic_name"],
-        }
-    )
-
-
 def _show_memory_change(cur: Any, change_id: UUID) -> None:
     row = memory_changes.get(cur, change_id)
     if row is None:
@@ -693,6 +682,9 @@ def _show_memory_change(cur: Any, change_id: UUID) -> None:
         _field("retire reason", row["retire_reason"])
     if row["operation"] == "restore":
         _field("restore reason", row["restore_reason"])
+    if row["operation"] == "redeliver":
+        for line in row["delivery_move"]:
+            print(f"  {line}")
     if row.get("successor"):
         _field("successor nomination", row["successor_nomination_id"])
         _field("successor version", row["successor_snapshot"]["version"])
@@ -700,8 +692,8 @@ def _show_memory_change(cur: Any, change_id: UUID) -> None:
         _field("candidate scope", row["successor_snapshot"]["scope_id"] or "-")
         _field("candidate kind", row["successor_snapshot"]["kind"])
         _field("candidate evidence", ", ".join(row["successor_snapshot"]["evidence"]))
-        _field("replacement delivery", _successor_delivery_label(row))
-        _field("replacement scope", row["successor_scope_id"] or "-")
+        for line in row["delivery_move"]:
+            print(f"  {line}")
         if row.get("successor_changed"):
             print(f"  current v{row['successor']['version']}  {row['successor']['content']}")
             _field("current candidate scope", row["successor"]["scope_id"] or "-")
@@ -952,6 +944,8 @@ def _print_memory_changes(rows: list[dict[str, Any]]) -> None:
             print(f"  restore reason: {row['restore_reason']}")
         if row.get("successor"):
             print(f"  successor: {row['successor']['content']}")
+        for line in row["delivery_move"]:
+            print(f"  {line}")
         for conflict in row.get("conflicts", []):
             print(
                 f"  ! {conflict.get('retirement_kind') or 'legacy'} conflict "
