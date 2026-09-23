@@ -194,7 +194,7 @@ guard は scope と直交する。`guard:<action>` の記憶が scope を持つ�
 
 ### 6.1 session_bootstrap
 
-セッション開始時に一度呼ぶ。**呼び出し規律の置き場所は MCP server の instructions である。**規律（開始時に一度 bootstrap、調べたら trace_put、痛んだら pain_report、User の記録指示は memory_nominate）はそこが運ぶ。
+セッション開始時に一度呼ぶ。**呼び出し規律の置き場所は MCP server の instructions である。**規律（開始時に一度 bootstrap、調べたら trace_put、痛んだら pain_report、User の記録指示は memory_nominate）はそこが運ぶ。Claude Code は instructions を 2 KB で切り詰めるので、instructions には使用頻度の高い規律から順に並べ、各 tool に渡す引数の細則（version、承認根拠、`successor_settings` など）はその tool の description に置く。2 KB の上限はテストで強制する。
 
 **ただし `session_bootstrap` だけは、そこに預けきらない。**v2.0 は「server の instructions は接続した CLI へ自動で届くので、指示ファイル側には何も書かない」としたが、これは撤回する。MCP の仕様が規定するのは instructions の *配送* であって、client がそれをモデルに *提示する* ことではない。Claude Code は使うと文書化されているが 2 KB で truncate し、Codex には instructions が agent guidance として安定に機能しないという未解決の問題がある。
 

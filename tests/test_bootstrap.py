@@ -4,7 +4,7 @@ import datetime as dt
 
 import pytest
 
-from mashu import bootstrap, ledger, memories, projects, scopes, tasks, temporary
+from mashu import bootstrap, ledger, memories, projects, scopes, server, tasks, temporary
 from mashu.tokens import pushed_cost
 
 DISCIPLINE = "never report a run as finished without the output that proves it"
@@ -249,3 +249,8 @@ def test_an_opening_against_a_schema_the_code_has_outgrown_says_so(cur):
     cur.execute("SELECT detail FROM event_log WHERE event_type = 'bootstrap_schema_behind'")
     rows = cur.fetchall()
     assert [row["detail"]["pending"] for row in rows] == [["0001_init.sql"]]
+
+
+def test_the_calling_guidance_fits_before_the_client_truncates_it():
+    assert len(server.INSTRUCTIONS.encode()) <= server.INSTRUCTIONS_BYTE_LIMIT
+    assert server.INSTRUCTIONS.startswith("Mashu pushes active Memory; call session_bootstrap")

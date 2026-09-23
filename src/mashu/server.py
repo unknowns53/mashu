@@ -30,6 +30,28 @@ from mashu.errors import (
 ACTOR_ENV_VAR = "MASHU_AGENT"
 DEFAULT_ACTOR = "agent"
 
+#: Claude Code truncates server instructions at 2 KB, so the most used guidance comes
+#: first and per-tool procedure lives in each tool's description instead.
+INSTRUCTIONS_BYTE_LIMIT = 2048
+INSTRUCTIONS = (
+    "Mashu pushes active Memory; call session_bootstrap first in every session. "
+    "Before continuing a task from a bootstrap card, call task_get with its full id and "
+    "verify old state against the repository and artifacts. Use task_checkpoint at work "
+    "breaks, attempt_record for failed tries, and decision_record for costly-to-rederive "
+    "reasons. Task completion remains the user's decision. If work looks done, use "
+    "task_propose_close with outcome and grounds; it changes no task state. "
+    "Record lookups or derivations with trace_put. Use pain_report only when missing or "
+    "stale knowledge caused an incident or repeated lookup; incidents nominate once, "
+    "friction on the second occurrence. Use prevention_kind='work' and task_id for "
+    "one-time fixes. Temporary Context handles expiry. "
+    "Durable Memory changes need an explicit user instruction. For a request to remember, "
+    "call memory_nominate then memory_admit. For an existing Memory, call memory_get, "
+    "memory_change_propose, then memory_change_apply. Follow each tool's description for "
+    "the required fields. Your own suggestion, confidence, and user silence are not "
+    "approval; your independent change idea stays pending. After success, briefly report "
+    "the target and reason; if it remains pending, say that review is needed."
+)
+
 
 def actor() -> str:
     """Return the identity configured for this MCP process."""
@@ -75,40 +97,7 @@ def build_server() -> Any:
     """Build the MCP server used by an agent session."""
     from mcp.server import MCPServer
 
-    # MCP instructions provide calling guidance to connected clients.
-    server = MCPServer(
-        name="mashu",
-        instructions=(
-            "Mashu pushes active Memory; call session_bootstrap first in every session. "
-            "Record lookups or derivations with trace_put. Use pain_report only when missing "
-            "or stale knowledge caused an incident or repeated lookup; incidents nominate "
-            "once, friction on the second occurrence. Use prevention_kind='work' and task_id "
-            "for one-time fixes. For an explicit user request to remember, call "
-            "memory_nominate then pass nomination.version as nomination_version to memory_admit, "
-            "approval_kind='user_instruction', a short "
-            "exact instruction quote, any available conversation_ref, and request_id. The Agent "
-            "executes it; this provenance is not authentication. Your own suggestion, "
-            "confidence, and user silence are not approval. For an existing Memory, call "
-            "memory_get before memory_change_propose. For replace, pass the successor nomination "
-            "version just read. If it changed, reread it and update the proposal. Preserve old "
-            "delivery settings by default; pass a complete successor_settings object with "
-            "delivery, scope_id, and guard_action only when the requested change includes new "
-            "delivery settings. If the changed successor no longer matches the user's explicit "
-            "instruction, get a new instruction before applying it. Your independent change "
-            "idea stays "
-            "pending. Apply only the exact change explicitly requested, with the same "
-            "user_instruction provenance and request_id. After success, briefly report the "
-            "target and reason; if it remains pending, say that review is needed. Invalidated "
-            "or legacy conflicts need "
-            "an instruction addressing those conflicts. Use policy approval only for a "
-            "server-registered condition. Temporary Context handles expiry. Use task_checkpoint "
-            "at work breaks; before continuing a task from a bootstrap card, call task_get with "
-            "its full id and verify old state against the repository and artifacts. Use "
-            "attempt_record for failed tries and decision_record for costly-to-rederive reasons. "
-            "Task completion remains the user's decision. If work looks done, use "
-            "task_propose_close with outcome and grounds; it changes no task state."
-        ),
-    )
+    server = MCPServer(name="mashu", instructions=INSTRUCTIONS)
 
     @server.tool()
     def session_bootstrap(scope: str | None = None) -> dict[str, Any]:
@@ -280,7 +269,14 @@ def build_server() -> Any:
         scope: str | None = None,
         guard_action: str | None = None,
     ) -> dict[str, Any]:
-        """Admit the exact nomination version with explicit instruction provenance."""
+        """Admit the exact nomination version with explicit instruction provenance.
+
+        Pass the version memory_nominate returned as `nomination_version`,
+        `approval_kind='user_instruction'`, a short exact quote of the user's instruction,
+        any available `conversation_ref`, and a new `request_id`. The Agent executes it;
+        this provenance is not authentication. Invalidated or legacy conflicts need
+        `conflict_ids` and a `conflict_instruction` in which the user addresses them.
+        """
         if approval_kind != "user_instruction":
             return _failure(MashuError("MCP admission requires approval_kind='user_instruction'"))
         try:
@@ -334,7 +330,14 @@ def build_server() -> Any:
         relocated_to_id: UUID | None = None,
         restore_reason: str | None = None,
     ) -> dict[str, Any]:
-        """Create or refresh a change proposal; replace requires the read successor version."""
+        """Create or refresh a change proposal; replace requires the read successor version.
+
+        Call memory_get first. For replace, pass the successor nomination version just
+        read; if it changed, reread it and update the proposal. Old delivery settings carry
+        over by default; pass a complete `successor_settings` object with `delivery`,
+        `scope_id`, and `guard_action` only when the requested change includes new
+        delivery settings.
+        """
         try:
             with db.transaction() as cur:
                 row = memory_changes.propose(
@@ -371,7 +374,14 @@ def build_server() -> Any:
         conflict_instruction: str | None = None,
         reversal_instruction: str | None = None,
     ) -> dict[str, Any]:
-        """Apply one exact proposal version with explicit user instruction provenance."""
+        """Apply one exact proposal version with explicit user instruction provenance.
+
+        Apply only the exact change the user explicitly requested, with
+        `approval_kind='user_instruction'`, a short exact quote of the instruction, and
+        `request_id`. If the successor changed and no longer matches that instruction, get
+        a new instruction first. Invalidated or legacy conflicts need an instruction
+        addressing those conflicts. This provenance is not authentication.
+        """
         if approval_kind != "user_instruction":
             return _failure(MashuError("MCP apply requires approval_kind='user_instruction'"))
         try:
