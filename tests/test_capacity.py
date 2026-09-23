@@ -27,13 +27,6 @@ def test_an_empty_store_admits_anything_reasonable(cur, scope_id):
     assert got["capacity"] == config.capacity()
 
 
-def test_the_act_gate_is_never_full(cur, monkeypatch):
-    monkeypatch.setenv("MASHU_CAPACITY", "10")
-    got = capacity.check_admission(cur, content=NEW_RULE * 20, delivery="guard")
-    assert got["ok"] is True
-    assert got["refusal"] is None
-
-
 def test_a_full_scope_refuses_the_next_rule_and_says_by_how_much(cur, scope_id, monkeypatch):
     monkeypatch.setenv("MASHU_CAPACITY", "400")
     fill(cur, scope_id, 5)
@@ -43,7 +36,7 @@ def test_a_full_scope_refuses_the_next_rule_and_says_by_how_much(cur, scope_id, 
     assert got["ok"] is False
     assert str(got["capacity"]) in got["refusal"]
     assert str(got["projected"]) in got["refusal"]
-    assert "mashu retire" in got["refusal"] and "guard" in got["refusal"]
+    assert "mashu retire" in got["refusal"] and "topic" in got["refusal"]
 
     with pytest.raises(RefusedError, match="seats 100 tokens"):
         remember(cur, NEW_RULE, scope_id=scope_id, delivery="scope")

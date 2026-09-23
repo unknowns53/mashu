@@ -229,6 +229,7 @@ def test_topic_page_creates_edits_and_removes_a_topic(dsn, monkeypatch):
         "balance",
         "Before changing win rates or placement",
         "-",
+        "delegate",
         "y",
     )
 
@@ -245,7 +246,7 @@ def test_topic_page_creates_edits_and_removes_a_topic(dsn, monkeypatch):
     assert [row["event_type"] for row in events][:2] == ["topic_created", "topic_updated"]
     edited = events[1]["detail"]["to"]
     assert edited["trigger"] == "Before changing win rates or placement"
-    assert edited["scope_id"] is None
+    assert (edited["scope_id"], edited["action"]) == (None, "delegate")
 
 
 def test_a_topic_holding_rules_is_not_removed_from_the_page(dsn, monkeypatch, capsys):

@@ -5,7 +5,7 @@ import datetime as dt
 import pytest
 
 from conftest import expire, new_project, new_task
-from mashu import bootstrap, ledger, memories, projects, scopes, server, tasks, temporary
+from mashu import bootstrap, ledger, memories, projects, scopes, server, tasks, temporary, topics
 from mashu.tokens import pushed_cost
 
 DISCIPLINE = "never report a run as finished without the output that proves it"
@@ -48,20 +48,6 @@ def test_a_scope_rule_waits_for_a_session_in_that_scope(cur, scope_id):
 
     here = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
     assert [row["content"] for row in here["scoped"]] == [LOCAL]
-
-
-def test_a_rule_held_at_the_act_gate_is_not_in_the_opening(cur, scope_id):
-    memories.remember(
-        cur,
-        content=PINNED,
-        actor="user",
-        scope_id=scope_id,
-        delivery="guard",
-        guard_action="Task",
-    )
-    got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
-    assert got["always"] == [] and got["scoped"] == []
-    assert got["tokens"] == 0
 
 
 def test_a_pushed_row_carries_an_id_and_a_body_and_nothing_else(cur):
@@ -243,8 +229,21 @@ def test_the_calling_guidance_fits_before_the_client_truncates_it():
     assert server.INSTRUCTIONS.startswith("Mashu pushes active Memory; call session_bootstrap")
 
 
-def test_an_opening_still_arrives_while_the_topic_migration_is_pending(cur, scope_id):
+def test_an_opening_and_the_hook_reader_survive_pending_topic_migrations(cur, scope_id):
     memories.remember(cur, content="Always rule", actor="user")
+    subject = topics.create_topic(cur, name="delegation", trigger="Before delegating", actor="user")
+    memories.remember(
+        cur, content=PINNED, actor="user", delivery="topic", topic_id=subject["topic_id"]
+    )
+    topics.update_topic(cur, subject["topic_id"], actor="user", action="delegate")
+    linked = bootstrap.session_bootstrap(cur, actor="agent")["topics"]
+    assert [row["topic"] for row in linked] == ["delegation"]
+
+    cur.execute("ALTER TABLE topic DROP COLUMN action")
+    cur.execute("DELETE FROM schema_migration WHERE filename = %s", ("0011_guard_into_topics.sql",))
+    assert bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)["topics"] == linked
+    assert topics.action_rules(cur, "delegate", None) == (None, [])
+
     cur.execute("ALTER TABLE memory DROP COLUMN topic_id")
     cur.execute(
         "ALTER TABLE memory_change DROP COLUMN successor_topic_id, "
@@ -257,4 +256,4 @@ def test_an_opening_still_arrives_while_the_topic_migration_is_pending(cur, scop
 
     assert [row["content"] for row in got["always"]] == ["Always rule"]
     assert got["topics"] == []
-    assert got["schema_pending"] == ["0010_topics.sql"]
+    assert got["schema_pending"] == ["0010_topics.sql", "0011_guard_into_topics.sql"]

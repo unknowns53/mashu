@@ -15,7 +15,7 @@ Mashu には、恒久的な Memory だけでなく、現在の作業状態を扱
 
 | 種類 | 役割 | 別のセッションに届くか | 寿命 |
 |---|---|---|---|
-| Memory | 今後も守る恒久ルール | 直接操作または明示指示の実行後、bootstrap、topic、guard のいずれかで届く | 原則恒久 |
+| Memory | 今後も守る恒久ルール | 直接操作または明示指示の実行後、bootstrap か topic で届く | 原則恒久 |
 | Project State | Project / Task の現在地、試行、判断、成果物の参照先 | active Task の短い card だけ届き、詳細は task_get で読む | close または Activity Lease が切れるまで |
 | Trace | 調べて分かったことを残す日付つきの観測 | 届かない。検索で明示的に読む | 既定 30 日 |
 | Ledger | 忘却によって起きた事故や再調査の記録 | 届かない | append-only |
@@ -51,12 +51,12 @@ User が CLI / TUI で Memory を直接登録・変更した
     └─ active Memory / retired Memory（user_direct として記録）
 
 pending candidate
-    └─ mashu review → active Memory → bootstrap / guard
+    └─ mashu review → active Memory → bootstrap / topic
 ~~~
 
 incident / friction から自動生成された candidate と Agent 独自の提案は pending に留まる。ユーザーが会話中に明示した記録・変更指示は `memory_admit` / `memory_change_apply` に渡し、同じセッションで実行できる。実行者は Agent のまま記録し、指示の原文と会話参照を別に保存する。これは監査用で、サーバーが会話の真正性を認証するものではない。Agent の有用性判断・confidence・ユーザーの沈黙は承認として扱わない。Project State は別扱いで、Agent が更新した active Task の card は次のセッションへ届く。Current State 全文は常時注入せず、card の完全な task_id から `task_get` で明示取得する。
 
-`memory_admit` に `content` を渡すと、候補の作成と採用を一つの transaction で行う。候補が既存の pending candidate に合流した場合と、invalidated / legacy の退役 Memory と衝突し、その conflict に触れた指示が無い場合は採用せずに止まり、作った候補と台帳行だけを残して nomination を返す。Agent はその本文と conflict を読み、`nomination_id` と nomination `version` を `nomination_version` として `memory_admit` に渡して続ける。この経路では本文・scope・根拠・conflict が読み取り後に変わっていれば拒否する。同じ request ID の再送は、どちらの経路でも、Memory が後から編集・退役されていても初回の採用応答を返す。replace は後継 nomination の内容と旧 Memory の配信条件を提案に固定し、配信条件を変える場合は `successor_settings` に `delivery`・`scope_id`・`guard_action` をまとめて proposal に含める。
+`memory_admit` に `content` を渡すと、候補の作成と採用を一つの transaction で行う。候補が既存の pending candidate に合流した場合と、invalidated / legacy の退役 Memory と衝突し、その conflict に触れた指示が無い場合は採用せずに止まり、作った候補と台帳行だけを残して nomination を返す。Agent はその本文と conflict を読み、`nomination_id` と nomination `version` を `nomination_version` として `memory_admit` に渡して続ける。この経路では本文・scope・根拠・conflict が読み取り後に変わっていれば拒否する。同じ request ID の再送は、どちらの経路でも、Memory が後から編集・退役されていても初回の採用応答を返す。replace は後継 nomination の内容と旧 Memory の配信条件を提案に固定し、配信条件を変える場合は `successor_settings` に `delivery` と `scope_id`（topic なら `topic` も）をまとめて proposal に含める。
 
 一度直せば以後は覚えなくてよい変更は、Memory ではなく Task の next_actions に記録する。pain の prevention-kind を work にするとこの扱いになる。
 
@@ -120,9 +120,9 @@ mashu
 | 領域 | TUI からできること |
 |---|---|
 | Attention | candidate の review、close proposal の判断、dormant Task の確認 |
-| Memories | active / retired Memory と Temporary Context の閲覧・検索、直接登録、編集、always / scope と Temporary Context の相互変換、retire、delivery / guard / topic の変更 |
+| Memories | active / retired Memory と Temporary Context の閲覧・検索、直接登録、編集、always / scope と Temporary Context の相互変換、retire、delivery / topic の変更 |
 | Work | active / dormant / closed Task と Project の閲覧・検索、Task の履歴・artifact の確認、Task / Current State / Project の作成・編集、touch / close / reopen |
-| Settings & health | 容量と queue の状態、bootstrap preview、Scope と route の作成・編集・削除、Topic の作成・編集・削除、migration の確認・適用 |
+| Settings & health | 容量と queue の状態、bootstrap preview、Scope と route の作成・編集・削除、Topic の作成・編集（action の結びつけを含む）・削除、migration の確認・適用 |
 
 各画面では矢印または j / k で移動し、Enter で開く。`/` のある一覧は部分検索できる。Esc または ← で一段戻り、q でその領域を閉じる。TUI は alternate screen 上で動くため、再描画した画面は terminal の履歴へ残らない。
 
@@ -137,14 +137,14 @@ User が CLI の `mashu remember` または dashboard の Memories から直接�
 ~~~bash
 mashu remember "Run migrations before restarting the service"
 mashu remember "Use the deployment scope" --scope deployment
-mashu remember "Check the remote before pushing" --delivery guard --action Bash
+mashu remember "Keep the win rate between 40 and 60 percent" --topic difficulty
 ~~~
 
-配信先を省略したときは、scope も省略すれば always、scope を指定すれば scope になる。guard を選ぶときは action も指定する。
+配信先を省略したときは、scope も省略すれば always、scope を指定すれば scope、--topic を指定すれば topic になる。
 
 期限つきの条件は --until で登録する。Temporary Context は review 不要で期限に消える。--until は delivery の指定と併用できず、期限は最大 14 日。
 
-Memories TUI では `c` で active な always / scope Memory を Temporary Context に変換できる。日数を入力すると元の Memory は `relocated` と移動先 ID を記録して retire され、同じ本文と Scope の Temporary Context が有効になる。Temporary Context で `c` を押すと、同じ本文と Scope の active Memory に戻る。無関係な invalidated / legacy conflict は上書きしない。guard は action を失うため Temporary Context には変換しない。
+Memories TUI では `c` で active な always / scope Memory を Temporary Context に変換できる。日数を入力すると元の Memory は `relocated` と移動先 ID を記録して retire され、同じ本文と Scope の Temporary Context が有効になる。Temporary Context で `c` を押すと、同じ本文と Scope の active Memory に戻る。無関係な invalidated / legacy conflict は上書きしない。topic の Memory は発動条件を失うため Temporary Context には変換しない。
 
 ~~~bash
 mashu remember "The staging host is down" --until 2d
@@ -236,27 +236,25 @@ TUI の操作は次のとおり。
 | mashu retire REF --kind KIND --reason REASON | `invalidated` / `superseded` / `out_of_scope` / `relocated` の理由を付けて Memory を退役させる。`legacy` は既存データと移行専用 |
 | mashu review --changes | retire / replace / restore / redeliver の pending proposal を TUI で読む |
 | mashu revise REF | Memory を改訂する。旧本文は revision history に残る |
-| mashu deliver REF always\|scope\|topic\|guard | active Memory の配信先を変更する。topic は --topic NAME で指定する |
+| mashu deliver REF always\|scope\|topic | active Memory の配信先を変更する。topic は --topic NAME で指定する |
 | mashu topic | topic の一覧・作成・編集・削除。`mashu topic show NAME` で本文を読む |
-| mashu guard ACTION | ACTION の直前に配信する Memory を表示する |
-| mashu guard ACTION --pin REF | Memory を ACTION の guard に追加する |
-| mashu guard ACTION --unpin REF | Memory を ACTION の guard から外す |
+| mashu topic --edit NAME --action ACT | topic を action に結びつける。`--no-action` で外す |
+| mashu guard ACTION | ACTION に結びついた topic のルールを表示する。PreToolUse hook が読む |
 | mashu admin migrate | 未適用の migration を実行する |
 
 ID は list コマンドが表示する先頭 8 文字を使える。4 文字以上の一意な前方一致も受け付ける。複数の候補に一致する場合は拒否される。
 
 ## 配信の仕組み
 
-Memory の通常の読み取りは検索ではなく push だ。session_bootstrap がセッション開始時にまとめて配信し、guard は特定の行為の直前に配信する。topic は見出しだけを開始時に配信し、本文は Agent がその作業に入るときに読む。検索できるのは Trace だけで、Trace から Memory は返さない。
+Memory の通常の読み取りは検索ではなく push だ。session_bootstrap がセッション開始時にまとめて配信する。topic は見出しだけを開始時に配信し、本文は Agent がその作業に入るときに読む。action を結びつけた topic は、その行為の直前に PreToolUse hook も本文を示す。検索できるのは Trace だけで、Trace から Memory は返さない。
 
 | delivery | 届く範囲 | 届くタイミング | 向いているルール |
 |---|---|---|---|
 | always | 全セッション | 開始時の bootstrap | どの作業でも守るルール |
 | scope | route が一致するセッション | 開始時の bootstrap | 特定の領域だけで必要なルール |
 | topic:NAME | 見出しは topic の Scope が一致するセッション（Scope が無ければ全セッション） | 見出しは開始時、本文はその作業に入るとき | 特定の作業のあいだだけ必要なルール |
-| guard:ACTION | ACTION に進むセッション | 行為の直前 | 判断の直前に必ず確認したいルール |
 
-scope は「どこで」、guard は「いつ」、topic は「何の作業のあいだか」を絞る。guard に scope も付いている場合は、その scope のセッションだけで発火する。
+scope は「どこで」、topic は「何の作業のあいだか」を絞る。topic に action を結びつけると、その作業に当たる tool call（`delegate` なら Agent / Task による subagent の起動）の直前に、hook がその topic のルールを示して呼び出しを一度止める。hook が発火するのは topic の見出しが載るセッション、つまり topic に Scope があればその Scope のセッションだけだ。
 
 初期の容量は次のとおり。各枠は独立しており、超過した書き込みは黙って切り捨てず拒否する。
 
@@ -301,6 +299,7 @@ topic は、特定の作業をしているあいだだけ必要なルールの�
 mashu topic
 mashu topic --add 難易度較正 --scope enrai --trigger "Before changing difficulty levers or win rates"
 mashu topic --edit 難易度較正 --trigger "Before calibrating difficulty"
+mashu topic --edit 委譲 --action delegate
 mashu topic show 難易度較正
 mashu topic --remove 難易度較正
 
@@ -308,7 +307,7 @@ mashu remember "Do not change ship stats to set difficulty" --topic 難易度較
 mashu deliver 1a2b3c4d topic --topic 難易度較正
 ~~~
 
-使い分けの目安は次のとおり。プロジェクトのどの作業でも守るなら scope、そのプロジェクトの一部の作業でだけ効くなら topic、特定の操作の直前に必ず目に入れたいなら guard を選ぶ。remove できるのは active なルールを持たない topic だけだ。一度も使われていない topic は削除され、名前も空く。退役したルールや提案が名前を参照している topic は、履歴を保つために archive され、一覧から消える。topic の作成と編集は Settings TUI の Topics からもできる。
+使い分けの目安は次のとおり。プロジェクトのどの作業でも守るなら scope、そのプロジェクトの一部の作業でだけ効くなら topic を選び、特定の操作の直前に必ず目に入れたいなら、その topic に action を結びつける。action は topic の編集でだけ設定でき、作成時には聞かれない。一つの action に結びつく open な topic は一つだけで、別の topic に移すときは先に元の topic から外す。一覧と `mashu topic show` は結びついた action を `before: delegate` のように示す。remove できるのは active なルールを持たない topic だけだ。一度も使われていない topic は削除され、名前も空く。退役したルールや提案が名前を参照している topic は、履歴を保つために archive され、一覧から消える。topic の作成と編集は Settings TUI の Topics からもできる。
 
 ## Project と Task
 
@@ -399,9 +398,11 @@ User が既存 Memory の変更を指示 → memory_get → memory_change_propos
 
 task_checkpoint の `attempts` には失敗した試行の結末、`decisions` には理由を失うと再導出コストが高い判断、`artifacts` には外部成果物の原典を入れる。一つでも拒否されれば checkpoint 全体が書かれない。Agent が独自に考えた Memory 変更は提案に留め、明示指示があった場合だけ MCP から適用する。ユーザーの会話指示の出所は記録されるが、認証されるわけではない。Temporary Context の登録、直接 Memory 操作、proposal review、Task の close / reopen は User の CLI / TUI 操作だ。終わったと思ったら status_text にそう書くのではなく task_propose_close を使う。前者は User に読み直しと打ち直しをさせ、後者は 1 打鍵で決まる。
 
-### PreToolUse hook で guard を有効にする
+### PreToolUse hook で action つきの topic を示す
 
-tools/pretooluse_guard.py を PreToolUse hook に登録すると、guard に pin された Memory が該当する行為の直前に表示される。最初の呼び出しは一度止まり、読んだうえで同じ判断なら同じ呼び出しをもう一度行う。DB に接続できない場合は作業を止めない。
+tools/pretooluse_guard.py を PreToolUse hook に登録すると、action を結びつけた topic のルールが、その action に当たる呼び出しの直前に表示される。最初の呼び出しは一度止まり、読んだうえで同じ判断なら同じ呼び出しをもう一度行う。止めるのはセッションごと（compaction をまたぐと改めて）一回だけだ。DB に接続できない場合は作業を止めない。
+
+以前の delivery `guard` の Memory は、migration `0011_guard_into_topics.sql` が action と同じ名前の topic へ移し、その topic を action に結びつける。
 
 既存の hook 設定がある場合は、次の entry をその設定に追加する。
 
@@ -507,7 +508,7 @@ docs/mashu-v3.md             Project State の実装仕様書
 migrations/                  連番の SQL。mashu admin migrate が順に実行
 src/mashu/                   実装
 tests/                       実 PostgreSQL に対するテスト
-tools/pretooluse_guard.py    guard 用 PreToolUse hook
+tools/pretooluse_guard.py    action つき topic 用 PreToolUse hook
 tools/sessionstart_guard.py  SessionStart 用 hook
 hooks/                       pre-commit / commit-msg
 ~~~

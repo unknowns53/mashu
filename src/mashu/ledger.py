@@ -7,7 +7,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import config, events, match, nominations, redact, tasks, traces
+from mashu import config, events, match, nominations, redact, tasks, topics, traces
 from mashu.capacity import LOCK_NAMESPACE, LOCK_PAIN
 from mashu.errors import MashuError, RefusedError
 
@@ -128,8 +128,8 @@ def report_pain(
             "this rule is already active and being delivered as "
             f"'{delivered['delivery']}'. No nomination was created: a third "
             "occurrence indicts the delivery, not the entrance standard. Ask "
-            "whether it should move to a guard on the act where it is needed, "
-            "or whether the wording is not recognisable at the moment it "
+            "whether it should move to a topic read when the work it governs "
+            "begins, or whether the wording is not recognisable at the moment it "
             "applies."
         )
         detail: dict[str, Any] = {
@@ -138,7 +138,11 @@ def report_pain(
         }
         if delivered["delivery"] == "topic":
             read = _topic_read(cur, delivered["topic_id"], session)
-            detail.update(topic_id=str(delivered["topic_id"]), topic_read=read)
+            detail.update(
+                topic_id=str(delivered["topic_id"]),
+                topic_read=read,
+                topic_action=_topic_action(cur, delivered["topic_id"]),
+            )
             if read is False:
                 result["note"] += (
                     " This session never read the topic, so first ask whether its trigger "
@@ -257,6 +261,14 @@ def ledger_entries(
         {"scope": scope_id, "limit": limit},
     )
     return cur.fetchall()
+
+
+def _topic_action(cur: psycopg.Cursor, topic_id: UUID) -> str | None:
+    """The action a topic stands before, if the store's topics carry one yet."""
+    if not topics.has_actions(cur):
+        return None
+    cur.execute("SELECT action FROM topic WHERE topic_id = %s", (topic_id,))
+    return cur.fetchone()["action"]
 
 
 def _topic_read(cur: psycopg.Cursor, topic_id: UUID, session: UUID | None) -> bool | None:

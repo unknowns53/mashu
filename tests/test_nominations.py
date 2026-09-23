@@ -106,13 +106,11 @@ def test_an_admission_may_reword_the_rule_and_choose_where_it_lands(cur, scope_i
     memory = admit(
         cur,
         nomination["nomination_id"],
-        delivery="guard",
-        guard_action="Bash",
+        delivery="always",
         content="run the migration first",
     )
     assert memory["content"] == "run the migration first"
-    assert memory["delivery"] == "guard"
-    assert memory["guard_action"] == "Bash"
+    assert memory["delivery"] == "always"
     assert memory["scope_id"] == str(scope_id)
 
 

@@ -150,34 +150,21 @@ def test_retirement_cancellation_and_legacy_selection_leave_the_memory_active(ds
     assert memory_row(dsn, memory["memory_id"])["status"] == "active"
 
 
-def test_delivery_can_be_changed_to_a_global_guard(dsn, monkeypatch):
+def test_delivery_edit_moves_to_a_scope_and_keeps_its_defaults_on_empty_input(dsn, monkeypatch):
     memory = remember(dsn)
-    keys(monkeypatch, "d", "guard", "Bash", "", "q")
+    keys(monkeypatch, "d", "scope", "deployments", "d", "", "", "q")
 
     assert memory_ui.run(dsn) == 0
     row = memory_row(dsn, memory["memory_id"])
-    assert row["delivery"] == "guard"
-    assert row["guard_action"] == "Bash"
-    assert row["scope_id"] is None
-
-
-def test_delivery_edit_keeps_existing_guard_defaults_on_empty_input(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
-        scope = scopes.require_scope(cur, "deployments")
-    memory = remember(dsn, delivery="guard", guard_action="Bash", scope_id=scope["scope_id"])
-    keys(monkeypatch, "d", "", "", "", "q")
-
-    assert memory_ui.run(dsn) == 0
-    row = memory_row(dsn, memory["memory_id"])
-    assert row["delivery"] == "guard"
-    assert row["guard_action"] == "Bash"
-    assert row["scope_id"] == scope["scope_id"]
+        assert row["scope_id"] == scopes.require_scope(cur, "deployments")["scope_id"]
+    assert row["delivery"] == "scope"
 
 
 def test_selection_stays_on_the_same_id_when_a_delivery_change_reorders_the_list(dsn, monkeypatch):
     selected = remember(dsn)
     other = remember(dsn, "spell out the timezone in scheduled jobs")
-    keys(monkeypatch, "d", "guard", "Bash", "", "e", REVISED, "q")
+    keys(monkeypatch, "d", "scope", "deployments", "e", REVISED, "q")
 
     assert memory_ui.run(dsn) == 0
     assert memory_row(dsn, selected["memory_id"])["content"] == REVISED
@@ -262,15 +249,15 @@ def test_non_tty_rendering_contains_no_ansi(monkeypatch):
         "memory_id": "12345678-abcd",
         "content": RULE,
         "scope_name": None,
-        "delivery": "guard",
-        "guard_action": "Bash",
+        "delivery": "topic",
+        "topic_name": "deploy",
     }
 
     rendered = memory_ui._screen_text([row], 0, "active", "", total=1, query="")
 
     assert "\x1b[" not in rendered
     assert RULE in rendered
-    assert "guard" in rendered and "Bash" in rendered
+    assert "topic:deploy" in rendered
 
 
 def test_the_delivery_prompt_explains_each_choice_in_one_line(dsn, monkeypatch, capsys):
@@ -281,7 +268,6 @@ def test_the_delivery_prompt_explains_each_choice_in_one_line(dsn, monkeypatch, 
     assert "always  every session, at start" in out
     assert "scope   sessions in one Scope, at start" in out
     assert "topic   its trigger is listed at start; read when that work begins" in out
-    assert "guard   just before one action (e.g. delegate)" in out
 
 
 def test_a_new_rule_can_open_a_new_topic_without_typing_an_id(dsn, monkeypatch):

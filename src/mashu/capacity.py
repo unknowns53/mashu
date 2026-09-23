@@ -117,11 +117,6 @@ def _room(projected: int, cost: int, what: str) -> str:
 
 #: The door out that every refusal names: a rule that has stopped earning its seat.
 _RETIRE = "`mashu retire <id> --reason <why>` for a rule that has stopped earning its seat"
-#: The door only guard offers, and the reason it is never itself full.
-_GUARD = (
-    "`mashu deliver <id> guard --action <act>` to move one out of the opening "
-    "and in front of the act it governs"
-)
 #: The door for a rule needed only while one kind of work is being done.
 _TOPIC = "`mashu deliver <id> topic --topic <name>` for one needed only during one kind of work"
 
@@ -131,7 +126,7 @@ def _refusal(projected: int, cost: int, ceiling: int, what: str) -> str:
     return (
         f"the opening seats {ceiling} tokens and "
         + _room(projected, cost, what)
-        + f"Make room first: {_RETIRE}, {_TOPIC}, or {_GUARD}."
+        + f"Make room first: {_RETIRE}, or {_TOPIC}."
     )
 
 
@@ -142,7 +137,7 @@ def _refusal_always(projected: int, cost: int, ceiling: int, what: str) -> str:
         + _room(projected, cost, what)
         + f"Make room first: {_RETIRE}, "
         "`mashu deliver <id> scope --scope <name>` for one that only governs "
-        f"one place, {_TOPIC}, or {_GUARD}."
+        f"one place, or {_TOPIC}."
     )
 
 
@@ -152,7 +147,7 @@ def _refusal_topic(name: str, projected: int, cost: int, ceiling: int) -> str:
         f"the topic '{name}' holds {ceiling} tokens of rules and this would take it to "
         f"{projected} ({cost} for this content on top of {projected - cost} already there). "
         f"Make room first: {_RETIRE}, or move one to another topic or delivery "
-        "(`mashu deliver <id> topic --topic <other>`, or always, scope, or guard)."
+        "(`mashu deliver <id> topic --topic <other>`, or always or scope)."
     )
 
 
@@ -257,16 +252,6 @@ def check_admission(
     before = _opening(cur)
     without = before.without_memory(exclude_memory_id)
 
-    if delivery == "guard":
-        # Guard memories are not part of the session payload.
-        measured = _measure(without)
-        return {
-            "ok": True,
-            "tokens": cost,
-            "projected": measured["always"] + max(measured["scopes"].values(), default=0),
-            "capacity": config.capacity(),
-            "refusal": None,
-        }
     if delivery not in ("always", "scope", "topic"):
         raise MashuError(f"unknown delivery '{delivery}'")
     if delivery == "topic":

@@ -143,8 +143,8 @@ def test_every_command_help_has_a_description_and_an_example(path, capsys):
     (
         (("remember",), ("temporary condition", "cannot be combined")),
         (("review",), ("interactive review UI", "User decisions")),
-        (("deliver",), ("Scope delivery requires --scope", "guard delivery requires --action")),
-        (("guard",), ("exits 2", "empty gate exits 0")),
+        (("deliver",), ("Scope delivery requires --scope", "topic delivery requires --topic")),
+        (("guard",), ("exit 2", "none exits 0")),
         (("scope",), ("optional --about", "User-only")),
         (("route",), ("--add requires --scope", "--ignore")),
         (("task", "close"), ("explicit outcome", "User's decision")),
@@ -161,38 +161,33 @@ def test_command_help_states_runtime_constraints(path, needles, capsys):
         assert needle in prose
 
 
-def test_a_pinned_rule_holds_the_act_and_lets_go_when_it_is_unpinned(run):
-    _, out, _ = run("remember", RULE)
-    memory_id = remembered_id(out)
-
-    code, out, _ = run("guard", "Bash", "--pin", memory_id)
-    assert code == 0 and out.startswith("pinned")
-
-    code, out, _ = run("guard", "Bash")
-    assert code == 2
-    assert out.strip() == RULE
-
-    code, out, _ = run("guard", "Bash", "--json")
-    assert code == 2
-    assert json.loads(out) == [{"memory_id": memory_id, "content": RULE}]
-
-    code, _, _ = run("guard", "Bash", "--unpin", memory_id)
-    assert code == 0
-
-    code, out, _ = run("guard", "Bash")
-    assert code == 0 and out == ""
-
-
-def test_serving_a_gate_is_recorded_but_an_empty_one_is_not(run, committing_dsn):
+def test_a_topic_linked_to_an_action_holds_its_calls_until_unlinked(run, committing_dsn):
     import psycopg
 
-    run("guard", "NothingIsPinnedHere")
+    name, action = f"delegation-{uuid4().hex[:8]}", f"act{uuid4().hex[:8]}"
+    run("topic", "--add", name, "--trigger", "Before handing work to a subagent")
+    memory_id = remembered_id(run("remember", RULE, "--topic", name)[1])
+    assert run("guard", action, "--json")[:2] == (0, "[]\n")
+
+    assert run("topic", "--edit", name, "--action", action)[0] == 0
+    assert f"(before: {action})" in run("topic")[1]
+    assert f"before      {action}" in run("topic", "show", name)[1]
+    code, out, _ = run("guard", action, "--json")
+    assert code == 2
+    assert json.loads(out) == [{"memory_id": memory_id, "content": RULE, "topic": name}]
     with psycopg.connect(committing_dsn) as conn:
-        rows = conn.execute(
-            "SELECT count(*) AS n FROM event_log WHERE event_type = 'guard_served' "
-            "AND detail ->> 'action' = 'NothingIsPinnedHere'"
-        ).fetchone()
-    assert rows[0] == 0
+        served = conn.execute(
+            "SELECT e.detail ->> 'count', e.detail ->> 'topic_id' = t.topic_id::text "
+            "FROM event_log e JOIN topic t ON t.name = %s "
+            "WHERE e.event_type = 'guard_served' AND e.detail ->> 'action' = %s",
+            (name, action),
+        ).fetchall()
+    assert served == [("1", True)]
+
+    code, _, err = run("topic", "--add", "x", "--trigger", "t", "--action", action)
+    assert code == 1 and "--edit" in err
+    assert run("topic", "--edit", name, "--no-action")[0] == 0
+    assert run("guard", action) == (0, "", "")
 
 
 def test_a_candidate_can_be_read_then_admitted(run):
@@ -457,8 +452,8 @@ def test_a_prefix_two_rows_answer_to_is_refused_with_both_of_them(run, committin
         for memory_id in (TWIN_A, TWIN_B):
             conn.execute(
                 "INSERT INTO memory "
-                "(memory_id, content, delivery, guard_action, evidence, created_by) "
-                "VALUES (%s, %s, 'guard', 'TwinAct', %s, 'test')",
+                "(memory_id, content, delivery, evidence, created_by) "
+                "VALUES (%s, %s, 'always', %s, 'test')",
                 (memory_id, TWIN, [ledger_id]),
             )
 

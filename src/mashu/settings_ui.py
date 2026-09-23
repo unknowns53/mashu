@@ -123,8 +123,7 @@ def _health_text(value: Health) -> str:
     else:
         schema = screen.success("up to date")
     deliveries = "  ·  ".join(
-        f"{name} {value.memory_counts.get(name, 0)}"
-        for name in ("always", "scope", "topic", "guard")
+        f"{name} {value.memory_counts.get(name, 0)}" for name in ("always", "scope", "topic")
     )
     heaviest = (
         f"  ·  heaviest {value.topic_heaviest_name} "
@@ -401,9 +400,10 @@ def _rules(count: int) -> str:
 
 def _topic_detail(row: dict[str, Any]) -> str:
     where = f"scope {row['scope_name']}" if row.get("scope_name") else "every session"
+    before = f"  ·  before: {row['action']}" if row.get("action") else ""
     return "\n".join(
         (
-            f"  ── {row['name']}  ·  listed in {where}",
+            f"  ── {row['name']}  ·  listed in {where}{before}",
             screen.wrap(f"trigger: {row['trigger']}", indent="  "),
             f"  {_rules(row['rules'])} active  ·  body {row['body_tokens']}/"
             f"{config.topic_capacity()} tokens  ·  index line {row['line_tokens']} tokens",
@@ -436,7 +436,8 @@ def _topics_page(dsn: str | None) -> None:
             line = screen.clip(
                 f"    {screen.pad(row['name'], 24)} "
                 f"{screen.pad(row.get('scope_name') or 'every session', 16)}"
-                f"{_rules(row['rules']):>9}  ·  {row['body_tokens']:>4} tokens",
+                f"{_rules(row['rules']):>9}  ·  {row['body_tokens']:>4} tokens"
+                + (f"  ·  before: {row['action']}" if row.get("action") else ""),
                 screen.text_width(),
             )
             lines.append(screen.selected(line) if index == at else line)
@@ -470,7 +471,13 @@ def _topics_page(dsn: str | None) -> None:
             name = _replacement("topic name", row["name"], clearable=False)
             trigger = _replacement("trigger", row["trigger"], clearable=False)
             scope_name = _topic_scope("scope", row.get("scope_name"))
-            if any(isinstance(value, screen.Cancelled) for value in (name, trigger, scope_name)):
+            action = _replacement(
+                "action, the tool calls whose start shows its rules "
+                "(delegate = Agent / Task subagent calls)",
+                row.get("action"),
+            )
+            answers = (name, trigger, scope_name, action)
+            if any(isinstance(value, screen.Cancelled) for value in answers):
                 note = "  topic unchanged"
                 continue
             try:
@@ -486,6 +493,8 @@ def _topics_page(dsn: str | None) -> None:
                         trigger=trigger or row["trigger"],
                         scope_id=scope_id,
                         clear_scope=scope_id is None,
+                        action=action,
+                        clear_action=action is None,
                     )
                 note = f"  edited topic {name or row['name']}"
             except MashuError as error:

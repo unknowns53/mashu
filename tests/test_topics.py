@@ -64,17 +64,6 @@ def test_empty_archived_and_other_scope_topics_are_not_listed(cur, scope_id):
     assert [row["topic"] for row in there["topics"]] == ["away"]
 
 
-def test_a_topic_for_every_session_is_listed_everywhere(cur, scope_id):
-    everywhere = topic(cur, "audio trim", trigger="Before trimming or splitting audio")
-    filed(cur, everywhere, "keep a 20 ms fade at every cut so no click is heard")
-
-    for session_scope in (None, scope_id):
-        got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=session_scope)
-        assert [row["line"] for row in got["topics"]] == [
-            "audio trim (1 rule): Before trimming or splitting audio"
-        ]
-
-
 def test_the_opening_comes_in_the_documented_order(cur, scope_id):
     remember(cur, ALWAYS)
     subject = topic(cur, scope_id=scope_id)
@@ -169,6 +158,27 @@ def test_editing_a_topic_moves_its_rules_scope_with_it(cur, scope_id):
     assert memories.get_memory(cur, rule["memory_id"])["scope_id"] is None
     cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'topic_updated'")
     assert cur.fetchone()["n"] == 2
+
+
+def test_one_action_leads_to_one_open_topic_served_where_it_is_listed(cur, scope_id):
+    subject = topic(cur, scope_id=scope_id)
+    rule = filed(cur, subject)
+    other = topic(cur, "delegation", trigger="Before delegating")
+    with pytest.raises(MashuError, match="action is letters"):
+        topics.update_topic(cur, subject["topic_id"], actor="user", action="two words")
+    topics.update_topic(cur, subject["topic_id"], actor="user", action="delegate")
+    with pytest.raises(MashuError, match="already applies before delegate"):
+        topics.update_topic(cur, other["topic_id"], actor="user", action="delegate")
+
+    elsewhere = scopes.create_scope(cur, name="elsewhere", actor="user")["scope_id"]
+    assert topics.action_rules(cur, "delegate", elsewhere) == (None, [])
+    linked, rules = topics.action_rules(cur, "delegate", scope_id)
+    assert linked["topic_id"] == subject["topic_id"]
+    assert [row["memory_id"] for row in rules] == [rule["memory_id"]]
+
+    topics.update_topic(cur, subject["topic_id"], actor="user", clear_action=True)
+    topics.update_topic(cur, other["topic_id"], actor="user", action="delegate")
+    assert topics.action_rules(cur, "delegate", scope_id)[0]["topic_id"] == other["topic_id"]
 
 
 # capacity
@@ -370,33 +380,78 @@ def test_a_retired_topic_rule_is_restored_into_its_topic(cur, scope_id):
 # the schema
 
 
-def test_migration_applies_to_a_store_at_0009_and_keeps_its_rows(old_store):
-    dsn = old_store("0010_topics.sql")
+def _guard_rows(dsn):
+    """Two rules an older store delivered as guard for 'delegate', the second retired."""
     with psycopg.connect(dsn) as conn:
         ledger_id = conn.execute(
             "INSERT INTO ledger (kind, what, prevention, created_by) "
             "VALUES ('explicit', 'seed', 'seed rule', 'test') RETURNING ledger_id"
         ).fetchone()[0]
-        kept = conn.execute(
-            "INSERT INTO memory (content, delivery, guard_action, evidence, created_by) "
-            "VALUES ('a guard that survives', 'guard', 'Task', %s, 'test') "
-            "RETURNING memory_id",
-            ([ledger_id],),
-        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO memory (content, delivery, guard_action, evidence, created_by, status, "
+            "retire_reason, retirement_kind, retired_at) VALUES "
+            "('delegation rule 0', 'guard', 'delegate', %(e)s, 'test', 'active', NULL, NULL, NULL),"
+            "('delegation rule 1', 'guard', 'delegate', %(e)s, 'test', 'retired', 'gone', "
+            "'invalidated', now())",
+            {"e": [ledger_id]},
+        )
+        return ledger_id
 
-    assert migrate.migrate(dsn) == ["0010_topics.sql"]
+
+def test_migration_folds_guard_rules_into_a_topic_linked_to_their_action(old_store):
+    dsn = old_store("0011_guard_into_topics.sql")
+    ledger_id = _guard_rows(dsn)
+
+    assert migrate.migrate(dsn) == ["0011_guard_into_topics.sql"]
     with psycopg.connect(dsn) as conn:
-        row = conn.execute(
-            "SELECT delivery, guard_action, topic_id FROM memory WHERE memory_id = %s",
-            (kept,),
+        made = conn.execute(
+            "SELECT t.topic_id, t.trigger, t.scope_id, t.action, t.created_by FROM topic t JOIN "
+            "event_log e ON e.detail ->> 'topic_id' = t.topic_id::text AND e.actor = t.created_by "
+            "WHERE t.name = 'delegate' AND e.event_type = 'topic_created'"
         ).fetchone()
-        assert row == ("guard", "Task", None)
+        assert made[1:] == ("before the delegate action", None, "delegate", "migration")
+        moved = conn.execute("SELECT DISTINCT delivery, topic_id FROM memory").fetchall()
+        assert moved == [("topic", made[0])]
         with pytest.raises(psycopg.errors.CheckViolation):
             conn.execute(
                 "INSERT INTO memory (content, delivery, evidence, created_by) "
-                "VALUES ('a topic rule with no topic', 'topic', %s, 'test')",
+                "VALUES ('a new guard rule', 'guard', %s, 'test')",
                 ([ledger_id],),
             )
+    with psycopg.connect(dsn) as conn, pytest.raises(psycopg.errors.UniqueViolation):
+        conn.execute(
+            "INSERT INTO topic (name, trigger, action, created_by) "
+            "VALUES ('second', 'Before delegating', 'delegate', 'test')"
+        )
+
+
+@pytest.mark.parametrize(
+    ("seed", "refusal"),
+    [
+        (
+            "INSERT INTO topic (name, trigger, created_by) "
+            "VALUES ('delegate', 'Before delegating', 'test')",
+            "already exists",
+        ),
+        (
+            "WITH made AS (INSERT INTO scope (name, created_by) VALUES ('game', 'test') "
+            "RETURNING scope_id) UPDATE memory SET scope_id = (SELECT scope_id FROM made) "
+            "WHERE content = 'delegation rule 0'",
+            "more than one scope",
+        ),
+    ],
+)
+def test_migration_refuses_guard_rules_it_cannot_fold_into_one_topic(old_store, seed, refusal):
+    dsn = old_store("0011_guard_into_topics.sql")
+    _guard_rows(dsn)
+    with psycopg.connect(dsn) as conn:
+        conn.execute(seed)
+
+    with pytest.raises(psycopg.errors.RaiseException, match=refusal):
+        migrate.migrate(dsn)
+    with psycopg.connect(dsn) as conn:
+        kept = conn.execute("SELECT count(*) FROM memory WHERE delivery = 'guard'").fetchone()
+        assert kept == (2,)
 
 
 # the MCP boundary

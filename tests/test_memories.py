@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 
 from conftest import remember, retire
-from mashu import match, memories, scopes, temporary
+from mashu import match, memories, temporary, topics
 from mashu.errors import MashuError, RefusedError, RetiredConflictError
 
 RULE = "never report a run as finished without the output that proves it"
@@ -136,55 +136,38 @@ def test_superseded_links_must_exist_and_cannot_form_cycles(cur):
         retire(cur, second, "the next rule replaces it", "superseded", superseded_by=uuid4())
 
 
-def test_a_move_names_what_its_delivery_needs_and_leaving_guard_clears_the_act(cur, scope_id):
+def test_a_move_names_what_its_delivery_needs_and_the_act_gate_is_gone(cur, scope_id):
     memory = remember(cur, RULE)
-    with pytest.raises(MashuError, match="action"):
+    with pytest.raises(MashuError, match="unknown delivery 'guard'"):
         memories.set_delivery(cur, memory["memory_id"], delivery="guard", actor="user")
+    with pytest.raises(MashuError, match="scope"):
+        memories.set_delivery(cur, memory["memory_id"], delivery="scope", actor="user")
     with pytest.raises(MashuError, match="clear"):
         memories.set_delivery(
             cur,
             memory["memory_id"],
-            delivery="guard",
+            delivery="always",
             actor="user",
-            guard_action="Bash",
             scope_id=scope_id,
             clear_scope=True,
         )
 
-    pinned = memories.set_delivery(
-        cur, memory["memory_id"], delivery="guard", actor="user", guard_action="Task"
-    )
-    assert (pinned["delivery"], pinned["guard_action"]) == ("guard", "Task")
-    with pytest.raises(MashuError, match="scope"):
-        memories.set_delivery(cur, memory["memory_id"], delivery="scope", actor="user")
-
     moved = memories.set_delivery(
         cur, memory["memory_id"], delivery="scope", actor="user", scope_id=scope_id
     )
-    assert moved["delivery"] == "scope"
-    assert moved["scope_id"] == scope_id
-    assert moved["guard_action"] is None
-
-
-def test_a_guard_with_no_scope_fires_everywhere_and_a_scoped_one_only_at_home(cur, scope_id):
-    everywhere = remember(cur, RULE, delivery="guard", guard_action="Task")
-    here = remember(cur, PINNED, scope_id=scope_id, delivery="guard", guard_action="Task")
-    elsewhere = scopes.create_scope(cur, name="somewhere else", actor="user")["scope_id"]
-
-    unscoped = memories.guard_pins(cur, action="Task")
-    assert [row["memory_id"] for row in unscoped] == [everywhere["memory_id"]]
-
-    at_home = memories.guard_pins(cur, action="Task", scope_id=scope_id)
-    assert {row["memory_id"] for row in at_home} == {everywhere["memory_id"], here["memory_id"]}
-
-    away = memories.guard_pins(cur, action="Task", scope_id=elsewhere)
-    assert [row["memory_id"] for row in away] == [everywhere["memory_id"]]
-    assert memories.guard_pins(cur, action="Bash", scope_id=scope_id) == []
+    assert (moved["delivery"], moved["scope_id"]) == ("scope", scope_id)
+    freed = memories.set_delivery(
+        cur, memory["memory_id"], delivery="always", actor="user", clear_scope=True
+    )
+    assert freed["scope_id"] is None
 
 
 def test_listing_a_scope_shows_what_lives_there_by_whatever_route(cur, scope_id):
     pushed = remember(cur, RULE, scope_id=scope_id, delivery="scope")
-    pinned = remember(cur, PINNED, scope_id=scope_id, delivery="guard", guard_action="Task")
+    subject = topics.create_topic(
+        cur, name="delegation", trigger="Before delegating", scope_id=scope_id, actor="user"
+    )
+    pinned = remember(cur, PINNED, delivery="topic", topic_id=subject["topic_id"])
     remember(cur, "answer in the language that was asked")
 
     listed = {row["memory_id"] for row in memories.active_memories(cur, scope_id=scope_id)}
@@ -220,29 +203,6 @@ def test_writing_a_retired_rule_back_stops_to_show_why_it_was_withdrawn(cur):
 
     unrelated = remember(cur, "quotas on the shared queue reset at midnight every day")
     assert unrelated["overrides"] == []
-
-
-def test_a_scoped_rule_moved_to_the_act_gate_can_be_freed_of_the_scope_it_came_from(cur, scope_id):
-    memory = remember(cur, RULE, scope_id=scope_id, delivery="scope")
-
-    kept = memories.set_delivery(
-        cur, memory["memory_id"], delivery="guard", actor="user", guard_action="Bash"
-    )
-    assert kept["scope_id"] == scope_id
-    assert memories.guard_pins(cur, action="Bash") == []
-
-    freed = memories.set_delivery(
-        cur,
-        memory["memory_id"],
-        delivery="guard",
-        actor="user",
-        guard_action="Bash",
-        clear_scope=True,
-    )
-    assert freed["scope_id"] is None
-    assert [row["memory_id"] for row in memories.guard_pins(cur, action="Bash")] == [
-        memory["memory_id"]
-    ]
 
 
 def test_an_always_memory_can_become_temporary_and_back(cur):
@@ -292,14 +252,6 @@ def test_temporary_round_trip_does_not_override_an_unrelated_invalidated_memory(
         temporary.convert_to_memory(cur, context["context_id"], actor="user")
     assert memories.get_memory(cur, source["memory_id"])["retirement_kind"] == "relocated"
     assert [row["context_id"] for row in temporary.active_temporary(cur)] == [context["context_id"]]
-
-
-def test_a_guard_memory_cannot_lose_its_action_by_becoming_temporary(cur):
-    memory = remember(cur, RULE, delivery="guard", guard_action="Bash")
-
-    with pytest.raises(MashuError, match="action would be lost"):
-        memories.convert_to_temporary(cur, memory["memory_id"], days=1, actor="user")
-    assert memories.get_memory(cur, memory["memory_id"])["status"] == "active"
 
 
 def test_a_refused_conversion_keeps_its_source_active(cur, monkeypatch):
