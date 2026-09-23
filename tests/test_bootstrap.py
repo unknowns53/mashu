@@ -4,6 +4,7 @@ import datetime as dt
 
 import pytest
 
+from conftest import expire, new_project, new_task
 from mashu import bootstrap, ledger, memories, projects, scopes, server, tasks, temporary
 from mashu.tokens import pushed_cost
 
@@ -19,27 +20,13 @@ OTHER_WORK = "read up on PNtBAm cononsolvency"
 @pytest.fixture
 def task(cur):
     """One project, one task, one state — the smallest thing that is delivered."""
-    projects.create_project(cur, name="mashu", actor="user")
-    return tasks.task_create(
+    new_project(cur, "mashu")
+    return new_task(
         cur,
+        SCHEMA,
         project="mashu",
-        name=SCHEMA,
         goal="hand the active states over with their dates",
         next_actions=["count the three shares apart"],
-        actor="agent",
-    )
-
-
-def expire(cur, task_id):
-    """Age a task past its lease, which is the whole of dormancy (7)."""
-    cur.execute(
-        """
-        UPDATE task
-        SET active_until = now() - interval '1 day',
-            last_activity_at = now() - interval '15 days'
-        WHERE task_id = %s
-        """,
-        (task_id,),
     )
 
 

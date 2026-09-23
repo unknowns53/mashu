@@ -1,44 +1,17 @@
 from __future__ import annotations
 
-import io
-import os
 import pathlib
 import sys
 
-import psycopg
 import pytest
 
+from conftest import keys
 from mashu import db, ledger, nominations, review_ui
-from mashu.migrate import migrate
-
-ADMIN_DSN = os.environ.get("MASHU_ADMIN_DSN", "dbname=postgres")
-TEST_DB = f"{os.environ.get('MASHU_TEST_DB', 'mashu_test')}_review"
 
 RULE = "run the migration before starting the local server, every time"
 OTHER = "spell out the timezone in every scheduled job, even when it looks obvious"
 
-
-@pytest.fixture
-def dsn() -> str:
-    """A database of this test's own, built from the migrations."""
-    with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
-        conn.execute(f'DROP DATABASE IF EXISTS "{TEST_DB}" WITH (FORCE)')
-        conn.execute(f'CREATE DATABASE "{TEST_DB}"')
-    conninfo = f"dbname={TEST_DB}"
-    migrate(conninfo)
-    return conninfo
-
-
-@pytest.fixture(autouse=True)
-def a_screen_of_a_known_size(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A terminal the paging can be reasoned about, whatever runs the suite."""
-    monkeypatch.setenv("COLUMNS", "100")
-    monkeypatch.setenv("LINES", "40")
-
-
-def keys(monkeypatch: pytest.MonkeyPatch, *typed: str) -> None:
-    """Hand the sitting its keystrokes: one line each, in the order pressed."""
-    monkeypatch.setattr("sys.stdin", io.StringIO("".join(f"{line}\n" for line in typed)))
+pytestmark = pytest.mark.usefixtures("known_screen")
 
 
 def a_candidate(dsn: str, content: str) -> dict:

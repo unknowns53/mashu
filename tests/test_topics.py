@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import shutil
 from uuid import uuid4
 
 import psycopg
@@ -18,7 +16,6 @@ from mashu import (
     topics,
 )
 from mashu.errors import MashuError, RefusedError
-from mashu.migrate import migration_files
 from mashu.tokens import pushed_cost
 
 TRIGGER = "Before changing difficulty levers, win rates, or initial placement"
@@ -405,48 +402,33 @@ def test_a_retired_topic_rule_is_restored_into_its_topic(cur, scope_id):
 # the schema
 
 
-def test_migration_applies_to_a_store_at_0009_and_keeps_its_rows(tmp_path):
-    admin_dsn = os.environ.get("MASHU_ADMIN_DSN", "dbname=postgres")
-    name = f"mashu_topic_upgrade_{uuid4().hex[:10]}"
-    old = tmp_path / "old-migrations"
-    old.mkdir()
-    for path in migration_files():
-        if path.name < "0010_topics.sql":
-            shutil.copy(path, old / path.name)
-    with psycopg.connect(admin_dsn, autocommit=True) as conn:
-        conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
-        conn.execute(f'CREATE DATABASE "{name}"')
-    dsn = f"dbname={name}"
-    try:
-        migrate.migrate(dsn, old)
-        with psycopg.connect(dsn) as conn:
-            ledger_id = conn.execute(
-                "INSERT INTO ledger (kind, what, prevention, created_by) "
-                "VALUES ('explicit', 'seed', 'seed rule', 'test') RETURNING ledger_id"
-            ).fetchone()[0]
-            kept = conn.execute(
-                "INSERT INTO memory (content, delivery, guard_action, evidence, created_by) "
-                "VALUES ('a guard that survives', 'guard', 'Task', %s, 'test') "
-                "RETURNING memory_id",
-                ([ledger_id],),
-            ).fetchone()[0]
+def test_migration_applies_to_a_store_at_0009_and_keeps_its_rows(old_store):
+    dsn = old_store("0010_topics.sql")
+    with psycopg.connect(dsn) as conn:
+        ledger_id = conn.execute(
+            "INSERT INTO ledger (kind, what, prevention, created_by) "
+            "VALUES ('explicit', 'seed', 'seed rule', 'test') RETURNING ledger_id"
+        ).fetchone()[0]
+        kept = conn.execute(
+            "INSERT INTO memory (content, delivery, guard_action, evidence, created_by) "
+            "VALUES ('a guard that survives', 'guard', 'Task', %s, 'test') "
+            "RETURNING memory_id",
+            ([ledger_id],),
+        ).fetchone()[0]
 
-        assert migrate.migrate(dsn) == ["0010_topics.sql"]
-        with psycopg.connect(dsn) as conn:
-            row = conn.execute(
-                "SELECT delivery, guard_action, topic_id FROM memory WHERE memory_id = %s",
-                (kept,),
-            ).fetchone()
-            assert row == ("guard", "Task", None)
-            with pytest.raises(psycopg.errors.CheckViolation):
-                conn.execute(
-                    "INSERT INTO memory (content, delivery, evidence, created_by) "
-                    "VALUES ('a topic rule with no topic', 'topic', %s, 'test')",
-                    ([ledger_id],),
-                )
-    finally:
-        with psycopg.connect(admin_dsn, autocommit=True) as conn:
-            conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+    assert migrate.migrate(dsn) == ["0010_topics.sql"]
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            "SELECT delivery, guard_action, topic_id FROM memory WHERE memory_id = %s",
+            (kept,),
+        ).fetchone()
+        assert row == ("guard", "Task", None)
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "INSERT INTO memory (content, delivery, evidence, created_by) "
+                "VALUES ('a topic rule with no topic', 'topic', %s, 'test')",
+                ([ledger_id],),
+            )
 
 
 # the MCP boundary

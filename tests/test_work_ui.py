@@ -1,38 +1,18 @@
 from __future__ import annotations
 
-import io
-import os
-
-import psycopg
 import pytest
 
+from conftest import keys, new_project
 from mashu import db, projects, routing, scopes, task_history, tasks, work_ui
-from mashu.migrate import migrate
 
-ADMIN_DSN = os.environ.get("MASHU_ADMIN_DSN", "dbname=postgres")
-TEST_DB = f"{os.environ.get('MASHU_TEST_DB', 'mashu_test')}_work_ui"
+pytestmark = pytest.mark.usefixtures("known_screen")
 
 
 @pytest.fixture
-def dsn() -> str:
-    with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
-        conn.execute(f'DROP DATABASE IF EXISTS "{TEST_DB}" WITH (FORCE)')
-        conn.execute(f'CREATE DATABASE "{TEST_DB}"')
-    conninfo = f"dbname={TEST_DB}"
-    migrate(conninfo)
-    with db.transaction(conninfo) as cur:
-        projects.create_project(cur, name="enrai", actor="user")
-    return conninfo
-
-
-@pytest.fixture(autouse=True)
-def known_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("COLUMNS", "100")
-    monkeypatch.setenv("LINES", "40")
-
-
-def keys(monkeypatch: pytest.MonkeyPatch, *typed: str) -> None:
-    monkeypatch.setattr("sys.stdin", io.StringIO("".join(f"{line}\n" for line in typed)))
+def dsn(dsn):
+    with db.transaction(dsn) as cur:
+        new_project(cur)
+    return dsn
 
 
 def make_task(

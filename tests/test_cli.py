@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from uuid import UUID, uuid4
 
 import pytest
@@ -18,9 +17,7 @@ from mashu import (
     tasks,
 )
 from mashu import traces as trace_domain
-from mashu.migrate import migrate
-
-ADMIN_DSN = os.environ.get("MASHU_ADMIN_DSN", "dbname=postgres")
+from mashu.migrate import migration_files
 
 # Keep test strings dissimilar to prevent cross-test trigram matches.
 RULE = "keep the deployment order in the runbook rather than in anyone's head"
@@ -983,25 +980,10 @@ def test_a_task_prefix_two_rows_answer_to_is_refused_with_both_of_them(run, comm
 
 
 # a checkout ahead of its database (13.2)
-def test_a_store_behind_the_code_says_so_instead_of_raising(capsys, tmp_path):
-    import pathlib
-    import shutil
+def test_a_store_behind_the_code_says_so_instead_of_raising(capsys, old_store):
+    behind = old_store(migration_files()[-1].name)
 
-    import psycopg
-
-    from mashu.migrate import migration_files
-
-    name = "mashu_test_behind"
-    with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
-        conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
-        conn.execute(f'CREATE DATABASE "{name}"')
-    partial = pathlib.Path(tmp_path / "migrations")
-    partial.mkdir()
-    for path in migration_files()[:-1]:
-        shutil.copy(path, partial / path.name)
-    migrate(f"dbname={name}", partial)
-
-    code = cli.main(["--dsn", f"dbname={name}", "review", "--changes", "--list"])
+    code = cli.main(["--dsn", behind, "review", "--changes", "--list"])
     captured = capsys.readouterr()
     assert code == 1
     assert "behind the code" in captured.err

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from conftest import expire
 from mashu import projects, tasks
 from mashu.errors import MashuError, RefusedError, UnknownProjectError
 
@@ -33,10 +34,7 @@ def test_a_listing_counts_what_each_project_is_carrying(cur):
     quiet = tasks.task_create(cur, project="mashu", name="rewrite the poster", actor="agent")
     done = tasks.task_create(cur, project="mashu", name="calibrate the lease", actor="agent")
 
-    cur.execute(
-        "UPDATE task SET active_until = now() - interval '1 day' WHERE task_id = %s",
-        (quiet["task"]["task_id"],),
-    )
+    expire(cur, quiet["task"]["task_id"])
     tasks.close(cur, done["task"]["task_id"], outcome="completed", actor="user")
 
     listed = projects.list_projects(cur)[0]

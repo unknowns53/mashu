@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import os
-from collections.abc import Iterator
-
-import psycopg
 import pytest
 
+from conftest import getkeys
 from mashu import (
     db,
     ledger,
@@ -14,37 +11,13 @@ from mashu import (
     projects,
     routing,
     scopes,
-    screen,
     settings_ui,
     tasks,
     temporary,
     topics,
 )
-from mashu.migrate import migrate
 
-ADMIN_DSN = os.environ.get("MASHU_ADMIN_DSN", "dbname=postgres")
-TEST_DB = f"{os.environ.get('MASHU_TEST_DB', 'mashu_test')}_settings"
-
-
-@pytest.fixture
-def dsn() -> Iterator[str]:
-    with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
-        conn.execute(f'DROP DATABASE IF EXISTS "{TEST_DB}" WITH (FORCE)')
-        conn.execute(f'CREATE DATABASE "{TEST_DB}"')
-    conninfo = f"dbname={TEST_DB}"
-    migrate(conninfo)
-    yield conninfo
-
-
-@pytest.fixture(autouse=True)
-def known_screen(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("COLUMNS", "100")
-    monkeypatch.setenv("LINES", "30")
-
-
-def keys(monkeypatch: pytest.MonkeyPatch, *pressed: str) -> None:
-    values = iter(pressed)
-    monkeypatch.setattr(screen, "getkey", lambda: next(values))
+pytestmark = pytest.mark.usefixtures("known_screen")
 
 
 def answers(monkeypatch: pytest.MonkeyPatch, *typed: str) -> list[str]:
@@ -62,7 +35,7 @@ def answers(monkeypatch: pytest.MonkeyPatch, *typed: str) -> list[str]:
 def test_top_level_reaches_every_settings_page_and_leaves_cleanly(
     dsn: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    keys(
+    getkeys(
         monkeypatch,
         "enter",
         "q",
@@ -267,7 +240,7 @@ def test_bootstrap_preview_resolves_cwd_and_shows_every_payload_share(
 def test_scope_page_creates_a_scope_with_its_summary(
     dsn: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    keys(monkeypatch, "n", "q")
+    getkeys(monkeypatch, "n", "q")
     answers(monkeypatch, "deployment", "Release and rollback knowledge")
 
     settings_ui._scopes_page(dsn)
@@ -280,7 +253,7 @@ def test_scope_page_creates_a_scope_with_its_summary(
 def test_scope_summary_is_optional_when_the_line_is_submitted_empty(
     dsn: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    keys(monkeypatch, "n", "q")
+    getkeys(monkeypatch, "n", "q")
     answers(monkeypatch, "deployment", "")
 
     settings_ui._scopes_page(dsn)
@@ -293,7 +266,7 @@ def test_scope_summary_is_optional_when_the_line_is_submitted_empty(
 def test_ctrl_c_at_an_optional_scope_summary_cancels_creation(
     dsn: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    keys(monkeypatch, "n", "q")
+    getkeys(monkeypatch, "n", "q")
 
     def answer(prompt: str) -> str:
         if prompt == "  scope name: ":
@@ -315,7 +288,7 @@ def test_scope_errors_stay_on_the_page_as_feedback(
 ) -> None:
     with db.transaction(dsn) as cur:
         scopes.create_scope(cur, name="duplicate", actor="user")
-    keys(monkeypatch, "n", "q")
+    getkeys(monkeypatch, "n", "q")
     answers(monkeypatch, "duplicate", "another summary")
 
     settings_ui._scopes_page(dsn)
@@ -326,7 +299,7 @@ def test_scope_errors_stay_on_the_page_as_feedback(
 def test_scope_name_and_summary_can_be_edited(dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
     with db.transaction(dsn) as cur:
         scope = scopes.create_scope(cur, name="old scope", summary="old summary", actor="user")
-    keys(monkeypatch, "e", "q")
+    getkeys(monkeypatch, "e", "q")
     answers(monkeypatch, "new scope", "new summary")
 
     settings_ui._scopes_page(dsn)
@@ -340,7 +313,7 @@ def test_scope_name_and_summary_can_be_edited(dsn: str, monkeypatch: pytest.Monk
 def test_routes_can_be_added_ignored_and_removed(dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
     with db.transaction(dsn) as cur:
         scopes.create_scope(cur, name="route scope", actor="user")
-    keys(monkeypatch, "n", "i", "x", "q")
+    getkeys(monkeypatch, "n", "i", "x", "q")
     answers(
         monkeypatch,
         "/tmp/settings-scoped/a/long/path",
@@ -363,7 +336,7 @@ def test_route_path_and_destination_can_be_edited(
         route = routing.add_route(
             cur, path_prefix="/tmp/old", scope_id=scope["scope_id"], actor="user"
         )
-    keys(monkeypatch, "e", "q")
+    getkeys(monkeypatch, "e", "q")
     answers(monkeypatch, "/tmp/new", "-")
 
     settings_ui._routes_page(dsn)
@@ -381,7 +354,7 @@ def test_schema_apply_is_confirmed_and_reports_a_noop(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     called: list[str | None] = []
-    keys(monkeypatch, "m", "q")
+    getkeys(monkeypatch, "m", "q")
     prompts = answers(monkeypatch, "y")
     monkeypatch.setattr(
         settings_ui.migration,
@@ -401,7 +374,7 @@ def test_long_pages_move_forward_and_back_without_losing_the_header(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("LINES", "10")
-    keys(monkeypatch, "space", "b", "q")
+    getkeys(monkeypatch, "space", "b", "q")
     body = "\n".join(f"  detail line {number}" for number in range(30))
 
     settings_ui._read_page("Long health page", body)
@@ -417,7 +390,7 @@ def test_topic_page_creates_edits_and_removes_a_topic(
 ) -> None:
     with db.transaction(dsn) as cur:
         scopes.create_scope(cur, name="game", actor="user")
-    keys(monkeypatch, "n", "e", "x", "q")
+    getkeys(monkeypatch, "n", "e", "x", "q")
     answers(
         monkeypatch,
         "difficulty",
@@ -455,7 +428,7 @@ def test_a_topic_holding_rules_is_not_removed_from_the_page(
             delivery="topic",
             topic_id=topic["topic_id"],
         )
-    keys(monkeypatch, "x", "q")
+    getkeys(monkeypatch, "x", "q")
     answers(monkeypatch, "y")
 
     settings_ui._topics_page(dsn)

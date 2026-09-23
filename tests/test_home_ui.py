@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import sys
 
-import psycopg
 import pytest
 
 from mashu import (
@@ -20,10 +19,6 @@ from mashu import (
     tasks,
     temporary,
 )
-from mashu.migrate import migrate
-
-ADMIN_DSN = "dbname=postgres"
-TEST_DB = "mashu_test_home"
 
 
 class TtyBuffer(io.StringIO):
@@ -95,17 +90,6 @@ def test_edit_text_shows_the_body_only_in_the_edit_buffer(
     assert opened == [("  > ", "the existing body")]
 
 
-@pytest.fixture
-def home_dsn() -> str:
-    """A clean store whose aggregate counts are exact."""
-    with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
-        conn.execute(f'DROP DATABASE IF EXISTS "{TEST_DB}" WITH (FORCE)')
-        conn.execute(f'CREATE DATABASE "{TEST_DB}"')
-    dsn = f"dbname={TEST_DB}"
-    migrate(dsn)
-    return dsn
-
-
 def test_no_command_opens_the_home_screen(monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[str | None] = []
     monkeypatch.setattr(home_ui, "run", lambda dsn=None: called.append(dsn) or 0)
@@ -115,9 +99,9 @@ def test_no_command_opens_the_home_screen(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_dashboard_collects_review_task_memory_and_project_counts(
-    home_dsn: str,
+    dsn: str,
 ) -> None:
-    with db.transaction(home_dsn) as cur:
+    with db.transaction(dsn) as cur:
         scope = scopes.create_scope(
             cur, name="home scope", summary="dashboard test scope", actor="user"
         )
@@ -216,7 +200,7 @@ def test_dashboard_collects_review_task_memory_and_project_counts(
             reason="counted by the dashboard test",
         )
 
-    state = home_ui._dashboard(home_dsn)
+    state = home_ui._dashboard(dsn)
 
     assert state == home_ui.Dashboard(
         review_ready=1,

@@ -1,65 +1,24 @@
 from __future__ import annotations
 
-import io
-import os
-
-import psycopg
 import pytest
 
-from mashu import close_ui, db, projects, tasks
-from mashu.migrate import migrate
-
-ADMIN_DSN = os.environ.get("MASHU_ADMIN_DSN", "dbname=postgres")
-TEST_DB = f"{os.environ.get('MASHU_TEST_DB', 'mashu_test')}_close"
+from conftest import committed_task, keys, new_project, task_row
+from mashu import close_ui, db, tasks
 
 MERGED = "deleted before the merge d178ecb7, nothing on main references it"
 
+pytestmark = pytest.mark.usefixtures("known_screen")
+
 
 @pytest.fixture
-def dsn() -> str:
-    """A database of this test's own, built from the migrations."""
-    with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
-        conn.execute(f'DROP DATABASE IF EXISTS "{TEST_DB}" WITH (FORCE)')
-        conn.execute(f'CREATE DATABASE "{TEST_DB}"')
-    conninfo = f"dbname={TEST_DB}"
-    migrate(conninfo)
-    with db.transaction(conninfo) as cur:
-        projects.create_project(cur, name="enrai", actor="user")
-    return conninfo
-
-
-@pytest.fixture(autouse=True)
-def a_screen_of_a_known_size(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A terminal the paging can be reasoned about, whatever runs the suite."""
-    monkeypatch.setenv("COLUMNS", "100")
-    monkeypatch.setenv("LINES", "40")
-
-
-def keys(monkeypatch: pytest.MonkeyPatch, *typed: str) -> None:
-    """Hand the screen its keystrokes: one line each, in the order pressed."""
-    monkeypatch.setattr("sys.stdin", io.StringIO("".join(f"{line}\n" for line in typed)))
+def dsn(dsn):
+    with db.transaction(dsn) as cur:
+        new_project(cur)
+    return dsn
 
 
 def a_task(dsn: str, name: str, *, propose: str | None = None, reason: str = MERGED):
-    """One open task, committed, optionally with a proposal standing on it."""
-    with db.transaction(dsn) as cur:
-        row = tasks.task_create(
-            cur,
-            project="enrai",
-            name=name,
-            goal=f"finish {name}",
-            actor="agent",
-            force=True,
-        )
-        task_id = row["task"]["task_id"]
-        if propose:
-            tasks.propose_close(cur, task_id, outcome=propose, reason=reason, actor="agent")
-        return task_id
-
-
-def task_row(dsn: str, task_id):
-    with db.transaction(dsn) as cur:
-        return tasks.task_get(cur, task_id)
+    return committed_task(dsn, name, propose=propose, reason=reason)
 
 
 def test_enter_closes_on_the_proposal_and_keeps_its_grounds(dsn, monkeypatch):

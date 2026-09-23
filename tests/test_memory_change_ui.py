@@ -1,33 +1,13 @@
 from __future__ import annotations
 
-import io
-import os
-
-import psycopg
 import pytest
 
+from conftest import keys
 from mashu import db, memories, memory_change_ui, memory_changes, nominations
-from mashu.migrate import migrate
 
-ADMIN_DSN = os.environ.get("MASHU_ADMIN_DSN", "dbname=postgres")
-TEST_DB = f"{os.environ.get('MASHU_TEST_DB', 'mashu_test')}_memory_change_ui"
 RULE = "the signed archive index is checked before extraction"
 
-
-@pytest.fixture
-def dsn() -> str:
-    with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
-        conn.execute(f'DROP DATABASE IF EXISTS "{TEST_DB}" WITH (FORCE)')
-        conn.execute(f'CREATE DATABASE "{TEST_DB}"')
-    conninfo = f"dbname={TEST_DB}"
-    migrate(conninfo)
-    return conninfo
-
-
-@pytest.fixture(autouse=True)
-def a_screen_of_a_known_size(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("COLUMNS", "100")
-    monkeypatch.setenv("LINES", "40")
+pytestmark = pytest.mark.usefixtures("known_screen")
 
 
 def _proposal(dsn: str):
@@ -53,13 +33,9 @@ def _proposal(dsn: str):
         )
 
 
-def _keys(monkeypatch: pytest.MonkeyPatch, *keys: str) -> None:
-    monkeypatch.setattr("sys.stdin", io.StringIO("".join(f"{key}\n" for key in keys)))
-
-
 def test_change_review_shows_the_full_target_and_applies_on_one_key(dsn, monkeypatch, capsys):
     proposal = _proposal(dsn)
-    _keys(monkeypatch, "", "y")
+    keys(monkeypatch, "", "y")
 
     assert memory_change_ui.run(dsn) == 0
     output = capsys.readouterr().out
@@ -82,7 +58,7 @@ def test_change_review_shows_the_full_target_and_applies_on_one_key(dsn, monkeyp
 
 def test_change_review_edits_the_prefilled_reason_before_apply(dsn, monkeypatch, capsys):
     proposal = _proposal(dsn)
-    _keys(monkeypatch, "", "e", "the archived format moved to a separate worker", "y")
+    keys(monkeypatch, "", "e", "the archived format moved to a separate worker", "y")
 
     assert memory_change_ui.run(dsn) == 0
     output = capsys.readouterr().out

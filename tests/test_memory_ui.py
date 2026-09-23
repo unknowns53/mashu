@@ -1,44 +1,23 @@
 from __future__ import annotations
 
 import datetime as dt
-import io
-import os
 
-import psycopg
 import pytest
 
+from conftest import keys
 from mashu import db, memories, memory_ui, scopes, screen, temporary, topics
-from mashu.migrate import migrate
-
-ADMIN_DSN = os.environ.get("MASHU_ADMIN_DSN", "dbname=postgres")
-TEST_DB = f"{os.environ.get('MASHU_TEST_DB', 'mashu_test')}_memory_ui"
 
 RULE = "never report a run as finished without the output that proves it"
 REVISED = "never report a run as finished without pasting the output that proves it"
 
+pytestmark = pytest.mark.usefixtures("known_screen")
+
 
 @pytest.fixture
-def dsn() -> str:
-    with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
-        conn.execute(f'DROP DATABASE IF EXISTS "{TEST_DB}" WITH (FORCE)')
-        conn.execute(f'CREATE DATABASE "{TEST_DB}"')
-    conninfo = f"dbname={TEST_DB}"
-    migrate(conninfo)
-    with db.transaction(conninfo) as cur:
+def dsn(dsn):
+    with db.transaction(dsn) as cur:
         scopes.create_scope(cur, name="deployments", actor="user")
-    return conninfo
-
-
-@pytest.fixture(autouse=True)
-def a_screen_of_a_known_size(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("COLUMNS", "100")
-    monkeypatch.setenv("LINES", "40")
-    monkeypatch.delenv("VISUAL", raising=False)
-    monkeypatch.delenv("EDITOR", raising=False)
-
-
-def keys(monkeypatch: pytest.MonkeyPatch, *typed: str) -> None:
-    monkeypatch.setattr("sys.stdin", io.StringIO("".join(f"{line}\n" for line in typed)))
+    return dsn
 
 
 def remember(dsn: str, content: str = RULE, **kwargs):
