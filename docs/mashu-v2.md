@@ -22,7 +22,7 @@ v1 は運用実測で破綻した。原因は個々の機構ではなく、入�
 | | v1 | v2 |
 |---|---|---|
 | 入口 | 価値の見込み | 損害の実証 |
-| 配信 | 検索（pull）中心 | 全量 push |
+| 配信 | 検索（pull）中心 | 存在の全量 push |
 | 量の管理 | 下流の機構で捌く | 入口で絶つ |
 | Review | 定常業務（束で捌く） | 例外処理（週に数件） |
 | 未審査の知識 | タグ付きで配信される | 一切配信されない |
@@ -140,7 +140,7 @@ incident / friction から自動生成した候補と、Agent 自身の追加・
 
 ### 5.2 席数（配信予算を上限でなく定員として使う）
 
-bootstrap で push される合計に硬い天井（当初 2000 token）を置く。天井に達した状態での昇格は、既存の記憶の退役か guard/scope への格下げとセットでない限り拒否される。
+bootstrap で push される合計に硬い天井（当初 2000 token）を置く。天井に達した状態での昇格は、既存の記憶の退役か guard / scope / topic への格下げとセットでない限り拒否される。
 
 これは v1 の admission control と似た形だが、意味が違う。v1 では溢れた分が検索へ落ちた。v2 には検索が無いので、**定員は「全量 push が成立するサイズに在庫を保つ」ことそのものを強制する**。定員があるから push が成立し、push が成立するから「読むべきタイミングで読まない」問題が消える。
 
@@ -153,6 +153,8 @@ bootstrap で push される合計に硬い天井（当初 2000 token）を置�
 **行数で数える代理指標は使わない。**v1 からの再入場では「always 上限 10 行 × 約 60 token」として運用したが、実測は 1 行 43 token で、10 行は意図した枠の半分強しか使わなかった。規則の長さは一定でないので、件数は枠の代理にならない。
 
 always 層で拒否されたものには、scope 規則には無い出口が一つある。一箇所でしか効かない規則なら、どこで効くかを言えばよい（`mashu deliver <id> scope --scope <name>`）。
+
+**topic（6 節）の見出しの行も、push される量として数える。**Scope を持たない topic の行は全セッションに届くので always 層に、Scope を持つ topic の行はその Scope に数える。行を数えるのは、その topic に active な規則が 1 件以上あるあいだだけである。topic の本文は bootstrap に載らないので席を使わない。ただし読んだときに一度に届く量なので、topic ごとに上限（当初 800 token、`MASHU_TOPIC_CAPACITY`）を置く。特定の作業でしか効かない規則は、scope でも always でも topic へ移すことで席を空けられる（`mashu deliver <id> topic --topic <name>`）。
 
 ### 5.3 退役
 
@@ -177,20 +179,25 @@ always 層で拒否されたものには、scope 規則には無い出口が一�
 
 ## 6. 配信
 
-Agent に知識を届ける経路はすべて push である。Agent 用の検索が存在するのは痕跡層（4.2 節）だけで、そこから知識は返らない。人が CLI / TUI で Memory の在庫を調べる操作は配送ではない。push には三つの経路があり、受け持つ失敗が異なる。
+Agent に知識を届ける経路は、すべて存在の push から始まる。Agent 用の検索が存在するのは痕跡層（4.2 節）だけで、そこから知識は返らない。人が CLI / TUI で Memory の在庫を調べる操作は配送ではない。配信には四つの経路があり、受け持つ失敗が異なる。
 
 | delivery | 誰に届くか | いつ届くか | 受け持つ失敗 | 例 |
 |---|---|---|---|---|
 | `always` | 全セッション | 開始時（bootstrap） | どの作業でも破ると損害が出る規律の不達 | 検証の証拠なしに完了と言わない |
 | `scope` | route が当たるセッションだけ | 開始時（bootstrap） | 無関係な領域の規則が always 層を希釈する | 特定の計算機環境の接続規律、特定ソフトの落とし穴 |
+| `topic:<name>` | 見出しは topic の Scope が当たるセッション（Scope が無ければ全セッション）、本文はその作業に入ったセッション | 見出しは開始時（bootstrap）、本文は作業に入るとき（`memory_list(topic=...)`） | 一部の作業でしか要らない規則が、その作業をしない大半のセッションの席を使う | 特定プロジェクトの難易度較正の規律、音声処理の落とし穴 |
 | `guard:<action>` | その行為に至ったセッション | 行為の直前 | 文脈にはあったのに判断の前に無かった | 委譲先の選定規則を、委譲ツールの実行直前に |
 
-軸は二つある。**scope は「どこで」を絞り、guard は「いつ」を絞る。**
+軸は三つある。**scope は「どこで」を絞り、guard は「いつ」を絞り、topic は「何の作業のあいだか」を絞る。**
 
 - always と scope の違いは配達先の絞り込みである。目的は always 層を最小に保つこと。押し込む量が増えるほど一行あたりの遵守は薄まるので、領域固有の規則を全セッションに送ることは、その規則のためでなく always 層全体の効力のために有害である
 - bootstrap と guard の違いは提示の時機である。開始時に読んだ規則が数十ターン後の判断の瞬間に効いていない、という失敗は v1 で実測されている。guard はその規則を bootstrap から外し、判断の直前に呼び出しを一度拒否する形で突きつける
 
+- scope と topic の違いは、規則が効く条件の種類である。scope の条件は cwd で決まる場所だが、同じ場所でも作業の種類によって要る規則は変わる。運用すると scope の規則の多くは、特定の作業をしているときだけ効く規則だった。それを scope に置くと、その作業をしないセッションにも毎回本文を押し込むことになる。topic は名前・規則数・発動条件の一行だけを push し、本文は条件に当たる作業に入るときに Agent が読む
+
 guard は scope と直交する。`guard:<action>` の記憶が scope を持つ場合、発火はその scope のセッションに限られる。
+
+topic は本文を pull で届けるが、v1 の検索とは失敗の形が違う。v1 の pull が起動されなかったのは、Agent が自分の知らないことを知らなかったからである。topic は見出しと発動条件を毎回 push するので、Agent は何があり、いつ読むべきかを知っている。これは v3 が Task card で採った二段構造、つまり存在は push し、詳細は既知の名前から決定的に pull する形と同じである。残る失敗は、Agent がいまの作業を発動条件に結びつけ損ねることであり、12 節の観測で数える。
 
 ### 6.1 session_bootstrap
 
@@ -205,12 +212,13 @@ guard は scope と直交する。`guard:<action>` の記憶が scope を持つ�
 1. **フックのあるクライアントでは、harness が配る**。SessionStart フック（`startup` / `resume` / `compact`）が `mashu bootstrap` の出力をそのまま文脈へ入れる。モデルが指示を読んで従うかどうかに依存しない。`compact` を含むのは、圧縮が同じ失敗の第二の扉だからである（session_id は変わらず、契約上 bootstrap は一度しか呼ばれず、push が書いた文脈のほうが落ちる）
 2. **フックの無いクライアント（Codex CLI）向けに、指示ファイルへ 2 行の shim を置く**。「Mashu MCP が接続されていればセッション開始時に一度 `session_bootstrap` を呼ぶ。SessionStart フックが既に配信していれば不要」。指示ファイルを痩せさせる方針との衝突は、2 行という量で受け止める
 
-フックが失敗したときは何も出力せず終了する。したがって「出たら呼ばない、出なければ呼ぶ」が自然に成立し、二重配信も無配信も起きない。指示ファイル側に書くのはこの 2 行だけで、trace / pain / nominate の規律は引き続き server の instructions が運ぶ。
+フックが失敗したときは何も出力せず終了する。したがって「出たら呼ばない、出なければ呼ぶ」が自然に成立し、二重配信も無配信も起きない。同じ理由で、bootstrap はコードより古い store でも失敗してはならない。未適用の migration が足す表や列は読まずに残りを配り、未適用であることを返す。topic の表がまだ無い store では、topic の見出しを空にして返す。指示ファイル側に書くのはこの 2 行だけで、trace / pain / nominate の規律は引き続き server の instructions が運ぶ。
 
 返すもの。
 
 - delivery = `always` の記憶（全文）
 - 現在 Scope の記憶（全文）。Scope は route（cwd 対応表）か引数で決まる
+- このセッションに見える topic の見出し（名前・規則数・発動条件）。Scope を持たない topic と現在 Scope の topic が見え、active な規則を持たない topic は載らない。本文は載らない
 - active な Task の Current State（v3 8 節で追加。各行に最終確認日時が本文として付く。dormant / closed は載らない）
 - 有効な Temporary Context
 - pending の候補件数（1 件でもあれば一行で知らせる）
@@ -233,7 +241,7 @@ bootstrap は「セッションの前提」を、guard は「判断の直前」�
 
 Temporary Context は既存の User 向け CLI / TUI から作成する。開始時点で expiry を指定した条件は、期限到来時に追加承認なしで配信対象から外れる。Agent が観測した期限つきの条件は trace に残す。期限管理は Temporary Context の既存実装を使い、Memory 専用の expiry や汎用条件 engine は作らない。
 
-Memories TUI の `c` は、active な always / scope Memory と Temporary Context を相互変換する。Memory からの変換では期限を必須とし、元の Memory を `relocated` として移動先 ID とともに記録してから、本文と Scope を保った Temporary Context を作る。逆変換では Temporary Context をその時点で終了し、同じ本文と Scope の active Memory を作る。無関係な invalidated / legacy conflict は上書きせず、定員判定が拒否した場合は元の行を有効なまま残す。guard は action という配送条件を Temporary Context へ移せないため対象外とする。
+Memories TUI の `c` は、active な always / scope Memory と Temporary Context を相互変換する。Memory からの変換では期限を必須とし、元の Memory を `relocated` として移動先 ID とともに記録してから、本文と Scope を保った Temporary Context を作る。逆変換では Temporary Context をその時点で終了し、同じ本文と Scope の active Memory を作る。無関係な invalidated / legacy conflict は上書きせず、定員判定が拒否した場合は元の行を有効なまま残す。guard と topic は、action や発動条件という配送条件を Temporary Context へ移せないため対象外とする。
 
 ## 8. インターフェース
 
@@ -245,7 +253,7 @@ Memories TUI の `c` は、active な always / scope Memory と Temporary Contex
 | `pain_report` | 痛みを台帳へ記録し、類似の台帳エントリ・痕跡・tombstone・active な記憶を返す。二度目・incident なら候補を生成 |
 | `trace_put` | 調べて分かったことを一行残す（4.2 節） |
 | `trace_search` | 痕跡の検索。日付と未検証の印を付けて返す |
-| `memory_list` | 指定 Scope の active な記憶を列挙する |
+| `memory_list` | 指定 Scope の active な記憶を列挙する。`topic` を渡すと、その topic の発動条件と規則の本文を返し、読んだことをセッション単位で event_log に残す |
 | `memory_get` | 指定した Memory の本文、revision、evidence、退役情報を返す。退役本文は明示取得でのみ読む |
 | `memory_nominate` | 新規 Memory の pending 候補を作るだけで採用しない。replace の後継候補に使う |
 | `memory_admit` | 承認根拠を必須にして採用する。本文を渡すと候補の作成と採用を 1 回で行い、合流した既存候補や未対応の invalidated / legacy conflict があれば採用せず候補を返す。候補 ID で採用するときは読み取った nomination version を必須にする。実行者 Agent と `user_instruction` の出所を別に保存し、request replay には初回応答を返す |
@@ -273,7 +281,8 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 | `mashu ledger` | 台帳の閲覧 |
 | `mashu trace [query]` | 痕跡の閲覧と検索 |
 | `mashu guard <action> --pin <id>` | 行為の門への留めつけ・解除・照会 |
-| `mashu deliver <id> <delivery>` | delivery の変更 |
+| `mashu deliver <id> <delivery>` | delivery の変更。topic へは `--topic <name>` で移す |
+| `mashu topic` | topic の一覧・作成・編集・archive（User のみ）。`mashu topic show <name>` で規則の本文を読む |
 | `mashu scope` / `mashu route` | Scope 台帳と cwd 対応表（v1 と同じ、User のみ作成） |
 | `mashu bootstrap` | push される内容と token を表示 |
 | `mashu admin migrate` | migration 実行 |
@@ -282,13 +291,13 @@ Review UI は nomination と Memory change proposal の一覧・個別画面を�
 
 まとめて承認するキーは無い。席は 1 件ずつ、その根拠を見て渡す。決めずに退ける保留（`s`、理由必須）だけは別で、status は pending のまま `deferred_at` と理由を持ち、既定の一覧から外れる。決定ではないので pending の件数も短縮 ID での直接操作も変わらず、`mashu review --all` で一覧に戻る。
 
-dashboard の Memories では active / retired Memory と未失効の Temporary Context を閲覧・検索する。Memory の詳細には evidence、revision history、退役種別、後継または移動先を含める。User は direct remember、Memory と Temporary Context の編集、Temporary Context の登録、kind を選んだ retire、delivery / guard の変更を 1 件ずつ実行できる。提案 review は Attention と `mashu review --changes` から開ける。
+dashboard の Memories では active / retired Memory と未失効の Temporary Context を閲覧・検索する。Memory の詳細には evidence、revision history、退役種別、後継または移動先を含める。User は direct remember、Memory と Temporary Context の編集、Temporary Context の登録、kind を選んだ retire、delivery / guard / topic の変更を 1 件ずつ実行できる。delivery を選ぶ画面は四つの経路をそれぞれ一行の説明つきで並べ、topic は番号つきの一覧から選ぶか、名前・Scope・発動条件を入力してその場で作る。提案 review は Attention と `mashu review --changes` から開ける。
 
 id を取る引数は、表示される短縮 ID（先頭 8 文字）の前方一致で解決する。一覧が短縮 ID しか出さない以上、完全 UUID しか受け付けない引数は、人に画面外の値を打たせることになる。4 文字未満の前置きと、複数行に当たる前置きは、候補を挙げて拒否する。
 
 `show` は Memory・candidate・台帳エントリを ID から非対話で読む経路として残す。dashboard の Memories でも Memory の evidence と revision history を読めるが、candidate と台帳エントリは対象にしない。台帳参照は記憶が席を占める理由そのものであり、どちらの経路でも退役前に確認できる状態を保つ。
 
-## 9. スキーマ（10 表）
+## 9. スキーマ（11 表）
 
 ```
 scope             台帳。User のみ作成
@@ -296,6 +305,7 @@ route             cwd から scope への対応表
 ledger            痛みの記録。append-only
 trace             痕跡。自動失効
 memory            記憶。active / retired と退役種別・後継・移動先
+topic             作業の種類ごとの規則束。名前・Scope・発動条件。User のみ作成
 memory_revision   本文の改訂履歴。append-only
 nomination        昇格候補。pending / admitted / declined
 memory_change     既存 Memory の retire / replace / restore proposal

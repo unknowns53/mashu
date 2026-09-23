@@ -242,9 +242,10 @@ dormant な Task は bootstrap に載らず、履歴は保持され、明示検�
 ```text
 1. Memory: always
 2. Memory: 現在 Scope
-3. active Task の bootstrap card（完全な Task IDと最終確認日時を明示）
-4. Temporary Context
-5. pending nomination 件数
+3. topic の見出し（名前・規則数・発動条件。本文は memory_list(topic=...) で読む）
+4. active Task の bootstrap card（完全な Task IDと最終確認日時を明示）
+5. Temporary Context
+6. pending nomination 件数
 ```
 
 approach / open questions / blockers / next actions の本文、および Attempt / Decision / Checkpoint / Trace / Ledger / dormant / closed は載らない。
@@ -255,7 +256,8 @@ Task card は Task 名・goal・statusをラベルつきで運び、approach / o
 
 ```text
 TOTAL            4000 tokens
-  Memory         2000（always は 800 まで。各 Scope は always と合わせて 2000 まで）
+  Memory         2000（always は 800 まで。各 Scope は always と合わせて 2000 まで。topic の見出しを含む）
+  Topic body      800 / topic（非配信）
   Task cards     1600 / scope（200 / Task）
   Task detail     800 / Task（非配信）
   Temporary       400
@@ -362,10 +364,10 @@ Work の `c` は選択中の Task だけを同じ close decision screen で開�
 
 ## 14. スキーマ
 
-現在の Memory 10 表に Project State 7 表を加えて 17 表。Project State の migration は 0004 から始まる。`ledger` には 0005 で 2 列を足し（`prevention_kind`、`filed_task`。9 節）、0006 で両者を結ぶ CHECK を張る（`filed_task` が非 NULL なら `prevention_kind='work'`）。台帳行そのものは append-only のままで、**提出先は行が書かれる前に決まり、後から書き込むことはできない**。矛盾した行を後から直す手段が無いことが、規約ではなく制約で持つ理由である。
+現在の Memory 11 表に Project State 7 表を加えて 18 表。Project State の migration は 0004 から始まる。`ledger` には 0005 で 2 列を足し（`prevention_kind`、`filed_task`。9 節）、0006 で両者を結ぶ CHECK を張る（`filed_task` が非 NULL なら `prevention_kind='work'`）。台帳行そのものは append-only のままで、**提出先は行が書かれる前に決まり、後から書き込むことはできない**。矛盾した行を後から直す手段が無いことが、規約ではなく制約で持つ理由である。
 
 ```text
-既存: scope route ledger trace memory memory_revision
+既存: scope route ledger trace memory memory_revision topic
       nomination memory_change temporary_context event_log
 
 追加: project task task_state task_checkpoint
@@ -399,6 +401,7 @@ Memory（v2 のまま）:
 
 Bootstrap:
   active な Memory と active な Task card だけが push される
+  topic は見出しだけが push され、本文は bootstrap に載らない。見出しは Memory の席で数える
   dormant / closed / 履歴 / trace は黙って push されない
   総 token が hard cap を超えない
 ```

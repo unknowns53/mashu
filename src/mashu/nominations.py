@@ -397,6 +397,7 @@ def admit(
     scope_id: UUID | None = None,
     scope_override: bool = False,
     guard_action: str | None = None,
+    topic_id: UUID | None = None,
     content: str | None = None,
     approval: dict[str, Any],
     request_id: UUID,
@@ -419,6 +420,9 @@ def admit(
             "approval": approval,
         }
     )
+    if topic_id is not None:
+        # Absent otherwise, so requests stored before topics existed still replay.
+        request["topic_id"] = str(topic_id)
     if replay is not None:
         if replay["nomination_id"] != nomination_id or replay["admit_request"] != request:
             raise MashuError("request_id was already used for a different Memory admission")
@@ -456,15 +460,13 @@ def admit(
         approval, required_conflicts=blocking_conflicts(current_conflicts)
     )
 
-    if delivery not in ("always", "scope", "guard"):
-        raise MashuError(f"unknown delivery '{delivery}'")
-    if delivery == "scope" and home is None:
-        raise MashuError("delivery 'scope' needs a scope to be delivered to")
-    if delivery == "guard":
-        if not guard_action:
-            raise MashuError("delivery 'guard' needs the action it stands in front of")
-    else:
+    from mashu import memories
+
+    memories.check_delivery(delivery, home, guard_action, topic_id)
+    if delivery != "guard":
         guard_action = None
+    if delivery == "topic":
+        home = memories.topic_home(cur, delivery, topic_id)
 
     verdict = redact.check(final)
     if not verdict.allowed:
@@ -485,17 +487,19 @@ def admit(
         delivery=delivery,
         scope_id=home,
         exclude_memory_id=exclude_memory_id,
+        topic_id=topic_id,
     )
     if not admission["ok"]:
         raise RefusedError(admission["refusal"])
 
     cur.execute(
         """
-        INSERT INTO memory (content, scope_id, delivery, guard_action, evidence, created_by)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO memory
+            (content, scope_id, delivery, guard_action, topic_id, evidence, created_by)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         RETURNING *
         """,
-        (final, home, delivery, guard_action, list(nomination["evidence"]), actor),
+        (final, home, delivery, guard_action, topic_id, list(nomination["evidence"]), actor),
     )
     memory = cur.fetchone()
     cur.execute(
@@ -529,7 +533,11 @@ def admit(
         actor,
         memory_id=memory["memory_id"],
         nomination_id=nomination_id,
-        detail={"delivery": delivery, "approval_source": approval_source},
+        detail={
+            "delivery": delivery,
+            "approval_source": approval_source,
+            **({"topic_id": str(topic_id)} if topic_id is not None else {}),
+        },
     )
     events.record(
         cur,
@@ -565,19 +573,21 @@ def remember_explicit(
     scope_id: UUID | None = None,
     delivery: str | None = None,
     guard_action: str | None = None,
+    topic_id: UUID | None = None,
 ) -> dict[str, Any]:
     """Nominate an instruction the agent carries and admit it at once when nothing needs reading.
 
     A stop keeps the ledger row and nomination, as memory_nominate would, so the agent can
     continue with an admission by id. Any other refusal propagates and writes nothing.
     """
-    chosen_delivery = delivery or ("scope" if scope_id else "always")
+    chosen_delivery = delivery or ("topic" if topic_id else "scope" if scope_id else "always")
     settings = {
         "actor": actor,
         "delivery": chosen_delivery,
         "scope_id": scope_id,
         "scope_override": True,
         "guard_action": guard_action,
+        "topic_id": topic_id,
         "approval": approval,
         "request_id": request_id,
     }

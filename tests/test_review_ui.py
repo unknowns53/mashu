@@ -359,3 +359,46 @@ def test_a_candidate_that_walks_back_a_retirement_says_so_above_its_evidence(
     assert withdrawn in out
     assert OTHER not in out
     assert out.index("retired conflict") < out.rindex("evidence")
+
+
+def _topic(dsn: str, name: str = "migrations") -> dict:
+    from mashu import topics
+
+    with db.transaction(dsn) as cur:
+        return topics.create_topic(
+            cur, name=name, trigger="Before touching a migration", actor="user"
+        )
+
+
+def test_admission_names_a_topic_with_t_and_explains_the_choices(dsn, monkeypatch, capsys):
+    topic = _topic(dsn)
+    a_candidate(dsn, RULE)
+    keys(monkeypatch, "", "y", "t migrations")
+
+    assert review_ui.run(dsn) == 0
+
+    out = capsys.readouterr().out
+    assert "'t NAME' for a topic" in out
+    assert "topic   its trigger is listed at start; read when that work begins" in out
+    rows = memory_rows(dsn)
+    assert (rows[0]["delivery"], rows[0]["topic_id"]) == ("topic", topic["topic_id"])
+
+
+def test_t_alone_opens_the_topic_picker_at_admission(dsn, monkeypatch, capsys):
+    _topic(dsn, "audio")
+    chosen = _topic(dsn, "migrations")
+    a_candidate(dsn, RULE)
+    keys(monkeypatch, "", "y", "t", "2")
+
+    assert review_ui.run(dsn) == 0
+    assert "2  migrations" in capsys.readouterr().out
+    assert memory_rows(dsn)[0]["topic_id"] == chosen["topic_id"]
+
+
+def test_an_unknown_topic_at_admission_keeps_the_candidate_pending(dsn, monkeypatch, capsys):
+    nomination = a_candidate(dsn, RULE)
+    keys(monkeypatch, "", "y", "t nowhere", "q")
+
+    assert review_ui.run(dsn) == 0
+    assert "no topic named 'nowhere'" in capsys.readouterr().out
+    assert nomination_row(dsn, nomination["nomination_id"])["status"] == "pending"

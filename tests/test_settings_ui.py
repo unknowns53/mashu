@@ -18,6 +18,7 @@ from mashu import (
     settings_ui,
     tasks,
     temporary,
+    topics,
 )
 from mashu.migrate import migrate
 
@@ -77,6 +78,9 @@ def test_top_level_reaches_every_settings_page_and_leaves_cleanly(
         "down",
         "enter",
         "q",
+        "down",
+        "enter",
+        "q",
         "q",
     )
 
@@ -87,6 +91,7 @@ def test_top_level_reaches_every_settings_page_and_leaves_cleanly(
         "Health/status",
         "Bootstrap preview",
         "Scopes",
+        "Topics",
         "Routes",
         "Schema/migrations",
     ):
@@ -405,3 +410,54 @@ def test_long_pages_move_forward_and_back_without_losing_the_header(
     assert "more line(s)" in out
     assert out.count("Long health page") == 3
     assert out.count("detail line 0") == 2
+
+
+def test_topic_page_creates_edits_and_archives_a_topic(
+    dsn: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with db.transaction(dsn) as cur:
+        scopes.create_scope(cur, name="game", actor="user")
+    keys(monkeypatch, "n", "e", "a", "q")
+    answers(
+        monkeypatch,
+        "difficulty",
+        "game",
+        "Before changing win rates",
+        "balance",
+        "Before changing win rates or placement",
+        "-",
+        "y",
+    )
+
+    settings_ui._topics_page(dsn)
+
+    with db.transaction(dsn) as cur:
+        row = topics.get_topic(cur, "balance")
+    assert row["trigger"] == "Before changing win rates or placement"
+    assert row["scope_id"] is None
+    assert row["archived_at"] is not None
+    out = capsys.readouterr().out
+    assert "created topic difficulty" in out and "archived topic balance" in out
+
+
+def test_a_topic_holding_rules_is_not_archived_from_the_page(
+    dsn: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with db.transaction(dsn) as cur:
+        topic = topics.create_topic(cur, name="difficulty", trigger="Before tuning", actor="user")
+        memories.remember(
+            cur,
+            content="keep the win rate between 45 and 55 percent",
+            actor="user",
+            delivery="topic",
+            topic_id=topic["topic_id"],
+        )
+    keys(monkeypatch, "a", "q")
+    answers(monkeypatch, "y")
+
+    settings_ui._topics_page(dsn)
+
+    out = capsys.readouterr().out
+    assert "still holds 1 active rule" in out
+    assert "1 rule active" in out
+    assert "Before tuning" in out

@@ -7,7 +7,7 @@ import os
 import psycopg
 import pytest
 
-from mashu import db, memories, memory_ui, scopes, screen, temporary
+from mashu import db, memories, memory_ui, scopes, screen, temporary, topics
 from mashu.migrate import migrate
 
 ADMIN_DSN = os.environ.get("MASHU_ADMIN_DSN", "dbname=postgres")
@@ -355,3 +355,83 @@ def test_non_tty_rendering_contains_no_ansi(monkeypatch):
     assert "\x1b[" not in rendered
     assert RULE in rendered
     assert "guard" in rendered and "Bash" in rendered
+
+
+def test_the_delivery_prompt_explains_each_choice_in_one_line(dsn, monkeypatch, capsys):
+    keys(monkeypatch, "n", RULE, "always", "q")
+
+    assert memory_ui.run(dsn) == 0
+    out = capsys.readouterr().out
+    assert "always  every session, at start" in out
+    assert "scope   sessions in one Scope, at start" in out
+    assert "topic   its trigger is listed at start; read when that work begins" in out
+    assert "guard   just before one action (e.g. delegate)" in out
+
+
+def test_a_new_rule_can_open_a_new_topic_without_typing_an_id(dsn, monkeypatch, capsys):
+    keys(
+        monkeypatch,
+        "n",
+        RULE,
+        "topic",
+        "n",
+        "run reports",
+        "deployments",
+        "Before writing a run report",
+        "q",
+    )
+
+    assert memory_ui.run(dsn) == 0
+    with db.transaction(dsn) as cur:
+        topic = topics.require_topic(cur, "run reports")
+        cur.execute("SELECT * FROM memory")
+        row = cur.fetchone()
+    assert topic["trigger"] == "Before writing a run report"
+    assert topic["scope_name"] == "deployments"
+    assert (row["delivery"], row["topic_id"]) == ("topic", topic["topic_id"])
+    assert row["scope_id"] == topic["scope_id"]
+    assert "topic:run reports" in capsys.readouterr().out
+
+
+def test_the_topic_picker_lists_topics_by_number(dsn, monkeypatch, capsys):
+    with db.transaction(dsn) as cur:
+        topics.create_topic(cur, name="audio trim", trigger="Before cutting audio", actor="user")
+        chosen = topics.create_topic(
+            cur, name="difficulty", trigger="Before changing win rates", actor="user"
+        )
+    memory = remember(dsn)
+    keys(monkeypatch, "d", "t", "2", "q")
+
+    assert memory_ui.run(dsn) == 0
+    out = capsys.readouterr().out
+    assert "1  audio trim" in out and "every session" in out and "0 rules" in out
+    assert "2  difficulty" in out and "Before changing win rates" in out
+    assert "n  a new topic" in out
+    row = memory_row(dsn, memory["memory_id"])
+    assert (row["delivery"], row["topic_id"]) == ("topic", chosen["topic_id"])
+
+
+def test_a_topic_picker_answer_out_of_range_changes_nothing(dsn, monkeypatch, capsys):
+    with db.transaction(dsn) as cur:
+        topics.create_topic(cur, name="difficulty", trigger="Before changing", actor="user")
+    memory = remember(dsn)
+    keys(monkeypatch, "d", "topic", "7", "q")
+
+    assert memory_ui.run(dsn) == 0
+    assert "choose a topic number from 1 to 1" in capsys.readouterr().out
+    assert memory_row(dsn, memory["memory_id"])["delivery"] == "always"
+
+
+def test_a_topic_rule_shows_its_trigger_and_is_not_converted(dsn, monkeypatch, capsys):
+    with db.transaction(dsn) as cur:
+        topic = topics.create_topic(
+            cur, name="difficulty", trigger="Before changing win rates", actor="user"
+        )
+    remember(dsn, delivery="topic", topic_id=topic["topic_id"])
+    keys(monkeypatch, "c", "q")
+
+    assert memory_ui.run(dsn) == 0
+    out = capsys.readouterr().out
+    assert "topic:difficulty" in out
+    assert "Before changing win rates" in out
+    assert "topic memories cannot become temporary" in out

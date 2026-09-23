@@ -9,7 +9,17 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Jsonb
 
-from mashu import approvals, capacity, config, events, match, memories, nominations, redact
+from mashu import (
+    approvals,
+    capacity,
+    config,
+    events,
+    match,
+    memories,
+    nominations,
+    redact,
+    topics,
+)
 from mashu.errors import MashuError, RefusedError
 
 OPERATIONS = ("retire", "replace", "restore")
@@ -74,24 +84,25 @@ def _successor_snapshot(row: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+_SETTING_KEYS = {"delivery", "scope_id", "guard_action"}
+_TOPIC_KEYS = {"topic"}
+
+
 def _successor_settings(
     cur: psycopg.Cursor,
     target: dict[str, Any],
     requested: dict[str, Any] | None,
 ) -> dict[str, Any]:
     if requested is None:
-        return {
-            "delivery": target["delivery"],
-            "scope_id": target["scope_id"],
-            "guard_action": target["guard_action"],
-        }
-    if not isinstance(requested, dict) or set(requested) != {
-        "delivery",
-        "scope_id",
-        "guard_action",
-    }:
+        return stored_settings_of_memory(cur, target)
+    if (
+        not isinstance(requested, dict)
+        or not _SETTING_KEYS <= set(requested)
+        or not set(requested) <= _SETTING_KEYS | _TOPIC_KEYS
+    ):
         raise MashuError(
-            "successor_settings must specify delivery, scope_id, and guard_action together"
+            "successor_settings must specify delivery, scope_id, and guard_action together, "
+            "plus topic for delivery 'topic'"
         )
     delivery = requested["delivery"]
     if delivery not in memories.DELIVERIES:
@@ -114,7 +125,83 @@ def _successor_settings(
         guard_action = guard_action.strip()
     elif guard_action is not None:
         raise MashuError("successor guard_action only applies to guard delivery")
-    return {"delivery": delivery, "scope_id": scope_id, "guard_action": guard_action}
+    settings: dict[str, Any] = {
+        "delivery": delivery,
+        "scope_id": scope_id,
+        "guard_action": guard_action,
+        "topic_id": None,
+        "topic_name": None,
+        "topic_trigger": None,
+    }
+    name = requested.get("topic")
+    if delivery != "topic":
+        if name is not None:
+            raise MashuError("successor topic only applies to topic delivery")
+        return settings
+    if not isinstance(name, str) or not name.strip():
+        raise MashuError("successor delivery 'topic' needs a topic name")
+    topic = topics.require_topic(cur, name)
+    if scope_id is not None and scope_id != topic["scope_id"]:
+        raise MashuError(
+            f"topic '{topic['name']}' is read in "
+            f"{topic['scope_name'] or 'every session'}; a topic Memory takes its topic's "
+            "scope, so pass that scope_id or null"
+        )
+    settings.update(
+        scope_id=topic["scope_id"], topic_id=topic["topic_id"], topic_name=topic["name"]
+    )
+    return settings
+
+
+def stored_settings_of_memory(cur: psycopg.Cursor, memory: dict[str, Any]) -> dict[str, Any]:
+    """A Memory's current delivery settings in the shape a proposal stores them."""
+    name = None
+    if memory["topic_id"] is not None:
+        cur.execute("SELECT name FROM topic WHERE topic_id = %s", (memory["topic_id"],))
+        name = cur.fetchone()["name"]
+    return {
+        "delivery": memory["delivery"],
+        "scope_id": memory["scope_id"],
+        "guard_action": memory["guard_action"],
+        "topic_id": memory["topic_id"],
+        "topic_name": name,
+        "topic_trigger": None,
+    }
+
+
+def requested_settings(row: dict[str, Any]) -> dict[str, Any] | None:
+    """The successor_settings argument that proposes a stored proposal's settings again."""
+    if row["successor_delivery"] is None:
+        return None
+    settings: dict[str, Any] = {
+        "delivery": row["successor_delivery"],
+        "scope_id": row["successor_scope_id"],
+        "guard_action": row["successor_guard_action"],
+    }
+    if row["successor_topic_name"] is not None:
+        settings["topic"] = row["successor_topic_name"]
+    return settings
+
+
+def _settings_event(settings: dict[str, Any] | None) -> dict[str, Any] | None:
+    if settings is None:
+        return None
+    return approvals.json_value(
+        {key: value for key, value in settings.items() if value is not None or key in _SETTING_KEYS}
+    )
+
+
+def _successor_topic(cur: psycopg.Cursor, change: dict[str, Any]) -> UUID | None:
+    """The open topic a proposal files its Memory under, unchanged since it was read."""
+    if change["successor_delivery"] != "topic":
+        return None
+    topic = topics.lock_open_topic(cur, change["successor_topic_id"])
+    if topic["scope_id"] != change["successor_scope_id"]:
+        raise MashuError(
+            f"topic '{topic['name']}' moved to another scope after this proposal was read; "
+            "read it and update the proposal"
+        )
+    return topic["topic_id"]
 
 
 def _validate_evidence(cur: psycopg.Cursor, evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -319,9 +406,11 @@ def propose(
                 (target_memory_id, target_revision_id, target_updated_at, operation,
                  retirement_kind, retire_reason, relocated_to_kind, relocated_to_id,
                  successor_nomination_id, successor_snapshot, successor_delivery,
-                 successor_scope_id, successor_guard_action, restore_reason, evidence,
+                 successor_scope_id, successor_guard_action, successor_topic_id,
+                 successor_topic_name, successor_topic_trigger, restore_reason, evidence,
                  conflict_ids, conflict_snapshot, proposed_by)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s)
             RETURNING *
             """,
             (
@@ -338,6 +427,9 @@ def propose(
                 successor_settings["delivery"] if successor_settings else None,
                 successor_settings["scope_id"] if successor_settings else None,
                 successor_settings["guard_action"] if successor_settings else None,
+                successor_settings["topic_id"] if successor_settings else None,
+                successor_settings["topic_name"] if successor_settings else None,
+                successor_settings["topic_trigger"] if successor_settings else None,
                 restore_reason,
                 Jsonb(basis),
                 conflict_ids,
@@ -353,7 +445,9 @@ def propose(
                 retirement_kind = %s, retire_reason = %s, relocated_to_kind = %s,
                 relocated_to_id = %s, successor_nomination_id = %s,
                 successor_snapshot = %s, successor_delivery = %s, successor_scope_id = %s,
-                successor_guard_action = %s, restore_reason = %s, evidence = %s,
+                successor_guard_action = %s, successor_topic_id = %s,
+                successor_topic_name = %s, successor_topic_trigger = %s,
+                restore_reason = %s, evidence = %s,
                 conflict_ids = %s, conflict_snapshot = %s, proposed_by = %s,
                 proposed_at = now(), version = version + 1
             WHERE change_id = %s AND status = 'pending'
@@ -372,6 +466,9 @@ def propose(
                 successor_settings["delivery"] if successor_settings else None,
                 successor_settings["scope_id"] if successor_settings else None,
                 successor_settings["guard_action"] if successor_settings else None,
+                successor_settings["topic_id"] if successor_settings else None,
+                successor_settings["topic_name"] if successor_settings else None,
+                successor_settings["topic_trigger"] if successor_settings else None,
                 restore_reason,
                 Jsonb(basis),
                 conflict_ids,
@@ -399,7 +496,7 @@ def propose(
             if successor_nomination_id
             else None,
             "successor_snapshot": successor_snapshot,
-            "successor_settings": approvals.json_value(successor_settings),
+            "successor_settings": _settings_event(successor_settings),
             "relocated_to_kind": relocated_to_kind,
             "relocated_to_id": str(relocated_to_id) if relocated_to_id else None,
             "conflict_ids": [str(item) for item in conflict_ids],
@@ -570,6 +667,7 @@ def apply(
             scope_id=change["successor_scope_id"],
             scope_override=True,
             guard_action=change["successor_guard_action"],
+            topic_id=_successor_topic(cur, change),
             approval=approval_source,
             request_id=request_id,
             exclude_memory_id=target["memory_id"],
@@ -632,14 +730,17 @@ def apply(
             "successor_snapshot": change["successor_snapshot"]
             if change["operation"] == "replace"
             else None,
-            "successor_settings": {
-                "delivery": change["successor_delivery"],
-                "scope_id": str(change["successor_scope_id"])
-                if change["successor_scope_id"]
-                else None,
-                "guard_action": change["successor_guard_action"],
-            }
-            if change["operation"] == "replace"
+            "successor_settings": _settings_event(
+                {
+                    "delivery": change["successor_delivery"],
+                    "scope_id": change["successor_scope_id"],
+                    "guard_action": change["successor_guard_action"],
+                    "topic_id": change["successor_topic_id"],
+                    "topic_name": change["successor_topic_name"],
+                    "topic_trigger": change["successor_topic_trigger"],
+                }
+            )
+            if change["successor_delivery"] is not None
             else None,
         },
     )

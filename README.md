@@ -15,7 +15,7 @@ Mashu には、恒久的な Memory だけでなく、現在の作業状態を扱
 
 | 種類 | 役割 | 別のセッションに届くか | 寿命 |
 |---|---|---|---|
-| Memory | 今後も守る恒久ルール | 直接操作または明示指示の実行後、bootstrap または guard で届く | 原則恒久 |
+| Memory | 今後も守る恒久ルール | 直接操作または明示指示の実行後、bootstrap、topic、guard のいずれかで届く | 原則恒久 |
 | Project State | Project / Task の現在地、試行、判断、成果物の参照先 | active Task の短い card だけ届き、詳細は task_get で読む | close または Activity Lease が切れるまで |
 | Trace | 調べて分かったことを残す日付つきの観測 | 届かない。検索で明示的に読む | 既定 30 日 |
 | Ledger | 忘却によって起きた事故や再調査の記録 | 届かない | append-only |
@@ -120,9 +120,9 @@ mashu
 | 領域 | TUI からできること |
 |---|---|
 | Attention | candidate の review、close proposal の判断、dormant Task の確認 |
-| Memories | active / retired Memory と Temporary Context の閲覧・検索、直接登録、編集、always / scope と Temporary Context の相互変換、retire、delivery / guard の変更 |
+| Memories | active / retired Memory と Temporary Context の閲覧・検索、直接登録、編集、always / scope と Temporary Context の相互変換、retire、delivery / guard / topic の変更 |
 | Work | active / dormant / closed Task と Project の閲覧・検索、Task の履歴・artifact の確認、Task / Current State / Project の作成・編集、touch / close / reopen |
-| Settings & health | 容量と queue の状態、bootstrap preview、Scope と route の作成・編集・削除、migration の確認・適用 |
+| Settings & health | 容量と queue の状態、bootstrap preview、Scope と route の作成・編集・削除、Topic の作成・編集・archive、migration の確認・適用 |
 
 各画面では矢印または j / k で移動し、Enter で開く。`/` のある一覧は部分検索できる。Esc または ← で一段戻り、q でその領域を閉じる。TUI は alternate screen 上で動くため、再描画した画面は terminal の履歴へ残らない。
 
@@ -236,7 +236,8 @@ TUI の操作は次のとおり。
 | mashu retire REF --kind KIND --reason REASON | `invalidated` / `superseded` / `out_of_scope` / `relocated` の理由を付けて Memory を退役させる。`legacy` は既存データと移行専用 |
 | mashu review --changes | retire / replace / restore の pending proposal を TUI で読む |
 | mashu revise REF | Memory を改訂する。旧本文は revision history に残る |
-| mashu deliver REF always\|scope\|guard | active Memory の配信先を変更する |
+| mashu deliver REF always\|scope\|topic\|guard | active Memory の配信先を変更する。topic は --topic NAME で指定する |
+| mashu topic | topic の一覧・作成・編集・archive。`mashu topic show NAME` で本文を読む |
 | mashu guard ACTION | ACTION の直前に配信する Memory を表示する |
 | mashu guard ACTION --pin REF | Memory を ACTION の guard に追加する |
 | mashu guard ACTION --unpin REF | Memory を ACTION の guard から外す |
@@ -246,15 +247,16 @@ ID は list コマンドが表示する先頭 8 文字を使える。4 文字以
 
 ## 配信の仕組み
 
-Memory の通常の読み取りは検索ではなく push だ。session_bootstrap がセッション開始時にまとめて配信し、guard は特定の行為の直前に配信する。検索できるのは Trace だけで、Trace から Memory は返さない。
+Memory の通常の読み取りは検索ではなく push だ。session_bootstrap がセッション開始時にまとめて配信し、guard は特定の行為の直前に配信する。topic は見出しだけを開始時に配信し、本文は Agent がその作業に入るときに読む。検索できるのは Trace だけで、Trace から Memory は返さない。
 
 | delivery | 届く範囲 | 届くタイミング | 向いているルール |
 |---|---|---|---|
 | always | 全セッション | 開始時の bootstrap | どの作業でも守るルール |
 | scope | route が一致するセッション | 開始時の bootstrap | 特定の領域だけで必要なルール |
+| topic:NAME | 見出しは topic の Scope が一致するセッション（Scope が無ければ全セッション） | 見出しは開始時、本文はその作業に入るとき | 特定の作業のあいだだけ必要なルール |
 | guard:ACTION | ACTION に進むセッション | 行為の直前 | 判断の直前に必ず確認したいルール |
 
-scope は「どこで」、guard は「いつ」を絞る。guard に scope も付いている場合は、その scope のセッションだけで発火する。
+scope は「どこで」、guard は「いつ」、topic は「何の作業のあいだか」を絞る。guard に scope も付いている場合は、その scope のセッションだけで発火する。
 
 初期の容量は次のとおり。各枠は独立しており、超過した書き込みは黙って切り捨てず拒否する。
 
@@ -263,12 +265,13 @@ scope は「どこで」、guard は「いつ」を絞る。guard に scope も�
 Memory               2000 token（always は 800 まで。各 Scope は always と合わせて 2000 まで）
 Task cards           1600 token / scope（1 Task 200）
 Task detail           800 token / Task（常時配信しない）
+Topic body            800 token / topic（常時配信しない）
 Temporary Context     400 token
 ~~~
 
-Scope ごとの Memory に独立した上限は無い。2000 から always の使用量を引いた残りが、各 Scope で使える量になる。
+Scope ごとの Memory に独立した上限は無い。2000 から always の使用量を引いた残りが、各 Scope で使える量になる。topic の見出しの行もこの席で数える。Scope を持たない topic の行は always に、Scope を持つ topic の行はその Scope に入る。
 
-環境変数 MASHU_TOTAL_CAPACITY、MASHU_CAPACITY、MASHU_ALWAYS_CAPACITY、MASHU_PROJECT_CAPACITY、MASHU_TASK_CARD_CAPACITY、MASHU_TASK_DETAIL_CAPACITY、MASHU_TEMPORARY_CAPACITY で変更できる。
+環境変数 MASHU_TOTAL_CAPACITY、MASHU_CAPACITY、MASHU_ALWAYS_CAPACITY、MASHU_PROJECT_CAPACITY、MASHU_TASK_CARD_CAPACITY、MASHU_TASK_DETAIL_CAPACITY、MASHU_TEMPORARY_CAPACITY、MASHU_TOPIC_CAPACITY で変更できる。
 
 Task card の枠は Scope ごとに独立している。Scope を持たない Project の card は全 Scope 共通分として各枠に含まれ、unrouted session にはこの共通分だけが届く。`mashu status` の card 使用量は、最も重い Scope の値である。Task detail は配信枠には含めず、1 Task ごとの上限だけを持つ。
 
@@ -289,6 +292,23 @@ mashu route --remove /work/service
 
 route は作業ディレクトリの path prefix と Scope を対応づける。bootstrap は現在の cwd から Scope を解決する。無関係なディレクトリを --ignore で明示的に unscoped にもできる。
 Scope の summary は任意で、CLI と Settings TUI のどちらでも省略できる。
+
+## Topic
+
+topic は、特定の作業をしているあいだだけ必要なルールの束だ。名前、発動条件の一文、所属する Scope（省略すると全セッション）を持つ。bootstrap には `難易度較正 (9 rules): Before changing difficulty levers or win rates` のような見出しの一行だけが載り、Agent はその作業に入るときに `memory_list(topic=...)` で本文を読む。
+
+~~~bash
+mashu topic
+mashu topic --add 難易度較正 --scope enrai --trigger "Before changing difficulty levers or win rates"
+mashu topic --edit 難易度較正 --trigger "Before calibrating difficulty"
+mashu topic show 難易度較正
+mashu topic --archive 難易度較正
+
+mashu remember "Do not change ship stats to set difficulty" --topic 難易度較正
+mashu deliver 1a2b3c4d topic --topic 難易度較正
+~~~
+
+使い分けの目安は次のとおり。プロジェクトのどの作業でも守るなら scope、そのプロジェクトの一部の作業でだけ効くなら topic、特定の操作の直前に必ず目に入れたいなら guard を選ぶ。archive できるのは active なルールを持たない topic だけだ。topic の作成と編集は Settings TUI の Topics からもできる。
 
 ## Project と Task
 
@@ -351,7 +371,7 @@ MCP tool は 19 個ある。
 | Knowledge | pain_report | 事故または再調査を Ledger に記録する |
 | Knowledge | trace_put | 調べて分かったことを日付つき Trace に残す |
 | Knowledge | trace_search | Trace だけを検索する |
-| Knowledge | memory_list | 指定 Scope の active Memory を一覧する |
+| Knowledge | memory_list | 指定 Scope の active Memory を一覧する。`topic` を渡すと、その topic の本文を読み、読んだことを記録する |
 | Knowledge | memory_get | 指定 Memory の本文、revision、evidence、退役種別・理由・後継を読む |
 | Knowledge | memory_nominate | 新規 Memory の pending candidate を作る。replace の後継に使う |
 | Knowledge | memory_admit | 承認根拠を必須にして採用する。`content` を渡せば候補の作成と採用を 1 回で行い、読むべき候補や conflict があれば止まる。止まった候補は `nomination_id` と読み取った version で採用する。request replay は初回応答を返す |
@@ -450,11 +470,12 @@ session_bootstrap は次の順序で返す。
 
 1. always Memory
 2. 現在の Scope の Memory
-3. active Task の card（完全な Task ID・名前・goal・status・詳細件数・最終確認日時）
-4. 有効な Temporary Context
-5. pending candidate の件数
+3. topic の見出し（名前・ルール数・発動条件）
+4. active Task の card（完全な Task ID・名前・goal・status・詳細件数・最終確認日時）
+5. 有効な Temporary Context
+6. pending candidate の件数
 
-approach、open questions、blockers、next actions の本文、および Trace、Ledger、Attempt、Decision、Checkpoint、dormant Task、closed Task は bootstrap に載らない。active Task を続ける前に `task_get` で詳細を取得する。
+topic の本文、approach、open questions、blockers、next actions の本文、および Trace、Ledger、Attempt、Decision、Checkpoint、dormant Task、closed Task は bootstrap に載らない。active Task を続ける前に `task_get` で詳細を取得する。
 
 ## 書き込みの安全規則
 

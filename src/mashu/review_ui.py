@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from mashu import db, nominations, screen, tokens
+from mashu import db, memory_ui, nominations, screen, tokens
 from mashu.errors import MashuError
 
 # the screens
@@ -29,7 +29,9 @@ _HELP = """
      ← goes back to the queue.
 
   y  admit it. The next question is where it is delivered from: enter takes
-     the default, and 'g ACTION' puts it in front of that act instead.
+     the default, 't NAME' files it under that topic ('t' alone lists the
+     topics and can open a new one), and 'g ACTION' puts it in front of that
+     act instead.
 
   e  edit the existing text in place; Enter saves it in the queue and Ctrl+C
      cancels. This does not admit it. Press y afterwards to try admission.
@@ -227,27 +229,40 @@ def _editor_text(content: str) -> str:
         path.unlink(missing_ok=True)
 
 
-def _delivery(row: dict[str, Any]) -> tuple[str, str | None] | None:
+def _delivery(
+    row: dict[str, Any], dsn: str | None = None
+) -> tuple[str, str | None, dict[str, Any] | None] | None:
     """Where the admitted memory is delivered from, asked once, at admission."""
-    print("delivery: enter for the default, or 'g ACTION' for a guard", flush=True)
+    default = "scope" if row.get("scope_id") else "always"
+    print(memory_ui.delivery_legend())
+    print(
+        f"delivery: enter for the default ({default}), 't NAME' for a topic ('t' alone "
+        "lists them), or 'g ACTION' for a guard",
+        flush=True,
+    )
     submitted = screen.editline("> ", "")
     if isinstance(submitted, screen.Cancelled):
         return None
     answer = submitted.text
     if not answer:
-        return ("scope" if row.get("scope_id") else "always"), None
+        return default, None, None
     if answer.startswith("g ") and answer[2:].strip():
-        return "guard", answer[2:].strip()
-    raise MashuError("delivery must be empty or 'g ACTION'")
+        return "guard", answer[2:].strip(), None
+    if answer == "t":
+        topic = memory_ui.pick_topic(dsn)
+        return None if topic is None else ("topic", None, topic)
+    if answer.startswith("t ") and answer[2:].strip():
+        return "topic", None, {"topic_id": None, "name": answer[2:].strip()}
+    raise MashuError("delivery must be empty, 't NAME', 't', or 'g ACTION'")
 
 
 def _admit(dsn: str | None, row: dict[str, Any]) -> str:
     """Admit one candidate in a transaction of its own."""
     try:
-        choice = _delivery(row)
+        choice = _delivery(row, dsn)
         if choice is None:
             return screen.warning("  ! admission cancelled")
-        delivery, guard_action = choice
+        delivery, guard_action, topic = choice
         with db.transaction(dsn) as cur:
             cur.execute(
                 "SELECT status, version, content FROM nomination "
@@ -298,6 +313,7 @@ def _admit(dsn: str | None, row: dict[str, Any]) -> str:
                 delivery=delivery,
                 expected_version=row["version"],
                 guard_action=guard_action,
+                topic_id=memory_ui.topic_id_for(cur, topic),
                 approval={
                     "kind": "user_direct",
                     "conflict_ids": [

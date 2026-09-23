@@ -7,9 +7,8 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import events, redact
+from mashu import capacity, events, redact
 from mashu.errors import MashuError, RefusedError
-from mashu.tokens import pushed_cost
 
 
 def create_scope(
@@ -94,18 +93,15 @@ def list_scopes(cur: psycopg.Cursor) -> list[dict[str, Any]]:
 
     cur.execute(
         """
-        SELECT scope_id, delivery, content FROM memory
+        SELECT scope_id, count(*) AS n FROM memory
         WHERE status = 'active' AND scope_id IS NOT NULL
+        GROUP BY scope_id
         """
     )
-    active: dict[Any, int] = {}
-    pushed: dict[Any, list[str]] = {}
-    for row in cur.fetchall():
-        active[row["scope_id"]] = active.get(row["scope_id"], 0) + 1
-        if row["delivery"] == "scope":
-            pushed.setdefault(row["scope_id"], []).append(row["content"])
+    active = {row["scope_id"]: row["n"] for row in cur.fetchall()}
+    pushed = capacity.bootstrap_totals(cur)["scopes"]
 
     for row in rows:
         row["n_active"] = active.get(row["scope_id"], 0)
-        row["push_tokens"] = pushed_cost(pushed.get(row["scope_id"], []))
+        row["push_tokens"] = pushed.get(row["scope_id"], 0)
     return rows

@@ -37,6 +37,7 @@ from mashu import (
     tasks,
     temporary,
     tokens,
+    topics,
 )
 from mashu import (
     ledger as ledger_domain,
@@ -131,6 +132,19 @@ def _project_ref(cur: Any, ref: str) -> UUID:
 
 def _scope(cur: Any, name: str | None) -> UUID | None:
     return scopes.require_scope(cur, name)["scope_id"] if name is not None else None
+
+
+def _topic(cur: Any, name: str | None) -> UUID | None:
+    return topics.require_topic(cur, name)["topic_id"] if name is not None else None
+
+
+def _delivery_label(row: dict[str, Any]) -> str:
+    """How a delivery reads in a listing: guard with its act, topic with its name."""
+    if row["delivery"] == "guard":
+        return f"guard:{row.get('guard_action') or '-'}"
+    if row["delivery"] == "topic":
+        return f"topic:{row.get('topic_name') or '-'}"
+    return row["delivery"]
 
 
 def _routed_scope(cur: Any) -> tuple[UUID | None, str | None, bool]:
@@ -260,9 +274,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("        writes against the new columns fail until 'mashu admin migrate'")
     else:
         print("schema  up to date")
-    active = "  ".join(
-        f"{key}={status.memory_counts.get(key, 0)}" for key in ("always", "scope", "guard")
-    )
+    active = "  ".join(f"{key}={status.memory_counts.get(key, 0)}" for key in memories.DELIVERIES)
     print(f"active  {active}")
     print(
         f"tokens  always={status.memory_always_tokens}/{config.always_capacity()}  "
@@ -272,6 +284,13 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"cards   active={status.active_states}  "
         f"worst={status.state_worst_tokens}/{config.project_capacity()}"
     )
+    heaviest = (
+        f"  heaviest={status.topic_heaviest_name} "
+        f"{status.topic_heaviest_tokens}/{config.topic_capacity()}"
+        if status.topic_heaviest_name
+        else ""
+    )
+    print(f"topics  count={status.topic_count}{heaviest}")
     print(f"temporary  tokens={status.temporary_tokens}/{config.temporary_capacity()}")
     print(f"pending {status.pending_ready + status.pending_deferred}")
     print(f"traces  unexpired={status.traces}")
@@ -295,6 +314,12 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     print(f"scope     {answer.get('scope') or '-'}  routed={routed_text}")
     _print_memory_rows(answer.get("always", []), heading="always")
     _print_memory_rows(answer.get("scoped", []), heading="scoped")
+    if answer.get("topics"):
+        print("topics")
+    for row in answer.get("topics", []):
+        print(_flow(row["line"], indent="  "))
+    if answer.get("topic_instruction"):
+        print(f"          {answer['topic_instruction']}")
     _print_state_rows(answer.get("states", []))
     if answer.get("task_instruction"):
         print(f"          {answer['task_instruction']}")
@@ -331,7 +356,12 @@ def cmd_remember(args: argparse.Namespace) -> int:
         print(f"temporary  {_short(row['context_id'])}  {row['expires_at']}")
         return 0
 
-    delivery = args.delivery or ("scope" if args.scope else "always")
+    if args.topic is not None and (args.scope is not None or args.delivery not in (None, "topic")):
+        raise MashuError(
+            "--topic delivers the rule with that topic, which already says where it is read; "
+            "omit --scope and --delivery"
+        )
+    delivery = args.delivery or ("topic" if args.topic else "scope" if args.scope else "always")
     acknowledged: list[UUID] | None = None
     while True:
         try:
@@ -344,6 +374,7 @@ def cmd_remember(args: argparse.Namespace) -> int:
                     scope_id=scope_id,
                     delivery=delivery,
                     guard_action=args.action,
+                    topic_id=_topic(cur, args.topic),
                     acknowledged_conflicts=acknowledged,
                 )
             break
@@ -572,8 +603,10 @@ def _print_evidence(cur: Any, evidence: list[UUID] | None) -> None:
 def _show_memory(cur: Any, memory_id: UUID) -> None:
     cur.execute(
         """
-        SELECT m.*, s.name AS scope_name
-        FROM memory m LEFT JOIN scope s ON s.scope_id = m.scope_id
+        SELECT m.*, s.name AS scope_name, t.name AS topic_name, t.trigger AS topic_trigger
+        FROM memory m
+        LEFT JOIN scope s ON s.scope_id = m.scope_id
+        LEFT JOIN topic t ON t.topic_id = m.topic_id
         WHERE m.memory_id = %s
         """,
         (memory_id,),
@@ -584,8 +617,9 @@ def _show_memory(cur: Any, memory_id: UUID) -> None:
         _field("status", f"retired  {row['retire_reason']}")
     else:
         _field("status", row["status"])
-    delivery = row["delivery"]
-    _field("delivery", f"guard  {row['guard_action']}" if delivery == "guard" else delivery)
+    _field("delivery", _delivery_label(row))
+    if row["delivery"] == "topic":
+        _field("trigger", row["topic_trigger"])
     _field("scope", row["scope_name"] or "-")
     _field("created", f"{_date(row['created_at'])}  {row['created_by']}")
     _field("tokens", tokens.pushed_cost([row["content"]]))
@@ -631,6 +665,17 @@ def _show_memory(cur: Any, memory_id: UUID) -> None:
                 _field("approval", detail["approval_source"])
 
 
+def _successor_delivery_label(row: dict[str, Any]) -> str:
+    """A proposal's delivery settings, read the same way a Memory's are."""
+    return _delivery_label(
+        {
+            "delivery": row["successor_delivery"],
+            "guard_action": row["successor_guard_action"],
+            "topic_name": row["successor_topic_name"],
+        }
+    )
+
+
 def _show_memory_change(cur: Any, change_id: UUID) -> None:
     row = memory_changes.get(cur, change_id)
     if row is None:
@@ -655,12 +700,7 @@ def _show_memory_change(cur: Any, change_id: UUID) -> None:
         _field("candidate scope", row["successor_snapshot"]["scope_id"] or "-")
         _field("candidate kind", row["successor_snapshot"]["kind"])
         _field("candidate evidence", ", ".join(row["successor_snapshot"]["evidence"]))
-        _field(
-            "replacement delivery",
-            f"guard: {row['successor_guard_action']}"
-            if row["successor_delivery"] == "guard"
-            else row["successor_delivery"],
-        )
+        _field("replacement delivery", _successor_delivery_label(row))
         _field("replacement scope", row["successor_scope_id"] or "-")
         if row.get("successor_changed"):
             print(f"  current v{row['successor']['version']}  {row['successor']['content']}")
@@ -787,19 +827,21 @@ def cmd_memories(args: argparse.Namespace) -> int:
         scope_id = _scope(cur, args.scope) if args.scope else None
         cur.execute(
             """
-            SELECT m.*, s.name AS scope_name
-            FROM memory m LEFT JOIN scope s ON s.scope_id = m.scope_id
+            SELECT m.*, s.name AS scope_name, t.name AS topic_name
+            FROM memory m
+            LEFT JOIN scope s ON s.scope_id = m.scope_id
+            LEFT JOIN topic t ON t.topic_id = m.topic_id
             WHERE m.status = %(status)s
               AND (%(scope)s::uuid IS NULL OR m.scope_id = %(scope)s::uuid)
-            ORDER BY m.delivery, s.name, m.created_at
+            ORDER BY m.delivery, s.name, t.name, m.created_at
             """,
             {"status": status, "scope": scope_id},
         )
         rows = cur.fetchall()
-    print("id        delivery  scope                 tokens  content")
+    print("id        delivery              scope                 tokens  content")
     for row in rows:
         print(
-            f"{_short(row['memory_id']):8}  {row['delivery']:<8}  "
+            f"{_short(row['memory_id']):8}  {_pad(_delivery_label(row)[:20], 20)}  "
             f"{(row['scope_name'] or '-')[:20]:20}  "
             f"{tokens.pushed_cost([row['content']]):6}  {row['content']}"
         )
@@ -1024,7 +1066,11 @@ def cmd_review(args: argparse.Namespace) -> int:
             nomination = cur.fetchone()
             scope_id = _scope(cur, args.scope) if args.scope else None
             delivery = args.delivery or (
-                "scope" if (args.scope or nomination.get("scope_id")) else "always"
+                "topic"
+                if args.topic
+                else "scope"
+                if (args.scope or nomination.get("scope_id"))
+                else "always"
             )
             request_id = args.request_id or uuid4()
             row = nominations.admit(
@@ -1035,6 +1081,7 @@ def cmd_review(args: argparse.Namespace) -> int:
                 expected_version=args.version,
                 scope_id=scope_id,
                 guard_action=args.action,
+                topic_id=_topic(cur, args.topic),
                 approval={"kind": "user_direct", "conflict_ids": args.ack_conflict or []},
                 request_id=request_id,
             )
@@ -1067,6 +1114,7 @@ def cmd_deliver(args: argparse.Namespace) -> int:
             guard_action=args.action,
             scope_id=_scope(cur, args.scope) if args.scope else None,
             clear_scope=args.no_scope,
+            topic_id=_topic(cur, args.topic),
         )
     print(f"delivery  {row['memory_id']}  {row['delivery']}")
     return 0
@@ -1134,6 +1182,78 @@ def cmd_scope(args: argparse.Namespace) -> int:
     print("name                         active  push_tokens")
     for row in rows:
         print(f"{row['name'][:28]:28}  {row['n_active']:6}  {row['push_tokens']:11}")
+    return 0
+
+
+def _print_topic_rows(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        print("no topics")
+        return
+    width = max(_cells("name"), *(_cells(row["name"]) for row in rows))
+    print(f"{_pad('name', width)}  {'scope':<20}  rules  body  trigger")
+    for row in rows:
+        print(
+            f"{_pad(row['name'], width)}  {(row['scope_name'] or 'every session')[:20]:20}  "
+            f"{row['rules']:5}  {row['body_tokens']:4}  {row['trigger']}"
+        )
+
+
+def cmd_topic(args: argparse.Namespace) -> int:
+    if args.topic_command == "show":
+        if any(flag is not None for flag in (args.add, args.edit, args.archive)):
+            raise MashuError("topic show reads one topic; run --add, --edit, or --archive alone")
+        with db.transaction(args.dsn) as cur:
+            answer = topics.topic_rules(cur, args.name)
+        topic = answer["topic"]
+        _field("topic", topic["name"])
+        _field("scope", topic["scope"] or "every session")
+        _field("trigger", topic["trigger"])
+        print("rules")
+        for row in answer["memories"]:
+            print(f"  {_short(row['memory_id'])}  {row['content']}")
+        return 0
+    if args.add is None and args.edit is None and (args.trigger or args.scope or args.rename):
+        raise MashuError("--trigger and --scope go with --add or --edit; --rename with --edit")
+    if args.rename is not None and args.edit is None:
+        raise MashuError("--rename goes with --edit")
+    with db.transaction(args.dsn) as cur:
+        if args.add is not None:
+            if args.trigger is None:
+                raise MashuError(
+                    "--add requires --trigger: one sentence saying when to read the topic. "
+                    'Example: mashu topic --add audio-trim --trigger "Before trimming audio"'
+                )
+            if args.scope == "-":
+                raise MashuError("omit --scope to list the topic in every session")
+            row = topics.create_topic(
+                cur,
+                name=args.add,
+                trigger=args.trigger,
+                scope_id=_scope(cur, args.scope),
+                actor=ACTOR,
+            )
+            print(f"created  {row['name']}")
+            return 0
+        if args.edit is not None:
+            current = topics.require_topic(cur, args.edit)
+            row = topics.update_topic(
+                cur,
+                current["topic_id"],
+                actor=ACTOR,
+                name=args.rename,
+                trigger=args.trigger,
+                scope_id=_scope(cur, args.scope) if args.scope not in (None, "-") else None,
+                clear_scope=args.scope == "-",
+            )
+            print(f"edited  {row['name']}")
+            return 0
+        if args.archive is not None:
+            current = topics.require_topic(cur, args.archive)
+            topics.archive_topic(cur, current["topic_id"], actor=ACTOR)
+            print(f"archived  {current['name']}")
+            return 0
+        rows = topics.list_topics(cur)
+    _print_topic_rows(rows)
     return 0
 
 
@@ -1446,6 +1566,7 @@ Managing durable rules:
   show                      Inspect one memory, candidate, or ledger row.
   retire / revise / deliver Withdraw, rewrite, or change delivery of a memory.
   guard                     Read or change rules delivered before an action.
+  topic                     Group rules read only when one kind of work begins.
 
 Work state and routing:
   project / task            Read and manage current project work.
@@ -1560,14 +1681,21 @@ def build_parser() -> argparse.ArgumentParser:
             'mashu remember "Run migrations before restarting the service"',
             'mashu remember "The staging host is down" --until 2d',
             'mashu remember "Check the remote before pushing" --delivery guard --action Bash',
+            'mashu remember "Keep the win rate between 40 and 60 percent" --topic difficulty',
         ),
     )
     remember.add_argument("body", help="the rule, written as a short sentence")
     remember.add_argument("--scope", help="deliver it to this scope only")
     remember.add_argument(
         "--delivery",
-        choices=("always", "scope", "guard"),
-        help="where it is delivered (default: scope with --scope, otherwise always)",
+        choices=memories.DELIVERIES,
+        help=(
+            "where it is delivered (default: topic with --topic, scope with --scope, "
+            "otherwise always)"
+        ),
+    )
+    remember.add_argument(
+        "--topic", help="file it under this topic, read when the topic's work begins"
     )
     remember.add_argument("--action", help="the tool the rule stands in front of, for guard")
     remember.add_argument(
@@ -1761,11 +1889,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     review.add_argument(
         "--delivery",
-        choices=("always", "scope", "guard"),
+        choices=memories.DELIVERIES,
         help="where the admitted memory is delivered",
     )
     review.add_argument("--scope", help="the scope the admitted memory belongs to")
     review.add_argument("--action", help="the tool it stands in front of, for guard")
+    review.add_argument("--topic", help="the topic it is read with, for topic")
     review.add_argument(
         "--ack-conflict",
         action="append",
@@ -1784,18 +1913,20 @@ def build_parser() -> argparse.ArgumentParser:
         "move a memory between the opening and the act gate",
         description=(
             "Change where an active memory is delivered. Scope delivery requires --scope; guard "
-            "delivery requires --action."
+            "delivery requires --action; topic delivery requires --topic."
         ),
         examples=(
             "mashu deliver 1a2b3c4d always",
             "mashu deliver 1a2b3c4d scope --scope deployment",
+            "mashu deliver 1a2b3c4d topic --topic difficulty",
             "mashu deliver 1a2b3c4d guard --action Bash",
         ),
     )
     deliver.add_argument("memory_id", help=_REF_HELP)
     deliver.add_argument(
-        "delivery", choices=("always", "scope", "guard"), help="where it is delivered from now on"
+        "delivery", choices=memories.DELIVERIES, help="where it is delivered from now on"
     )
+    deliver.add_argument("--topic", help="the topic it is read with, for topic")
     deliver.add_argument("--action", help="the tool it stands in front of, for guard")
     deliver.add_argument("--scope", help="the scope it belongs to, for scope")
     deliver.add_argument(
@@ -1844,6 +1975,47 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--add", metavar="NAME", help="create a scope with this name")
     scope.add_argument("--about", metavar="LINE", help="what the scope covers")
     scope.set_defaults(func=cmd_scope)
+
+    topic = _command(
+        sub,
+        "topic",
+        "rules read only when one kind of work begins",
+        description=(
+            "List topics, or create, edit, or archive one. A topic's trigger line is pushed at "
+            "session start and its rules are read when that work begins. --add requires "
+            "--trigger; --scope limits the listing to one Scope, and '-' with --edit lists it "
+            "in every session. Archiving needs an empty topic. These are User operations."
+        ),
+        examples=(
+            "mashu topic",
+            'mashu topic --add difficulty --trigger "Before changing difficulty levers" '
+            "--scope game",
+            'mashu topic --edit difficulty --trigger "Before changing win rates"',
+            "mashu topic --edit difficulty --scope -",
+            "mashu topic --archive difficulty",
+            "mashu topic show difficulty",
+        ),
+    )
+    topic_group = topic.add_mutually_exclusive_group()
+    topic_group.add_argument("--add", metavar="NAME", help="create a topic with this name")
+    topic_group.add_argument("--edit", metavar="NAME", help="edit the topic with this name")
+    topic_group.add_argument("--archive", metavar="NAME", help="archive an empty topic")
+    topic.add_argument("--trigger", metavar="TEXT", help="one sentence saying when to read it")
+    topic.add_argument(
+        "--scope", help="the Scope whose sessions list it; '-' with --edit means every session"
+    )
+    topic.add_argument("--rename", metavar="NEW", help="the new name, with --edit")
+    topic.set_defaults(func=cmd_topic, topic_command=None)
+    topic_sub = topic.add_subparsers(dest="topic_command", metavar="COMMAND")
+    topic_show = _command(
+        topic_sub,
+        "show",
+        "one topic and the bodies of its rules",
+        description="Print one topic's trigger and rules for a person. Nothing is recorded.",
+        examples=("mashu topic show difficulty",),
+    )
+    topic_show.add_argument("name", help="the topic's name")
+    topic_show.set_defaults(func=cmd_topic)
 
     route = _command(
         sub,

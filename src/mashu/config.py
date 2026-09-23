@@ -25,6 +25,9 @@ DEFAULT_TASK_DETAIL_CAPACITY = 800
 #: Hard ceiling on the temporary share of the opening (v3 8).
 DEFAULT_TEMPORARY_CAPACITY = 400
 
+#: Maximum rule bodies one topic holds; they are read on demand, not pushed (5.2).
+DEFAULT_TOPIC_CAPACITY = 800
+
 #: How long a task's lease runs from its last sign of activity (v3 7).
 DEFAULT_TASK_LEASE_DAYS = 14
 
@@ -67,6 +70,10 @@ def task_detail_capacity() -> int:
 
 def temporary_capacity() -> int:
     return int(os.environ.get("MASHU_TEMPORARY_CAPACITY") or DEFAULT_TEMPORARY_CAPACITY)
+
+
+def topic_capacity() -> int:
+    return int(os.environ.get("MASHU_TOPIC_CAPACITY") or DEFAULT_TOPIC_CAPACITY)
 
 
 def task_lease_days() -> int:

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from mashu import db, memories, references, scopes, screen, temporary
+from mashu import db, memories, references, scopes, screen, temporary, topics
 from mashu.errors import MashuError, RetiredConflictError
 
 ACTOR = "user"
@@ -23,6 +23,19 @@ _KEYS = (
     "  n remember   p temporary   e edit   c convert   r retire   d delivery"
 )
 _ITEM_KEYS = "  space read on   b page back   ← list   q leave"
+
+#: Each delivery in one plain line, shown wherever a person chooses one.
+DELIVERY_CHOICES = (
+    ("always", "every session, at start"),
+    ("scope", "sessions in one Scope, at start"),
+    ("topic", "its trigger is listed at start; read when that work begins"),
+    ("guard", "just before one action (e.g. delegate)"),
+)
+
+
+def delivery_legend() -> str:
+    """The delivery choices, one plain line each."""
+    return "\n".join(f"    {name:<6}  {meaning}" for name, meaning in DELIVERY_CHOICES)
 
 
 def _short(value: Any) -> str:
@@ -54,10 +67,13 @@ def _rows(dsn: str | None, view: str) -> list[dict[str, Any]]:
         else:
             cur.execute(
                 """
-                SELECT m.*, s.name AS scope_name
-                FROM memory m LEFT JOIN scope s ON s.scope_id = m.scope_id
+                SELECT m.*, s.name AS scope_name,
+                       t.name AS topic_name, t.trigger AS topic_trigger
+                FROM memory m
+                LEFT JOIN scope s ON s.scope_id = m.scope_id
+                LEFT JOIN topic t ON t.topic_id = m.topic_id
                 WHERE m.status = %s
-                ORDER BY m.delivery, s.name NULLS FIRST, m.created_at, m.memory_id
+                ORDER BY m.delivery, s.name NULLS FIRST, t.name, m.created_at, m.memory_id
                 """,
                 (view,),
             )
@@ -69,8 +85,11 @@ def _memory_record(dsn: str | None, memory_id: UUID) -> dict[str, Any]:
     with db.transaction(dsn) as cur:
         cur.execute(
             """
-            SELECT m.*, s.name AS scope_name
-            FROM memory m LEFT JOIN scope s ON s.scope_id = m.scope_id
+            SELECT m.*, s.name AS scope_name,
+                   t.name AS topic_name, t.trigger AS topic_trigger
+            FROM memory m
+            LEFT JOIN scope s ON s.scope_id = m.scope_id
+            LEFT JOIN topic t ON t.topic_id = m.topic_id
             WHERE m.memory_id = %s
             """,
             (memory_id,),
@@ -108,6 +127,8 @@ def _delivery(row: dict[str, Any]) -> str:
     delivery = row["delivery"]
     if delivery == "guard":
         return f"guard:{row.get('guard_action') or '-'}"
+    if delivery == "topic":
+        return f"topic:{row.get('topic_name') or '-'}"
     return delivery
 
 
@@ -118,7 +139,7 @@ def _line(row: dict[str, Any], view: str, width: int) -> str:
         expiry = _date(row["expires_at"])
         return screen.clip(f"{fixed}{expiry}  {row['content']}", width)
     fixed = (
-        f"   {_short(row['memory_id'])}  {screen.pad(_delivery(row), 16)} {screen.pad(scope, 14)}  "
+        f"   {_short(row['memory_id'])}  {screen.pad(_delivery(row), 22)} {screen.pad(scope, 14)}  "
     )
     return screen.clip(f"{fixed}{row['content']}", width)
 
@@ -142,10 +163,13 @@ def _detail(row: dict[str, Any], view: str, limit: int = 8) -> str:
     else:
         lines = [
             screen.bold(f"  ── {view} memory {_short(row['memory_id'])}"),
-            _field("delivery", row.get("delivery")),
+            _field("delivery", _delivery(row)),
             _field("scope", row.get("scope_name") or "-"),
-            _field("guard", row.get("guard_action") or "-"),
         ]
+        if row.get("delivery") == "topic":
+            lines.append(_field("trigger", row.get("topic_trigger") or "-"))
+        else:
+            lines.append(_field("guard", row.get("guard_action") or "-"))
         if view == "retired":
             lines.append(_field("kind", row.get("retirement_kind") or "legacy"))
             lines.append(_field("retired", _date(row.get("retired_at"))))
@@ -182,10 +206,17 @@ def _full_detail(row: dict[str, Any]) -> str:
         screen.bold(f"  memory {_short(row['memory_id'])}  {status}"),
         screen.dim(f"  {_date(row.get('created_at'))}  by {row.get('created_by') or '-'}"),
         "",
-        _field("delivery", row.get("delivery")),
+        _field("delivery", _delivery(row)),
         _field("scope", row.get("scope_name") or "-"),
         _field("guard", row.get("guard_action") or "-"),
     ]
+    if row.get("delivery") == "topic":
+        lines.extend(
+            [
+                screen.bold("  trigger"),
+                screen.wrap(row.get("topic_trigger") or "-", indent="    "),
+            ]
+        )
     if status == "retired":
         lines.extend(
             [
@@ -276,6 +307,7 @@ def _matches(row: dict[str, Any], view: str, query: str) -> bool:
         row.get("scope_name"),
         row.get("delivery"),
         row.get("guard_action"),
+        row.get("topic_name"),
         row.get("retire_reason"),
         row.get("expires_at"),
     ]
@@ -365,23 +397,113 @@ def _resolve_id(cur: Any, value: str, *, table: str, column: str, label: str) ->
     )
 
 
+def _topic_line(number: int, row: dict[str, Any]) -> str:
+    scope = row.get("scope_name") or "every session"
+    rules = f"{row['rules']} rule" + ("" if row["rules"] == 1 else "s")
+    return screen.clip(
+        f"    {number:>2}  {screen.pad(row['name'], 20)} {screen.pad(scope, 14)} "
+        f"{rules:>8}  {row['trigger']}",
+        screen.terminal_width() - 1,
+    )
+
+
+def pick_topic(dsn: str | None, current: Any = None) -> dict[str, Any] | None:
+    """Choose an open topic by number, or describe a new one; nothing is written here."""
+    with db.transaction(dsn) as cur:
+        rows = topics.list_topics(cur)
+    print(screen.bold("  topics"))
+    for number, row in enumerate(rows, 1):
+        print(_topic_line(number, row))
+    print("     n  a new topic")
+    default = next(
+        (str(number) for number, row in enumerate(rows, 1) if row["topic_id"] == current), ""
+    )
+    hint = f"; enter={default}" if default else ""
+    answer = screen.editline(f"  topic [number, or n for a new one{hint}]: ", default)
+    if isinstance(answer, screen.Cancelled):
+        return None
+    chosen = (answer.text or default).strip().casefold()
+    if not chosen:
+        return None
+    if chosen in ("n", "new"):
+        return _new_topic()
+    if chosen.isdigit() and 1 <= int(chosen) <= len(rows):
+        row = rows[int(chosen) - 1]
+        return {"topic_id": row["topic_id"], "name": row["name"]}
+    raise MashuError(f"choose a topic number from 1 to {len(rows)}, or n for a new topic")
+
+
+def _new_topic() -> dict[str, Any] | None:
+    """Ask for the three things a topic is: its name, where it is listed, and its trigger."""
+    name = _required(f"  new topic name [at most {topics.NAME_LIMIT} characters]: ")
+    if name is None:
+        return None
+    scope = screen.editline("  scope [empty means every session]: ", "")
+    if isinstance(scope, screen.Cancelled):
+        return None
+    print(
+        screen.dim(
+            "  the trigger says when to read it, e.g. 'Before changing difficulty levers or "
+            "win rates'"
+        )
+    )
+    trigger = _required(f"  trigger [one sentence, at most {topics.TRIGGER_LIMIT} characters]: ")
+    if trigger is None:
+        return None
+    return {"topic_id": None, "name": name, "scope_name": scope.text or None, "trigger": trigger}
+
+
+def topic_id_for(cur: Any, choice: dict[str, Any] | None) -> UUID | None:
+    """The chosen topic's id, creating a described topic inside the caller's write."""
+    if choice is None:
+        return None
+    if choice.get("topic_id") is not None:
+        return choice["topic_id"]
+    if choice.get("trigger") is None:
+        return topics.require_topic(cur, choice["name"])["topic_id"]
+    return topics.create_topic(
+        cur,
+        name=choice["name"],
+        trigger=choice["trigger"],
+        scope_id=_scope_id(cur, choice.get("scope_name")),
+        actor=ACTOR,
+    )["topic_id"]
+
+
+def _chosen_delivery(text: str) -> str:
+    """A delivery by name, or by its first letter."""
+    chosen = text.strip().casefold()
+    for name, _meaning in DELIVERY_CHOICES:
+        if chosen in (name, name[0]):
+            return name
+    raise MashuError("delivery must be always, scope, topic, or guard")
+
+
 def _delivery_answers(
     default: str = "always",
     *,
     scope_default: str | None = None,
     action_default: str | None = None,
-) -> tuple[str, str | None, str | None] | None:
+    topic_default: Any = None,
+    dsn: str | None = None,
+) -> tuple[str, str | None, str | None, dict[str, Any] | None] | None:
     """Ask for a route and its route-specific fields before opening a transaction."""
-    chosen_answer = screen.editline("  delivery [always/scope/guard; edit existing]: ", default)
+    print(screen.bold("  where should this rule be delivered?"))
+    print(delivery_legend())
+    chosen_answer = screen.editline(
+        "  delivery [always/scope/topic/guard; edit existing]: ", default
+    )
     if isinstance(chosen_answer, screen.Cancelled):
         return None
-    chosen = chosen_answer.text or default
-    chosen = chosen.casefold()
-    if chosen not in memories.DELIVERIES:
-        raise MashuError("delivery must be always, scope, or guard")
+    chosen = _chosen_delivery(chosen_answer.text or default)
     scope_name: str | None = None
     action: str | None = None
-    if chosen == "scope":
+    topic: dict[str, Any] | None = None
+    if chosen == "topic":
+        topic = pick_topic(dsn, topic_default)
+        if topic is None:
+            return None
+    elif chosen == "scope":
         prompt = (
             f"  scope name [enter={scope_default}]: "
             if scope_default
@@ -418,7 +540,7 @@ def _delivery_answers(
             scope_name = None
     elif scope_default:
         scope_name = scope_default
-    return chosen, scope_name, action
+    return chosen, scope_name, action, topic
 
 
 def _revise(dsn: str | None, row: dict[str, Any]) -> str:
@@ -519,10 +641,12 @@ def _set_delivery(dsn: str | None, row: dict[str, Any]) -> str:
         row["delivery"],
         scope_default=row.get("scope_name"),
         action_default=row.get("guard_action"),
+        topic_default=row.get("topic_id"),
+        dsn=dsn,
     )
     if answers is None:
         return screen.warning("  ! delivery unchanged")
-    delivery, scope_name, action = answers
+    delivery, scope_name, action, topic = answers
     with db.transaction(dsn) as cur:
         scope_id = _scope_id(cur, scope_name)
         changed = memories.set_delivery(
@@ -533,8 +657,10 @@ def _set_delivery(dsn: str | None, row: dict[str, Any]) -> str:
             guard_action=action,
             scope_id=scope_id,
             clear_scope=scope_id is None,
+            topic_id=topic_id_for(cur, topic),
         )
-    return screen.success(f"  ✓ delivery {_short(row['memory_id'])}  {changed['delivery']}")
+    label = f"topic:{topic['name']}" if topic else changed["delivery"]
+    return screen.success(f"  ✓ delivery {_short(row['memory_id'])}  {label}")
 
 
 def _conflict_text(conflict: RetiredConflictError) -> str:
@@ -551,10 +677,10 @@ def _remember(dsn: str | None) -> tuple[str, UUID | None]:
     content = _required("  memory [empty cancels]: ")
     if content is None:
         return screen.warning("  ! nothing remembered"), None
-    answers = _delivery_answers()
+    answers = _delivery_answers(dsn=dsn)
     if answers is None:
         return screen.warning("  ! nothing remembered"), None
-    delivery, scope_name, action = answers
+    delivery, scope_name, action, topic = answers
     acknowledged: list[UUID] | None = None
     while True:
         try:
@@ -566,6 +692,7 @@ def _remember(dsn: str | None) -> tuple[str, UUID | None]:
                     scope_id=_scope_id(cur, scope_name),
                     delivery=delivery,
                     guard_action=action,
+                    topic_id=topic_id_for(cur, topic),
                     acknowledged_conflicts=acknowledged,
                 )
             message = screen.success(f"  ✓ remembered {_short(row['memory_id'])}")
@@ -625,6 +752,8 @@ def _temporary(dsn: str | None) -> tuple[str, UUID | None]:
 def _convert_to_temporary(dsn: str | None, row: dict[str, Any]) -> tuple[str, UUID | None]:
     if row["delivery"] == "guard":
         return screen.warning("  ! guard memories cannot become temporary"), None
+    if row["delivery"] == "topic":
+        return screen.warning("  ! topic memories cannot become temporary"), None
     days = _days()
     if days is None:
         return screen.warning("  ! conversion cancelled"), None

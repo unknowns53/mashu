@@ -254,3 +254,20 @@ def test_an_opening_against_a_schema_the_code_has_outgrown_says_so(cur):
 def test_the_calling_guidance_fits_before_the_client_truncates_it():
     assert len(server.INSTRUCTIONS.encode()) <= server.INSTRUCTIONS_BYTE_LIMIT
     assert server.INSTRUCTIONS.startswith("Mashu pushes active Memory; call session_bootstrap")
+
+
+def test_an_opening_still_arrives_while_the_topic_migration_is_pending(cur, scope_id):
+    memories.remember(cur, content="Always rule", actor="user")
+    cur.execute("ALTER TABLE memory DROP COLUMN topic_id")
+    cur.execute(
+        "ALTER TABLE memory_change DROP COLUMN successor_topic_id, "
+        "DROP COLUMN successor_topic_name, DROP COLUMN successor_topic_trigger"
+    )
+    cur.execute("DROP TABLE topic")
+    cur.execute("DELETE FROM schema_migration WHERE filename = %s", ("0010_topics.sql",))
+
+    got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
+
+    assert [row["content"] for row in got["always"]] == ["Always rule"]
+    assert got["topics"] == []
+    assert got["schema_pending"] == ["0010_topics.sql"]

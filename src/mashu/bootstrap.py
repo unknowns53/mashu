@@ -7,7 +7,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import config, events, memories, migrate, projects, tasks, temporary
+from mashu import config, events, memories, migrate, projects, tasks, temporary, topics
 from mashu.tokens import pushed_cost
 
 TASK_DETAIL_INSTRUCTION = (
@@ -39,6 +39,7 @@ def session_bootstrap(
     """Everything a session in this scope is told, and what it cost to tell it."""
     always = memories.always_memories(cur)
     scoped = memories.scope_push_memories(cur, scope_id) if scope_id is not None else []
+    index = topics.session_index(cur, scope_id)
     states = active_states(cur, scope_id)
     contexts = temporary.active_temporary(cur, scope_id=scope_id)
 
@@ -48,8 +49,9 @@ def session_bootstrap(
     # Where the schema stands, delivered rather than looked up.
     schema_pending = migrate.pending(cur)
 
-    # Counted apart because they are refused apart (v3 8).
-    memory_tokens = pushed_cost([row["content"] for row in always + scoped])
+    # Counted apart because they are refused apart (v3 8). Topic lines sit in the Memory seats.
+    topic_tokens = pushed_cost([row["line"] for row in index])
+    memory_tokens = pushed_cost([row["content"] for row in always + scoped]) + topic_tokens
     state_rows = [
         {
             "task": str(row["task"]["task_id"])[:8],
@@ -72,6 +74,7 @@ def session_bootstrap(
         detail={
             "tokens": total,
             "memory": memory_tokens,
+            "topics": topic_tokens,
             "project": project_tokens,
             "cards": project_tokens,
             "temporary": temporary_tokens,
@@ -104,6 +107,8 @@ def session_bootstrap(
     return {
         "always": [{"memory_id": r["memory_id"], "content": r["content"]} for r in always],
         "scoped": [{"memory_id": r["memory_id"], "content": r["content"]} for r in scoped],
+        "topics": index,
+        "topic_instruction": topics.INSTRUCTION if index else None,
         "scope": scope_name,
         "routed": routed,
         "states": state_rows,
@@ -111,6 +116,7 @@ def session_bootstrap(
         "temporary": [{"content": r["content"], "expires_at": r["expires_at"]} for r in contexts],
         "pending": pending,
         "memory_tokens": memory_tokens,
+        "topic_tokens": topic_tokens,
         "card_tokens": project_tokens,
         "project_tokens": project_tokens,
         "temporary_tokens": temporary_tokens,

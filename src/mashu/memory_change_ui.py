@@ -188,15 +188,7 @@ def _edit_reason(dsn: str | None, row: dict[str, Any]) -> str:
                 successor_nomination_version=(
                     row["successor"]["version"] if row["operation"] == "replace" else None
                 ),
-                successor_settings=(
-                    {
-                        "delivery": row["successor_delivery"],
-                        "scope_id": row["successor_scope_id"],
-                        "guard_action": row["successor_guard_action"],
-                    }
-                    if row["operation"] == "replace"
-                    else None
-                ),
+                successor_settings=memory_changes.requested_settings(row),
                 relocated_to_kind=row["relocated_to_kind"],
                 relocated_to_id=row["relocated_to_id"],
                 restore_reason=reason if field == "restore_reason" else row["restore_reason"],
@@ -281,15 +273,7 @@ def _refresh(dsn: str | None, row: dict[str, Any]) -> dict[str, Any]:
             retire_reason=current["retire_reason"],
             successor_nomination_id=current["successor_nomination_id"],
             successor_nomination_version=successor_version,
-            successor_settings=(
-                {
-                    "delivery": current["successor_delivery"],
-                    "scope_id": current["successor_scope_id"],
-                    "guard_action": current["successor_guard_action"],
-                }
-                if current["operation"] == "replace"
-                else None
-            ),
+            successor_settings=memory_changes.requested_settings(current),
             relocated_to_kind=current["relocated_to_kind"],
             relocated_to_id=current["relocated_to_id"],
             restore_reason=current["restore_reason"],

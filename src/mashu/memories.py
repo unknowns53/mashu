@@ -7,21 +7,38 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import capacity, config, events, match, nominations, redact
+from mashu import capacity, config, events, match, nominations, redact, topics
 from mashu.errors import MashuError, RefusedError, RetiredConflictError
 
-DELIVERIES = ("always", "scope", "guard")
+DELIVERIES = ("always", "scope", "topic", "guard")
 
 _EXPLICIT_WHAT = "recorded by the user's own hand"
 
 
-def _check_delivery(delivery: str, scope_id: UUID | None, guard_action: str | None) -> None:
+def check_delivery(
+    delivery: str,
+    scope_id: UUID | None,
+    guard_action: str | None,
+    topic_id: UUID | None = None,
+) -> None:
+    """Refuse a delivery that lacks the one detail its route needs, or carries another's."""
     if delivery not in DELIVERIES:
         raise MashuError(f"unknown delivery '{delivery}' (expected one of {', '.join(DELIVERIES)})")
     if delivery == "scope" and scope_id is None:
         raise MashuError("delivery 'scope' needs a scope to be delivered to")
     if delivery == "guard" and not guard_action:
         raise MashuError("delivery 'guard' needs the action it stands in front of")
+    if delivery == "topic" and topic_id is None:
+        raise MashuError("delivery 'topic' needs the topic it is read with")
+    if delivery != "topic" and topic_id is not None:
+        raise MashuError("a topic only applies to delivery 'topic'")
+
+
+def topic_home(cur: psycopg.Cursor, delivery: str, topic_id: UUID | None) -> UUID | None:
+    """The scope a topic Memory takes from its topic, which must still be open."""
+    if delivery != "topic" or topic_id is None:
+        return None
+    return topics.lock_open_topic(cur, topic_id)["scope_id"]
 
 
 def remember(
@@ -32,12 +49,15 @@ def remember(
     scope_id: UUID | None = None,
     delivery: str = "always",
     guard_action: str | None = None,
+    topic_id: UUID | None = None,
     acknowledged_conflicts: list[UUID] | None = None,
 ) -> dict[str, Any]:
     """Write a rule straight into the active set, with the writing as its evidence."""
-    _check_delivery(delivery, scope_id, guard_action)
+    check_delivery(delivery, scope_id, guard_action, topic_id)
     if delivery != "guard":
         guard_action = None
+    if delivery == "topic":
+        scope_id = topic_home(cur, delivery, topic_id)
 
     verdict = redact.check(content)
     if not verdict.allowed:
@@ -70,7 +90,9 @@ def remember(
         }
     else:
         approval_source = {"kind": "user_direct"}
-    admission = capacity.check_admission(cur, content=content, delivery=delivery, scope_id=scope_id)
+    admission = capacity.check_admission(
+        cur, content=content, delivery=delivery, scope_id=scope_id, topic_id=topic_id
+    )
     if not admission["ok"]:
         raise RefusedError(admission["refusal"])
 
@@ -88,11 +110,12 @@ def remember(
     nominations.validate_evidence(cur, [ledger_id])
     cur.execute(
         """
-        INSERT INTO memory (content, scope_id, delivery, guard_action, evidence, created_by)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO memory
+            (content, scope_id, delivery, guard_action, topic_id, evidence, created_by)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         RETURNING *
         """,
-        (content, scope_id, delivery, guard_action, [ledger_id], actor),
+        (content, scope_id, delivery, guard_action, topic_id, [ledger_id], actor),
     )
     memory = cur.fetchone()
     cur.execute(
@@ -100,6 +123,8 @@ def remember(
         (memory["memory_id"], content, actor, _EXPLICIT_WHAT),
     )
     detail: dict[str, Any] = {"delivery": delivery, "approval_source": approval_source}
+    if topic_id is not None:
+        detail["topic_id"] = str(topic_id)
     if overruled:
         detail["overrides"] = [str(row["memory_id"]) for row in overruled]
     if retirement_matches:
@@ -144,10 +169,12 @@ def memory_details(cur: psycopg.Cursor, memory_id: UUID) -> dict[str, Any] | Non
     cur.execute(
         """
         SELECT m.*, s.name AS scope_name,
+               t.name AS topic_name, t.trigger AS topic_trigger,
                r.revision_id AS current_revision_id,
                r.created_at AS revision_created_at
         FROM memory m
         LEFT JOIN scope s ON s.scope_id = m.scope_id
+        LEFT JOIN topic t ON t.topic_id = m.topic_id
         LEFT JOIN LATERAL (
             SELECT revision_id, created_at FROM memory_revision
             WHERE memory_id = m.memory_id AND content = m.content
@@ -305,6 +332,10 @@ def convert_to_temporary(
     current = _require_active(cur, memory_id)
     if current["delivery"] == "guard":
         raise MashuError("a guard memory cannot become temporary because its action would be lost")
+    if current["delivery"] == "topic":
+        raise MashuError(
+            "a topic memory cannot become temporary because its topic's trigger would be lost"
+        )
     scope_id = current["scope_id"] if current["delivery"] == "scope" else None
     context = temporary.put_temporary(
         cur,
@@ -353,6 +384,7 @@ def revise(
         delivery=current["delivery"],
         scope_id=current["scope_id"],
         exclude_memory_id=memory_id,
+        topic_id=current["topic_id"],
     )
     if not admission["ok"]:
         raise RefusedError(admission["refusal"])
@@ -420,11 +452,15 @@ def restore(
     ]
     if active:
         raise MashuError("a similar active Memory already exists; resolve that Memory first")
+    home = current["scope_id"]
+    if current["delivery"] == "topic":
+        home = topic_home(cur, "topic", current["topic_id"])
     admission = capacity.check_admission(
         cur,
         content=current["content"],
         delivery=current["delivery"],
-        scope_id=current["scope_id"],
+        scope_id=home,
+        topic_id=current["topic_id"],
     )
     if not admission["ok"]:
         raise RefusedError(admission["refusal"])
@@ -433,11 +469,11 @@ def restore(
         UPDATE memory
         SET status = 'active', retire_reason = NULL, retired_at = NULL, updated_at = now(),
             retirement_kind = NULL, superseded_by = NULL,
-            relocated_to_kind = NULL, relocated_to_id = NULL
+            relocated_to_kind = NULL, relocated_to_id = NULL, scope_id = %s
         WHERE memory_id = %s AND status = 'retired'
         RETURNING *
         """,
-        (memory_id,),
+        (home, memory_id),
     )
     row = cur.fetchone()
     events.record(
@@ -471,23 +507,28 @@ def set_delivery(
     guard_action: str | None = None,
     scope_id: UUID | None = None,
     clear_scope: bool = False,
+    topic_id: UUID | None = None,
+    approval_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Move a rule between the opening, one scope's opening, and the act gate."""
+    """Move a rule between the opening, one scope's opening, a topic, and the act gate."""
     current = _require_active(cur, memory_id)
     if clear_scope and scope_id is not None:
         raise MashuError("pass a scope or clear it, not both")
     home = None if clear_scope else (current["scope_id"] if scope_id is None else scope_id)
-    _check_delivery(delivery, home, guard_action)
+    check_delivery(delivery, home, guard_action, topic_id)
     if delivery != "guard":
         guard_action = None
+    if delivery == "topic":
+        home = topic_home(cur, delivery, topic_id)
 
-    if delivery in ("always", "scope"):
+    if delivery in ("always", "scope", "topic"):
         admission = capacity.check_admission(
             cur,
             content=current["content"],
             delivery=delivery,
             scope_id=home,
             exclude_memory_id=memory_id,
+            topic_id=topic_id,
         )
         if not admission["ok"]:
             raise RefusedError(admission["refusal"])
@@ -495,20 +536,20 @@ def set_delivery(
     cur.execute(
         """
         UPDATE memory
-        SET delivery = %s, guard_action = %s, scope_id = %s, updated_at = now()
+        SET delivery = %s, guard_action = %s, scope_id = %s, topic_id = %s, updated_at = now()
         WHERE memory_id = %s
         RETURNING *
         """,
-        (delivery, guard_action, home, memory_id),
+        (delivery, guard_action, home, topic_id, memory_id),
     )
     row = cur.fetchone()
-    events.record(
-        cur,
-        "delivery_changed",
-        actor,
-        memory_id=memory_id,
-        detail={"from": current["delivery"], "to": delivery, "action": guard_action},
-    )
+    detail: dict[str, Any] = {"from": current["delivery"], "to": delivery, "action": guard_action}
+    if current["topic_id"] is not None or topic_id is not None:
+        detail["from_topic_id"] = str(current["topic_id"]) if current["topic_id"] else None
+        detail["to_topic_id"] = str(topic_id) if topic_id else None
+    if approval_source is not None:
+        detail["approval_source"] = approval_source
+    events.record(cur, "delivery_changed", actor, memory_id=memory_id, detail=detail)
     return row
 
 

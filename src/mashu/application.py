@@ -16,6 +16,7 @@ from mashu import (
     scopes,
     tasks,
     temporary,
+    topics,
 )
 
 
@@ -36,6 +37,9 @@ class StatusSnapshot:
     delivery_failures_30d: int
     scope_count: int
     scope_rows: list[dict[str, Any]]
+    topic_count: int
+    topic_heaviest_name: str | None
+    topic_heaviest_tokens: int
     tasks_active: int
     tasks_dormant: int
     tasks_closed: int
@@ -90,6 +94,8 @@ def status_snapshot(cur: psycopg.Cursor) -> StatusSnapshot:
     )
     delivery_failures = cur.fetchone()["n"]
     scope_rows = scopes.list_scopes(cur)
+    topic_rows = topics.list_topics(cur)
+    heaviest = max(topic_rows, key=lambda row: row["body_tokens"], default=None)
     cur.execute(
         "SELECT count(*) FILTER (WHERE status = 'open' AND now() <= active_until) AS active, "
         "count(*) FILTER (WHERE status = 'open' AND now() > active_until) AS dormant, "
@@ -112,6 +118,9 @@ def status_snapshot(cur: psycopg.Cursor) -> StatusSnapshot:
         delivery_failures_30d=delivery_failures,
         scope_count=len(scope_rows),
         scope_rows=scope_rows,
+        topic_count=len(topic_rows),
+        topic_heaviest_name=heaviest["name"] if heaviest else None,
+        topic_heaviest_tokens=heaviest["body_tokens"] if heaviest else 0,
         tasks_active=task_counts["active"],
         tasks_dormant=task_counts["dormant"],
         tasks_closed=task_counts["closed"],

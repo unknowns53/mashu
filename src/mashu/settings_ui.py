@@ -14,6 +14,7 @@ from mashu import (
     routing,
     scopes,
     screen,
+    topics,
 )
 from mashu import migrate as migration
 from mashu.errors import MashuError
@@ -28,6 +29,7 @@ _TOP_ITEMS = (
     ("Health/status", "capacity, queues, recent evidence, and work"),
     ("Bootstrap preview", "what a session opened here receives"),
     ("Scopes", "memory homes and their opening cost"),
+    ("Topics", "rules read when one kind of work begins"),
     ("Routes", "directory trees mapped to scopes or ignored"),
     ("Schema/migrations", "database version and pending changes"),
 )
@@ -42,7 +44,8 @@ _HELP = """
   Home/End     jump to the first or last list item
   ← or q       return one level; from this page, leave
 
-  Scope and route pages show their own write keys. Route removal and schema
+  Scope, topic, and route pages show their own write keys. A topic is archived
+  only once it holds no active rule. Route removal, topic archiving, and schema
   migration always ask for confirmation before changing the store.
 """
 
@@ -63,6 +66,9 @@ class Health:
     ledger_30d: int
     delivery_failures_30d: int
     scope_count: int
+    topic_count: int
+    topic_heaviest_name: str | None
+    topic_heaviest_tokens: int
     tasks_active: int
     tasks_dormant: int
     tasks_closed: int
@@ -88,6 +94,9 @@ def _health(dsn: str | None) -> Health:
         ledger_30d=snapshot.ledger_30d,
         delivery_failures_30d=snapshot.delivery_failures_30d,
         scope_count=snapshot.scope_count,
+        topic_count=snapshot.topic_count,
+        topic_heaviest_name=snapshot.topic_heaviest_name,
+        topic_heaviest_tokens=snapshot.topic_heaviest_tokens,
         tasks_active=snapshot.tasks_active,
         tasks_dormant=snapshot.tasks_dormant,
         tasks_closed=snapshot.tasks_closed,
@@ -102,7 +111,14 @@ def _health_text(value: Health) -> str:
     else:
         schema = screen.success("up to date")
     deliveries = "  ·  ".join(
-        f"{name} {value.memory_counts.get(name, 0)}" for name in ("always", "scope", "guard")
+        f"{name} {value.memory_counts.get(name, 0)}"
+        for name in ("always", "scope", "topic", "guard")
+    )
+    heaviest = (
+        f"  ·  heaviest {value.topic_heaviest_name} "
+        f"{value.topic_heaviest_tokens}/{config.topic_capacity()} tokens"
+        if value.topic_heaviest_name
+        else ""
     )
     return "\n".join(
         (
@@ -122,6 +138,7 @@ def _health_text(value: Health) -> str:
             f"  ·  {value.ledger_30d} ledger entries in 30 days",
             f"  Delivery health    {value.delivery_failures_30d} suspected failures in 30 days",
             f"  Scopes             {value.scope_count}",
+            f"  Topics             {value.topic_count}{heaviest}",
             f"  Tasks              {value.tasks_active} active"
             f"  ·  {value.tasks_dormant} dormant  ·  {value.tasks_closed} closed",
         )
@@ -152,6 +169,15 @@ def _bootstrap_text(answer: dict[str, Any]) -> str:
         lines.extend([f"  Schema             {len(pending)} migration(s) pending", ""])
     lines.extend(_memory_lines("Always memories", answer.get("always") or []))
     lines.extend(["", *_memory_lines("Scoped memories", answer.get("scoped") or []), ""])
+    index = answer.get("topics") or []
+    lines.append(f"  Topics ({len(index)})")
+    if not index:
+        lines.append("    —")
+    for row in index:
+        lines.append(screen.wrap(row["line"], indent="    "))
+    if answer.get("topic_instruction"):
+        lines.append(screen.wrap(answer["topic_instruction"], indent="    "))
+    lines.append("")
 
     states = answer.get("states") or []
     lines.append(f"  Active task cards ({len(states)})")
@@ -347,6 +373,152 @@ def _scopes_page(dsn: str | None) -> None:
                         actor=ACTOR,
                     )
                 note = f"  created scope {name_answer.text}"
+            except MashuError as error:
+                note = f"  {error}"
+
+
+def _topic_rows(dsn: str | None) -> list[dict[str, Any]]:
+    with db.transaction(dsn) as cur:
+        return topics.list_topics(cur)
+
+
+def _rules(count: int) -> str:
+    return f"{count} rule" if count == 1 else f"{count} rules"
+
+
+def _topic_detail(row: dict[str, Any]) -> str:
+    where = f"scope {row['scope_name']}" if row.get("scope_name") else "every session"
+    return "\n".join(
+        (
+            f"  ── {row['name']}  ·  listed in {where}",
+            screen.wrap(f"trigger: {row['trigger']}", indent="  "),
+            f"  {_rules(row['rules'])} active  ·  body {row['body_tokens']}/"
+            f"{config.topic_capacity()} tokens  ·  index line {row['line_tokens']} tokens",
+        )
+    )
+
+
+def _topic_scope(prompt: str, current: str | None) -> str | None | screen.Cancelled:
+    """A scope name, or None for every session; '-' clears one already set."""
+    hint = "; '-' means every session" if current else "; empty means every session"
+    answer = screen.editline(f"  {prompt} [edit existing{hint}]: ", current or "")
+    if isinstance(answer, screen.Cancelled):
+        return answer
+    if answer.text == "-":
+        return None
+    return answer.text or current
+
+
+def _topics_page(dsn: str | None) -> None:
+    at, note, selected = 0, "", None
+    while True:
+        rows = _topic_rows(dsn)
+        kept = next((index for index, row in enumerate(rows) if row["topic_id"] == selected), None)
+        if kept is not None:
+            at = kept
+        selected = None
+        at = max(0, min(at, len(rows) - 1))
+        lines = []
+        for index, row in enumerate(rows):
+            line = screen.clip(
+                f"    {screen.pad(row['name'], 24)} "
+                f"{screen.pad(row.get('scope_name') or 'every session', 16)}"
+                f"{_rules(row['rules']):>9}  ·  {row['body_tokens']:>4} tokens",
+                screen.text_width(),
+            )
+            lines.append(screen.selected(line) if index == at else line)
+        detail = _topic_detail(rows[at]) if rows else "  No topics yet. Press n to create one."
+        keys = screen.trailer(
+            detail,
+            "  n new topic   e edit   a archive   " + _LIST_KEYS.strip(),
+            note,
+        )
+        screen.paint(screen.list_screen(_title("Topics"), lines, at, keys))
+        key = screen.getkey()
+        note = ""
+        if key in ("q", "left"):
+            return
+        if key == "?":
+            _help()
+        elif key in ("up", "k"):
+            at = max(0, at - 1)
+        elif key in ("down", "j"):
+            at = min(max(0, len(rows) - 1), at + 1)
+        elif key == "home":
+            at = 0
+        elif key == "end":
+            at = max(0, len(rows) - 1)
+        elif key == "e":
+            if not rows:
+                note = "  there is no topic to edit"
+                continue
+            row = rows[at]
+            selected = row["topic_id"]
+            name = _replacement("topic name", row["name"], clearable=False)
+            trigger = _replacement("trigger", row["trigger"], clearable=False)
+            scope_name = _topic_scope("scope", row.get("scope_name"))
+            if any(isinstance(value, screen.Cancelled) for value in (name, trigger, scope_name)):
+                note = "  topic unchanged"
+                continue
+            try:
+                with db.transaction(dsn) as cur:
+                    scope_id = (
+                        scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
+                    )
+                    topics.update_topic(
+                        cur,
+                        row["topic_id"],
+                        actor=ACTOR,
+                        name=name or row["name"],
+                        trigger=trigger or row["trigger"],
+                        scope_id=scope_id,
+                        clear_scope=scope_id is None,
+                    )
+                note = f"  edited topic {name or row['name']}"
+            except MashuError as error:
+                note = f"  {error}"
+        elif key == "a":
+            if not rows:
+                note = "  there is no topic to archive"
+                continue
+            row = rows[at]
+            if not _confirm(f"archive topic {row['name']}?"):
+                note = "  topic kept"
+                continue
+            try:
+                with db.transaction(dsn) as cur:
+                    topics.archive_topic(cur, row["topic_id"], actor=ACTOR)
+                note = f"  archived topic {row['name']}"
+            except MashuError as error:
+                note = f"  {error}"
+        elif key == "n":
+            name_answer = _answer("  topic name: ")
+            if isinstance(name_answer, screen.Cancelled):
+                note = "  topic creation cancelled"
+                continue
+            if not name_answer.text:
+                note = "  a topic needs a name"
+                continue
+            scope_answer = _answer("  scope [empty means every session]: ")
+            if isinstance(scope_answer, screen.Cancelled):
+                note = "  topic creation cancelled"
+                continue
+            trigger_answer = _answer("  trigger [one sentence saying when to read it]: ")
+            if isinstance(trigger_answer, screen.Cancelled):
+                note = "  topic creation cancelled"
+                continue
+            try:
+                with db.transaction(dsn) as cur:
+                    topics.create_topic(
+                        cur,
+                        name=name_answer.text,
+                        trigger=trigger_answer.text,
+                        scope_id=scopes.require_scope(cur, scope_answer.text)["scope_id"]
+                        if scope_answer.text
+                        else None,
+                        actor=ACTOR,
+                    )
+                note = f"  created topic {name_answer.text}"
             except MashuError as error:
                 note = f"  {error}"
 
@@ -551,6 +723,7 @@ _PAGES: tuple[Callable[[str | None], None], ...] = (
     _health_page,
     _bootstrap_page,
     _scopes_page,
+    _topics_page,
     _routes_page,
     _schema_page,
 )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from datetime import date, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from mashu import (
     bootstrap,
@@ -18,6 +18,7 @@ from mashu import (
     scopes,
     task_history,
     tasks,
+    topics,
     traces,
 )
 from mashu.errors import (
@@ -35,6 +36,8 @@ DEFAULT_ACTOR = "agent"
 INSTRUCTIONS_BYTE_LIMIT = 2048
 INSTRUCTIONS = (
     "Mashu pushes active Memory; call session_bootstrap first in every session. "
+    "When the work at hand matches a bootstrap topic's trigger, call memory_list with that "
+    "topic before starting it. "
     "Before continuing a task from a bootstrap card, call task_get with its full id and "
     "verify old state against the repository and artifacts. Use task_checkpoint at work "
     "breaks; put failed tries in its attempts, costly-to-rederive reasons in decisions, "
@@ -99,10 +102,12 @@ def build_server() -> Any:
     from mcp.server import MCPServer
 
     server = MCPServer(name="mashu", instructions=INSTRUCTIONS)
+    # Each client session runs its own stdio server process, so one id per build names it.
+    session = uuid4()
 
     @server.tool()
     def session_bootstrap(scope: str | None = None) -> dict[str, Any]:
-        """Return session memories, active task cards, and temporary context at startup."""
+        """Return session memories, the topic index, task cards, and temporary context."""
         try:
             with db.transaction() as cur:
                 scope_id, scope_name, routed = _scope(cur, scope)
@@ -214,10 +219,19 @@ def build_server() -> Any:
             return _failure(error)
 
     @server.tool()
-    def memory_list(scope: str) -> dict[str, Any]:
-        """List active knowledge for one named scope."""
+    def memory_list(scope: str | None = None, topic: str | None = None) -> dict[str, Any]:
+        """List active knowledge for one named scope, or read one topic's rules.
+
+        Pass exactly one. With `topic`, read the rules before starting the work its
+        trigger names; bootstrap lists topics but never their rules.
+        """
+        if (scope is None) == (topic is None):
+            return _failure(MashuError("pass exactly one of scope or topic"))
         try:
             with db.transaction() as cur:
+                if topic is not None:
+                    answer = topics.read_for_session(cur, topic, actor=actor(), session=session)
+                    return _plain({"ok": True, **answer})
                 row = scopes.require_scope(cur, scope)
                 found = memories.active_memories(cur, scope_id=row["scope_id"])
                 return _plain({"ok": True, "scope": row["name"], "memories": found})
@@ -271,6 +285,7 @@ def build_server() -> Any:
         delivery: str | None = None,
         scope: str | None = None,
         guard_action: str | None = None,
+        topic: str | None = None,
     ) -> dict[str, Any]:
         """Admit a new Memory with explicit instruction provenance.
 
@@ -283,6 +298,8 @@ def build_server() -> Any:
         any available `conversation_ref`, and a new `request_id`. The Agent executes it;
         this provenance is not authentication. Invalidated or legacy conflicts need
         `conflict_ids` and a `conflict_instruction` in which the user addresses them.
+        For a rule the user wants read only during one kind of work, pass
+        `delivery='topic'` and an existing `topic` name.
         """
         if approval_kind != "user_instruction":
             return _failure(MashuError("MCP admission requires approval_kind='user_instruction'"))
@@ -305,6 +322,7 @@ def build_server() -> Any:
         }
         try:
             with db.transaction() as cur:
+                topic_id = topics.require_topic(cur, topic)["topic_id"] if topic else None
                 if content is not None:
                     scope_id, _, _ = _scope(cur, scope)
                     answer = nominations.remember_explicit(
@@ -316,6 +334,7 @@ def build_server() -> Any:
                         scope_id=scope_id,
                         delivery=delivery,
                         guard_action=guard_action,
+                        topic_id=topic_id,
                     )
                     return _plain({"ok": answer["admitted"], **answer})
                 cur.execute("SELECT * FROM nomination WHERE nomination_id = %s", (nomination_id,))
@@ -327,7 +346,9 @@ def build_server() -> Any:
                     if scope
                     else nomination["scope_id"]
                 )
-                chosen_delivery = delivery or ("scope" if scope_id else "always")
+                chosen_delivery = delivery or (
+                    "topic" if topic_id else "scope" if scope_id else "always"
+                )
                 result = nominations.admit(
                     cur,
                     nomination_id,
@@ -337,6 +358,7 @@ def build_server() -> Any:
                     scope_id=scope_id,
                     scope_override=True,
                     guard_action=guard_action,
+                    topic_id=topic_id,
                     approval=approval,
                     request_id=request_id,
                 )
@@ -367,7 +389,8 @@ def build_server() -> Any:
         read; if it changed, reread it and update the proposal. Old delivery settings carry
         over by default; pass a complete `successor_settings` object with `delivery`,
         `scope_id`, and `guard_action` only when the requested change includes new
-        delivery settings.
+        delivery settings. For `delivery='topic'` add `topic` with an existing topic name
+        and pass that topic's scope_id or null.
         """
         try:
             with db.transaction() as cur:
