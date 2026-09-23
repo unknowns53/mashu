@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from conftest import remember
 from mashu import capacity, config, memories, scopes, temporary
 from mashu.errors import RefusedError
 from mashu.tokens import pushed_cost
@@ -15,7 +16,7 @@ CONDITION_EVERYWHERE = "the licence server is offline this week"
 
 def fill(cur, scope_id, count):
     for content in RULES[:count]:
-        memories.remember(cur, content=content, actor="user", scope_id=scope_id, delivery="scope")
+        remember(cur, content, scope_id=scope_id, delivery="scope")
 
 
 def test_an_empty_store_admits_anything_reasonable(cur, scope_id):
@@ -45,7 +46,7 @@ def test_a_full_scope_refuses_the_next_rule_and_says_by_how_much(cur, scope_id, 
     assert "mashu retire" in got["refusal"] and "guard" in got["refusal"]
 
     with pytest.raises(RefusedError, match="seats 100 tokens"):
-        memories.remember(cur, content=NEW_RULE, actor="user", scope_id=scope_id, delivery="scope")
+        remember(cur, NEW_RULE, scope_id=scope_id, delivery="scope")
 
 
 def test_an_always_rule_is_weighed_against_the_fullest_scope(cur, scope_id, monkeypatch):
@@ -94,7 +95,7 @@ def test_the_totals_separate_what_every_session_pays_from_what_one_scope_does(
 ):
     monkeypatch.setenv("MASHU_CAPACITY", "400")
     fill(cur, scope_id, 2)
-    memories.remember(cur, content=NEW_RULE, actor="user")
+    remember(cur, NEW_RULE)
 
     totals = capacity.bootstrap_totals(cur)
     assert totals["always"] == pushed_cost([NEW_RULE])
@@ -105,7 +106,7 @@ def test_the_totals_separate_what_every_session_pays_from_what_one_scope_does(
 def test_the_always_layer_has_a_lower_ceiling_of_its_own(cur, scope_id, monkeypatch):
     monkeypatch.setenv("MASHU_CAPACITY", "400")
     monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", str(pushed_cost(RULES[:1])))
-    memories.remember(cur, content=RULES[0], actor="user")
+    remember(cur, RULES[0])
 
     got = capacity.check_admission(cur, content=NEW_RULE, delivery="always")
     assert got["ok"] is False
@@ -129,7 +130,7 @@ def test_the_layer_refusal_names_the_door_a_scope_rule_does_not_have(cur, monkey
     assert "mashu deliver <id> scope" in got["refusal"]
 
     with pytest.raises(RefusedError, match="the always layer seats"):
-        memories.remember(cur, content=NEW_RULE, actor="user")
+        remember(cur, NEW_RULE)
 
 
 def test_a_dated_condition_is_not_weighed_against_the_seats(cur, scope_id, monkeypatch):

@@ -5,16 +5,8 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from mashu import (
-    bootstrap,
-    capacity,
-    config,
-    memories,
-    migrate,
-    nominations,
-    scopes,
-    topics,
-)
+from conftest import remember, retire
+from mashu import bootstrap, capacity, config, memories, migrate, nominations, scopes, topics
 from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
@@ -29,9 +21,7 @@ def topic(cur, name="difficulty", *, scope_id=None, trigger=TRIGGER):
 
 
 def filed(cur, subject, content=LEVER):
-    return memories.remember(
-        cur, content=content, actor="user", delivery="topic", topic_id=subject["topic_id"]
-    )
+    return remember(cur, content, delivery="topic", topic_id=subject["topic_id"])
 
 
 def line(subject, rules):
@@ -86,7 +76,7 @@ def test_a_topic_for_every_session_is_listed_everywhere(cur, scope_id):
 
 
 def test_the_opening_comes_in_the_documented_order(cur, scope_id):
-    memories.remember(cur, content=ALWAYS, actor="user")
+    remember(cur, ALWAYS)
     subject = topic(cur, scope_id=scope_id)
     filed(cur, subject)
     got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
@@ -104,11 +94,15 @@ def test_the_opening_comes_in_the_documented_order(cur, scope_id):
 # pulling a topic
 
 
-def test_reading_a_topic_returns_its_rules_and_records_the_session(cur, scope_id):
+def test_reading_a_topic_records_the_session_and_a_person_reading_records_nothing(cur, scope_id):
     subject = topic(cur, scope_id=scope_id)
     first = filed(cur, subject)
     second = filed(cur, subject, PLACEMENT)
     session = uuid4()
+    listed = topics.topic_rules(cur, "difficulty")["memories"]
+    assert {row["content"] for row in listed} == {LEVER, PLACEMENT}
+    cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'topic_read'")
+    assert cur.fetchone()["n"] == 0
 
     got = topics.read_for_session(cur, "difficulty", actor="agent", session=session)
 
@@ -119,21 +113,12 @@ def test_reading_a_topic_returns_its_rules_and_records_the_session(cur, scope_id
         second["memory_id"],
     }
     cur.execute("SELECT actor, detail FROM event_log WHERE event_type = 'topic_read'")
-    events = cur.fetchall()
-    assert events == [
+    assert cur.fetchall() == [
         {
             "actor": "agent",
             "detail": {"topic_id": str(subject["topic_id"]), "session": str(session)},
         }
     ]
-
-
-def test_reading_for_a_person_records_nothing(cur):
-    subject = topic(cur)
-    filed(cur, subject)
-    assert [row["content"] for row in topics.topic_rules(cur, "difficulty")["memories"]] == [LEVER]
-    cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'topic_read'")
-    assert cur.fetchone()["n"] == 0
 
 
 def test_an_archived_topic_cannot_be_read_or_filled(cur):
@@ -154,9 +139,7 @@ def test_removing_deletes_an_unused_topic_and_archives_a_used_one(cur):
     rule = filed(cur, used)
     with pytest.raises(MashuError, match="still holds 1 active rule"):
         topics.remove_topic(cur, used["topic_id"], actor="user")
-    memories.retire(
-        cur, rule["memory_id"], reason="lever gone", actor="user", retirement_kind="out_of_scope"
-    )
+    retire(cur, rule, "lever gone", "out_of_scope")
     assert topics.remove_topic(cur, used["topic_id"], actor="user")["removed"] == "archived"
     assert topics.get_topic(cur, "difficulty")["archived_at"] is not None
 
@@ -211,7 +194,7 @@ def test_a_scoped_topic_line_counts_in_its_scope(cur, scope_id):
 
 
 def test_the_first_rule_of_a_topic_is_refused_when_its_line_does_not_fit(cur, monkeypatch):
-    memories.remember(cur, content=ALWAYS, actor="user")
+    remember(cur, ALWAYS)
     subject = topic(cur)
     monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", str(pushed_cost([ALWAYS]) + 3))
 
@@ -261,8 +244,8 @@ def test_a_trigger_edit_is_weighed_where_the_line_lands(cur, monkeypatch):
 
 
 def test_writes_that_shrink_the_opening_pass_when_it_is_already_over(cur, scope_id, monkeypatch):
-    kept = memories.remember(cur, content=ALWAYS, actor="user")
-    other = memories.remember(cur, content=PLACEMENT, actor="user")
+    kept = remember(cur, ALWAYS)
+    other = remember(cur, PLACEMENT)
     subject = topic(cur, scope_id=scope_id)
     monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", "10")
 
@@ -277,9 +260,9 @@ def test_writes_that_shrink_the_opening_pass_when_it_is_already_over(cur, scope_
 
     # Growing it is still refused, and so is a global topic line in place of a short body.
     with pytest.raises(RefusedError, match="the always layer seats 10"):
-        memories.remember(cur, content="one more line for everyone", actor="user")
+        remember(cur, "one more line for everyone")
     global_topic = topic(cur, "everywhere", trigger="Before any long work")
-    short = memories.remember(cur, content="x", actor="user", scope_id=scope_id, delivery="scope")
+    short = remember(cur, "x", scope_id=scope_id, delivery="scope")
     memories.set_delivery(cur, short["memory_id"], delivery="always", actor="user")
     with pytest.raises(RefusedError, match="the always layer seats 10"):
         memories.set_delivery(
@@ -297,14 +280,7 @@ def test_writes_that_shrink_the_opening_pass_when_it_is_already_over(cur, scope_
 def test_remember_files_a_rule_under_its_topic_with_the_topic_scope(cur, scope_id):
     subject = topic(cur, scope_id=scope_id)
     elsewhere = scopes.create_scope(cur, name="elsewhere", actor="user")["scope_id"]
-    row = memories.remember(
-        cur,
-        content=LEVER,
-        actor="user",
-        delivery="topic",
-        topic_id=subject["topic_id"],
-        scope_id=elsewhere,
-    )
+    row = remember(cur, LEVER, delivery="topic", topic_id=subject["topic_id"], scope_id=elsewhere)
     assert row["delivery"] == "topic"
     assert row["topic_id"] == subject["topic_id"]
     assert row["scope_id"] == scope_id
@@ -312,16 +288,14 @@ def test_remember_files_a_rule_under_its_topic_with_the_topic_scope(cur, scope_i
     assert detail["topic_name"] == "difficulty" and detail["topic_trigger"] == TRIGGER
 
     with pytest.raises(MashuError, match="needs the topic"):
-        memories.remember(cur, content=PLACEMENT, actor="user", delivery="topic")
+        remember(cur, PLACEMENT, delivery="topic")
     with pytest.raises(MashuError, match="only applies to delivery 'topic'"):
-        memories.remember(
-            cur, content=PLACEMENT, actor="user", delivery="always", topic_id=subject["topic_id"]
-        )
+        remember(cur, PLACEMENT, delivery="always", topic_id=subject["topic_id"])
 
 
 def test_delivery_can_move_into_and_out_of_a_topic(cur):
     subject = topic(cur)
-    row = memories.remember(cur, content=LEVER, actor="user")
+    row = remember(cur, LEVER)
     moved = memories.set_delivery(
         cur, row["memory_id"], delivery="topic", topic_id=subject["topic_id"], actor="user"
     )
@@ -381,13 +355,7 @@ def test_a_topic_memory_cannot_become_temporary(cur):
 def test_a_retired_topic_rule_is_restored_into_its_topic(cur, scope_id):
     subject = topic(cur)
     row = filed(cur, subject)
-    memories.retire(
-        cur,
-        row["memory_id"],
-        reason="the lever moved",
-        actor="user",
-        retirement_kind="out_of_scope",
-    )
+    retire(cur, row, "the lever moved", "out_of_scope")
     topics.update_topic(cur, subject["topic_id"], actor="user", scope_id=scope_id)
     restored = memories.restore(
         cur,

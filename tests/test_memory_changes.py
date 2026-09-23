@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import pytest
 
+from conftest import apply_change, propose_change, remember, retire
 from mashu import bootstrap, match, memories, memory_changes, nominations, scopes, topics
 from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
@@ -12,62 +13,53 @@ RULE = "the storage adapter trusts the signed manifest before selecting a mirror
 UPDATED = "the storage adapter verifies the signed manifest before selecting a mirror"
 SUCCESSOR = "validate the export envelope checksum before opening its payload"
 INVALIDATED = "old export checksum advice caused rejected payloads"
+RESTORE_EVIDENCE = [
+    {"kind": "artifact", "ref": "release://adapter-v3", "observation": "the check was removed"}
+]
+REVERSAL = {"reversal_instruction": "Restore the rule after reversing the prior retirement"}
 
 
-def _memory(cur, content: str = RULE):
-    return memories.remember(cur, content=content, actor="user")
-
-
-def _evidence(cur, content: str = "observed the storage adapter outcome"):
+def _successor(cur, content, kind="user_explicit", **kwargs):
+    """A pending candidate standing on an explicit ledger row of its own."""
     cur.execute(
-        """
-        INSERT INTO ledger (kind, what, prevention, created_by)
-        VALUES ('explicit', 'user instruction', %s, 'user')
-        RETURNING ledger_id
-        """,
+        "INSERT INTO ledger (kind, what, prevention, created_by) "
+        "VALUES ('explicit', 'user instruction', %s, 'user') RETURNING ledger_id",
         (content,),
     )
-    return cur.fetchone()["ledger_id"]
-
-
-def _propose_retire(cur, memory, *, kind="invalidated", reason="the adapter now verifies it"):
-    detail = memories.memory_details(cur, memory["memory_id"])
-    return memory_changes.propose(
-        cur,
-        target_memory_id=memory["memory_id"],
-        target_revision_id=detail["current_revision_id"],
-        target_updated_at=detail["updated_at"],
-        operation="retire",
-        retirement_kind=kind,
-        retire_reason=reason,
-        evidence=[
-            {
-                "kind": "ledger",
-                "id": str(memory["evidence"][0]),
-                "observation": "the adapter now verifies the rule before loading",
-            }
-        ],
-        actor="agent",
+    evidence = [cur.fetchone()["ledger_id"]]
+    return nominations.create_nomination(
+        cur, content=content, kind=kind, evidence=evidence, actor="agent", **kwargs
     )
 
 
-def _approval(instruction: str = "Retire this rule because the adapter now checks it"):
-    return {
-        "kind": "user_instruction",
-        "instruction": instruction,
-        "conversation_ref": "conversation:turn-42",
-    }
+def _replace(cur, old, successor, version=None, **kwargs):
+    return propose_change(
+        cur,
+        old,
+        "replace",
+        ledger_id=successor["evidence"][0],
+        retirement_kind="superseded",
+        retire_reason="the successor rule replaces this one",
+        successor_nomination_id=successor["nomination_id"],
+        successor_nomination_version=version or successor["version"],
+        **kwargs,
+    )
+
+
+def _redeliver(cur, memory, settings):
+    return propose_change(cur, memory, "redeliver", successor_settings=settings)
+
+
+def _topic_settings(name, trigger=None, scope_id=None):
+    settings = {"delivery": "topic", "scope_id": scope_id, "guard_action": None, "topic": name}
+    if trigger is not None:
+        settings["topic_trigger"] = trigger
+    return settings
 
 
 def test_memory_get_returns_full_retired_memory_without_putting_body_in_matches(cur):
-    memory = _memory(cur)
-    retired = memories.retire(
-        cur,
-        memory["memory_id"],
-        reason="the storage adapter enforces this itself",
-        retirement_kind="invalidated",
-        actor="user",
-    )
+    memory = remember(cur, RULE)
+    retired = retire(cur, memory, "the storage adapter enforces this itself")
 
     detail = memories.memory_details(cur, memory["memory_id"])
     assert detail["content"] == RULE
@@ -81,8 +73,10 @@ def test_memory_get_returns_full_retired_memory_without_putting_body_in_matches(
 
 
 def test_agent_proposal_stays_pending_until_explicit_instruction_and_replay_is_idempotent(cur):
-    memory = _memory(cur)
-    proposal = _propose_retire(cur, memory)
+    memory = remember(cur, RULE)
+    proposal = propose_change(
+        cur, memory, "retire", retirement_kind="invalidated", retire_reason="now verified"
+    )
 
     assert proposal["operation"] == "retire"
     assert proposal["target_revision_id"] is not None
@@ -90,34 +84,15 @@ def test_agent_proposal_stays_pending_until_explicit_instruction_and_replay_is_i
     assert proposal["target"]["content"] == RULE
     with pytest.raises(MashuError, match="approval kind"):
         memory_changes.apply(
-            cur,
-            proposal["change_id"],
-            version=1,
-            request_id=uuid4(),
-            approval={},
-            actor="agent",
+            cur, proposal["change_id"], version=1, request_id=uuid4(), approval={}, actor="agent"
         )
     assert memories.get_memory(cur, memory["memory_id"])["status"] == "active"
     assert memory_changes.get(cur, proposal["change_id"])["status"] == "pending"
 
     request_id = uuid4()
-    approval = _approval()
-    applied = memory_changes.apply(
-        cur,
-        proposal["change_id"],
-        version=1,
-        request_id=request_id,
-        approval=approval,
-        actor="agent",
-    )
-    replay = memory_changes.apply(
-        cur,
-        proposal["change_id"],
-        version=1,
-        request_id=request_id,
-        approval=approval,
-        actor="agent",
-    )
+    instruction = "Retire this rule because the adapter now checks it"
+    applied = apply_change(cur, proposal, instruction, request_id=request_id)
+    replay = apply_change(cur, proposal, instruction, request_id=request_id)
 
     assert applied == replay
     assert applied["memory"]["status"] == "retired"
@@ -131,112 +106,39 @@ def test_agent_proposal_stays_pending_until_explicit_instruction_and_replay_is_i
     retirement_event = cur.fetchone()
     assert retirement_event["actor"] == "agent"
     assert retirement_event["detail"]["approval_source"]["kind"] == "user_instruction"
-    assert retirement_event["detail"]["approval_source"]["instruction"] == approval["instruction"]
+    assert retirement_event["detail"]["approval_source"]["instruction"] == instruction
     cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'memory_change_applied'")
     assert cur.fetchone()["n"] == 1
 
     with pytest.raises(MashuError, match="different memory change request"):
-        memory_changes.apply(
-            cur,
-            proposal["change_id"],
-            version=1,
-            request_id=request_id,
-            approval=_approval("a different instruction"),
-            actor="agent",
-        )
+        apply_change(cur, proposal, "a different instruction", request_id=request_id)
 
 
 def test_changed_target_revision_requires_a_refreshed_proposal(cur):
-    memory = _memory(cur)
-    proposal = _propose_retire(cur, memory)
+    memory = remember(cur, RULE)
+    retirement = {"retirement_kind": "invalidated", "retire_reason": "the adapter verifies it"}
+    proposal = propose_change(cur, memory, "retire", **retirement)
     memories.revise(cur, memory["memory_id"], content=UPDATED, actor="user")
 
     with pytest.raises(MashuError, match="target Memory changed"):
-        memory_changes.apply(
-            cur,
-            proposal["change_id"],
-            version=1,
-            request_id=uuid4(),
-            approval=_approval(),
-            actor="agent",
-        )
+        apply_change(cur, proposal)
 
+    refreshed = propose_change(cur, memory, "retire", change_id=proposal["change_id"], **retirement)
     current = memories.memory_details(cur, memory["memory_id"])
-    refreshed = memory_changes.propose(
-        cur,
-        target_memory_id=memory["memory_id"],
-        target_revision_id=current["current_revision_id"],
-        target_updated_at=current["updated_at"],
-        operation="retire",
-        retirement_kind="invalidated",
-        retire_reason="the adapter now verifies the updated rule",
-        evidence=[
-            {
-                "kind": "ledger",
-                "id": str(memory["evidence"][0]),
-                "observation": "the adapter now verifies the updated rule",
-            }
-        ],
-        actor="agent",
-        change_id=proposal["change_id"],
-    )
     assert refreshed["version"] == 2
     assert refreshed["target_revision_id"] == current["current_revision_id"]
-    result = memory_changes.apply(
-        cur,
-        proposal["change_id"],
-        version=2,
-        request_id=uuid4(),
-        approval=_approval("Retire the updated rule because the adapter now verifies it"),
-        actor="agent",
-    )
-    assert result["memory"]["status"] == "retired"
+    assert apply_change(cur, refreshed)["memory"]["status"] == "retired"
 
 
 def test_new_conflict_after_replace_proposal_requires_reread_and_acknowledgment(cur):
-    old = _memory(cur)
-    ledger_id = _evidence(cur, SUCCESSOR)
-    successor = nominations.create_nomination(
-        cur,
-        content=SUCCESSOR,
-        kind="user_explicit",
-        evidence=[ledger_id],
-        actor="agent",
-    )
-    target = memories.memory_details(cur, old["memory_id"])
-    proposal = memory_changes.propose(
-        cur,
-        target_memory_id=old["memory_id"],
-        target_revision_id=target["current_revision_id"],
-        target_updated_at=target["updated_at"],
-        operation="replace",
-        retirement_kind="superseded",
-        retire_reason="the new export envelope rule replaces this one",
-        successor_nomination_id=successor["nomination_id"],
-        successor_nomination_version=successor["version"],
-        evidence=[
-            {"kind": "ledger", "id": str(ledger_id), "observation": "new incident needs this rule"}
-        ],
-        actor="agent",
-    )
+    old = remember(cur, RULE)
+    successor = _successor(cur, SUCCESSOR)
+    proposal = _replace(cur, old, successor)
 
-    invalidated = _memory(cur, SUCCESSOR)
-    memories.retire(
-        cur,
-        invalidated["memory_id"],
-        reason=INVALIDATED,
-        retirement_kind="invalidated",
-        actor="user",
-    )
+    invalidated = remember(cur, SUCCESSOR)
+    retire(cur, invalidated, INVALIDATED)
     with pytest.raises(MashuError, match="conflicts changed"):
-        memory_changes.apply(
-            cur,
-            proposal["change_id"],
-            version=1,
-            request_id=uuid4(),
-            approval=_approval("Replace the old rule"),
-            actor="agent",
-        )
+        apply_change(cur, proposal, "Replace the old rule")
     assert memories.get_memory(cur, old["memory_id"])["status"] == "active"
     assert nominations._require_pending(cur, successor["nomination_id"])["status"] == "pending"
 
@@ -244,36 +146,17 @@ def test_new_conflict_after_replace_proposal_requires_reread_and_acknowledgment(
     refreshed_nomination = nominations.refresh_conflicts(
         cur, successor["nomination_id"], conflict_ids, actor="agent"
     )
-    current = memories.memory_details(cur, old["memory_id"])
-    refreshed = memory_changes.propose(
-        cur,
-        target_memory_id=old["memory_id"],
-        target_revision_id=current["current_revision_id"],
-        target_updated_at=current["updated_at"],
-        operation="replace",
-        retirement_kind="superseded",
-        retire_reason="the new export envelope rule replaces this one",
-        successor_nomination_id=successor["nomination_id"],
-        successor_nomination_version=refreshed_nomination["version"],
-        evidence=[
-            {"kind": "ledger", "id": str(ledger_id), "observation": "new incident needs this rule"}
-        ],
-        actor="agent",
-        change_id=proposal["change_id"],
+    refreshed = _replace(
+        cur, old, successor, refreshed_nomination["version"], change_id=proposal["change_id"]
     )
     assert refreshed["version"] == 2
     assert refreshed["conflicts"][0]["retirement_kind"] == "invalidated"
-    result = memory_changes.apply(
+    result = apply_change(
         cur,
-        proposal["change_id"],
-        version=2,
-        request_id=uuid4(),
-        approval={
-            **_approval("Replace this rule after considering its invalidation"),
-            "conflict_ids": [invalidated["memory_id"]],
-            "conflict_instruction": "Apply this replacement despite the invalidated rule",
-        },
-        actor="agent",
+        refreshed,
+        "Replace this rule after considering its invalidation",
+        conflict_ids=[invalidated["memory_id"]],
+        conflict_instruction="Apply this replacement despite the invalidated rule",
     )
     assert result["operation"] == "replace"
     assert result["retired"]["retirement_kind"] == "superseded"
@@ -282,45 +165,14 @@ def test_new_conflict_after_replace_proposal_requires_reread_and_acknowledgment(
     assert refreshed_nomination["conflicts"] == [invalidated["memory_id"]]
 
 
-def test_restore_rechecks_capacity_duplicates_and_keeps_retirement_history(cur):
-    memory = _memory(cur)
-    retired = memories.retire(
-        cur,
-        memory["memory_id"],
-        reason="the adapter was expected to reject unsigned manifests",
-        retirement_kind="legacy",
-        actor="user",
-        _legacy_compat=True,
-    )
-    detail = memories.memory_details(cur, memory["memory_id"])
-    proposal = memory_changes.propose(
-        cur,
-        target_memory_id=memory["memory_id"],
-        target_revision_id=detail["current_revision_id"],
-        target_updated_at=detail["updated_at"],
-        operation="restore",
-        restore_reason="the upstream signature check was removed",
-        evidence=[
-            {
-                "kind": "artifact",
-                "ref": "release://adapter-v3",
-                "observation": "the upstream release removed the replacement check",
-            }
-        ],
-        actor="agent",
+def test_restore_keeps_retirement_history(cur):
+    memory = remember(cur, RULE)
+    retired = retire(cur, memory, "the adapter was expected to reject unsigned manifests", "legacy")
+    proposal = propose_change(
+        cur, memory, "restore", restore_reason="the check was removed", evidence=RESTORE_EVIDENCE
     )
 
-    result = memory_changes.apply(
-        cur,
-        proposal["change_id"],
-        version=1,
-        request_id=uuid4(),
-        approval={
-            **_approval("Restore this rule because the upstream check was removed"),
-            "reversal_instruction": "Restore the rule after reversing the prior retirement",
-        },
-        actor="agent",
-    )
+    result = apply_change(cur, proposal, "Restore this rule", **REVERSAL)
     assert result["memory"]["status"] == "active"
     assert result["memory"]["retirement_kind"] is None
     history = memories.memory_details(cur, memory["memory_id"])["retirement_history"]
@@ -329,51 +181,15 @@ def test_restore_rechecks_capacity_duplicates_and_keeps_retirement_history(cur):
 
 
 def test_restore_refuses_a_duplicate_active_memory(cur):
-    memory = _memory(cur)
-    memories.retire(
-        cur,
-        memory["memory_id"],
-        reason="this rule is no longer needed",
-        retirement_kind="legacy",
-        actor="user",
-        _legacy_compat=True,
-    )
-    memories.remember(
-        cur,
-        content=RULE,
-        actor="user",
-        acknowledged_conflicts=[memory["memory_id"]],
-    )
-    detail = memories.memory_details(cur, memory["memory_id"])
-    proposal = memory_changes.propose(
-        cur,
-        target_memory_id=memory["memory_id"],
-        target_revision_id=detail["current_revision_id"],
-        target_updated_at=detail["updated_at"],
-        operation="restore",
-        restore_reason="the old deployment path returned",
-        evidence=[
-            {
-                "kind": "artifact",
-                "ref": "release://adapter-v4",
-                "observation": "the older deployment path has returned",
-            }
-        ],
-        actor="agent",
+    memory = remember(cur, RULE)
+    retire(cur, memory, "this rule is no longer needed", "legacy")
+    remember(cur, RULE, acknowledged_conflicts=[memory["memory_id"]])
+    proposal = propose_change(
+        cur, memory, "restore", restore_reason="the path returned", evidence=RESTORE_EVIDENCE
     )
 
     with pytest.raises(MashuError, match="similar active Memory already exists"):
-        memory_changes.apply(
-            cur,
-            proposal["change_id"],
-            version=1,
-            request_id=uuid4(),
-            approval={
-                **_approval("Restore the returned rule"),
-                "reversal_instruction": "Reverse the legacy retirement after reviewing its reason",
-            },
-            actor="agent",
-        )
+        apply_change(cur, proposal, "Restore the returned rule", **REVERSAL)
     assert memories.get_memory(cur, memory["memory_id"])["status"] == "retired"
 
 
@@ -381,240 +197,67 @@ def test_replace_seats_against_the_final_active_set_and_refusal_rolls_back(cur, 
     old_content = "oldrule " + "amber brass cedar cobalt copper " * 18
     new_content = "newrule " + "apricot birch daisy emerald fig " * 9
     old_cost = pushed_cost([old_content])
-    new_cost = pushed_cost([new_content])
-    assert new_cost < old_cost
+    assert pushed_cost([new_content]) < old_cost
     monkeypatch.setenv("MASHU_CAPACITY", str(old_cost))
     monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", str(old_cost))
-    old = memories.remember(cur, content=old_content, actor="user")
-    evidence = _evidence(cur, new_content)
-    successor = nominations.create_nomination(
-        cur,
-        content=new_content,
-        kind="incident",
-        evidence=[evidence],
-        actor="agent",
-    )
-    detail = memories.memory_details(cur, old["memory_id"])
-    proposal = memory_changes.propose(
-        cur,
-        target_memory_id=old["memory_id"],
-        target_revision_id=detail["current_revision_id"],
-        target_updated_at=detail["updated_at"],
-        operation="replace",
-        retirement_kind="superseded",
-        retire_reason="the shorter checksum rule replaces the larger rule",
-        successor_nomination_id=successor["nomination_id"],
-        successor_nomination_version=successor["version"],
-        evidence=[
-            {
-                "kind": "ledger",
-                "id": str(evidence),
-                "observation": "the shorter signature rule covers the new issue",
-            }
-        ],
-        actor="agent",
-    )
-    result = memory_changes.apply(
-        cur,
-        proposal["change_id"],
-        version=1,
-        request_id=uuid4(),
-        approval=_approval("Replace the larger rule with the shorter one"),
-        actor="agent",
-    )
+    old = remember(cur, old_content)
+    proposal = _replace(cur, old, _successor(cur, new_content, "incident"))
+    result = apply_change(cur, proposal, "Replace the larger rule with the shorter one")
     assert result["memory"]["status"] == "active"
     assert result["retired"]["status"] == "retired"
 
-    second_old = _memory(cur, "older rule for a separate export format")
+    second_old = remember(cur, "older rule for a separate export format")
     too_large = "too_large " + "violet walnut xylophone zephyr quartz " * 18
-    second_evidence = _evidence(cur, too_large)
-    second_successor = nominations.create_nomination(
-        cur,
-        content=too_large,
-        kind="incident",
-        evidence=[second_evidence],
-        actor="agent",
-    )
-    second_detail = memories.memory_details(cur, second_old["memory_id"])
-    second_proposal = memory_changes.propose(
-        cur,
-        target_memory_id=second_old["memory_id"],
-        target_revision_id=second_detail["current_revision_id"],
-        target_updated_at=second_detail["updated_at"],
-        operation="replace",
-        retirement_kind="superseded",
-        retire_reason="the oversized replacement should fail without changing either row",
-        successor_nomination_id=second_successor["nomination_id"],
-        successor_nomination_version=second_successor["version"],
-        evidence=[
-            {
-                "kind": "ledger",
-                "id": str(second_evidence),
-                "observation": "the proposed rule exceeds the remaining seat",
-            }
-        ],
-        actor="agent",
-    )
+    second_successor = _successor(cur, too_large, "incident")
+    second_proposal = _replace(cur, second_old, second_successor)
     monkeypatch.setenv("MASHU_CAPACITY", str(pushed_cost([too_large]) - 1))
     monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", str(pushed_cost([too_large]) - 1))
     with pytest.raises(RefusedError):
-        memory_changes.apply(
-            cur,
-            second_proposal["change_id"],
-            version=1,
-            request_id=uuid4(),
-            approval=_approval("Replace the old rule"),
-            actor="agent",
-        )
+        apply_change(cur, second_proposal, "Replace the old rule")
     assert memories.get_memory(cur, second_old["memory_id"])["status"] == "active"
-    assert (
-        nominations._require_pending(cur, second_successor["nomination_id"])["status"] == "pending"
-    )
+    pending = nominations._require_pending(cur, second_successor["nomination_id"])
+    assert pending["status"] == "pending"
     assert memory_changes.get(cur, second_proposal["change_id"])["status"] == "pending"
 
 
 def test_replace_rejects_a_successor_changed_after_proposal(cur):
-    old = _memory(cur, f"old adapter rule {uuid4()}")
-    successor_content = f"verify the export digest before sending {uuid4()}"
+    old = remember(cur, f"old adapter rule {uuid4()}")
     revised_content = f"verify the transport envelope before sending {uuid4()}"
-    evidence_id = _evidence(cur, successor_content)
-    successor = nominations.create_nomination(
-        cur,
-        content=successor_content,
-        kind="user_explicit",
-        evidence=[evidence_id],
-        actor="agent",
-    )
-    target = memories.memory_details(cur, old["memory_id"])
-    evidence = [
-        {"kind": "ledger", "id": str(evidence_id), "observation": "the export needs a digest"}
-    ]
-    proposal = memory_changes.propose(
-        cur,
-        target_memory_id=old["memory_id"],
-        target_revision_id=target["current_revision_id"],
-        target_updated_at=target["updated_at"],
-        operation="replace",
-        retirement_kind="superseded",
-        retire_reason="the transport envelope rule replaces the adapter rule",
-        successor_nomination_id=successor["nomination_id"],
-        successor_nomination_version=successor["version"],
-        evidence=evidence,
-        actor="agent",
-    )
+    successor = _successor(cur, f"verify the export digest before sending {uuid4()}")
+    proposal = _replace(cur, old, successor)
     revised = nominations.revise(
-        cur,
-        successor["nomination_id"],
-        content=revised_content,
-        actor="user",
+        cur, successor["nomination_id"], content=revised_content, actor="user"
     )
     with pytest.raises(MashuError, match="successor nomination version changed"):
-        memory_changes.propose(
-            cur,
-            target_memory_id=old["memory_id"],
-            target_revision_id=target["current_revision_id"],
-            target_updated_at=target["updated_at"],
-            operation="replace",
-            retirement_kind="superseded",
-            retire_reason="the stale candidate must not become a proposal",
-            successor_nomination_id=successor["nomination_id"],
-            successor_nomination_version=successor["version"],
-            evidence=evidence,
-            actor="agent",
-        )
+        _replace(cur, old, successor)
 
     with pytest.raises(MashuError, match="successor nomination changed"):
-        memory_changes.apply(
-            cur,
-            proposal["change_id"],
-            version=proposal["version"],
-            request_id=uuid4(),
-            approval=_approval("Replace the adapter rule"),
-            actor="agent",
-        )
+        apply_change(cur, proposal, "Replace the adapter rule")
     assert memories.get_memory(cur, old["memory_id"])["status"] == "active"
-    assert (
-        nominations._require_pending(cur, successor["nomination_id"])["content"] == revised_content
-    )
+    pending = nominations._require_pending(cur, successor["nomination_id"])
+    assert pending["content"] == revised_content
 
-    refreshed = memory_changes.propose(
-        cur,
-        target_memory_id=old["memory_id"],
-        target_revision_id=target["current_revision_id"],
-        target_updated_at=target["updated_at"],
-        operation="replace",
-        retirement_kind="superseded",
-        retire_reason="the revised transport envelope rule replaces the adapter rule",
-        successor_nomination_id=successor["nomination_id"],
-        successor_nomination_version=revised["version"],
-        evidence=evidence,
-        actor="agent",
-        change_id=proposal["change_id"],
-    )
+    refreshed = _replace(cur, old, successor, revised["version"], change_id=proposal["change_id"])
     assert refreshed["version"] == proposal["version"] + 1
     assert refreshed["successor_snapshot"]["content"] == revised_content
-    applied = memory_changes.apply(
-        cur,
-        proposal["change_id"],
-        version=refreshed["version"],
-        request_id=uuid4(),
-        approval=_approval("Replace it with the revised transport envelope rule"),
-        actor="agent",
-    )
+    applied = apply_change(cur, refreshed, "Replace it with the revised transport envelope rule")
     assert applied["memory"]["content"] == revised_content
 
 
 def test_replace_inherits_guard_settings_and_clears_nomination_scope(cur):
     scope = scopes.create_scope(cur, name=f"candidate-only scope {uuid4()}", actor="user")
-    old = memories.remember(
-        cur,
-        content=f"run the deployment checksum guard {uuid4()}",
-        actor="user",
-        delivery="guard",
-        guard_action="deploy",
+    old = remember(
+        cur, f"run the deployment checksum guard {uuid4()}", delivery="guard", guard_action="deploy"
     )
-    successor_content = f"verify the release signature before deployment {uuid4()}"
-    evidence_id = _evidence(cur, successor_content)
-    successor = nominations.create_nomination(
-        cur,
-        content=successor_content,
-        kind="incident",
-        evidence=[evidence_id],
-        actor="agent",
-        scope_id=scope["scope_id"],
+    successor = _successor(
+        cur, f"verify the release signature {uuid4()}", "incident", scope_id=scope["scope_id"]
     )
-    target = memories.memory_details(cur, old["memory_id"])
-    proposal = memory_changes.propose(
-        cur,
-        target_memory_id=old["memory_id"],
-        target_revision_id=target["current_revision_id"],
-        target_updated_at=target["updated_at"],
-        operation="replace",
-        retirement_kind="superseded",
-        retire_reason="the release signature check replaces the deployment checksum guard",
-        successor_nomination_id=successor["nomination_id"],
-        successor_nomination_version=successor["version"],
-        evidence=[
-            {
-                "kind": "ledger",
-                "id": str(evidence_id),
-                "observation": "the release signature check prevents this deployment failure",
-            }
-        ],
-        actor="agent",
-    )
+    proposal = _replace(cur, old, successor)
     assert proposal["successor_delivery"] == "guard"
     assert proposal["successor_scope_id"] is None
     assert proposal["successor_guard_action"] == "deploy"
 
-    applied = memory_changes.apply(
-        cur,
-        proposal["change_id"],
-        version=proposal["version"],
-        request_id=uuid4(),
-        approval=_approval("Replace the deployment guard with the release signature check"),
-        actor="agent",
-    )
+    applied = apply_change(cur, proposal, "Replace the guard with the release signature check")
     assert applied["memory"]["delivery"] == "guard"
     assert applied["memory"]["guard_action"] == "deploy"
     assert applied["memory"]["scope_id"] is None
@@ -633,124 +276,37 @@ def test_replace_inherits_guard_settings_and_clears_nomination_scope(cur):
 def test_changed_successor_delivery_is_part_of_the_proposal_version(cur):
     old_scope = scopes.create_scope(cur, name=f"old delivery scope {uuid4()}", actor="user")
     new_scope = scopes.create_scope(cur, name=f"new delivery scope {uuid4()}", actor="user")
-    old = memories.remember(
+    old = remember(
         cur,
-        content=f"keep the legacy importer scoped {uuid4()}",
-        actor="user",
+        f"keep the legacy importer scoped {uuid4()}",
         delivery="scope",
         scope_id=old_scope["scope_id"],
     )
-    successor_content = f"validate the signed import manifest {uuid4()}"
-    evidence_id = _evidence(cur, successor_content)
-    successor = nominations.create_nomination(
-        cur,
-        content=successor_content,
-        kind="user_explicit",
-        evidence=[evidence_id],
-        actor="agent",
-    )
-    target = memories.memory_details(cur, old["memory_id"])
-    evidence = [
-        {"kind": "ledger", "id": str(evidence_id), "observation": "the importer needs a signature"}
-    ]
-    proposal = memory_changes.propose(
-        cur,
-        target_memory_id=old["memory_id"],
-        target_revision_id=target["current_revision_id"],
-        target_updated_at=target["updated_at"],
-        operation="replace",
-        retirement_kind="superseded",
-        retire_reason="the signed manifest rule replaces the legacy importer rule",
-        successor_nomination_id=successor["nomination_id"],
-        successor_nomination_version=successor["version"],
-        evidence=evidence,
-        actor="agent",
-    )
-    changed = memory_changes.propose(
-        cur,
-        target_memory_id=old["memory_id"],
-        target_revision_id=target["current_revision_id"],
-        target_updated_at=target["updated_at"],
-        operation="replace",
-        retirement_kind="superseded",
-        retire_reason="the signed manifest rule replaces the legacy importer rule",
-        successor_nomination_id=successor["nomination_id"],
-        successor_nomination_version=successor["version"],
-        successor_settings={
-            "delivery": "scope",
-            "scope_id": new_scope["scope_id"],
-            "guard_action": None,
-        },
-        evidence=evidence,
-        actor="agent",
-        change_id=proposal["change_id"],
+    successor = _successor(cur, f"validate the signed import manifest {uuid4()}")
+    proposal = _replace(cur, old, successor)
+    moved = {"delivery": "scope", "scope_id": new_scope["scope_id"], "guard_action": None}
+    changed = _replace(
+        cur, old, successor, successor_settings=moved, change_id=proposal["change_id"]
     )
     assert changed["version"] == proposal["version"] + 1
     with pytest.raises(MashuError, match="version changed"):
-        memory_changes.apply(
-            cur,
-            proposal["change_id"],
-            version=proposal["version"],
-            request_id=uuid4(),
-            approval=_approval("Replace it and move delivery to the new scope"),
-            actor="agent",
-        )
+        apply_change(cur, proposal, "Replace it and move delivery to the new scope")
 
-    applied = memory_changes.apply(
-        cur,
-        proposal["change_id"],
-        version=changed["version"],
-        request_id=uuid4(),
-        approval=_approval("Replace it and move delivery to the new scope"),
-        actor="agent",
-    )
+    applied = apply_change(cur, changed, "Replace it and move delivery to the new scope")
     assert applied["memory"]["delivery"] == "scope"
     assert applied["memory"]["scope_id"] == str(new_scope["scope_id"])
 
 
-def _propose_redeliver(cur, memory, settings, *, change_id=None):
-    detail = memories.memory_details(cur, memory["memory_id"])
-    return memory_changes.propose(
-        cur,
-        target_memory_id=memory["memory_id"],
-        target_revision_id=detail["current_revision_id"],
-        target_updated_at=detail["updated_at"],
-        operation="redeliver",
-        successor_settings=settings,
-        evidence=[
-            {
-                "kind": "ledger",
-                "id": str(memory["evidence"][0]),
-                "observation": "the rule only matters while calibrating difficulty",
-            }
-        ],
-        actor="agent",
-        change_id=change_id,
-    )
-
-
-def _topic_settings(name, trigger=None, scope_id=None):
-    settings = {"delivery": "topic", "scope_id": scope_id, "guard_action": None, "topic": name}
-    if trigger is not None:
-        settings["topic_trigger"] = trigger
-    return settings
-
-
 def test_redeliver_moves_a_rule_into_an_existing_topic_without_touching_its_body(cur):
-    memory = _memory(cur)
+    memory = remember(cur, RULE)
     topics.create_topic(cur, name="calibration", trigger="Before calibrating", actor="user")
-    proposal = _propose_redeliver(cur, memory, _topic_settings("calibration"))
+    proposal = _redeliver(cur, memory, _topic_settings("calibration"))
     assert proposal["delivery_move"] == ["delivery: always -> topic:calibration"]
     assert memories.get_memory(cur, memory["memory_id"])["delivery"] == "always"
 
-    result = memory_changes.apply(
-        cur,
-        proposal["change_id"],
-        version=proposal["version"],
-        request_id=uuid4(),
-        approval=_approval("Move it into the calibration topic"),
-        actor="agent",
-    )
+    request_id = uuid4()
+    result = apply_change(cur, proposal, "Move it into the topic", request_id=request_id)
+    assert apply_change(cur, proposal, "Move it into the topic", request_id=request_id) == result
 
     moved = memories.get_memory(cur, memory["memory_id"])
     assert result["operation"] == "redeliver"
@@ -765,8 +321,8 @@ def test_redeliver_moves_a_rule_into_an_existing_topic_without_touching_its_body
 
 
 def test_redeliver_opens_a_described_topic_when_applied(cur, scope_id):
-    memory = _memory(cur)
-    proposal = _propose_redeliver(
+    memory = remember(cur, RULE)
+    proposal = _redeliver(
         cur, memory, _topic_settings("calibration", "Before calibrating", scope_id)
     )
     assert topics.get_topic(cur, "calibration") is None
@@ -774,14 +330,7 @@ def test_redeliver_opens_a_described_topic_when_applied(cur, scope_id):
         "opens topic calibration for test scope: Before calibrating"
     )
 
-    memory_changes.apply(
-        cur,
-        proposal["change_id"],
-        version=proposal["version"],
-        request_id=uuid4(),
-        approval=_approval("Put it in a new calibration topic"),
-        actor="agent",
-    )
+    apply_change(cur, proposal, "Put it in a new calibration topic")
 
     topic = topics.get_topic(cur, "calibration")
     moved = memories.get_memory(cur, memory["memory_id"])
@@ -791,80 +340,28 @@ def test_redeliver_opens_a_described_topic_when_applied(cur, scope_id):
     assert moved["scope_id"] == scope_id
 
 
-def test_redeliver_refuses_a_topic_opened_differently_after_the_proposal(cur):
-    memory = _memory(cur)
-    proposal = _propose_redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))
+def test_redeliver_refuses_a_topic_opened_differently_or_a_target_changed_after_it(cur, scope_id):
+    memory = remember(cur, RULE)
+    proposal = _redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))
     topics.create_topic(cur, name="calibration", trigger="Before tuning", actor="user")
-
     with pytest.raises(MashuError, match="opened differently"):
-        memory_changes.apply(
-            cur,
-            proposal["change_id"],
-            version=proposal["version"],
-            request_id=uuid4(),
-            approval=_approval("Put it in a new calibration topic"),
-            actor="agent",
-        )
+        apply_change(cur, proposal, "Put it in a new calibration topic")
     assert memories.get_memory(cur, memory["memory_id"])["delivery"] == "always"
 
-
-def test_redeliver_refuses_a_target_changed_after_the_proposal(cur, scope_id):
-    memory = _memory(cur)
-    proposal = _propose_redeliver(
-        cur, memory, {"delivery": "scope", "scope_id": scope_id, "guard_action": None}
-    )
+    scoped = {"delivery": "scope", "scope_id": scope_id, "guard_action": None}
+    proposal = _redeliver(cur, memory, scoped)
     memories.revise(cur, memory["memory_id"], content=UPDATED, actor="user")
-
     with pytest.raises(MashuError, match="changed after this proposal was read"):
-        memory_changes.apply(
-            cur,
-            proposal["change_id"],
-            version=proposal["version"],
-            request_id=uuid4(),
-            approval=_approval("Scope it"),
-            actor="agent",
-        )
-
-
-def test_redeliver_replays_its_first_answer_for_the_same_request(cur, scope_id):
-    memory = _memory(cur)
-    proposal = _propose_redeliver(
-        cur, memory, {"delivery": "scope", "scope_id": scope_id, "guard_action": None}
-    )
-    request_id = uuid4()
-    first = memory_changes.apply(
-        cur,
-        proposal["change_id"],
-        version=proposal["version"],
-        request_id=request_id,
-        approval=_approval("Scope it"),
-        actor="agent",
-    )
-    again = memory_changes.apply(
-        cur,
-        proposal["change_id"],
-        version=proposal["version"],
-        request_id=request_id,
-        approval=_approval("Scope it"),
-        actor="agent",
-    )
-    assert again == first
+        apply_change(cur, proposal, "Scope it")
 
 
 def test_redeliver_over_a_topic_bound_leaves_everything_as_it_was(cur, monkeypatch):
-    memory = _memory(cur)
-    proposal = _propose_redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))
+    memory = remember(cur, RULE)
+    proposal = _redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))
     monkeypatch.setenv("MASHU_TOPIC_CAPACITY", "1")
 
     with pytest.raises(RefusedError), cur.connection.transaction():
-        memory_changes.apply(
-            cur,
-            proposal["change_id"],
-            version=proposal["version"],
-            request_id=uuid4(),
-            approval=_approval("Put it in a new calibration topic"),
-            actor="agent",
-        )
+        apply_change(cur, proposal, "Put it in a new calibration topic")
 
     assert topics.get_topic(cur, "calibration") is None
     assert memories.get_memory(cur, memory["memory_id"])["delivery"] == "always"
@@ -872,30 +369,17 @@ def test_redeliver_over_a_topic_bound_leaves_everything_as_it_was(cur, monkeypat
 
 
 def test_redeliver_refuses_a_move_that_changes_nothing_or_carries_retirement(cur):
-    memory = _memory(cur)
+    memory = remember(cur, RULE)
     with pytest.raises(MashuError, match="as they are"):
-        _propose_redeliver(
-            cur, memory, {"delivery": "always", "scope_id": None, "guard_action": None}
-        )
+        _redeliver(cur, memory, {"delivery": "always", "scope_id": None, "guard_action": None})
     topics.create_topic(cur, name="calibration", trigger="Before calibrating", actor="user")
     with pytest.raises(MashuError, match="already exists"):
-        _propose_redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))
-    detail = memories.memory_details(cur, memory["memory_id"])
+        _redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))
     with pytest.raises(MashuError, match="only changes delivery settings"):
-        memory_changes.propose(
+        propose_change(
             cur,
-            target_memory_id=memory["memory_id"],
-            target_revision_id=detail["current_revision_id"],
-            target_updated_at=detail["updated_at"],
-            operation="redeliver",
+            memory,
+            "redeliver",
             retire_reason="not a retirement",
             successor_settings=_topic_settings("calibration"),
-            evidence=[
-                {
-                    "kind": "ledger",
-                    "id": str(memory["evidence"][0]),
-                    "observation": "moving it",
-                }
-            ],
-            actor="agent",
         )
