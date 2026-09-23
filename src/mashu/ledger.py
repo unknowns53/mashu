@@ -31,8 +31,13 @@ def report_pain(
     source: str | None = None,
     prevention_kind: str = "rule",
     task_id: UUID | None = None,
+    session: UUID | None = None,
 ) -> dict[str, Any]:
-    """Record one pain, show what it resembles, and nominate when it is proven."""
+    """Record one pain, show what it resembles, and nominate when it is proven.
+
+    `session` names the MCP server process reporting it, so a pain against a topic rule
+    can say whether that session had read the topic.
+    """
     if kind not in REPORTABLE_KINDS:
         raise MashuError(
             f"kind must be one of {', '.join(REPORTABLE_KINDS)}; 'explicit' and 'claimed' are "
@@ -127,13 +132,25 @@ def report_pain(
             "or whether the wording is not recognisable at the moment it "
             "applies."
         )
+        detail: dict[str, Any] = {
+            "delivery": delivered["delivery"],
+            "score": float(delivered["score"]),
+        }
+        if delivered["delivery"] == "topic":
+            read = _topic_read(cur, delivered["topic_id"], session)
+            detail.update(topic_id=str(delivered["topic_id"]), topic_read=read)
+            if read is False:
+                result["note"] += (
+                    " This session never read the topic, so first ask whether its trigger "
+                    "names the work in words recognisable when it begins."
+                )
         events.record(
             cur,
             "delivery_failure_suspected",
             actor,
             memory_id=delivered["memory_id"],
             ledger_id=ledger_id,
-            detail={"delivery": delivered["delivery"], "score": float(delivered["score"])},
+            detail=detail,
         )
         return result
 
@@ -240,3 +257,19 @@ def ledger_entries(
         {"scope": scope_id, "limit": limit},
     )
     return cur.fetchall()
+
+
+def _topic_read(cur: psycopg.Cursor, topic_id: UUID, session: UUID | None) -> bool | None:
+    """Whether this session read the topic; unknown when the pain came from outside MCP."""
+    if session is None:
+        return None
+    cur.execute(
+        """
+        SELECT 1 FROM event_log
+        WHERE event_type = 'topic_read'
+          AND detail->>'topic_id' = %s AND detail->>'session' = %s
+        LIMIT 1
+        """,
+        (str(topic_id), str(session)),
+    )
+    return cur.fetchone() is not None

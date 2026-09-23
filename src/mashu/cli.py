@@ -295,7 +295,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"pending {status.pending_ready + status.pending_deferred}")
     print(f"traces  unexpired={status.traces}")
     print(f"ledger  last_30_days={status.ledger_30d}")
-    print(f"delivery  suspected_failures_30d={status.delivery_failures_30d}")
+    routes = "  ".join(
+        f"{route}={status.delivery_failures_by_route.get(route, 0)}"
+        for route in application.DELIVERY_FAILURE_ROUTES
+    )
+    print(f"delivery  suspected_failures_30d={status.delivery_failures_30d}  {routes}")
     print("scopes")
     print("name                         active  push_tokens")
     for row in status.scope_rows:

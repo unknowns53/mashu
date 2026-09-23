@@ -724,7 +724,8 @@ def test_a_pain_on_a_rule_already_delivered_names_the_delivery_and_is_counted(ru
 
     _, out, _ = run("status")
     suspected = next(line for line in out.splitlines() if line.startswith("delivery"))
-    assert int(suspected.split("=")[1]) >= 1
+    assert int(suspected.split()[1].split("=")[1]) >= 1
+    assert "pushed=" in suspected
 
 
 #: Kept apart from the rest for the same trigram reason as the two above.

@@ -19,6 +19,9 @@ from mashu import (
     topics,
 )
 
+#: How suspected delivery failures are split in status.
+DELIVERY_FAILURE_ROUTES = ("pushed", "topic_unread", "topic_read", "guard", "unknown")
+
 
 @dataclass(frozen=True)
 class StatusSnapshot:
@@ -35,6 +38,7 @@ class StatusSnapshot:
     traces: int
     ledger_30d: int
     delivery_failures_30d: int
+    delivery_failures_by_route: dict[str, int]
     scope_count: int
     scope_rows: list[dict[str, Any]]
     topic_count: int
@@ -88,11 +92,26 @@ def status_snapshot(cur: psycopg.Cursor) -> StatusSnapshot:
     traces = cur.fetchone()["n"]
     cur.execute("SELECT count(*) AS n FROM ledger WHERE created_at >= now() - interval '30 days'")
     ledger_30d = cur.fetchone()["n"]
+    # A topic rule that failed unread points at its trigger; one that failed after being
+    # read points at its wording, so the two are counted apart (v2 12).
     cur.execute(
-        "SELECT count(*) AS n FROM event_log WHERE event_type = 'delivery_failure_suspected' "
-        "AND created_at >= now() - interval '30 days'"
+        """
+        SELECT CASE
+                   WHEN detail->>'delivery' IN ('always', 'scope') THEN 'pushed'
+                   WHEN detail->>'delivery' = 'guard' THEN 'guard'
+                   WHEN detail->>'topic_read' = 'false' THEN 'topic_unread'
+                   WHEN detail->>'topic_read' = 'true' THEN 'topic_read'
+                   ELSE 'unknown'
+               END AS route,
+               count(*) AS n
+        FROM event_log
+        WHERE event_type = 'delivery_failure_suspected'
+          AND created_at >= now() - interval '30 days'
+        GROUP BY 1
+        """
     )
-    delivery_failures = cur.fetchone()["n"]
+    by_route = {row["route"]: row["n"] for row in cur.fetchall()}
+    delivery_failures = sum(by_route.values())
     scope_rows = scopes.list_scopes(cur)
     topic_rows = topics.list_topics(cur)
     heaviest = max(topic_rows, key=lambda row: row["body_tokens"], default=None)
@@ -116,6 +135,7 @@ def status_snapshot(cur: psycopg.Cursor) -> StatusSnapshot:
         traces=traces,
         ledger_30d=ledger_30d,
         delivery_failures_30d=delivery_failures,
+        delivery_failures_by_route=by_route,
         scope_count=len(scope_rows),
         scope_rows=scope_rows,
         topic_count=len(topic_rows),

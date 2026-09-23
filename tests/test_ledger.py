@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 
-from mashu import ledger, memories, nominations
+from mashu import application, ledger, memories, nominations, topics
 from mashu.errors import MashuError, RefusedError
 
 # Trigram fixtures use near-identical and unrelated text.
@@ -368,3 +370,36 @@ def test_a_rule_row_can_never_carry_a_filing(cur, work_task):
             """,
             (work_task["task"]["task_id"],),
         )
+
+
+@pytest.mark.parametrize(
+    ("read_first", "session", "topic_read", "route"),
+    [
+        (True, uuid4(), True, "topic_read"),
+        (False, uuid4(), False, "topic_unread"),
+        (False, None, None, "unknown"),
+    ],
+)
+def test_a_pain_on_a_topic_rule_says_whether_its_session_read_the_topic(
+    cur, read_first, session, topic_read, route
+):
+    rule = "keep ship stats fixed when calibrating difficulty levels"
+    topic = topics.create_topic(cur, name="calibration", trigger="Before calibrating", actor="user")
+    memories.remember(cur, content=rule, actor="user", delivery="topic", topic_id=topic["topic_id"])
+    if read_first:
+        topics.read_for_session(cur, "calibration", actor="agent", session=session)
+
+    ledger.report_pain(
+        cur,
+        kind="incident",
+        what="changed ship stats",
+        prevention=rule,
+        actor="agent",
+        session=session,
+    )
+
+    cur.execute("SELECT detail FROM event_log WHERE event_type = 'delivery_failure_suspected'")
+    detail = cur.fetchone()["detail"]
+    assert detail["delivery"] == "topic"
+    assert detail["topic_read"] is topic_read
+    assert application.status_snapshot(cur).delivery_failures_by_route == {route: 1}

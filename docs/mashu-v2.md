@@ -270,7 +270,7 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 | コマンド | 内容 |
 |---|---|
 | `mashu` | 人向け dashboard。Attention / Memories / Work / Settings & health を開く |
-| `mashu status` | 在庫と定員の使用量（always 層と、最も重い開き方の二つ）、pending 件数、台帳の直近、配信失敗の疑い件数 |
+| `mashu status` | 在庫と定員の使用量（always 層と、最も重い開き方の二つ）、pending 件数、台帳の直近、配信失敗の疑い件数とその経路別の内訳（push された規則、読まれなかった topic、読まれた topic、guard、不明） |
 | `mashu review` / `mashu review --changes` | nomination または Memory change proposal を読み、編集・適用・却下・取り下げ |
 | `mashu remember <body>` | User 明示。CLI で即時 active にする経路。invalidated / legacy conflict は理由を表示して個別 ID を確認する |
 | `mashu retire <id> --kind K --reason <r>` | 退役。kind と理由が必須。`legacy` は既存データと移行用 |
@@ -364,5 +364,6 @@ redeliver 提案は、active な Memory の配信条件だけを `successor_sett
 
 - **三度目の痛み**が観測される。記憶が active なのに同じ穴で再発したなら、配信（push / guard）が機能していない。入口ではなく配信を疑う。**これは人の気づきに委ねない。**`pain_report` が active な Memory に閾値以上で当たった時点で候補生成を止め、`delivery_failure_suspected` を event_log に残し、`mashu status` が直近 30 日の件数を出す（4.1 節）。反証条件が観測量になっていなければ、それは反証条件ではなく願望である
   - 疑うべきものは二つある。ひとつは配信経路の選択（bootstrap で読んだ規則が数十ターン後の判断の瞬間に効いていないなら、その規則は `guard` へ移すべきだった）。もうひとつは文言（規則が、それが効くべき瞬間に自分のこととして認識されない書き方をしている）
+  - topic の規則に当たった痛みは、痛みを報告した MCP セッションがその topic を読んでいたかどうかを event に残し、`mashu status` が経路別に数える。読まれずに外れたなら、疑うのは topic の発動条件の文言である（Agent がいまの作業をその条件に結びつけられなかった）。読まれたのに外れたなら、疑うのは規則の文言か、判断の直前に出す `guard` が要る規則だったかである。CLI から報告された痛みはセッションが分からないので「不明」に数える
 - 初回の痛みのコストが頻発して耐えられない。そのときは実証の基準を緩める判定材料になる
 - 二度目の照合が実際には拾えていない（台帳や痕跡に類似エントリがあるのに気づかれない）。pg_trgm の閾値か、prevention と痕跡の書き方を較正する

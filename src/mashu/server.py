@@ -167,6 +167,7 @@ def build_server() -> Any:
                     scope_id=scope_id,
                     prevention_kind=prevention_kind,
                     task_id=task_id,
+                    session=session,
                 )
                 return _plain({"ok": True, **answer})
         except MashuError as error:

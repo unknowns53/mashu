@@ -65,6 +65,7 @@ class Health:
     traces: int
     ledger_30d: int
     delivery_failures_30d: int
+    delivery_failures_by_route: dict[str, int]
     scope_count: int
     topic_count: int
     topic_heaviest_name: str | None
@@ -93,6 +94,7 @@ def _health(dsn: str | None) -> Health:
         traces=snapshot.traces,
         ledger_30d=snapshot.ledger_30d,
         delivery_failures_30d=snapshot.delivery_failures_30d,
+        delivery_failures_by_route=snapshot.delivery_failures_by_route,
         scope_count=snapshot.scope_count,
         topic_count=snapshot.topic_count,
         topic_heaviest_name=snapshot.topic_heaviest_name,
@@ -101,6 +103,16 @@ def _health(dsn: str | None) -> Health:
         tasks_dormant=snapshot.tasks_dormant,
         tasks_closed=snapshot.tasks_closed,
     )
+
+
+def _routes(by_route: dict[str, int]) -> str:
+    """The non-zero routes of the suspected failures, in status order."""
+    shown = [
+        f"{route} {by_route[route]}"
+        for route in application.DELIVERY_FAILURE_ROUTES
+        if by_route.get(route)
+    ]
+    return f"  ({', '.join(shown)})" if shown else ""
 
 
 def _health_text(value: Health) -> str:
@@ -136,7 +148,8 @@ def _health_text(value: Health) -> str:
             f"  ·  {value.pending_deferred} deferred",
             f"  Evidence           {value.traces} live traces"
             f"  ·  {value.ledger_30d} ledger entries in 30 days",
-            f"  Delivery health    {value.delivery_failures_30d} suspected failures in 30 days",
+            f"  Delivery health    {value.delivery_failures_30d} suspected failures in 30 days"
+            + _routes(value.delivery_failures_by_route),
             f"  Scopes             {value.scope_count}",
             f"  Topics             {value.topic_count}{heaviest}",
             f"  Tasks              {value.tasks_active} active"

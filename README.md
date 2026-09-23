@@ -226,7 +226,7 @@ TUI の操作は次のとおり。
 
 | コマンド | 役割 |
 |---|---|
-| mashu status | schema、容量、pending 件数、最近の ledger、配信失敗の疑いを表示 |
+| mashu status | schema、容量、pending 件数、最近の ledger、配信失敗の疑いとその経路別の内訳を表示 |
 | mashu bootstrap | 現在のディレクトリのセッションへ配信される内容と token 数を表示 |
 | mashu show REF | Memory、candidate、Ledger、Memory change proposal の 1 件を根拠・履歴つきで表示 |
 | mashu memories | active Memory の一覧を表示 |
