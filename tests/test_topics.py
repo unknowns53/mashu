@@ -148,11 +148,20 @@ def test_an_archived_topic_cannot_be_read_or_filled(cur):
         filed(cur, subject)
 
 
-def test_a_topic_holding_rules_cannot_be_archived(cur):
-    subject = topic(cur)
-    filed(cur, subject)
+def test_removing_deletes_an_unused_topic_and_archives_a_used_one(cur):
+    unused = topic(cur, "unused")
+    assert topics.remove_topic(cur, unused["topic_id"], actor="user")["removed"] == "deleted"
+    assert topics.get_topic(cur, "unused") is None
+
+    used = topic(cur)
+    rule = filed(cur, used)
     with pytest.raises(MashuError, match="still holds 1 active rule"):
-        topics.archive_topic(cur, subject["topic_id"], actor="user")
+        topics.remove_topic(cur, used["topic_id"], actor="user")
+    memories.retire(
+        cur, rule["memory_id"], reason="lever gone", actor="user", retirement_kind="out_of_scope"
+    )
+    assert topics.remove_topic(cur, used["topic_id"], actor="user")["removed"] == "archived"
+    assert topics.get_topic(cur, "difficulty")["archived_at"] is not None
 
 
 def test_topic_names_and_triggers_are_one_bounded_line(cur):

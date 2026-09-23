@@ -412,12 +412,12 @@ def test_long_pages_move_forward_and_back_without_losing_the_header(
     assert out.count("detail line 0") == 2
 
 
-def test_topic_page_creates_edits_and_archives_a_topic(
+def test_topic_page_creates_edits_and_removes_a_topic(
     dsn: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     with db.transaction(dsn) as cur:
         scopes.create_scope(cur, name="game", actor="user")
-    keys(monkeypatch, "n", "e", "a", "q")
+    keys(monkeypatch, "n", "e", "x", "q")
     answers(
         monkeypatch,
         "difficulty",
@@ -432,15 +432,18 @@ def test_topic_page_creates_edits_and_archives_a_topic(
     settings_ui._topics_page(dsn)
 
     with db.transaction(dsn) as cur:
-        row = topics.get_topic(cur, "balance")
-    assert row["trigger"] == "Before changing win rates or placement"
-    assert row["scope_id"] is None
-    assert row["archived_at"] is not None
+        assert topics.get_topic(cur, "balance") is None
+        cur.execute(
+            "SELECT detail FROM event_log WHERE event_type = 'topic_updated' ORDER BY created_at"
+        )
+        edited = cur.fetchone()["detail"]["to"]
+    assert edited["trigger"] == "Before changing win rates or placement"
+    assert edited["scope_id"] is None
     out = capsys.readouterr().out
-    assert "created topic difficulty" in out and "archived topic balance" in out
+    assert "created topic difficulty" in out and "deleted topic balance" in out
 
 
-def test_a_topic_holding_rules_is_not_archived_from_the_page(
+def test_a_topic_holding_rules_is_not_removed_from_the_page(
     dsn: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     with db.transaction(dsn) as cur:
@@ -452,7 +455,7 @@ def test_a_topic_holding_rules_is_not_archived_from_the_page(
             delivery="topic",
             topic_id=topic["topic_id"],
         )
-    keys(monkeypatch, "a", "q")
+    keys(monkeypatch, "x", "q")
     answers(monkeypatch, "y")
 
     settings_ui._topics_page(dsn)

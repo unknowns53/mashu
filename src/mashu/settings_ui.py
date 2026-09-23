@@ -443,7 +443,7 @@ def _topics_page(dsn: str | None) -> None:
         detail = _topic_detail(rows[at]) if rows else "  No topics yet. Press n to create one."
         keys = screen.trailer(
             detail,
-            "  n new topic   e edit   a archive   " + _LIST_KEYS.strip(),
+            "  n new topic   e edit   x remove   " + _LIST_KEYS.strip(),
             note,
         )
         screen.paint(screen.list_screen(_title("Topics"), lines, at, keys))
@@ -490,18 +490,18 @@ def _topics_page(dsn: str | None) -> None:
                 note = f"  edited topic {name or row['name']}"
             except MashuError as error:
                 note = f"  {error}"
-        elif key == "a":
+        elif key == "x":
             if not rows:
-                note = "  there is no topic to archive"
+                note = "  there is no topic to remove"
                 continue
             row = rows[at]
-            if not _confirm(f"archive topic {row['name']}?"):
+            if not _confirm(f"remove topic {row['name']}?"):
                 note = "  topic kept"
                 continue
             try:
                 with db.transaction(dsn) as cur:
-                    topics.archive_topic(cur, row["topic_id"], actor=ACTOR)
-                note = f"  archived topic {row['name']}"
+                    removed = topics.remove_topic(cur, row["topic_id"], actor=ACTOR)
+                note = f"  {removed['removed']} topic {row['name']}"
             except MashuError as error:
                 note = f"  {error}"
         elif key == "n":

@@ -282,7 +282,7 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 | `mashu trace [query]` | 痕跡の閲覧と検索 |
 | `mashu guard <action> --pin <id>` | 行為の門への留めつけ・解除・照会 |
 | `mashu deliver <id> <delivery>` | delivery の変更。topic へは `--topic <name>` で移す |
-| `mashu topic` | topic の一覧・作成・編集・archive（User のみ）。`mashu topic show <name>` で規則の本文を読む |
+| `mashu topic` | topic の一覧・作成・編集・削除（User のみ）。active な規則が無い topic だけを消せる。一度も使われていなければ削除し、退役した規則や提案が参照していれば archive する。`mashu topic show <name>` で規則の本文を読む |
 | `mashu scope` / `mashu route` | Scope 台帳と cwd 対応表（v1 と同じ、User のみ作成） |
 | `mashu bootstrap` | push される内容と token を表示 |
 | `mashu admin migrate` | migration 実行 |

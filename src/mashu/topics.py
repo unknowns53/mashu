@@ -249,6 +249,38 @@ def archive_topic(cur: psycopg.Cursor, topic_id: UUID, *, actor: str) -> dict[st
     return row
 
 
+def remove_topic(cur: psycopg.Cursor, topic_id: UUID, *, actor: str) -> dict[str, Any]:
+    """Delete a topic nothing has used, or archive one whose past rules or proposals name it.
+
+    Retired rules and proposals keep their topic_id, so a used topic stays as an archived
+    row and its name stays taken; an unused one leaves no reference and frees its name.
+    """
+    cur.execute(
+        """
+        SELECT EXISTS (SELECT 1 FROM memory WHERE topic_id = %(id)s)
+            OR EXISTS (SELECT 1 FROM memory_change WHERE successor_topic_id = %(id)s)
+            OR EXISTS (
+                SELECT 1 FROM memory_change m JOIN topic t ON t.name = m.successor_topic_name
+                WHERE t.topic_id = %(id)s AND m.status = 'pending'
+            ) AS used
+        """,
+        {"id": topic_id},
+    )
+    if cur.fetchone()["used"]:
+        return {**archive_topic(cur, topic_id, actor=actor), "removed": "archived"}
+    cur.execute("DELETE FROM topic WHERE topic_id = %s RETURNING *", (topic_id,))
+    row = cur.fetchone()
+    if row is None:
+        raise MashuError(f"no topic {topic_id}")
+    events.record(
+        cur,
+        "topic_deleted",
+        actor,
+        detail={"topic_id": str(topic_id), "name": row["name"]},
+    )
+    return {**row, "removed": "deleted"}
+
+
 def list_topics(cur: psycopg.Cursor, *, include_archived: bool = False) -> list[dict[str, Any]]:
     """Every open topic with its rule count, body cost, and index-line cost."""
     cur.execute(_LISTED, {"archived": include_archived})

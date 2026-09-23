@@ -1198,8 +1198,8 @@ def _print_topic_rows(rows: list[dict[str, Any]]) -> None:
 
 def cmd_topic(args: argparse.Namespace) -> int:
     if args.topic_command == "show":
-        if any(flag is not None for flag in (args.add, args.edit, args.archive)):
-            raise MashuError("topic show reads one topic; run --add, --edit, or --archive alone")
+        if any(flag is not None for flag in (args.add, args.edit, args.remove)):
+            raise MashuError("topic show reads one topic; run --add, --edit, or --remove alone")
         with db.transaction(args.dsn) as cur:
             answer = topics.topic_rules(cur, args.name)
         topic = answer["topic"]
@@ -1245,10 +1245,10 @@ def cmd_topic(args: argparse.Namespace) -> int:
             )
             print(f"edited  {row['name']}")
             return 0
-        if args.archive is not None:
-            current = topics.require_topic(cur, args.archive)
-            topics.archive_topic(cur, current["topic_id"], actor=ACTOR)
-            print(f"archived  {current['name']}")
+        if args.remove is not None:
+            current = topics.require_topic(cur, args.remove)
+            removed = topics.remove_topic(cur, current["topic_id"], actor=ACTOR)
+            print(f"{removed['removed']}  {current['name']}")
             return 0
         rows = topics.list_topics(cur)
     _print_topic_rows(rows)
@@ -1979,10 +1979,11 @@ def build_parser() -> argparse.ArgumentParser:
         "topic",
         "rules read only when one kind of work begins",
         description=(
-            "List topics, or create, edit, or archive one. A topic's trigger line is pushed at "
+            "List topics, or create, edit, or remove one. A topic's trigger line is pushed at "
             "session start and its rules are read when that work begins. --add requires "
             "--trigger; --scope limits the listing to one Scope, and '-' with --edit lists it "
-            "in every session. Archiving needs an empty topic. These are User operations."
+            "in every session. Removing needs a topic with no active rules: one never used is "
+            "deleted, one whose past rules name it is archived. These are User operations."
         ),
         examples=(
             "mashu topic",
@@ -1990,14 +1991,16 @@ def build_parser() -> argparse.ArgumentParser:
             "--scope game",
             'mashu topic --edit difficulty --trigger "Before changing win rates"',
             "mashu topic --edit difficulty --scope -",
-            "mashu topic --archive difficulty",
+            "mashu topic --remove difficulty",
             "mashu topic show difficulty",
         ),
     )
     topic_group = topic.add_mutually_exclusive_group()
     topic_group.add_argument("--add", metavar="NAME", help="create a topic with this name")
     topic_group.add_argument("--edit", metavar="NAME", help="edit the topic with this name")
-    topic_group.add_argument("--archive", metavar="NAME", help="archive an empty topic")
+    topic_group.add_argument(
+        "--remove", metavar="NAME", help="delete an unused topic, or archive one used before"
+    )
     topic.add_argument("--trigger", metavar="TEXT", help="one sentence saying when to read it")
     topic.add_argument(
         "--scope", help="the Scope whose sessions list it; '-' with --edit means every session"

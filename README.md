@@ -122,7 +122,7 @@ mashu
 | Attention | candidate の review、close proposal の判断、dormant Task の確認 |
 | Memories | active / retired Memory と Temporary Context の閲覧・検索、直接登録、編集、always / scope と Temporary Context の相互変換、retire、delivery / guard / topic の変更 |
 | Work | active / dormant / closed Task と Project の閲覧・検索、Task の履歴・artifact の確認、Task / Current State / Project の作成・編集、touch / close / reopen |
-| Settings & health | 容量と queue の状態、bootstrap preview、Scope と route の作成・編集・削除、Topic の作成・編集・archive、migration の確認・適用 |
+| Settings & health | 容量と queue の状態、bootstrap preview、Scope と route の作成・編集・削除、Topic の作成・編集・削除、migration の確認・適用 |
 
 各画面では矢印または j / k で移動し、Enter で開く。`/` のある一覧は部分検索できる。Esc または ← で一段戻り、q でその領域を閉じる。TUI は alternate screen 上で動くため、再描画した画面は terminal の履歴へ残らない。
 
@@ -237,7 +237,7 @@ TUI の操作は次のとおり。
 | mashu review --changes | retire / replace / restore / redeliver の pending proposal を TUI で読む |
 | mashu revise REF | Memory を改訂する。旧本文は revision history に残る |
 | mashu deliver REF always\|scope\|topic\|guard | active Memory の配信先を変更する。topic は --topic NAME で指定する |
-| mashu topic | topic の一覧・作成・編集・archive。`mashu topic show NAME` で本文を読む |
+| mashu topic | topic の一覧・作成・編集・削除。`mashu topic show NAME` で本文を読む |
 | mashu guard ACTION | ACTION の直前に配信する Memory を表示する |
 | mashu guard ACTION --pin REF | Memory を ACTION の guard に追加する |
 | mashu guard ACTION --unpin REF | Memory を ACTION の guard から外す |
@@ -302,13 +302,13 @@ mashu topic
 mashu topic --add 難易度較正 --scope enrai --trigger "Before changing difficulty levers or win rates"
 mashu topic --edit 難易度較正 --trigger "Before calibrating difficulty"
 mashu topic show 難易度較正
-mashu topic --archive 難易度較正
+mashu topic --remove 難易度較正
 
 mashu remember "Do not change ship stats to set difficulty" --topic 難易度較正
 mashu deliver 1a2b3c4d topic --topic 難易度較正
 ~~~
 
-使い分けの目安は次のとおり。プロジェクトのどの作業でも守るなら scope、そのプロジェクトの一部の作業でだけ効くなら topic、特定の操作の直前に必ず目に入れたいなら guard を選ぶ。archive できるのは active なルールを持たない topic だけだ。topic の作成と編集は Settings TUI の Topics からもできる。
+使い分けの目安は次のとおり。プロジェクトのどの作業でも守るなら scope、そのプロジェクトの一部の作業でだけ効くなら topic、特定の操作の直前に必ず目に入れたいなら guard を選ぶ。remove できるのは active なルールを持たない topic だけだ。一度も使われていない topic は削除され、名前も空く。退役したルールや提案が名前を参照している topic は、履歴を保つために archive され、一覧から消える。topic の作成と編集は Settings TUI の Topics からもできる。
 
 ## Project と Task
 
