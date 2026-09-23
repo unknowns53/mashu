@@ -37,7 +37,7 @@ def report_pain(
         raise MashuError(
             f"kind must be one of {', '.join(REPORTABLE_KINDS)}; 'explicit' and 'claimed' are "
             "reserved for a person's own statement, written by mashu remember and by "
-            "memory_nominate respectively"
+            "memory_nominate or memory_admit respectively"
         )
     if prevention_kind not in PREVENTION_KINDS:
         raise MashuError(f"prevention_kind must be one of {', '.join(PREVENTION_KINDS)}")

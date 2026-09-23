@@ -115,13 +115,13 @@ v1 の投機的捕捉との関係。セッションから安く残すという�
 
 1. 台帳の二度目照合（自動生成）
 2. `pain_report` の incident（自動生成）
-3. Agent が会話中の User の記録指示を運ぶ場合（`memory_nominate`。指示は kind = `claimed` の台帳エントリとして残り、それが evidence になる。明示指示がある場合は `memory_admit` まで続けて同じセッションで完了できる。実行者は Agent のまま記録し、承認根拠に短い原文と取得可能な会話参照を別に記録する）
+3. Agent が会話中の User の記録指示を運ぶ場合（`memory_admit` に本文を渡す。指示は kind = `claimed` の台帳エントリとして残り、それが evidence になる。候補の作成と採用は同じ transaction で行い、1 回の呼び出しで完了する。実行者は Agent のまま記録し、承認根拠に短い原文と取得可能な会話参照を別に記録する）
 
 incident / friction から自動生成した候補と、Agent 自身の追加・変更案は pending のまま残る。**明示指示を受けて Agent が実行する新規採用や変更には、別画面での再承認を要求しない。** 出所には `user_instruction` と指示の短い原文、会話参照を記録し、actor は Agent として残す。これは認証ではなく監査用の出所記録であり、サーバーは会話中に本当にその指示があったか検証できない。Agent 自身の有用性判断、confidence、反対が無かったことは承認ではない。MCP instructions と運用上の信頼でこの境界を守る。
 
-`memory_nominate` は新規採用候補を作るだけであり、明示指示の根拠を伴う `memory_admit` が必要である。MCP 側に会話の真正性を検証する仕組みはない。**Agent が独自に判断した採用・退役・置換・復帰は提案にとどめ、明示指示かサーバーに実装済みの条件が無ければ適用しない。**直接 CLI / TUI 操作は `user_direct` として Agent の実行とは区別する。
+新規採用は常に明示指示の根拠を伴う `memory_admit` を通る。`memory_nominate` は候補を作るだけで採用せず、replace の後継候補を作るときに使う。MCP 側に会話の真正性を検証する仕組みはない。**Agent が独自に判断した採用・退役・置換・復帰は提案にとどめ、明示指示かサーバーに実装済みの条件が無ければ適用しない。**直接 CLI / TUI 操作は `user_direct` として Agent の実行とは区別する。
 
-`memory_nominate` は判断対象の `version` を返す。`memory_admit` は読み取った version を必須で受け取り、本文・scope・kind・evidence・conflict が変わっていれば適用を拒否する。admission の request ID には初回応答全体を保存し、後から Memory が編集・退役されても再送には同じ応答を返す。
+本文を渡された `memory_admit` は、Agent がまだ読んでいないものがあれば採用せずに止まる。一つは候補が照合によって既存の pending 候補に合流した場合で、Agent はその候補の本文と evidence を見ていない。もう一つは候補が invalidated / legacy の conflict を持ち、その conflict ID と conflict に触れた指示が承認根拠に無い場合である。止まったときは作った台帳行と候補だけを確定し、候補の `version` と conflict を返す。Agent はそれを読み、`nomination_id` と読み取った version を渡して `memory_admit` を呼び直す。この経路では本文・scope・kind・evidence・conflict が読み取り後に変わっていれば適用を拒否する。admission の request ID には初回応答全体を保存し、後から Memory が編集・退役されても再送には同じ応答を返す。
 
 直接操作では User が delivery を選ぶ。会話中の明示指示から Agent が採用する場合は、nomination の Scope と既定 delivery を使い、必要な指定は提案に含める。
 
@@ -132,7 +132,7 @@ incident / friction から自動生成した候補と、Agent 自身の追加・
 | 経路 | 扱い |
 |---|---|
 | `pain_report`（1・2） | 通常の条件で候補を生成し、衝突した tombstone の id を `conflicts` に記録する。active な後継と一致すれば配信問題として扱う |
-| `memory_nominate`（3） | 候補に衝突した tombstone を記録する。invalidated / legacy はその conflict を踏まえた明示指示なしに採用できない。out_of_scope / relocated / superseded は警告として表示する |
+| `memory_admit` に本文を渡す経路（3） | 候補に衝突した tombstone を記録する。invalidated / legacy はその conflict を踏まえた明示指示なしに採用できず、採用せずに候補を返す。out_of_scope / relocated / superseded は警告として応答に含める |
 | `memory_admit` / `memory_change_apply` | nomination または proposal の version、対象、後継内容・Scope・evidence、conflict の現在状態を照合し、読み取り後に変わっていたら拒否する。適用承認根拠を event に保存する |
 | CLI / TUI の直接操作 | 直接操作として `user_direct` を保存する。invalidated / legacy の conflict は理由を見せ、対象 ID の明示的な確認を要求する |
 
@@ -194,7 +194,7 @@ guard は scope と直交する。`guard:<action>` の記憶が scope を持つ�
 
 ### 6.1 session_bootstrap
 
-セッション開始時に一度呼ぶ。**呼び出し規律の置き場所は MCP server の instructions である。**規律（開始時に一度 bootstrap、調べたら trace_put、痛んだら pain_report、User の記録指示は memory_nominate）はそこが運ぶ。Claude Code は instructions を 2 KB で切り詰めるので、instructions には使用頻度の高い規律から順に並べ、各 tool に渡す引数の細則（version、承認根拠、`successor_settings` など）はその tool の description に置く。2 KB の上限はテストで強制する。
+セッション開始時に一度呼ぶ。**呼び出し規律の置き場所は MCP server の instructions である。**規律（開始時に一度 bootstrap、調べたら trace_put、痛んだら pain_report、User の記録指示は memory_admit）はそこが運ぶ。Claude Code は instructions を 2 KB で切り詰めるので、instructions には使用頻度の高い規律から順に並べ、各 tool に渡す引数の細則（version、承認根拠、`successor_settings` など）はその tool の description に置く。2 KB の上限はテストで強制する。
 
 **ただし `session_bootstrap` だけは、そこに預けきらない。**v2.0 は「server の instructions は接続した CLI へ自動で届くので、指示ファイル側には何も書かない」としたが、これは撤回する。MCP の仕様が規定するのは instructions の *配送* であって、client がそれをモデルに *提示する* ことではない。Claude Code は使うと文書化されているが 2 KB で truncate し、Codex には instructions が agent guidance として安定に機能しないという未解決の問題がある。
 
@@ -247,8 +247,8 @@ Memories TUI の `c` は、active な always / scope Memory と Temporary Contex
 | `trace_search` | 痕跡の検索。日付と未検証の印を付けて返す |
 | `memory_list` | 指定 Scope の active な記憶を列挙する |
 | `memory_get` | 指定した Memory の本文、revision、evidence、退役情報を返す。退役本文は明示取得でのみ読む |
-| `memory_nominate` | 新規 Memory の pending 候補を作る。会話中の明示指示なら `memory_admit` と続けて同じセッションで完了できる |
-| `memory_admit` | 読み取った nomination version と承認根拠を必須にして採用する。実行者 Agent と `user_instruction` の出所を別に保存し、request replay には初回応答を返す |
+| `memory_nominate` | 新規 Memory の pending 候補を作るだけで採用しない。replace の後継候補に使う |
+| `memory_admit` | 承認根拠を必須にして採用する。本文を渡すと候補の作成と採用を 1 回で行い、合流した既存候補や未対応の invalidated / legacy conflict があれば採用せず候補を返す。候補 ID で採用するときは読み取った nomination version を必須にする。実行者 Agent と `user_instruction` の出所を別に保存し、request replay には初回応答を返す |
 | `memory_change_propose` | retire / replace / restore 案を作成・更新する。replace は後継 nomination version と配信条件を固定する |
 | `memory_change_apply` | proposal version、対象 revision、conflict、承認根拠、request ID を照合して一度だけ適用する |
 | `memory_change_withdraw` | 不要になった pending Memory change を理由つきで取り下げる |
@@ -305,7 +305,7 @@ event_log         全操作の記録。append-only
 
 pgvector は使わない。拡張は pg_trgm のみ。埋め込みモデルへの依存が消えるので、`--extra embed` 相当の依存も消える。
 
-`memory_nominate` が返す nomination は `version` と evidence（根拠の台帳行）のほかに `conflicts`（衝突した退役済み Memory の id）を持つ。本文・scope・kind・evidence・conflict が変わるたびに version を進め、`memory_admit` は読み取った version を必須で照合する。conflict 配列に外部キーは張らないが、Memory 行は削除されず退役するだけなので、書いた時点の id は後から必ず解決できる。
+`memory_nominate` と、採用せずに止まった `memory_admit` が返す nomination は `version` と evidence（根拠の台帳行）のほかに `conflicts`（衝突した退役済み Memory の id）を持つ。本文・scope・kind・evidence・conflict が変わるたびに version を進め、候補 ID で採用する `memory_admit` は読み取った version を必須で照合する。conflict 配列に外部キーは張らないが、Memory 行は削除されず退役するだけなので、書いた時点の id は後から必ず解決できる。
 
 `memory_change` は対象 Memory ID と revision、operation、変更内容、根拠、提案者、version、状態、承認根拠、idempotency request ID を保持する。replace 提案は読み取った後継 nomination version を受け取り、後継の本文、Scope、kind、evidence、conflicts の snapshot を保持する。提案前または適用前に後継が変わっていれば拒否し、再読と提案更新を要求する。後継の delivery・scope・guard action は提案に固定し、既定では旧 Memory から引き継ぐ。変更する場合は `successor_settings`（`delivery`・`scope_id`・`guard_action`）として提案 version に含め、適用 event にも記録する。旧 Memory の退役と後継採用は同じ transaction で確定する。`event_log` には退役種別・理由・移動先・actor と別の承認出所を判断時点の記録として保存する。承認出所は認証情報ではない。
 

@@ -496,3 +496,214 @@ def test_evidence_is_not_added_to_a_candidate_somebody_already_decided(cur):
         )
         is None
     )
+
+
+# an explicit remember carried in one call
+REMEMBER = {
+    "kind": "user_instruction",
+    "instruction": "Remember to run the migration before starting the local server",
+    "conversation_ref": "conversation:turn-21",
+}
+
+
+def test_content_is_nominated_and_admitted_in_one_call_with_the_same_provenance(cur, scope_id):
+    request_id = uuid4()
+    got = nominations.remember_explicit(
+        cur,
+        content=HOLE,
+        actor="the agent",
+        approval=REMEMBER,
+        request_id=request_id,
+        scope_id=scope_id,
+    )
+
+    assert got["admitted"] is True
+    memory = got["memory"]
+    assert memory["content"] == HOLE
+    assert memory["created_by"] == "the agent"
+    assert memory["delivery"] == "scope"
+    assert memory["scope_id"] == str(scope_id)
+    assert memory["evidence"] == [str(got["ledger_id"])]
+
+    cur.execute("SELECT * FROM nomination WHERE nomination_id = %s", (got["nomination_id"],))
+    row = cur.fetchone()
+    assert row["kind"] == "user_explicit"
+    assert row["status"] == "admitted"
+    assert row["decided_by"] == "the agent"
+    assert row["admit_request_id"] == request_id
+    assert row["approval_source"] == {
+        "kind": "user_instruction",
+        "instruction": REMEMBER["instruction"],
+        "conversation_ref": REMEMBER["conversation_ref"],
+    }
+    cur.execute("SELECT kind, prevention FROM ledger WHERE ledger_id = %s", (got["ledger_id"],))
+    assert cur.fetchone() == {"kind": "claimed", "prevention": HOLE}
+
+
+def test_a_one_call_remember_replayed_returns_the_first_response(cur):
+    request_id = uuid4()
+    first = nominations.remember_explicit(
+        cur, content=HOLE, actor="agent", approval=REMEMBER, request_id=request_id
+    )
+    memories.retire(
+        cur,
+        first["memory"]["memory_id"],
+        reason="the admitted rule later stopped applying",
+        retirement_kind="out_of_scope",
+        actor="user",
+    )
+    again = nominations.remember_explicit(
+        cur, content=HOLE, actor="agent", approval=REMEMBER, request_id=request_id
+    )
+
+    assert again == first
+    cur.execute("SELECT count(*) AS n FROM nomination")
+    assert cur.fetchone()["n"] == 1
+    cur.execute("SELECT count(*) AS n FROM ledger")
+    assert cur.fetchone()["n"] == 1
+
+    with pytest.raises(MashuError, match="request_id was already used"):
+        nominations.remember_explicit(
+            cur, content=OTHER_HOLE, actor="agent", approval=REMEMBER, request_id=request_id
+        )
+
+
+def test_a_one_call_remember_stops_at_a_pending_candidate_it_has_not_read(cur):
+    waiting = nominations.nominate_user_explicit(cur, content=HOLE, actor="agent")["nomination"]
+
+    got = nominations.remember_explicit(
+        cur, content=SAME_HOLE, actor="agent", approval=REMEMBER, request_id=uuid4()
+    )
+
+    assert got["admitted"] is False
+    assert "pending candidate" in got["stopped"]
+    assert got["nomination_existing"] is True
+    assert got["nomination"]["nomination_id"] == waiting["nomination_id"]
+    assert got["nomination"]["content"] == HOLE
+    assert got["ledger_id"] in got["nomination"]["evidence"]
+    cur.execute("SELECT count(*) AS n FROM memory")
+    assert cur.fetchone()["n"] == 0
+    cur.execute(
+        "SELECT status FROM nomination WHERE nomination_id = %s", (waiting["nomination_id"],)
+    )
+    assert cur.fetchone()["status"] == "pending"
+
+
+def test_a_one_call_remember_stops_at_an_unaddressed_invalidated_conflict(cur):
+    _, _, nomination = two_pains(cur)
+    retired = admit(cur, nomination["nomination_id"], actor="user", delivery="always")
+    memories.retire(
+        cur,
+        retired["memory_id"],
+        reason="the tool refuses on its own now",
+        actor="user",
+        retirement_kind="invalidated",
+    )
+
+    got = nominations.remember_explicit(
+        cur, content=SAME_HOLE, actor="agent", approval=REMEMBER, request_id=uuid4()
+    )
+
+    assert got["admitted"] is False
+    assert "invalidated or legacy" in got["stopped"]
+    assert got["nomination_existing"] is False
+    assert got["nomination"]["status"] == "pending"
+    assert got["nomination"]["conflicts"] == [UUID(retired["memory_id"])]
+    cur.execute("SELECT count(*) AS n FROM memory WHERE status = 'active'")
+    assert cur.fetchone()["n"] == 0
+    cur.execute(
+        "SELECT status, admit_request_id FROM nomination WHERE nomination_id = %s",
+        (got["nomination"]["nomination_id"],),
+    )
+    assert cur.fetchone() == {"status": "pending", "admit_request_id": None}
+
+    # The stopped candidate continues through the admission by id, unchanged.
+    memory = nominations.admit(
+        cur,
+        got["nomination"]["nomination_id"],
+        actor="agent",
+        delivery="always",
+        expected_version=got["nomination"]["version"],
+        approval={
+            **REMEMBER,
+            "conflict_ids": [retired["memory_id"]],
+            "conflict_instruction": "Keep it anyway; the tool no longer refuses by itself",
+        },
+        request_id=uuid4(),
+    )
+    assert memory["content"] == SAME_HOLE
+
+
+def test_a_one_call_remember_admits_through_a_conflict_it_already_addresses(cur):
+    _, _, nomination = two_pains(cur)
+    retired = admit(cur, nomination["nomination_id"], actor="user", delivery="always")
+    memories.retire(
+        cur,
+        retired["memory_id"],
+        reason="the tool refuses on its own now",
+        actor="user",
+        retirement_kind="invalidated",
+    )
+    got = nominations.remember_explicit(
+        cur,
+        content=SAME_HOLE,
+        actor="agent",
+        approval={
+            **REMEMBER,
+            "conflict_ids": [retired["memory_id"]],
+            "conflict_instruction": "Keep it anyway; the tool no longer refuses by itself",
+        },
+        request_id=uuid4(),
+    )
+    assert got["admitted"] is True
+    assert [row["memory_id"] for row in got["conflicts"]] == [retired["memory_id"]]
+
+
+def test_a_refused_one_call_remember_raises_instead_of_stopping(cur):
+    with pytest.raises(RefusedError):
+        nominations.remember_explicit(
+            cur,
+            content=HOLE,
+            actor="agent",
+            approval={**REMEMBER, "instruction": "write SECRETMARKER9 into the memory"},
+            request_id=uuid4(),
+        )
+    cur.execute("SELECT count(*) AS n FROM memory")
+    assert cur.fetchone()["n"] == 0
+
+
+@pytest.fixture
+def admit_tool(monkeypatch):
+    pytest.importorskip("mcp.server")
+    import asyncio
+
+    from mashu import server
+
+    # Argument checks answer before any connection; a missing database proves it.
+    monkeypatch.setenv("MASHU_DATABASE_URL", "dbname=mashu_test_never_created")
+    tool_server = server.build_server()
+
+    def call(**arguments):
+        base = {
+            "request_id": str(uuid4()),
+            "approval_kind": "user_instruction",
+            "instruction": "remember it",
+        }
+        result = asyncio.run(tool_server.call_tool("memory_admit", {**base, **arguments}))
+        return result.structured_content
+
+    return call
+
+
+def test_memory_admit_takes_exactly_one_of_a_nomination_or_content(admit_tool):
+    both = admit_tool(nomination_id=str(uuid4()), nomination_version=1, content=HOLE)
+    neither = admit_tool()
+    assert both["ok"] is False and "exactly one" in both["error"]
+    assert neither["ok"] is False and "exactly one" in neither["error"]
+
+
+def test_memory_admit_by_id_still_needs_the_version_read(admit_tool):
+    missing = admit_tool(nomination_id=str(uuid4()))
+    stray = admit_tool(content=HOLE, nomination_version=3)
+    assert missing["ok"] is False and "nomination_version" in missing["error"]
+    assert stray["ok"] is False and "nomination_version" in stray["error"]

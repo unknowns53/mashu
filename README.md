@@ -39,7 +39,9 @@ Memory 以外の記録は、Memory の代わりではない。便利なメモや
          └─ 既存の Trace / friction と照合できれば candidate
 
 User が会話中に「覚えて」と言った
-    └─ memory_nominate → memory_admit → active Memory（同じセッションで完了）
+    └─ memory_admit（content を渡す）→ active Memory（1 回の呼び出しで完了）
+         └─ 未読の pending candidate に合流した、または invalidated / legacy と衝突した
+              └─ 採用せず停止 → 返った nomination を読み、memory_admit（nomination_id）
 
 Agent が既存 Memory の変更を考えた
     └─ memory_get → memory_change_propose → pending proposal
@@ -54,7 +56,7 @@ pending candidate
 
 incident / friction から自動生成された candidate と Agent 独自の提案は pending に留まる。ユーザーが会話中に明示した記録・変更指示は `memory_admit` / `memory_change_apply` に渡し、同じセッションで実行できる。実行者は Agent のまま記録し、指示の原文と会話参照を別に保存する。これは監査用で、サーバーが会話の真正性を認証するものではない。Agent の有用性判断・confidence・ユーザーの沈黙は承認として扱わない。Project State は別扱いで、Agent が更新した active Task の card は次のセッションへ届く。Current State 全文は常時注入せず、card の完全な task_id から `task_get` で明示取得する。
 
-`memory_nominate` の応答には nomination `version` が含まれる。`memory_admit` はそれを `nomination_version` として必須で受け取り、本文・scope・根拠・conflict が読み取り後に変わっていれば拒否する。同じ request ID の再送は、Memory が後から編集・退役されていても初回の採用応答を返す。replace は後継 nomination の内容と旧 Memory の配信条件を提案に固定し、配信条件を変える場合は `successor_settings` に `delivery`・`scope_id`・`guard_action` をまとめて proposal に含める。
+`memory_admit` に `content` を渡すと、候補の作成と採用を一つの transaction で行う。候補が既存の pending candidate に合流した場合と、invalidated / legacy の退役 Memory と衝突し、その conflict に触れた指示が無い場合は採用せずに止まり、作った候補と台帳行だけを残して nomination を返す。Agent はその本文と conflict を読み、`nomination_id` と nomination `version` を `nomination_version` として `memory_admit` に渡して続ける。この経路では本文・scope・根拠・conflict が読み取り後に変わっていれば拒否する。同じ request ID の再送は、どちらの経路でも、Memory が後から編集・退役されていても初回の採用応答を返す。replace は後継 nomination の内容と旧 Memory の配信条件を提案に固定し、配信条件を変える場合は `successor_settings` に `delivery`・`scope_id`・`guard_action` をまとめて proposal に含める。
 
 一度直せば以後は覚えなくてよい変更は、Memory ではなく Task の next_actions に記録する。pain の prevention-kind を work にするとこの扱いになる。
 
@@ -130,7 +132,7 @@ Agent が使うサブコマンドと MCP は変わらない。引数を付けた
 
 ### 恒久ルールを直接登録する
 
-User が CLI の `mashu remember` または dashboard の Memories から直接登録した内容は、review を待たずに active Memory になる。会話中に「覚えて」と明示された内容は `memory_nominate` の直後に `memory_admit` を呼べる。
+User が CLI の `mashu remember` または dashboard の Memories から直接登録した内容は、review を待たずに active Memory になる。会話中に「覚えて」と明示された内容は、Agent が `memory_admit` に本文を渡して 1 回で登録できる。
 
 ~~~bash
 mashu remember "Run migrations before restarting the service"
@@ -351,8 +353,8 @@ MCP tool は 22 個ある。
 | Knowledge | trace_search | Trace だけを検索する |
 | Knowledge | memory_list | 指定 Scope の active Memory を一覧する |
 | Knowledge | memory_get | 指定 Memory の本文、revision、evidence、退役種別・理由・後継を読む |
-| Knowledge | memory_nominate | 新規 Memory の pending candidate を作る |
-| Knowledge | memory_admit | 読み取った nomination version と承認根拠を必須にして採用する。request replay は初回応答を返す |
+| Knowledge | memory_nominate | 新規 Memory の pending candidate を作る。replace の後継に使う |
+| Knowledge | memory_admit | 承認根拠を必須にして採用する。`content` を渡せば候補の作成と採用を 1 回で行い、読むべき候補や conflict があれば止まる。止まった候補は `nomination_id` と読み取った version で採用する。request replay は初回応答を返す |
 | Knowledge | memory_change_propose | retire / replace / restore を作成または更新する。replace は後継の内容・version と配信条件を固定する |
 | Knowledge | memory_change_apply | proposal の version と対象・conflict・承認根拠を照合して適用する |
 | Knowledge | memory_change_withdraw | 不要になった pending proposal を取り下げる |
@@ -373,7 +375,7 @@ Agent が守る基本の動詞は次の四つだ。
 ~~~text
 調べて分かった          → trace_put
 実際に困った            → pain_report
-User が「覚えて」と言った → memory_nominate → memory_admit
+User が「覚えて」と言った → memory_admit（content）
 User が既存 Memory の変更を指示 → memory_get → memory_change_propose → memory_change_apply
 作業の区切り            → task_checkpoint
 ~~~

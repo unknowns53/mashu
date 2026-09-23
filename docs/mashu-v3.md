@@ -64,7 +64,7 @@ Mashu
 | 履歴 | revision | checkpoint / attempt / decision |
 | 終了 | retire / replace / restore。理由と退役種別を記録 | close（User）/ dormant（lease） |
 
-Project State から Memory への昇格経路は作らない。作業中に恒久規則が見つかったなら、それは通常どおり `pain_report` / `memory_nominate` の実証経路を通る。
+Project State から Memory への昇格経路は作らない。作業中に恒久規則が見つかったなら、それは通常どおり `pain_report` の実証経路か、User の明示指示による `memory_admit` を通る。
 
 ### 3.1 信頼境界 — 明示指示と Project State の継続更新
 
@@ -270,8 +270,7 @@ Agent の書き分けは次の四行に収まるように設計する。これ�
 ```text
 調べて分かった            → trace_put
 痛かった                  → pain_report
-User が覚えてと言った     → memory_nominate
-明示指示による採用      → memory_admit
+User が覚えてと言った     → memory_admit
 作業の区切り              → task_checkpoint
 ```
 

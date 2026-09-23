@@ -43,10 +43,7 @@ def validate(
             source["conversation_ref"] = reference
 
     expected = {str(value) for value in required_conflicts or []}
-    try:
-        supplied = {str(UUID(str(value))) for value in (approval.get("conflict_ids") or [])}
-    except (ValueError, TypeError, AttributeError) as error:
-        raise MashuError("conflict_ids must contain Memory UUIDs") from error
+    supplied = _supplied_conflicts(approval)
     if expected != supplied:
         if expected or supplied:
             raise MashuError(
@@ -73,6 +70,28 @@ def validate(
             source["reversal_approved_by_action"] = True
 
     return source
+
+
+def acknowledges_conflicts(approval: dict[str, Any], required_conflicts: list[UUID]) -> bool:
+    """Whether the approval names exactly these conflicts and, for an instruction, addresses them.
+
+    Content checks on the acknowledgment text stay in validate, so a text that is present
+    but refused still fails there rather than reading as unacknowledged.
+    """
+    expected = {str(value) for value in required_conflicts}
+    if _supplied_conflicts(approval) != expected:
+        return False
+    if expected and approval.get("kind") == "user_instruction":
+        text = approval.get("conflict_instruction")
+        return isinstance(text, str) and bool(text.strip())
+    return True
+
+
+def _supplied_conflicts(approval: dict[str, Any]) -> set[str]:
+    try:
+        return {str(UUID(str(value))) for value in (approval.get("conflict_ids") or [])}
+    except (ValueError, TypeError, AttributeError) as error:
+        raise MashuError("conflict_ids must contain Memory UUIDs") from error
 
 
 def _safe_text(value: Any, label: str, *, required: bool = False) -> str | None:

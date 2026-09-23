@@ -322,6 +322,13 @@ def conflict_rows(cur: psycopg.Cursor, conflicts: list[UUID] | None) -> list[dic
     return [by_id[c] for c in conflicts if c in by_id]
 
 
+def blocking_conflicts(rows: list[dict[str, Any]]) -> list[UUID]:
+    """The retirements an admission may not walk past without an instruction addressing them."""
+    return [
+        row["memory_id"] for row in rows if row.get("retirement_kind") in ("invalidated", "legacy")
+    ]
+
+
 #: What both decision paths say when the row moved under them.
 NOT_PENDING = "nomination is no longer pending"
 
@@ -445,12 +452,9 @@ def admit(
             "retirement conflicts changed since this nomination was read; read the updated "
             "candidate and confirm it again"
         )
-    blocking = [
-        row["memory_id"]
-        for row in current_conflicts
-        if row.get("retirement_kind") in ("invalidated", "legacy")
-    ]
-    approval_source = approvals.validate(approval, required_conflicts=blocking)
+    approval_source = approvals.validate(
+        approval, required_conflicts=blocking_conflicts(current_conflicts)
+    )
 
     if delivery not in ("always", "scope", "guard"):
         raise MashuError(f"unknown delivery '{delivery}'")
@@ -536,6 +540,98 @@ def admit(
         detail={"approval_source": approval_source, "request_id": str(request_id)},
     )
     return approvals.json_value(memory)
+
+
+#: Why a one-call remember stopped at the queue instead of admitting.
+_STOP_EXISTING = (
+    "this content joined an already pending candidate whose body and evidence you have not "
+    "read, so nothing was admitted. Read the returned nomination; if the user's instruction "
+    "covers it, call memory_admit with its nomination_id and nomination version."
+)
+_STOP_CONFLICT = (
+    "this content repeats Memory retired as invalidated or legacy, so nothing was admitted. "
+    "Show the user the returned conflicts; if they address them, call memory_admit with the "
+    "nomination_id, nomination version, conflict_ids, and conflict_instruction."
+)
+
+
+def remember_explicit(
+    cur: psycopg.Cursor,
+    *,
+    content: str,
+    actor: str,
+    approval: dict[str, Any],
+    request_id: UUID,
+    scope_id: UUID | None = None,
+    delivery: str | None = None,
+    guard_action: str | None = None,
+) -> dict[str, Any]:
+    """Nominate an instruction the agent carries and admit it at once when nothing needs reading.
+
+    A stop keeps the ledger row and nomination, as memory_nominate would, so the agent can
+    continue with an admission by id. Any other refusal propagates and writes nothing.
+    """
+    chosen_delivery = delivery or ("scope" if scope_id else "always")
+    settings = {
+        "actor": actor,
+        "delivery": chosen_delivery,
+        "scope_id": scope_id,
+        "scope_override": True,
+        "guard_action": guard_action,
+        "approval": approval,
+        "request_id": request_id,
+    }
+
+    # The nomination a first call created is no longer pending, so a replay has to find it
+    # before nominating again or it would file a second candidate for the same request.
+    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (str(request_id),))
+    cur.execute("SELECT * FROM nomination WHERE admit_request_id = %s", (request_id,))
+    replay = cur.fetchone()
+    if replay is not None:
+        if replay["content"] != content:
+            raise MashuError("request_id was already used for a different Memory admission")
+        memory = admit(
+            cur,
+            replay["nomination_id"],
+            expected_version=replay["admit_request"]["expected_version"],
+            **settings,
+        )
+        verdict = redact.check(content)
+        gate = {"unchecked": verdict.unchecked}
+        if verdict.malformed:
+            gate["malformed"] = verdict.malformed
+        return _remembered(memory, replay, replay["evidence"][0], gate)
+
+    nominated = nominate_user_explicit(cur, content=content, actor=actor, scope_id=scope_id)
+    nomination = nominated["nomination"]
+    if nominated["nomination_existing"]:
+        return {"admitted": False, "stopped": _STOP_EXISTING, **nominated}
+    blocking = blocking_conflicts(conflict_rows(cur, nomination["conflicts"]))
+    if not approvals.acknowledges_conflicts(approval, blocking):
+        return {"admitted": False, "stopped": _STOP_CONFLICT, **nominated}
+
+    memory = admit(
+        cur, nomination["nomination_id"], expected_version=nomination["version"], **settings
+    )
+    gate = {key: nominated[key] for key in ("unchecked", "malformed") if key in nominated}
+    return _remembered(memory, nomination, nominated["ledger_id"], gate)
+
+
+def _remembered(
+    memory: dict[str, Any],
+    nomination: dict[str, Any],
+    ledger_id: UUID,
+    gate: dict[str, Any],
+) -> dict[str, Any]:
+    # Built only from rows an admission freezes, so a replay answers exactly as the first call.
+    return {
+        "admitted": True,
+        "memory": memory,
+        "nomination_id": nomination["nomination_id"],
+        "ledger_id": ledger_id,
+        "conflicts": nomination["conflict_snapshot"],
+        **gate,
+    }
 
 
 def decline(cur: psycopg.Cursor, nomination_id: UUID, *, actor: str, reason: str) -> dict[str, Any]:

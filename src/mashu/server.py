@@ -45,7 +45,7 @@ INSTRUCTIONS = (
     "friction on the second occurrence. Use prevention_kind='work' and task_id for "
     "one-time fixes. Temporary Context handles expiry. "
     "Durable Memory changes need an explicit user instruction. For a request to remember, "
-    "call memory_nominate then memory_admit. For an existing Memory, call memory_get, "
+    "call memory_admit with the content. For an existing Memory, call memory_get, "
     "memory_change_propose, then memory_change_apply. Follow each tool's description for "
     "the required fields. Your own suggestion, confidence, and user silence are not "
     "approval; your independent change idea stays pending. After success, briefly report "
@@ -225,10 +225,11 @@ def build_server() -> Any:
 
     @server.tool()
     def memory_nominate(content: str, scope: str | None = None) -> dict[str, Any]:
-        """Create or update a pending candidate for a new durable Memory.
+        """Create or update a pending candidate for a new durable Memory without admitting it.
 
-        This does not admit it. Use memory_admit in the same session only when an explicit
-        user instruction asks Mashu to remember this content.
+        Use it for the successor of a memory_change_propose replace, or to read the current
+        candidate again when memory_admit stopped at the queue. A plain explicit request to
+        remember goes to memory_admit with `content` instead.
         """
         try:
             with db.transaction() as cur:
@@ -257,11 +258,12 @@ def build_server() -> Any:
 
     @server.tool()
     def memory_admit(
-        nomination_id: UUID,
-        nomination_version: int,
         request_id: UUID,
         approval_kind: str,
         instruction: str,
+        nomination_id: UUID | None = None,
+        nomination_version: int | None = None,
+        content: str | None = None,
         conversation_ref: str | None = None,
         conflict_ids: list[UUID] | None = None,
         conflict_instruction: str | None = None,
@@ -269,9 +271,13 @@ def build_server() -> Any:
         scope: str | None = None,
         guard_action: str | None = None,
     ) -> dict[str, Any]:
-        """Admit the exact nomination version with explicit instruction provenance.
+        """Admit a new Memory with explicit instruction provenance.
 
-        Pass the version memory_nominate returned as `nomination_version`,
+        For a plain request to remember, pass `content` (and optional `scope`): the
+        nomination and admission happen in one call. If it joins an already pending
+        candidate or repeats invalidated or legacy retired Memory, it stops with
+        `admitted: false` and returns the nomination to read; then pass that
+        `nomination_id` and its `version` as `nomination_version`. Always pass
         `approval_kind='user_instruction'`, a short exact quote of the user's instruction,
         any available `conversation_ref`, and a new `request_id`. The Agent executes it;
         this provenance is not authentication. Invalidated or legacy conflicts need
@@ -279,8 +285,38 @@ def build_server() -> Any:
         """
         if approval_kind != "user_instruction":
             return _failure(MashuError("MCP admission requires approval_kind='user_instruction'"))
+        if (nomination_id is None) == (content is None):
+            return _failure(
+                MashuError("pass exactly one of nomination_id (with nomination_version) or content")
+            )
+        if nomination_id is not None and nomination_version is None:
+            return _failure(MashuError("nomination_id needs the nomination_version you read"))
+        if content is not None and nomination_version is not None:
+            return _failure(
+                MashuError("nomination_version belongs with nomination_id, not with content")
+            )
+        approval = {
+            "kind": approval_kind,
+            "instruction": instruction,
+            "conversation_ref": conversation_ref,
+            "conflict_ids": conflict_ids or [],
+            "conflict_instruction": conflict_instruction,
+        }
         try:
             with db.transaction() as cur:
+                if content is not None:
+                    scope_id, _, _ = _scope(cur, scope)
+                    answer = nominations.remember_explicit(
+                        cur,
+                        content=content,
+                        actor=actor(),
+                        approval=approval,
+                        request_id=request_id,
+                        scope_id=scope_id,
+                        delivery=delivery,
+                        guard_action=guard_action,
+                    )
+                    return _plain({"ok": answer["admitted"], **answer})
                 cur.execute("SELECT * FROM nomination WHERE nomination_id = %s", (nomination_id,))
                 nomination = cur.fetchone()
                 if nomination is None:
@@ -300,13 +336,7 @@ def build_server() -> Any:
                     scope_id=scope_id,
                     scope_override=True,
                     guard_action=guard_action,
-                    approval={
-                        "kind": approval_kind,
-                        "instruction": instruction,
-                        "conversation_ref": conversation_ref,
-                        "conflict_ids": conflict_ids or [],
-                        "conflict_instruction": conflict_instruction,
-                    },
+                    approval=approval,
                     request_id=request_id,
                 )
                 return _plain({"ok": True, "memory": result})
