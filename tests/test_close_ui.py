@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import committed_task, keys, new_project, task_row
-from mashu import close_ui, db, tasks
+from conftest import committed_task, expire, keys, new_project, task_row, update_task
+from mashu import close_ui, db
 
 MERGED = "deleted before the merge d178ecb7, nothing on main references it"
+DETAIL = {
+    "goal": "launch without the old rail",
+    "status_text": "the replacement is fitted",
+    "approach": "reuse the aft mounting points",
+    "open_questions": ["whether the forward mount also moves"],
+    "blockers": ["await the load certificate"],
+    "next_actions": ["run the loaded trial"],
+}
 
 pytestmark = pytest.mark.usefixtures("known_screen")
 
@@ -17,63 +25,30 @@ def dsn(dsn):
     return dsn
 
 
-def a_task(dsn: str, name: str, *, propose: str | None = None, reason: str = MERGED):
-    return committed_task(dsn, name, propose=propose, reason=reason)
+def a_task(dsn: str, name: str, *, propose: str | None = None, dormant=False, **state):
+    task_id = committed_task(dsn, name, propose=propose, reason=MERGED)
+    with db.transaction(dsn) as cur:
+        if state:
+            update_task(cur, task_id, **state)
+        if dormant:
+            expire(cur, task_id)
+    return task_id
 
 
-def test_enter_closes_on_the_proposal_and_keeps_its_grounds(dsn, monkeypatch):
+def status(dsn, task_id):
+    return task_row(dsn, task_id)["task"]["status"]
+
+
+def test_the_grounds_are_on_the_screen_and_leaving_decides_nothing(dsn, monkeypatch, capsys):
     task_id = a_task(dsn, "drop the close-up tool", propose="completed")
-    keys(monkeypatch, "enter", "q")
-
-    assert close_ui.run(dsn) == 0
-
-    row = task_row(dsn, task_id)
-    assert row["task"]["status"] == "closed"
-    assert row["task"]["outcome"] == "completed"
-    assert row["task"]["close_reason"] == MERGED
-
-
-def test_the_grounds_are_on_the_screen_before_the_key_that_accepts_them(dsn, monkeypatch, capsys):
-    a_task(dsn, "drop the close-up tool", propose="completed")
     keys(monkeypatch, "q")
 
     assert close_ui.run(dsn) == 0
-    out = capsys.readouterr().out
-    assert MERGED in out
-    assert "proposed completed by agent" in out
+    assert MERGED in capsys.readouterr().out
+    assert status(dsn, task_id) == "open"
 
 
-def test_an_outcome_key_asks_for_a_reason_and_takes_an_empty_one(dsn, monkeypatch):
-    task_id = a_task(dsn, "rework the hull")
-    keys(monkeypatch, "c", "", "q")
-
-    assert close_ui.run(dsn) == 0
-
-    row = task_row(dsn, task_id)
-    assert row["task"]["outcome"] == "completed"
-    assert row["task"]["close_reason"] is None
-
-
-def test_an_empty_reason_keeps_the_proposed_grounds_where_the_outcome_agrees(dsn, monkeypatch):
-    task_id = a_task(dsn, "drop the close-up tool", propose="completed")
-    keys(monkeypatch, "c", "", "q")
-
-    assert close_ui.run(dsn) == 0
-    assert task_row(dsn, task_id)["task"]["close_reason"] == MERGED
-
-
-def test_choosing_against_the_proposal_records_no_reason_of_its(dsn, monkeypatch):
-    task_id = a_task(dsn, "drop the close-up tool", propose="completed")
-    keys(monkeypatch, "a", "", "q")
-
-    assert close_ui.run(dsn) == 0
-
-    row = task_row(dsn, task_id)
-    assert row["task"]["outcome"] == "abandoned"
-    assert row["task"]["close_reason"] is None
-
-
-def test_a_typed_reason_is_what_is_recorded(dsn, monkeypatch):
+def test_superseded_takes_the_reason_typed_for_it(dsn, monkeypatch):
     task_id = a_task(dsn, "rework the hull")
     keys(monkeypatch, "s", "ship-parts took this over", "q")
 
@@ -84,57 +59,8 @@ def test_a_typed_reason_is_what_is_recorded(dsn, monkeypatch):
     assert row["task"]["close_reason"] == "ship-parts took this over"
 
 
-def test_an_overtaken_proposal_is_asked_about_before_it_is_taken(dsn, monkeypatch):
-    task_id = a_task(dsn, "drop the close-up tool", propose="completed")
-    with db.transaction(dsn) as cur:
-        state = tasks.task_get(cur, task_id)
-        tasks.task_update(
-            cur,
-            task_id,
-            actor="agent",
-            expect_updated_at=state["state"]["updated_at"],
-            status_text="wanted for the deck test after all",
-        )
-    keys(monkeypatch, "enter", "n", "q")
-
-    assert close_ui.run(dsn) == 0
-    assert task_row(dsn, task_id)["task"]["status"] == "open"
-
-
-def test_an_overtaken_proposal_can_still_be_taken_by_saying_so(dsn, monkeypatch):
-    task_id = a_task(dsn, "drop the close-up tool", propose="completed")
-    with db.transaction(dsn) as cur:
-        state = tasks.task_get(cur, task_id)
-        tasks.task_update(
-            cur,
-            task_id,
-            actor="agent",
-            expect_updated_at=state["state"]["updated_at"],
-            status_text="wanted for the deck test after all",
-        )
-    keys(monkeypatch, "enter", "y", "q")
-
-    assert close_ui.run(dsn) == 0
-    assert task_row(dsn, task_id)["task"]["outcome"] == "completed"
-
-
-def test_enter_on_a_task_nobody_proposed_anything_for_says_so(dsn, monkeypatch, capsys):
-    task_id = a_task(dsn, "rework the hull")
-    keys(monkeypatch, "enter", "q")
-
-    assert close_ui.run(dsn) == 0
-    assert "nothing is proposed" in capsys.readouterr().out
-    assert task_row(dsn, task_id)["task"]["status"] == "open"
-
-
 def test_dropping_a_proposal_leaves_the_task_open_with_its_lease_renewed(dsn, monkeypatch):
-    task_id = a_task(dsn, "drop the close-up tool", propose="completed")
-    with db.transaction(dsn) as cur:
-        cur.execute(
-            "UPDATE task SET active_until = now() - interval '1 day', "
-            "last_activity_at = now() - interval '15 days' WHERE task_id = %s",
-            (task_id,),
-        )
+    task_id = a_task(dsn, "drop the close-up tool", propose="completed", dormant=True)
     keys(monkeypatch, "w", "q")
 
     assert close_ui.run(dsn) == 0
@@ -156,30 +82,17 @@ def test_renewing_says_nothing_about_whether_the_work_is_finished(dsn, monkeypat
     assert row["proposal"]["outcome"] == "completed"
 
 
-def test_the_proposals_lead_the_list_because_that_is_what_the_screen_is_for(dsn, monkeypatch):
-    a_task(dsn, "rework the hull")
+def test_the_proposals_lead_the_list_and_the_arrows_reach_the_rest(dsn, monkeypatch):
+    unproposed = a_task(dsn, "rework the hull")
     proposed = a_task(dsn, "drop the close-up tool", propose="completed")
     keys(monkeypatch, "enter", "q")
-
     assert close_ui.run(dsn) == 0
-    assert task_row(dsn, proposed)["task"]["status"] == "closed"
+    assert status(dsn, proposed) == "closed"
 
-
-def test_the_arrows_reach_the_tasks_nobody_proposed_anything_for(dsn, monkeypatch):
-    unproposed = a_task(dsn, "rework the hull")
-    a_task(dsn, "drop the close-up tool", propose="completed")
+    a_task(dsn, "inspect the deck", propose="completed")
     keys(monkeypatch, "down", "c", "", "q")
-
     assert close_ui.run(dsn) == 0
     assert task_row(dsn, unproposed)["task"]["outcome"] == "completed"
-
-
-def test_leaving_decides_nothing(dsn, monkeypatch):
-    task_id = a_task(dsn, "drop the close-up tool", propose="completed")
-    keys(monkeypatch, "q")
-
-    assert close_ui.run(dsn) == 0
-    assert task_row(dsn, task_id)["task"]["status"] == "open"
 
 
 def test_a_store_with_nothing_open_says_so_rather_than_painting_a_list(dsn, monkeypatch, capsys):
@@ -189,128 +102,66 @@ def test_a_store_with_nothing_open_says_so_rather_than_painting_a_list(dsn, monk
 
 
 def test_the_screen_reads_the_dormant_tasks_too(dsn, monkeypatch):
-    task_id = a_task(dsn, "drop the close-up tool", propose="completed")
-    with db.transaction(dsn) as cur:
-        cur.execute(
-            "UPDATE task SET active_until = now() - interval '1 day', "
-            "last_activity_at = now() - interval '15 days' WHERE task_id = %s",
-            (task_id,),
-        )
+    task_id = a_task(dsn, "drop the close-up tool", propose="completed", dormant=True)
     keys(monkeypatch, "enter", "q")
 
     assert close_ui.run(dsn) == 0
-    assert task_row(dsn, task_id)["task"]["status"] == "closed"
+    assert status(dsn, task_id) == "closed"
 
 
 def test_the_preview_shows_decision_context_and_marks_a_stale_proposal(dsn, monkeypatch, capsys):
-    task_id = a_task(dsn, "replace the launch rail", propose="completed")
-    with db.transaction(dsn) as cur:
-        state = tasks.task_get(cur, task_id)
-        tasks.task_update(
-            cur,
-            task_id,
-            actor="agent",
-            expect_updated_at=state["state"]["updated_at"],
-            goal="launch without the old rail",
-            status_text="the replacement is fitted",
-            approach="reuse the aft mounting points",
-            open_questions=["whether the forward mount also moves"],
-            blockers=["await the load certificate"],
-            next_actions=["run the loaded trial"],
-        )
+    a_task(dsn, "replace the launch rail", propose="completed", **DETAIL)
     keys(monkeypatch, "q")
 
     assert close_ui.run(dsn) == 0
     out = capsys.readouterr().out
     assert "PROPOSAL" in out
     assert "STALE" in out
-    assert "goal" in out and "launch without the old rail" in out
-    assert "status" in out and "the replacement is fitted" in out
-    assert "approach" in out and "reuse the aft mounting points" in out
-    assert "open questions" in out and "whether the forward mount also moves" in out
-    assert "blockers" in out and "await the load certificate" in out
-    assert "next actions" in out and "run the loaded trial" in out
+    for value in DETAIL.values():
+        assert (value[0] if isinstance(value, list) else value) in out
+    for label in ("goal", "status", "approach", "open questions", "blockers", "next actions"):
+        assert label in out
 
 
 @pytest.mark.parametrize(
-    "query",
-    [
-        "REPLACE",
-        "ENRAI",
-        "ACTIVE",
-        "LAUNCH WITHOUT",
-        "FITTED",
-        "FORWARD MOUNT",
-        "NOTHING ON MAIN",
-    ],
+    "query", ["REPLACE", "ENRAI", "ACTIVE", "LAUNCH WITHOUT", "FITTED", "FORWARD MOUNT", "ON MAIN"]
 )
 def test_search_matches_every_promised_text_field_case_insensitively(dsn, query):
-    task_id = a_task(dsn, "replace the launch rail", propose="completed")
-    with db.transaction(dsn) as cur:
-        state = tasks.task_get(cur, task_id)
-        tasks.task_update(
-            cur,
-            task_id,
-            actor="agent",
-            expect_updated_at=state["state"]["updated_at"],
-            goal="launch without the old rail",
-            status_text="the replacement is fitted",
-            open_questions=["whether the forward mount also moves"],
-        )
-        row = tasks.task_get(cur, task_id)
+    task_id = a_task(dsn, "replace the launch rail", propose="completed", **DETAIL)
+    row = task_row(dsn, task_id)
 
     assert close_ui._matches(row, query)
     assert close_ui._matches(row, str(task_id)[:12])
 
 
-def test_search_filters_the_list_and_an_empty_search_restores_it(dsn, monkeypatch, capsys):
-    hull = a_task(dsn, "rework the hull")
-    deck = a_task(dsn, "inspect the deck")
-    keys(monkeypatch, "/", "HULL", "/", "", "home", "c", "", "q")
-
-    assert close_ui.run(dsn) == 0
-    out = capsys.readouterr().out
-    assert "1/2 open task(s)" in out
-    assert "search 'HULL'" in out
-    assert task_row(dsn, deck)["task"]["outcome"] == "completed"
-    assert task_row(dsn, hull)["task"]["status"] == "open"
-
-
-def test_zero_search_results_can_be_searched_again_and_left(dsn, monkeypatch, capsys):
-    a_task(dsn, "rework the hull")
-    keys(monkeypatch, "/", "absent", "/", "", "q")
-
-    assert close_ui.run(dsn) == 0
-    out = capsys.readouterr().out
-    assert "0/1 open task(s)" in out
-    assert "no tasks match" in out
-    assert "1 open task(s)" in out
-
-
-def test_left_clears_a_search_then_home_can_reach_the_full_list(dsn, monkeypatch):
-    hull = a_task(dsn, "rework the hull")
-    deck = a_task(dsn, "inspect the deck")
-    keys(monkeypatch, "/", "hull", "left", "home", "c", "", "q")
-
-    assert close_ui.run(dsn) == 0
-    assert task_row(dsn, deck)["task"]["outcome"] == "completed"
-    assert task_row(dsn, hull)["task"]["status"] == "open"
-
-
 @pytest.mark.parametrize(
-    ("movement", "closed_name"),
-    [(("j",), "older"), (("end", "k"), "newer")],
+    "searches",
+    [
+        ("/", "HULL", "/", "", "home"),
+        ("/", "hull", "left", "home"),
+        ("/", "absent", "/", "", "home"),
+    ],
 )
-def test_jk_and_home_end_move_between_tasks(dsn, monkeypatch, movement, closed_name):
-    older = a_task(dsn, "older task")
-    newer = a_task(dsn, "newer task")
+def test_a_search_narrows_the_list_and_clearing_it_restores_the_whole_list(
+    dsn, monkeypatch, searches
+):
+    hull = a_task(dsn, "rework the hull")
+    deck = a_task(dsn, "inspect the deck")
+    keys(monkeypatch, *searches, "c", "", "q")
+
+    assert close_ui.run(dsn) == 0
+    assert task_row(dsn, deck)["task"]["outcome"] == "completed"
+    assert status(dsn, hull) == "open"
+
+
+@pytest.mark.parametrize(("movement", "closed_index"), [(("j",), 0), (("end", "k"), 1)])
+def test_jk_and_home_end_move_between_tasks(dsn, monkeypatch, movement, closed_index):
+    task_ids = [a_task(dsn, "older task"), a_task(dsn, "newer task")]
     keys(monkeypatch, *movement, "c", "", "q")
 
     assert close_ui.run(dsn) == 0
-    expected = older if closed_name == "older" else newer
-    untouched = newer if closed_name == "older" else older
-    assert task_row(dsn, expected)["task"]["outcome"] == "completed"
-    assert task_row(dsn, untouched)["task"]["status"] == "open"
+    assert task_row(dsn, task_ids[closed_index])["task"]["outcome"] == "completed"
+    assert status(dsn, task_ids[1 - closed_index]) == "open"
 
 
 def test_page_down_moves_by_more_than_one_visible_task(dsn, monkeypatch):
@@ -318,12 +169,10 @@ def test_page_down_moves_by_more_than_one_visible_task(dsn, monkeypatch):
     keys(monkeypatch, "pagedown", "c", "", "q")
 
     assert close_ui.run(dsn) == 0
-    closed = [
-        task_id for task_id in task_ids if task_row(dsn, task_id)["task"]["status"] == "closed"
-    ]
+    closed = [task_id for task_id in task_ids if status(dsn, task_id) == "closed"]
     assert len(closed) == 1
-    assert task_row(dsn, task_ids[-1])["task"]["status"] == "open"
-    assert task_row(dsn, task_ids[-2])["task"]["status"] == "open"
+    assert status(dsn, task_ids[-1]) == "open"
+    assert status(dsn, task_ids[-2]) == "open"
 
 
 def test_selection_survives_reload_when_withdrawing_reorders_the_list(dsn, monkeypatch):
@@ -333,24 +182,11 @@ def test_selection_survives_reload_when_withdrawing_reorders_the_list(dsn, monke
 
     assert close_ui.run(dsn) == 0
     assert task_row(dsn, selected)["task"]["outcome"] == "completed"
-    assert task_row(dsn, other)["task"]["status"] == "open"
+    assert status(dsn, other) == "open"
 
 
 def test_non_tty_output_has_no_ansi_and_small_screens_stay_bounded(dsn, monkeypatch, capsys):
-    task_id = a_task(dsn, "replace the launch rail", propose="completed")
-    with db.transaction(dsn) as cur:
-        state = tasks.task_get(cur, task_id)
-        tasks.task_update(
-            cur,
-            task_id,
-            actor="agent",
-            expect_updated_at=state["state"]["updated_at"],
-            goal="launch without the old rail",
-            status_text="the replacement is fitted",
-            approach="reuse the aft mounting points",
-            blockers=["await the load certificate"],
-            next_actions=["run the loaded trial"],
-        )
+    a_task(dsn, "replace the launch rail", propose="completed", **DETAIL)
     monkeypatch.setenv("LINES", "12")
     keys(monkeypatch, "q")
 

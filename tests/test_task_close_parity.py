@@ -4,12 +4,15 @@ import io
 
 import pytest
 
-from conftest import new_project
+from conftest import committed_task, keys, new_project, task_row, update_task
 from mashu import close_ui, db, tasks, work_ui
 
 PROPOSAL_REASON = "the replacement has passed its acceptance checks"
 
-pytestmark = pytest.mark.usefixtures("known_screen")
+pytestmark = [
+    pytest.mark.usefixtures("known_screen"),
+    pytest.mark.parametrize("entry", ["close", "work"]),
+]
 
 
 @pytest.fixture
@@ -20,57 +23,25 @@ def dsn(dsn):
 
 
 def make_task(dsn: str, *, proposal: bool = False, stale: bool = False):
-    with db.transaction(dsn) as cur:
-        row = tasks.task_create(
-            cur,
-            project="enrai",
-            name="finish the replacement rail",
-            goal="fit the approved replacement",
-            actor="agent",
-            force=True,
-        )
-        task_id = row["task"]["task_id"]
-        if proposal:
-            tasks.propose_close(
-                cur,
-                task_id,
-                outcome="completed",
-                reason=PROPOSAL_REASON,
-                actor="agent",
-            )
-        if stale:
-            state = tasks.task_get(cur, task_id)
-            tasks.task_update(
-                cur,
-                task_id,
-                actor="agent",
-                expect_updated_at=state["state"]["updated_at"],
-                status_text="one last fitting check remains",
-            )
-        return task_id
+    propose = "completed" if proposal else None
+    task_id = committed_task(
+        dsn, "fit the replacement rail", propose=propose, reason=PROPOSAL_REASON
+    )
+    if stale:
+        with db.transaction(dsn) as cur:
+            update_task(cur, task_id, status_text="one last fitting check remains")
+    return task_id
 
 
-def task_row(dsn: str, task_id):
-    with db.transaction(dsn) as cur:
-        return tasks.task_get(cur, task_id)
+def run(dsn: str, task_id, entry: str) -> int:
+    return work_ui.run(dsn) if entry == "work" else close_ui.run(dsn, task_id=task_id)
 
 
 def run_entry(dsn: str, task_id, entry: str, monkeypatch, *lines: str) -> None:
-    if entry == "work":
-        lines = ("c", *lines, "q")
-
-        def run() -> int:
-            return work_ui.run(dsn)
-    else:
-
-        def run() -> int:
-            return close_ui.run(dsn, task_id=task_id)
-
-    monkeypatch.setattr("sys.stdin", io.StringIO("".join(f"{line}\n" for line in lines)))
-    assert run() == 0
+    keys(monkeypatch, *(("c", *lines, "q") if entry == "work" else lines))
+    assert run(dsn, task_id, entry) == 0
 
 
-@pytest.mark.parametrize("entry", ["close", "work"])
 def test_accepting_a_proposal_has_the_same_result_from_both_entries(dsn, monkeypatch, entry):
     task_id = make_task(dsn, proposal=True)
     run_entry(dsn, task_id, entry, monkeypatch, "enter")
@@ -80,7 +51,6 @@ def test_accepting_a_proposal_has_the_same_result_from_both_entries(dsn, monkeyp
     assert closed["task"]["close_reason"] == PROPOSAL_REASON
 
 
-@pytest.mark.parametrize("entry", ["close", "work"])
 def test_enter_without_a_proposal_is_a_noop_from_both_entries(dsn, monkeypatch, entry):
     task_id = make_task(dsn)
     run_entry(dsn, task_id, entry, monkeypatch, "enter")
@@ -90,15 +60,19 @@ def test_enter_without_a_proposal_is_a_noop_from_both_entries(dsn, monkeypatch, 
     assert row["proposal"] is None
 
 
-@pytest.mark.parametrize("entry", ["close", "work"])
-def test_accepting_a_stale_proposal_uses_the_same_confirmation(dsn, monkeypatch, entry):
+@pytest.mark.parametrize(("answer", "status"), [("y", "closed"), ("n", "open")])
+def test_a_stale_proposal_is_taken_only_on_the_same_confirmation(
+    dsn, monkeypatch, entry, answer, status
+):
     task_id = make_task(dsn, proposal=True, stale=True)
-    run_entry(dsn, task_id, entry, monkeypatch, "enter", "y")
+    run_entry(dsn, task_id, entry, monkeypatch, "enter", answer)
 
-    assert task_row(dsn, task_id)["task"]["close_reason"] == PROPOSAL_REASON
+    row = task_row(dsn, task_id)
+    assert row["task"]["status"] == status
+    if status == "closed":
+        assert row["task"]["close_reason"] == PROPOSAL_REASON
 
 
-@pytest.mark.parametrize("entry", ["close", "work"])
 def test_a_different_explicit_outcome_does_not_confirm_a_stale_proposal(dsn, monkeypatch, entry):
     task_id = make_task(dsn, proposal=True, stale=True)
     run_entry(dsn, task_id, entry, monkeypatch, "a", "")
@@ -108,39 +82,39 @@ def test_a_different_explicit_outcome_does_not_confirm_a_stale_proposal(dsn, mon
     assert closed["task"]["close_reason"] is None
 
 
-@pytest.mark.parametrize("entry", ["close", "work"])
-def test_empty_reason_keeps_proposal_reason_when_outcomes_match(dsn, monkeypatch, entry):
+@pytest.mark.parametrize(
+    ("typed", "recorded"),
+    [("", PROPOSAL_REASON), ("ship-parts took this over", "ship-parts took this over")],
+)
+def test_the_reason_typed_at_an_outcome_key_wins_and_an_empty_one_keeps_the_proposal_grounds(
+    dsn, monkeypatch, entry, typed, recorded
+):
     task_id = make_task(dsn, proposal=True)
-    run_entry(dsn, task_id, entry, monkeypatch, "c", "")
+    run_entry(dsn, task_id, entry, monkeypatch, "c", typed)
 
-    assert task_row(dsn, task_id)["task"]["close_reason"] == PROPOSAL_REASON
+    assert task_row(dsn, task_id)["task"]["close_reason"] == recorded
 
 
-@pytest.mark.parametrize("entry", ["close", "work"])
 def test_ctrl_c_while_entering_a_reason_cancels_the_close(dsn, monkeypatch, entry):
     task_id = make_task(dsn, proposal=True)
-    keys = iter(("c", "c", "q") if entry == "work" else ("c",))
+    pressed = iter(("c", "c", "q") if entry == "work" else ("c",))
     monkeypatch.setattr("sys.stdin", io.StringIO())
 
     def read(prompt: str = "") -> str:
         if prompt == "> ":
-            return next(keys)
+            return next(pressed)
         if prompt.startswith("  reason"):
             raise KeyboardInterrupt
         raise AssertionError(f"unexpected prompt: {prompt}")
 
     monkeypatch.setattr("builtins.input", read)
-    if entry == "work":
-        assert work_ui.run(dsn) == 0
-    else:
-        assert close_ui.run(dsn, task_id=task_id) == 0
+    assert run(dsn, task_id, entry) == 0
 
     row = task_row(dsn, task_id)
     assert row["task"]["status"] == "open"
     assert row["proposal"]["reason"] == PROPOSAL_REASON
 
 
-@pytest.mark.parametrize("entry", ["close", "work"])
 @pytest.mark.parametrize("change", ["state", "proposal"])
 def test_acceptance_rechecks_the_displayed_snapshot(dsn, monkeypatch, entry, change):
     task_id = make_task(dsn, proposal=True, stale=True)
@@ -148,21 +122,10 @@ def test_acceptance_rechecks_the_displayed_snapshot(dsn, monkeypatch, entry, cha
     def change_after_display(_question: str) -> bool:
         with db.transaction(dsn) as cur:
             if change == "state":
-                state = tasks.task_get(cur, task_id)
-                tasks.task_update(
-                    cur,
-                    task_id,
-                    actor="agent",
-                    expect_updated_at=state["state"]["updated_at"],
-                    status_text="changed after the close screen opened",
-                )
+                update_task(cur, task_id, status_text="changed after the close screen opened")
             else:
                 tasks.propose_close(
-                    cur,
-                    task_id,
-                    outcome="abandoned",
-                    reason="the rail replacement was cancelled",
-                    actor="agent",
+                    cur, task_id, outcome="abandoned", reason="it was cancelled", actor="agent"
                 )
         return True
 

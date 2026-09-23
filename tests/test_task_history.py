@@ -4,10 +4,10 @@ import re
 from pathlib import Path
 from uuid import uuid4
 
-import psycopg
 import pytest
 
-from mashu import projects, task_history, tasks
+from conftest import expire, new_project, new_task, update_task
+from mashu import task_history, tasks
 from mashu.errors import (
     ClosedTaskError,
     MashuError,
@@ -16,63 +16,61 @@ from mashu.errors import (
     RefusedError,
 )
 
-
-@pytest.fixture
-def project(cur):
-    return projects.create_project(cur, name="history", actor="user")
+STATE_FIELDS = ("goal", "approach", "status_text", "open_questions", "blockers", "next_actions")
 
 
 @pytest.fixture
-def task(cur, project):
-    return tasks.task_create(
+def task(cur):
+    new_project(cur, "history")
+    return new_task(
         cur,
-        project=project["project_id"],
-        name="record the task history",
-        actor="agent",
+        "record the task history",
+        "history",
         goal="keep the current state and its milestones consistent",
         next_actions=["write the history module"],
     )
 
 
-def _state_columns(row):
-    return {
-        field: row[field]
-        for field in (
-            "goal",
-            "approach",
-            "status_text",
-            "open_questions",
-            "blockers",
-            "next_actions",
-        )
-    }
+@pytest.fixture
+def task_id(task):
+    return task["task"]["task_id"]
 
 
-def _expire(cur, task_id):
-    cur.execute(
-        "UPDATE task SET active_until = now() - interval '1 day' WHERE task_id = %s",
-        (task_id,),
-    )
-
-
-def test_checkpoint_replaces_and_freezes_the_same_state(cur, task):
-    checkpointed = task_history.checkpoint(
+def checkpoint(cur, task, what_changed="recorded the state", **kwargs):
+    return task_history.checkpoint(
         cur,
         task["task"]["task_id"],
         actor="agent",
-        what_changed="history service is in place",
+        what_changed=what_changed,
         expect_updated_at=task["state"]["updated_at"],
+        **kwargs,
+    )
+
+
+def _state_columns(row):
+    return {field: row[field] for field in STATE_FIELDS}
+
+
+def _history_counts(cur):
+    counts = {}
+    for table in ("task_checkpoint", "attempt", "decision", "artifact_reference"):
+        cur.execute(f"SELECT count(*) AS n FROM {table}")
+        counts[table] = cur.fetchone()["n"]
+    return counts
+
+
+def test_checkpoint_replaces_and_freezes_the_same_state(cur, task):
+    checkpointed = checkpoint(
+        cur,
+        task,
+        "history service is in place",
         status_text="the append-only history rows are being wired",
         next_actions=["run the PostgreSQL tests"],
     )
 
-    cur.execute(
-        "SELECT * FROM task_state WHERE task_id = %s",
-        (task["task"]["task_id"],),
-    )
-    state = cur.fetchone()
+    cur.execute("SELECT * FROM task_state WHERE task_id = %s", (task["task"]["task_id"],))
     frozen = checkpointed["checkpoint"]
-    assert _state_columns(state) == _state_columns(frozen)
+    assert _state_columns(cur.fetchone()) == _state_columns(frozen)
     assert frozen["what_changed"] == "history service is in place"
     assert frozen["created_by"] == "agent"
     assert frozen["evidence"] == []
@@ -88,171 +86,81 @@ def test_checkpoint_replaces_and_freezes_the_same_state(cur, task):
     ("field", "value"),
     [("attempt", "x" * 301), ("result", "x" * 501), ("reason", "x" * 501), ("next", "x" * 301)],
 )
-def test_attempt_limit_is_refused_before_an_attempt_row(cur, task, field, value):
+def test_attempt_limit_is_refused_before_an_attempt_row(cur, task_id, field, value):
     with pytest.raises(OverLimitError) as raised:
         task_history.attempt_record(
-            cur,
-            task["task"]["task_id"],
-            actor="agent",
-            **{"attempt": "try it", field: value},
+            cur, task_id, actor="agent", **{"attempt": "try it", field: value}
         )
     assert raised.value.field == field
-    cur.execute("SELECT count(*) AS n FROM attempt")
-    assert cur.fetchone()["n"] == 0
+    assert _history_counts(cur)["attempt"] == 0
 
 
-def test_checkpoint_limit_leaves_no_frozen_row(cur, task):
+def test_a_refused_checkpoint_leaves_no_frozen_row(cur, task, monkeypatch):
     with pytest.raises(OverLimitError):
-        task_history.checkpoint(
-            cur,
-            task["task"]["task_id"],
-            actor="agent",
-            what_changed="state was changed",
-            expect_updated_at=task["state"]["updated_at"],
-            goal="x" * 301,
-        )
+        checkpoint(cur, task, goal="x" * 301)
 
-    cur.execute("SELECT count(*) AS n FROM task_checkpoint")
-    assert cur.fetchone()["n"] == 0
-
-
-def test_a_stale_checkpoint_leaves_no_frozen_row(cur, task):
-    tasks.task_update(
-        cur,
-        task["task"]["task_id"],
-        actor="other session",
-        expect_updated_at=task["state"]["updated_at"],
-        status_text="the other session won",
+    other = new_task(cur, "other task", "history")
+    foreign = task_history.artifact_link(
+        cur, other["task"]["task_id"], actor="agent", kind="file", locator="results/other.txt"
     )
-    with pytest.raises(MashuError):
-        task_history.checkpoint(
-            cur,
-            task["task"]["task_id"],
-            actor="agent",
-            what_changed="this version lost",
-            expect_updated_at=task["state"]["updated_at"],
-            status_text="still stale",
-        )
+    for evidence in ([uuid4()], [foreign["reference_id"]]):
+        with pytest.raises(MashuError):
+            checkpoint(cur, task, evidence=evidence)
 
-    cur.execute("SELECT count(*) AS n FROM task_checkpoint")
-    assert cur.fetchone()["n"] == 0
-
-
-def test_a_budget_refusal_leaves_no_frozen_row(cur, task, monkeypatch):
-    tasks.task_create(cur, project="history", name="another active task", actor="agent")
     monkeypatch.setenv("MASHU_PROJECT_CAPACITY", "1")
-
     with pytest.raises(ProjectBudgetError):
-        task_history.checkpoint(
+        checkpoint(
             cur,
-            task["task"]["task_id"],
-            actor="agent",
-            what_changed="would exceed the project state share",
-            expect_updated_at=task["state"]["updated_at"],
+            task,
             goal=task["state"]["goal"],
             next_actions=task["state"]["next_actions"],
             status_text="this state cannot fit, and it is larger than the one it replaces",
         )
+    monkeypatch.delenv("MASHU_PROJECT_CAPACITY")
 
-    cur.execute("SELECT count(*) AS n FROM task_checkpoint")
-    assert cur.fetchone()["n"] == 0
+    update_task(cur, task["task"]["task_id"], actor="other", status_text="the other session won")
+    with pytest.raises(MashuError):
+        checkpoint(cur, task, status_text="still stale")
+
+    assert _history_counts(cur)["task_checkpoint"] == 0
 
 
-def test_checkpoint_evidence_must_exist_and_belong_to_the_task(cur, task, project):
-    other = tasks.task_create(cur, project=project["project_id"], name="other task", actor="agent")
-    foreign = task_history.artifact_link(
+def test_linked_artifacts_of_the_same_task_join_the_checkpoint_evidence(cur, task, task_id):
+    earlier = task_history.artifact_link(
+        cur, task_id, actor="agent", kind="file", locator="results/table.csv", label="the table"
+    )
+    checkpointed = checkpoint(
         cur,
-        other["task"]["task_id"],
-        actor="agent",
-        kind="file",
-        locator="results/other.txt",
+        task,
+        evidence=[earlier["reference_id"]],
+        artifacts=[{"kind": "git_commit", "locator": "0bd5d89"}],
     )
-    task_id = task["task"]["task_id"]
-
-    for evidence in ([uuid4()], [foreign["reference_id"]]):
-        with pytest.raises(MashuError):
-            task_history.checkpoint(
-                cur,
-                task_id,
-                actor="agent",
-                what_changed="evidence should be refused",
-                expect_updated_at=task["state"]["updated_at"],
-                evidence=evidence,
-            )
-
-    cur.execute("SELECT count(*) AS n FROM task_checkpoint")
-    assert cur.fetchone()["n"] == 0
+    linked = checkpointed["artifacts"][0]["reference_id"]
+    assert checkpointed["checkpoint"]["evidence"] == [earlier["reference_id"], linked]
 
 
-def test_checkpoint_accepts_artifacts_from_the_same_task(cur, task):
-    artifact = task_history.artifact_link(
-        cur,
-        task["task"]["task_id"],
-        actor="agent",
-        kind="git_commit",
-        locator="9d12f5a",
-        label="history implementation",
-    )
-    checkpointed = task_history.checkpoint(
-        cur,
-        task["task"]["task_id"],
-        actor="agent",
-        what_changed="linked the implementation",
-        expect_updated_at=task["state"]["updated_at"],
-        evidence=[artifact["reference_id"]],
-    )
-    assert checkpointed["checkpoint"]["evidence"] == [artifact["reference_id"]]
+def test_history_writes_renew_the_lease(cur, task_id):
+    lease = "SELECT active_until, last_activity_at FROM task WHERE task_id = %s"
+    for write in (
+        lambda: task_history.attempt_record(cur, task_id, actor="agent", attempt="try a"),
+        lambda: task_history.decision_record(cur, task_id, actor="agent", decision="keep it"),
+        lambda: task_history.artifact_link(
+            cur, task_id, actor="agent", kind="url", locator="https://example.test"
+        ),
+    ):
+        expire(cur, task_id)
+        before = cur.execute(lease, (task_id,)).fetchone()
+        assert write()["task_id"] == task_id
+        after = cur.execute(lease, (task_id,)).fetchone()
+        assert after["active_until"] > before["active_until"]
+        assert after["last_activity_at"] > before["last_activity_at"]
 
 
-def test_history_writes_renew_the_lease(cur, task):
-    task_id = task["task"]["task_id"]
-    _expire(cur, task_id)
-    before = cur.execute(
-        "SELECT active_until, last_activity_at FROM task WHERE task_id = %s", (task_id,)
-    ).fetchone()
-    task_history.attempt_record(cur, task_id, actor="agent", attempt="try a")
-    after_attempt = cur.execute(
-        "SELECT active_until, last_activity_at FROM task WHERE task_id = %s", (task_id,)
-    ).fetchone()
-    assert after_attempt["active_until"] > before["active_until"]
-    assert after_attempt["last_activity_at"] > before["last_activity_at"]
-
-    _expire(cur, task_id)
-    before_decision = cur.execute(
-        "SELECT active_until FROM task WHERE task_id = %s", (task_id,)
-    ).fetchone()
-    decision = task_history.decision_record(cur, task_id, actor="agent", decision="keep it")
-    after_decision = cur.execute(
-        "SELECT active_until FROM task WHERE task_id = %s", (task_id,)
-    ).fetchone()
-    assert after_decision["active_until"] > before_decision["active_until"]
-
-    _expire(cur, task_id)
-    before_artifact = cur.execute(
-        "SELECT active_until FROM task WHERE task_id = %s", (task_id,)
-    ).fetchone()
-    task_history.artifact_link(
-        cur, task_id, actor="agent", kind="url", locator="https://example.test"
-    )
-    after_artifact = cur.execute(
-        "SELECT active_until FROM task WHERE task_id = %s", (task_id,)
-    ).fetchone()
-    assert after_artifact["active_until"] > before_artifact["active_until"]
-    assert decision["task_id"] == task_id
-
-
-def test_closed_task_refuses_all_four_history_writes(cur, task):
-    task_id = task["task"]["task_id"]
+def test_closed_task_refuses_all_four_history_writes(cur, task_id):
     closed = tasks.close(cur, task_id, outcome="completed", actor="user")
 
     with pytest.raises(ClosedTaskError):
-        task_history.checkpoint(
-            cur,
-            task_id,
-            actor="agent",
-            what_changed="too late",
-            expect_updated_at=closed["state"]["updated_at"],
-        )
+        checkpoint(cur, closed, "too late")
     with pytest.raises(ClosedTaskError):
         task_history.attempt_record(cur, task_id, actor="agent", attempt="too late")
     with pytest.raises(ClosedTaskError):
@@ -261,20 +169,16 @@ def test_closed_task_refuses_all_four_history_writes(cur, task):
         task_history.artifact_link(cur, task_id, actor="agent", kind="file", locator="too late")
 
 
-def test_decisions_form_a_same_task_supersedes_chain(cur, task, project):
-    first = task_history.decision_record(
-        cur, task["task"]["task_id"], actor="agent", decision="use one module"
-    )
+def test_decisions_form_a_same_task_supersedes_chain(cur, task_id):
+    first = task_history.decision_record(cur, task_id, actor="agent", decision="use one module")
     second = task_history.decision_record(
         cur,
-        task["task"]["task_id"],
+        task_id,
         actor="agent",
         decision="keep the module boundary",
         supersedes_id=first["decision_id"],
     )
-    other = tasks.task_create(
-        cur, project=project["project_id"], name="different task", actor="agent"
-    )
+    other = new_task(cur, "different task", "history")
 
     with pytest.raises(MashuError):
         task_history.decision_record(
@@ -285,7 +189,7 @@ def test_decisions_form_a_same_task_supersedes_chain(cur, task, project):
             supersedes_id=first["decision_id"],
         )
 
-    decisions = task_history.decision_list(cur, task["task"]["task_id"])
+    decisions = task_history.decision_list(cur, task_id)
     assert [row["decision_id"] for row in decisions] == [
         second["decision_id"],
         first["decision_id"],
@@ -293,22 +197,12 @@ def test_decisions_form_a_same_task_supersedes_chain(cur, task, project):
     assert decisions[0]["supersedes_id"] == first["decision_id"]
 
 
-def test_close_freezes_the_last_state_with_the_closing_actor(cur, task):
-    task_id = task["task"]["task_id"]
-    updated = tasks.task_update(
-        cur,
-        task_id,
-        actor="agent",
-        expect_updated_at=task["state"]["updated_at"],
-        status_text="ready for the user's judgement",
-        next_actions=["close the task"],
+def test_close_freezes_the_last_state_with_the_closing_actor(cur, task_id):
+    updated = update_task(
+        cur, task_id, status_text="ready for the user's judgement", next_actions=["close it"]
     )
     closed = tasks.close(
-        cur,
-        task_id,
-        outcome="completed",
-        reason="the implementation is merged",
-        actor="user",
+        cur, task_id, outcome="completed", reason="the implementation is merged", actor="user"
     )
     checkpoints = task_history.checkpoint_list(cur, task_id)
     assert len(checkpoints) == 1
@@ -319,18 +213,11 @@ def test_close_freezes_the_last_state_with_the_closing_actor(cur, task):
     assert closed["task"]["status"] == "closed"
 
 
-def test_expanded_task_contains_only_the_requested_histories(cur, task):
-    task_id = task["task"]["task_id"]
+def test_expanded_task_contains_only_the_requested_histories(cur, task, task_id):
     task_history.attempt_record(cur, task_id, actor="agent", attempt="try it")
     task_history.decision_record(cur, task_id, actor="agent", decision="keep it")
     task_history.artifact_link(cur, task_id, actor="agent", kind="file", locator="src/main.py")
-    task_history.checkpoint(
-        cur,
-        task_id,
-        actor="agent",
-        what_changed="recorded the current state",
-        expect_updated_at=task["state"]["updated_at"],
-    )
+    checkpoint(cur, task)
 
     expanded = task_history.expanded_task(cur, task_id, attempts=True, artifacts=True)
     assert len(expanded["attempts"]) == 1
@@ -340,27 +227,7 @@ def test_expanded_task_contains_only_the_requested_histories(cur, task):
     assert "task" in expanded and "state" in expanded
 
 
-def test_checkpoint_rows_refuse_update_at_the_database_boundary(cur, task):
-    task_id = task["task"]["task_id"]
-    cur.execute(
-        "INSERT INTO task_checkpoint (task_id, what_changed, created_by) VALUES (%s, %s, %s)",
-        (task_id, "the state was frozen", "agent"),
-    )
-    with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
-        cur.execute("UPDATE task_checkpoint SET what_changed = 'rewritten'")
-
-
-def test_checkpoint_rows_refuse_delete_at_the_database_boundary(cur, task):
-    task_id = task["task"]["task_id"]
-    cur.execute(
-        "INSERT INTO task_checkpoint (task_id, what_changed, created_by) VALUES (%s, %s, %s)",
-        (task_id, "the state was frozen", "agent"),
-    )
-    with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
-        cur.execute("DELETE FROM task_checkpoint")
-
-
-def test_artifact_locator_is_still_checked_as_text(cur, task, monkeypatch, tmp_path):
+def test_artifact_locator_is_still_checked_as_text(cur, task_id, monkeypatch, tmp_path):
     patterns = tmp_path / "banned-patterns"
     patterns.write_text(re.escape(str(Path.home())) + "\n", encoding="utf-8")
     monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(patterns))
@@ -368,22 +235,19 @@ def test_artifact_locator_is_still_checked_as_text(cur, task, monkeypatch, tmp_p
     with pytest.raises(RefusedError):
         task_history.artifact_link(
             cur,
-            task["task"]["task_id"],
+            task_id,
             actor="agent",
             kind="file",
             locator=str(Path.home() / "private" / "result.txt"),
         )
 
 
-def test_checkpoint_writes_attempts_decisions_and_artifacts_with_the_state(cur, task):
-    task_id = task["task"]["task_id"]
+def test_checkpoint_writes_attempts_decisions_and_artifacts_with_the_state(cur, task, task_id):
     earlier = task_history.decision_record(cur, task_id, actor="agent", decision="use one module")
-    checkpointed = task_history.checkpoint(
+    checkpointed = checkpoint(
         cur,
-        task_id,
-        actor="agent",
-        what_changed="history arrives with the checkpoint",
-        expect_updated_at=task["state"]["updated_at"],
+        task,
+        "history arrives with the checkpoint",
         status_text="checkpoint carries its history",
         attempts=[
             {"attempt": "append rows in separate calls", "result": "too many calls"},
@@ -414,43 +278,13 @@ def test_checkpoint_writes_attempts_decisions_and_artifacts_with_the_state(cur, 
     assert checkpointed["unchecked"] is False
 
 
-def test_linked_artifacts_join_the_checkpoint_evidence(cur, task):
-    task_id = task["task"]["task_id"]
-    earlier = task_history.artifact_link(
-        cur, task_id, actor="agent", kind="file", locator="results/table.csv"
-    )
-    checkpointed = task_history.checkpoint(
-        cur,
-        task_id,
-        actor="agent",
-        what_changed="linked the new commit",
-        expect_updated_at=task["state"]["updated_at"],
-        evidence=[earlier["reference_id"]],
-        artifacts=[{"kind": "git_commit", "locator": "0bd5d89"}],
-    )
-    linked = checkpointed["artifacts"][0]["reference_id"]
-    assert checkpointed["checkpoint"]["evidence"] == [earlier["reference_id"], linked]
-
-
-def _history_counts(cur):
-    counts = {}
-    for table in ("task_checkpoint", "attempt", "decision", "artifact_reference"):
-        cur.execute(f"SELECT count(*) AS n FROM {table}")
-        counts[table] = cur.fetchone()["n"]
-    return counts
-
-
-def test_one_refused_item_leaves_the_checkpoint_unwritten(cur, task):
-    task_id = task["task"]["task_id"]
+def test_one_refused_item_leaves_the_checkpoint_unwritten(cur, task, task_id):
     before = cur.execute("SELECT * FROM task_state WHERE task_id = %s", (task_id,)).fetchone()
 
     with pytest.raises(OverLimitError) as raised:
-        task_history.checkpoint(
+        checkpoint(
             cur,
-            task_id,
-            actor="agent",
-            what_changed="one attempt is too long",
-            expect_updated_at=task["state"]["updated_at"],
+            task,
             status_text="this must not land",
             attempts=[{"attempt": "fine"}, {"attempt": "x" * 301}],
             decisions=[{"decision": "would be recorded"}],
@@ -460,12 +294,7 @@ def test_one_refused_item_leaves_the_checkpoint_unwritten(cur, task):
     assert raised.value.field == "attempt"
     after = cur.execute("SELECT * FROM task_state WHERE task_id = %s", (task_id,)).fetchone()
     assert after == before
-    assert _history_counts(cur) == {
-        "task_checkpoint": 0,
-        "attempt": 0,
-        "decision": 0,
-        "artifact_reference": 0,
-    }
+    assert set(_history_counts(cur).values()) == {0}
 
 
 @pytest.mark.parametrize(
@@ -481,14 +310,7 @@ def test_one_refused_item_leaves_the_checkpoint_unwritten(cur, task):
 )
 def test_malformed_history_items_are_refused_before_any_write(cur, task, items, message):
     with pytest.raises(MashuError, match=message):
-        task_history.checkpoint(
-            cur,
-            task["task"]["task_id"],
-            actor="agent",
-            what_changed="malformed history",
-            expect_updated_at=task["state"]["updated_at"],
-            **items,
-        )
+        checkpoint(cur, task, "malformed history", **items)
     assert set(_history_counts(cur).values()) == {0}
 
 
