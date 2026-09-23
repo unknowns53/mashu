@@ -642,7 +642,10 @@ def task_update(
     name: str | None = None,
     project: UUID | str | None = None,
 ) -> dict[str, Any]:
-    """Replace current state and optionally edit its task label and project."""
+    """Replace the fields given, keeping each omitted one; "" or [] clears a field.
+
+    Optionally edits the task's label and project too.
+    """
     _lock(cur)
     task = _require_open(cur, task_id)
     current = task_get(cur, task_id)
@@ -650,13 +653,19 @@ def task_update(
     if not new_name:
         raise MashuError("a task needs a name: it is what the duplicate match reads")
     home = projects.require_project(cur, task["project_id"] if project is None else project)
+    given = {
+        "goal": goal,
+        "approach": approach,
+        "status_text": status_text,
+        "open_questions": open_questions,
+        "blockers": blockers,
+        "next_actions": next_actions,
+    }
     state = _state_of(
-        goal=goal,
-        approach=approach,
-        status_text=status_text,
-        open_questions=open_questions,
-        blockers=blockers,
-        next_actions=next_actions,
+        **{
+            field: current["state"][field] if value is None else value
+            for field, value in given.items()
+        }
     )
     _check_limits(
         state,

@@ -177,8 +177,8 @@ def test_the_database_refuses_a_sixth_line_when_the_code_is_gone_round(cur, task
         )
 
 
-# replacement, not accumulation (5.3)
-def test_an_update_replaces_the_state_and_keeps_none_of_the_old_one(cur, task):
+# replacement per field, not accumulation (5.3)
+def test_an_update_replaces_the_fields_given_and_keeps_the_omitted_ones(cur, task):
     updated = tasks.task_update(
         cur,
         task["task"]["task_id"],
@@ -191,15 +191,27 @@ def test_an_update_replaces_the_state_and_keeps_none_of_the_old_one(cur, task):
     assert updated["state"]["next_actions"] == ["write the services"]
     assert updated["state"]["status_text"] == "tables written, services next"
 
-    cleared = tasks.task_update(
+    kept = tasks.task_update(
         cur,
         task["task"]["task_id"],
         actor="agent",
         expect_updated_at=updated["state"]["updated_at"],
-        goal="ship migration 0004 with the seven tables",
+        next_actions=["wire the MCP tools"],
+    )
+    assert kept["state"]["goal"] == "ship migration 0004 with the seven tables"
+    assert kept["state"]["next_actions"] == ["wire the MCP tools"]
+
+    cleared = tasks.task_update(
+        cur,
+        task["task"]["task_id"],
+        actor="agent",
+        expect_updated_at=kept["state"]["updated_at"],
+        status_text="",
+        next_actions=[],
     )
     assert cleared["state"]["next_actions"] == []
     assert cleared["state"]["status_text"] is None
+    assert cleared["state"]["goal"] == "ship migration 0004 with the seven tables"
 
     cur.execute(
         "SELECT count(*) AS n FROM task_state WHERE task_id = %s", (task["task"]["task_id"],)
@@ -780,7 +792,9 @@ def test_a_task_over_new_card_and_detail_limits_can_still_be_shrunk(cur, project
         actor="agent",
         expect_updated_at=current["updated_at"],
         goal="short goal",
+        approach="",
         status_text="short status",
+        next_actions=[],
     )
 
     assert shrunk["state"]["goal"] == "short goal"

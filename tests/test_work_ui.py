@@ -48,6 +48,8 @@ def make_task(
             project="enrai",
             name=name,
             goal=f"finish {name}",
+            approach="load test first",
+            blockers=["waiting on the load test"],
             actor="agent",
             force=True,
         )

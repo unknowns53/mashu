@@ -119,6 +119,8 @@ Project と Scope は同じ概念ではない。Scope は delivery / routing の
 
 Task の「今」だけを持つ。履歴を書かない。状態が変われば**置換**し、古い記述を残さない。
 
+置換は欄ごとに行う。渡した欄は丸ごと置き換え、省いた欄は前の値を保ち、空文字か空リストを渡した欄は空になる。欄の中身へ継ぎ足すことはしない。goal と approach はめったに変わらないので、全欄の送信を求めると、status だけを書き換えるつもりの呼び出しがこの二つを黙って消す。
+
 ```text
 goal / approach / status_text / open_questions / blockers / next_actions / updated_at / updated_by
 ```
@@ -138,7 +140,7 @@ full detail     800 estimated tokens / Task
 
 初期値であり、実測後に変更してよい。bootstrap card は Task 名・goal・statusと、approach / open questions / blockers / next actions が存在することを示す件数だけから作る。full detail は全欄を含むが常時配信しない。長文が必要なら原典を Artifact Reference に置く。
 
-**追記は一箇所だけ許す。**`append_next_action` は next_actions に 1 件足すだけで他の欄に触れない。呼び出すのは痛みの記録（9 節の `work`）であって、state を読み終えたセッションではない。痛みは痛かった当人がその場で書くものなので、置換のために state 全体を持って来いと要求すれば、報告は他の 5 欄を捏造するか、行われないかのどちらかになる。上限・入口拒否・予算判定は置換とまったく同じものを通すので、追記で書ける state は置換でも書けた state に限られる。追記も `updated_at` を動かすため、追記前に読んだ置換は楽観チェックで拒否される。
+**追記は一箇所だけ許す。**`append_next_action` は next_actions に 1 件足すだけで他の欄に触れない。呼び出すのは痛みの記録（9 節の `work`）であって、state を読み終えたセッションではない。痛みは痛かった当人がその場で書くものである。置換は next_actions を丸ごと置き換え、読み取り時の `updated_at` も要求するので、置換で書かせれば、報告は既存の next actions を消すか、state を読みに行く往復のせいで行われないかのどちらかになる。上限・入口拒否・予算判定は置換とまったく同じものを通すので、追記で書ける state は置換でも書けた state に限られる。追記も `updated_at` を動かすため、追記前に読んだ置換は楽観チェックで拒否される。
 
 **並行する置換は楽観チェックで受ける。**複数セッションが同じ Task を同時に更新しうる。`task_update` は読み取り時の `updated_at` を添えて置換し、不一致なら拒否して現在の state を返す。黙って last-writer-wins にすると、並行セッションの一方の作業が痕跡なく消える。
 

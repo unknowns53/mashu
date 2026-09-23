@@ -572,7 +572,7 @@ def build_server() -> Any:
         blockers: list[str] | None = None,
         next_actions: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Replace full state; omitted fields clear.
+        """Replace the state fields given; omitted fields keep their value, "" or [] clears.
 
         Pass the read state's `updated_at` as `expect_updated_at`.
         """
@@ -610,9 +610,10 @@ def build_server() -> Any:
         decisions: list[dict[str, Any]] | None = None,
         artifacts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Replace full state and record a checkpoint with its history; omitted fields clear.
+        """Replace the state fields given and record a checkpoint with its history.
 
-        Pass the read state's `updated_at` as `expect_updated_at`. Optional history, all
+        Omitted fields keep their value; "" or [] clears one. Pass the read state's
+        `updated_at` as `expect_updated_at`. Optional history, all
         written with the checkpoint or not at all:
         `attempts` items `{attempt, result?, reason?, next?}` for failed tries,
         `decisions` items `{decision, reason?, supersedes_id?}` for reasons costly to
