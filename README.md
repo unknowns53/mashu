@@ -367,7 +367,7 @@ MCP tool は 19 個ある。
 | Project State | task_propose_close | Task の終了案を理由つきで置く |
 | Project State | task_withdraw_close_proposal | close proposal を取り下げる |
 
-Agent が守る基本の動詞は次の四つだ。
+Agent が守る基本の動詞は次のとおり。
 
 ~~~text
 調べて分かった          → trace_put
