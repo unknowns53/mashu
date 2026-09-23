@@ -258,11 +258,13 @@ scope は「どこで」、guard は「いつ」を絞る。guard に scope も�
 
 ~~~text
 全体                 4000 token
-Memory               2000 token（always 800 / scope 1200）
+Memory               2000 token（always は 800 まで。各 Scope は always と合わせて 2000 まで）
 Task cards           1600 token / scope（1 Task 200）
 Task detail           800 token / Task（常時配信しない）
 Temporary Context     400 token
 ~~~
+
+Scope ごとの Memory に独立した上限は無い。2000 から always の使用量を引いた残りが、各 Scope で使える量になる。
 
 環境変数 MASHU_TOTAL_CAPACITY、MASHU_CAPACITY、MASHU_ALWAYS_CAPACITY、MASHU_PROJECT_CAPACITY、MASHU_TASK_CARD_CAPACITY、MASHU_TASK_DETAIL_CAPACITY、MASHU_TEMPORARY_CAPACITY で変更できる。
 
