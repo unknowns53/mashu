@@ -187,6 +187,8 @@ def test_touch_reactivates_a_dormant_task(dsn, monkeypatch):
 
 def test_task_name_project_and_current_state_can_be_edited(dsn, monkeypatch):
     task_id = make_task(dsn, "old rail wording")
+    with db.transaction(dsn) as cur:
+        update_task(cur, task_id, **STATE)
     keys(
         monkeypatch,
         "e",

@@ -422,7 +422,7 @@ def _replacement(
     if answer.text == "":
         return current
     if clearable and answer.text == "-":
-        return None
+        return ""
     return answer.text
 
 

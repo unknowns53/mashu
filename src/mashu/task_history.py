@@ -201,7 +201,7 @@ def checkpoint(
     decisions: list[dict[str, Any]] | None = None,
     artifacts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Replace the state, append the history it rests on, and freeze all of it as one checkpoint.
+    """Replace the given state fields, append the history they rest on, and freeze it all.
 
     Every item is checked before the first write, so a refused item leaves the state and
     history as they were. Artifacts linked here become evidence of the checkpoint.

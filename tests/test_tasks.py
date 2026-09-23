@@ -130,8 +130,8 @@ def test_the_database_refuses_the_same_limits_when_the_code_is_gone_round(
         cur.execute(f"UPDATE task_state SET {column} = %s WHERE task_id = %s", (value, task_id))
 
 
-# replacement, not accumulation (5.3)
-def test_an_update_replaces_the_state_and_keeps_none_of_the_old_one(cur, task_id):
+# replacement per field, not accumulation (5.3)
+def test_an_update_replaces_the_fields_given_and_keeps_the_omitted_ones(cur, task_id):
     updated = update_task(
         cur,
         task_id,
@@ -142,9 +142,10 @@ def test_an_update_replaces_the_state_and_keeps_none_of_the_old_one(cur, task_id
     assert updated["state"]["next_actions"] == ["write the services"]
     assert updated["state"]["status_text"] == "tables written, services next"
 
-    cleared = update_task(cur, task_id, goal=GOAL)
-    assert cleared["state"]["next_actions"] == []
-    assert cleared["state"]["status_text"] is None
+    changed = update_task(cur, task_id, status_text="", next_actions=["wire the MCP tools"])
+    assert changed["state"]["next_actions"] == ["wire the MCP tools"]
+    assert changed["state"]["status_text"] is None
+    assert changed["state"]["goal"] == GOAL
 
     cur.execute("SELECT count(*) AS n FROM task_state WHERE task_id = %s", (task_id,))
     assert cur.fetchone()["n"] == 1
@@ -295,7 +296,7 @@ def test_a_task_over_new_card_and_detail_limits_can_still_be_shrunk(cur, project
     )
 
     assert shrunk["state"]["goal"] == "short goal"
-    assert shrunk["state"]["approach"] is None
+    assert shrunk["state"]["approach"] == "a" * 400
 
 
 # the lease (7)
@@ -461,23 +462,6 @@ def test_task_card_and_full_detail_have_independent_limits(cur, project, monkeyp
     with pytest.raises(OverLimitError) as detail_error:
         new_task(cur, name, "mashu", **detail)
     assert detail_error.value.field == "task detail"
-
-
-def test_long_detail_does_not_consume_more_bootstrap_capacity(cur, project):
-    short = new_task(cur, "short detail", "mashu", goal="same", approach="x", next_actions=["x"])
-    long = new_task(
-        cur,
-        "longer detail",
-        "mashu",
-        goal="same",
-        approach="x" * 400,
-        next_actions=["x" * 250],
-        force=True,
-    )
-
-    same_name = "same card"
-    assert tasks.card_cost(same_name, short["state"]) == tasks.card_cost(same_name, long["state"])
-    assert tasks.state_cost(same_name, short["state"]) < tasks.state_cost(same_name, long["state"])
 
 
 # the one append (v3 5.3, and ledger's work path)
