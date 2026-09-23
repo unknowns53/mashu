@@ -373,3 +373,133 @@ def test_artifact_locator_is_still_checked_as_text(cur, task, monkeypatch, tmp_p
             kind="file",
             locator=str(Path.home() / "private" / "result.txt"),
         )
+
+
+def test_checkpoint_writes_attempts_decisions_and_artifacts_with_the_state(cur, task):
+    task_id = task["task"]["task_id"]
+    earlier = task_history.decision_record(cur, task_id, actor="agent", decision="use one module")
+    checkpointed = task_history.checkpoint(
+        cur,
+        task_id,
+        actor="agent",
+        what_changed="history arrives with the checkpoint",
+        expect_updated_at=task["state"]["updated_at"],
+        status_text="checkpoint carries its history",
+        attempts=[
+            {"attempt": "append rows in separate calls", "result": "too many calls"},
+            {"attempt": "one call", "reason": "fewer verbs", "next": "measure it"},
+        ],
+        decisions=[
+            {
+                "decision": "keep the module boundary",
+                "reason": "the CLI still reads the rows",
+                "supersedes_id": str(earlier["decision_id"]),
+            }
+        ],
+        artifacts=[{"kind": "git_commit", "locator": "9d12f5a", "label": "fold history"}],
+    )
+
+    assert [row["attempt"] for row in checkpointed["attempts"]] == [
+        "append rows in separate calls",
+        "one call",
+    ]
+    assert checkpointed["attempts"][1]["next"] == "measure it"
+    assert checkpointed["decisions"][0]["supersedes_id"] == earlier["decision_id"]
+    assert checkpointed["artifacts"][0]["label"] == "fold history"
+    assert checkpointed["state"]["status_text"] == "checkpoint carries its history"
+    assert len(task_history.attempt_list(cur, task_id)) == 2
+    assert len(task_history.decision_list(cur, task_id)) == 2
+    assert len(task_history.artifact_list(cur, task_id)) == 1
+    assert checkpointed["checkpoint"]["created_by"] == "agent"
+    assert checkpointed["unchecked"] is False
+
+
+def test_linked_artifacts_join_the_checkpoint_evidence(cur, task):
+    task_id = task["task"]["task_id"]
+    earlier = task_history.artifact_link(
+        cur, task_id, actor="agent", kind="file", locator="results/table.csv"
+    )
+    checkpointed = task_history.checkpoint(
+        cur,
+        task_id,
+        actor="agent",
+        what_changed="linked the new commit",
+        expect_updated_at=task["state"]["updated_at"],
+        evidence=[earlier["reference_id"]],
+        artifacts=[{"kind": "git_commit", "locator": "0bd5d89"}],
+    )
+    linked = checkpointed["artifacts"][0]["reference_id"]
+    assert checkpointed["checkpoint"]["evidence"] == [earlier["reference_id"], linked]
+
+
+def _history_counts(cur):
+    counts = {}
+    for table in ("task_checkpoint", "attempt", "decision", "artifact_reference"):
+        cur.execute(f"SELECT count(*) AS n FROM {table}")
+        counts[table] = cur.fetchone()["n"]
+    return counts
+
+
+def test_one_refused_item_leaves_the_checkpoint_unwritten(cur, task):
+    task_id = task["task"]["task_id"]
+    before = cur.execute("SELECT * FROM task_state WHERE task_id = %s", (task_id,)).fetchone()
+
+    with pytest.raises(OverLimitError) as raised:
+        task_history.checkpoint(
+            cur,
+            task_id,
+            actor="agent",
+            what_changed="one attempt is too long",
+            expect_updated_at=task["state"]["updated_at"],
+            status_text="this must not land",
+            attempts=[{"attempt": "fine"}, {"attempt": "x" * 301}],
+            decisions=[{"decision": "would be recorded"}],
+            artifacts=[{"kind": "file", "locator": "src/main.py"}],
+        )
+
+    assert raised.value.field == "attempt"
+    after = cur.execute("SELECT * FROM task_state WHERE task_id = %s", (task_id,)).fetchone()
+    assert after == before
+    assert _history_counts(cur) == {
+        "task_checkpoint": 0,
+        "attempt": 0,
+        "decision": 0,
+        "artifact_reference": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("items", "message"),
+    [
+        ({"attempts": [{"attempt": "try", "outcome": "worked"}]}, "unknown key"),
+        ({"decisions": [{"reason": "no decision given"}]}, "missing required"),
+        ({"artifacts": [{"kind": "file"}]}, "missing required"),
+        ({"artifacts": [{"kind": "tarball", "locator": "a.tgz"}]}, "unknown artifact kind"),
+        ({"decisions": [{"decision": "d", "supersedes_id": "not-a-uuid"}]}, "UUID"),
+        ({"attempts": ["just a string"]}, "must be an object"),
+    ],
+)
+def test_malformed_history_items_are_refused_before_any_write(cur, task, items, message):
+    with pytest.raises(MashuError, match=message):
+        task_history.checkpoint(
+            cur,
+            task["task"]["task_id"],
+            actor="agent",
+            what_changed="malformed history",
+            expect_updated_at=task["state"]["updated_at"],
+            **items,
+        )
+    assert set(_history_counts(cur).values()) == {0}
+
+
+def test_history_is_written_only_through_task_checkpoint_over_mcp(monkeypatch):
+    pytest.importorskip("mcp.server")
+    import asyncio
+
+    from mashu import server
+
+    monkeypatch.setenv("MASHU_DATABASE_URL", "dbname=mashu_test_never_created")
+    names = {tool.name for tool in asyncio.run(server.build_server().list_tools())}
+    assert len(names) == 19
+    assert not names & {"attempt_record", "decision_record", "artifact_link"}
+    assert "task_checkpoint" in names

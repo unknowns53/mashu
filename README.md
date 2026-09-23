@@ -343,7 +343,7 @@ claude mcp add mashu \
 
 Agent 名は serve の --agent、または MASHU_AGENT で指定する。別の MCP client を使う場合も、同じく mashu serve を stdio server として登録する。
 
-MCP tool は 22 個ある。
+MCP tool は 19 個ある。
 
 | 分類 | Tool | 役割 |
 |---|---|---|
@@ -363,10 +363,7 @@ MCP tool は 22 個ある。
 | Project State | task_get | Task の Current State 全文を取得し、指定した履歴だけ展開する。着手前に必須 |
 | Project State | task_search | Task 名と Current State を検索する |
 | Project State | task_update | Current State を置換する |
-| Project State | task_checkpoint | Current State を置換し、区切りとして履歴を凍結する |
-| Project State | attempt_record | 試したことと結果を追記する |
-| Project State | decision_record | 判断と、その理由を追記する |
-| Project State | artifact_link | 外部成果物の原典を Task にリンクする |
+| Project State | task_checkpoint | Current State を置換し、区切りとして履歴を凍結する。`attempts`（試したことと結果）、`decisions`（判断と理由）、`artifacts`（外部成果物の原典）も同じ transaction で追記し、artifacts は checkpoint の evidence になる |
 | Project State | task_propose_close | Task の終了案を理由つきで置く |
 | Project State | task_withdraw_close_proposal | close proposal を取り下げる |
 
@@ -377,10 +374,10 @@ Agent が守る基本の動詞は次の四つだ。
 実際に困った            → pain_report
 User が「覚えて」と言った → memory_admit（content）
 User が既存 Memory の変更を指示 → memory_get → memory_change_propose → memory_change_apply
-作業の区切り            → task_checkpoint
+作業の区切り            → task_checkpoint（attempts / decisions / artifacts を添える）
 ~~~
 
-Attempt は失敗した試行の結末、Decision は理由を失うと再導出コストが高い判断に使う。Agent が独自に考えた Memory 変更は提案に留め、明示指示があった場合だけ MCP から適用する。ユーザーの会話指示の出所は記録されるが、認証されるわけではない。Temporary Context の登録、直接 Memory 操作、proposal review、Task の close / reopen は User の CLI / TUI 操作だ。終わったと思ったら status_text にそう書くのではなく task_propose_close を使う。前者は User に読み直しと打ち直しをさせ、後者は 1 打鍵で決まる。
+task_checkpoint の `attempts` には失敗した試行の結末、`decisions` には理由を失うと再導出コストが高い判断、`artifacts` には外部成果物の原典を入れる。一つでも拒否されれば checkpoint 全体が書かれない。Agent が独自に考えた Memory 変更は提案に留め、明示指示があった場合だけ MCP から適用する。ユーザーの会話指示の出所は記録されるが、認証されるわけではない。Temporary Context の登録、直接 Memory 操作、proposal review、Task の close / reopen は User の CLI / TUI 操作だ。終わったと思ったら status_text にそう書くのではなく task_propose_close を使う。前者は User に読み直しと打ち直しをさせ、後者は 1 打鍵で決まる。
 
 ### PreToolUse hook で guard を有効にする
 

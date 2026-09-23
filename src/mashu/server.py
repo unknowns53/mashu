@@ -37,9 +37,10 @@ INSTRUCTIONS = (
     "Mashu pushes active Memory; call session_bootstrap first in every session. "
     "Before continuing a task from a bootstrap card, call task_get with its full id and "
     "verify old state against the repository and artifacts. Use task_checkpoint at work "
-    "breaks, attempt_record for failed tries, and decision_record for costly-to-rederive "
-    "reasons. Task completion remains the user's decision. If work looks done, use "
-    "task_propose_close with outcome and grounds; it changes no task state. "
+    "breaks; put failed tries in its attempts, costly-to-rederive reasons in decisions, "
+    "and external sources in artifacts. Task completion remains the user's decision. "
+    "If work looks done, use task_propose_close with outcome and grounds; it changes no "
+    "task state. "
     "Record lookups or derivations with trace_put. Use pain_report only when missing or "
     "stale knowledge caused an incident or repeated lookup; incidents nominate once, "
     "friction on the second occurrence. Use prevention_kind='work' and task_id for "
@@ -578,10 +579,19 @@ def build_server() -> Any:
         blockers: list[str] | None = None,
         next_actions: list[str] | None = None,
         evidence: list[UUID] | None = None,
+        attempts: list[dict[str, Any]] | None = None,
+        decisions: list[dict[str, Any]] | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Replace full state and record a checkpoint; omitted fields clear.
+        """Replace full state and record a checkpoint with its history; omitted fields clear.
 
-        Pass the read state's `updated_at` as `expect_updated_at`.
+        Pass the read state's `updated_at` as `expect_updated_at`. Optional history, all
+        written with the checkpoint or not at all:
+        `attempts` items `{attempt, result?, reason?, next?}` for failed tries,
+        `decisions` items `{decision, reason?, supersedes_id?}` for reasons costly to
+        re-derive, and `artifacts` items `{kind, locator, label?}` for external sources.
+        Artifact kinds: git_commit, git_branch, file, document, obsidian, issue, dataset,
+        log, url, other. Artifacts linked here join `evidence` automatically.
         """
         try:
             with db.transaction() as cur:
@@ -598,6 +608,9 @@ def build_server() -> Any:
                     blockers=blockers,
                     next_actions=next_actions,
                     evidence=evidence,
+                    attempts=attempts,
+                    decisions=decisions,
+                    artifacts=artifacts,
                 )
                 return _plain({"ok": True, **answer})
         except MashuError as error:
@@ -628,74 +641,6 @@ def build_server() -> Any:
         try:
             with db.transaction() as cur:
                 answer = tasks.withdraw_proposal(cur, task_id, actor=actor())
-                return _plain({"ok": True, **answer})
-        except MashuError as error:
-            return _failure(error)
-
-    @server.tool()
-    def attempt_record(
-        task_id: UUID,
-        attempt: str,
-        result: str | None = None,
-        reason: str | None = None,
-        next: str | None = None,
-    ) -> dict[str, Any]:
-        """Record the outcome and next step of a failed try."""
-        try:
-            with db.transaction() as cur:
-                answer = task_history.attempt_record(
-                    cur,
-                    task_id,
-                    actor=actor(),
-                    attempt=attempt,
-                    result=result,
-                    reason=reason,
-                    next=next,
-                )
-                return _plain({"ok": True, **answer})
-        except MashuError as error:
-            return _failure(error)
-
-    @server.tool()
-    def decision_record(
-        task_id: UUID,
-        decision: str,
-        reason: str | None = None,
-        supersedes_id: UUID | None = None,
-    ) -> dict[str, Any]:
-        """Record a judgement whose reason would be costly to re-derive."""
-        try:
-            with db.transaction() as cur:
-                answer = task_history.decision_record(
-                    cur,
-                    task_id,
-                    actor=actor(),
-                    decision=decision,
-                    reason=reason,
-                    supersedes_id=supersedes_id,
-                )
-                return _plain({"ok": True, **answer})
-        except MashuError as error:
-            return _failure(error)
-
-    @server.tool()
-    def artifact_link(
-        task_id: UUID,
-        kind: str,
-        locator: str,
-        label: str | None = None,
-    ) -> dict[str, Any]:
-        """Link a task to the external source of an artifact."""
-        try:
-            with db.transaction() as cur:
-                answer = task_history.artifact_link(
-                    cur,
-                    task_id,
-                    actor=actor(),
-                    kind=kind,
-                    locator=locator,
-                    label=label,
-                )
                 return _plain({"ok": True, **answer})
         except MashuError as error:
             return _failure(error)

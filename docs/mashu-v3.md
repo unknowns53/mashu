@@ -160,7 +160,7 @@ task_id / attempt (300) / result (500) / reason (500) / next (300) / created_at 
 task_id / decision / reason / supersedes_id / created_at / created_by
 ```
 
-どちらもコード・ログ・長文引用は文字上限が物理的に拒否する。どちらも bootstrap には載らず、`attempt_list` / `decision_list` で明示取得する。
+どちらもコード・ログ・長文引用は文字上限が物理的に拒否する。Agent はどちらも `task_checkpoint` の `attempts` / `decisions` として区切りの checkpoint と一緒に書き、追記だけの Tool は持たない（5.6 節）。どちらも bootstrap には載らず、`attempt_list` / `decision_list` で明示取得する。
 
 Trace と Attempt は似ているが統合しない。Trace は「この日に調べて分かった」、Attempt は「この Task でこう試してこうなった」であり、重複が運用で実測された場合のみ再検討する。
 
@@ -172,14 +172,16 @@ Mashu 外の正本への参照。
 task_id / kind / locator / label / created_at
 ```
 
-kind は `git_commit` / `git_branch` / `file` / `document` / `obsidian` / `issue` / `dataset` / `log` / `url` / `other`。本文は保存しない。
+kind は `git_commit` / `git_branch` / `file` / `document` / `obsidian` / `issue` / `dataset` / `log` / `url` / `other`。本文は保存しない。Agent は `task_checkpoint` の `artifacts` として書き、そこで作った参照はその checkpoint の evidence に加わる。
 
 ### 5.6 Checkpoint
 
 まとまった作業の区切りで Agent が打つ。`task_checkpoint` は **Current State の置換と、履歴行の凍結を一度に行う**。すなわち checkpoint は task_update の上位互換であり、Agent が覚える動詞を増やさない。
 
+区切りまでに生じた Attempt・Decision・Artifact Reference も同じ呼び出しの `attempts` / `decisions` / `artifacts` で渡す。state の置換、それらの追記、checkpoint の凍結は一つの transaction で行い、文字上限・入口拒否・kind・supersedes の検査は書き込みの前にすべての行へかける。一行でも拒否されれば何も書かない。記録の粒度を checkpoint に揃えることで、履歴を書くための動詞を別に覚えさせずに済む。
+
 ```text
-what_changed / 凍結時点の Current State / evidence (artifact 参照) / created_at / created_by
+what_changed / 凍結時点の Current State / evidence (artifact 参照。同じ呼び出しで作った参照を含む) / created_at / created_by
 ```
 
 Checkpoint は append-only の履歴であり、bootstrap には載らない。そして **Checkpoint は Task の終了ではない**。
@@ -211,7 +213,7 @@ close 時は最終 checkpoint を凍結し、bootstrap から除外する。atte
 
 close を User に強制すると、忘れられた Task が腐った state を永久に push し続ける。かといって沈黙を完了と解釈すれば、Agent に終了判定をさせないという 6 節の原則が裏口から破れる。この間を lease で取る。
 
-open な Task は `last_activity_at` と `active_until` を持つ。`task_update` / `task_checkpoint` / `attempt_record` / `decision_record` / `artifact_link` / User の `task touch` が lease を延長する。初期値は 14 日とし、計算のキュー待ちや査読待ちで正当に週単位の空白が生じる研究のリズムに対して短すぎるかどうかは、reactivate の頻度（17 節)で較正する。
+open な Task は `last_activity_at` と `active_until` を持つ。`task_update` / `task_checkpoint` / User の `task touch` が lease を延長する。初期値は 14 日とし、計算のキュー待ちや査読待ちで正当に週単位の空白が生じる研究のリズムに対して短すぎるかどうかは、reactivate の頻度（17 節)で較正する。
 
 **dormant は保存された状態ではなく、導出される状態である。**
 
@@ -274,7 +276,7 @@ User が覚えてと言った     → memory_admit
 作業の区切り              → task_checkpoint
 ```
 
-attempt_record と decision_record は「失敗した試行の結末」「後から理由を失うと高くつく判断」に限る補助動詞であり、毎ターン打つものではない。
+task_checkpoint の `attempts` と `decisions` は「失敗した試行の結末」「後から理由を失うと高くつく判断」に限って埋める欄であり、毎回の checkpoint で書くものではない。独立した動詞にはしないので、上の四行は増えない。
 
 **痛みの答えには二つの形がある。**v2 では、痛みを防いだはずのものはすべて「誰かが毎回持っているべき一文」＝規則の形をしていた。それ以外の置き場が無かったので、そう書くしかなかったのである。Project State ができた以上その前提は無くなる。一度直せば以後は何も覚えなくてよい変更 ＝ 作業は、規則ではない。
 
@@ -320,7 +322,7 @@ v2 の Memory 信頼境界と Tool は `docs/mashu-v2.md` を正本として更�
 
 ## 13. インターフェース追加
 
-### 13.1 MCP Tool（Memory 関連 11 + Project State 関連 11）
+### 13.1 MCP Tool（Memory 関連 11 + Project State 関連 8）
 
 Memory 関連 Tool は `docs/mashu-v2.md` 8.1 節に記す。`session_bootstrap` は返却内容が広がり、`pain_report` は 9 節の二つの形を受けるため `prevention_kind`（`rule` 既定 / `work`）と `task_id` を取る。Project State 関連の追加は
 
@@ -329,8 +331,7 @@ Memory 関連 Tool は `docs/mashu-v2.md` 8.1 節に記す。`session_bootstrap`
 | `task_create` | 重複照合つきの Task 作成（5.2 節） |
 | `task_get` / `task_search` / `project_list` | 明示取得・検索 |
 | `task_update` | Current State の置換（楽観チェック・hard limit・予算判定つき） |
-| `task_checkpoint` | 置換 + 履歴凍結（5.6 節） |
-| `attempt_record` / `decision_record` / `artifact_link` | 履歴の追記 |
+| `task_checkpoint` | 置換 + attempt / decision / artifact の追記 + 履歴凍結（5.6 節） |
 | `task_propose_close` / `task_withdraw_close_proposal` | 終了の提案と取り下げ（6.1 節） |
 
 `attempt_list` / `decision_list` / `artifact_list` は `task_get` の展開引数として提供し、Tool 数の増殖を避ける。**`task_close` は Agent 用 MCP に置かない。**提案は close ではないので `task_propose_close` はこの禁止に触れない。
