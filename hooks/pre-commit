@@ -4,6 +4,7 @@ set -eu
 
 hook_dir=$(dirname "$0")
 . "$hook_dir/_banned.sh"
+. "$hook_dir/_budget.sh"
 
 banned_load || exit 1
 trap 'rm -f "$BANNED_PATTERNS_FILE"' EXIT
@@ -40,6 +41,35 @@ IFS=$old_ifs
 if [ "$failed" -ne 0 ]; then
     printf '%s\n' "pre-commit: commit aborted. Remove the flagged text; do not use --no-verify." >&2
     exit 1
+fi
+
+# Hold tests/ to its line budget whenever the commit touches tests/.
+if printf '%s\n' "$(git diff --cached --name-only)" | grep -q '^tests/'; then
+    budget=$(budget_staged)
+    count=$(budget_count)
+    if [ -z "$budget" ]; then
+        printf '%s\n' "pre-commit: $BUDGET_FILE is missing; it holds the tests/ line budget." >&2
+        exit 1
+    fi
+    if budget_raised; then
+        others=$(git diff --cached --name-only | grep -v -x "$BUDGET_FILE" || true)
+        if [ -n "$others" ]; then
+            printf '%s\n' "pre-commit: raise $BUDGET_FILE in a commit of its own, with nothing else staged." >&2
+            exit 1
+        fi
+    elif [ "$count" -gt "$budget" ]; then
+        cat >&2 <<MSG
+pre-commit: tests/ has $count non-blank lines, over its budget of $budget.
+    Make room instead of raising the budget: extend an existing test rather than add
+    one, build state with the shared fixtures in tests/conftest.py, test each invariant
+    at one layer only, and assert on state rather than on screen or CLI wording.
+    Only the user may decide to raise the budget. Ask them; do not edit it on your own.
+MSG
+        exit 1
+    elif [ "$count" -lt "$budget" ]; then
+        printf '%s\n' "pre-commit: tests/ shrank to $count lines; set $BUDGET_FILE to $count in this commit." >&2
+        exit 1
+    fi
 fi
 
 exit 0
