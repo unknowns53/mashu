@@ -497,7 +497,11 @@ def build_server() -> Any:
         next_actions: list[str] | None = None,
         force: bool = False,
     ) -> dict[str, Any]:
-        """Create a task; likely duplicates are returned unless `force` is true."""
+        """Create a task; likely duplicates are returned unless `force` is true.
+
+        `goal` (80 chars) names the outcome and `status_text` (120 chars) says where the
+        task stands; both ride on every bootstrap card, so details go in approach or next_actions.
+        """
         try:
             with db.transaction() as cur:
                 answer = tasks.task_create(
@@ -575,6 +579,8 @@ def build_server() -> Any:
         """Replace the state fields given; omitted fields keep their value, "" or [] clears.
 
         Pass the read state's `updated_at` as `expect_updated_at`.
+        `goal` (80 chars) names the outcome and `status_text` (120 chars) says where the
+        task stands; both ride on every bootstrap card, so details go in approach or next_actions.
         """
         try:
             with db.transaction() as cur:
@@ -613,7 +619,9 @@ def build_server() -> Any:
         """Replace the state fields given and record a checkpoint with its history.
 
         Omitted fields keep their value; "" or [] clears one. Pass the read state's
-        `updated_at` as `expect_updated_at`. Optional history, all
+        `updated_at` as `expect_updated_at`. `goal` (80 chars) names the outcome and
+        `status_text` (120 chars) says where the task stands; both ride on every
+        bootstrap card, so what was done goes in `what_changed`. Optional history, all
         written with the checkpoint or not at all:
         `attempts` items `{attempt, result?, reason?, next?}` for failed tries,
         `decisions` items `{decision, reason?, supersedes_id?}` for reasons costly to

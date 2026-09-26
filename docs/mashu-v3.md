@@ -128,15 +128,17 @@ goal / approach / status_text / open_questions / blockers / next_actions / updat
 **hard limit は store が強制する。**「簡潔に書け」という指示は情報量制御にならないので、DB / service 層で拒否する。
 
 ```text
-goal            300 chars
+goal             80 chars
 approach        500 chars
-status_text     500 chars
+status_text     120 chars
 open_questions  最大 5 件 × 300 chars
 blockers        最大 5 件 × 300 chars
 next_actions    最大 5 件 × 300 chars
 bootstrap card  200 estimated tokens / Task
 full detail     800 estimated tokens / Task
 ```
+
+goal と status は Scope の全セッションへ card として push されるので、他の欄より短く抑える。運用では status が「何をしたか」の日誌になり、コミットのハッシュ・パス・測定値が並んで、一つの Scope の card 枠を埋めた。status は Task がいまどこにいるかを一、二文で言う欄で、したことは checkpoint の what_changed、コミットやパスは Artifact Reference、残りの作業は next_actions が持つ。上限は書き込む値にだけ掛け、書き換えずに引き継がれた値には掛けない。上限を締める前に書かれた state を、別の欄の更新のたびに書き直させないためである。DB の CHECK 制約はそのため 0004 の広い上限のまま残す。
 
 初期値であり、実測後に変更してよい。bootstrap card は Task 名・goal・statusと、approach / open questions / blockers / next actions が存在することを示す件数だけから作る。full detail は全欄を含むが常時配信しない。長文が必要なら原典を Artifact Reference に置く。
 

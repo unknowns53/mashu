@@ -27,10 +27,12 @@ class RetiredConflictError(MashuError):
 class OverLimitError(RefusedError):
     """A current-state field, card, or detail longer than the store will hold."""
 
-    def __init__(self, field: str, limit: int, actual: int, *, unit: str = "chars"):
+    def __init__(
+        self, field: str, limit: int, actual: int, *, unit: str = "chars", advice: str | None = None
+    ):
         super().__init__(
             f"{field} is {actual} {unit} and the limit is {limit}; "
-            "put the long form where its original lives and reference it instead"
+            + (advice or "put the long form where its original lives and reference it instead")
         )
         self.field = field
         self.limit = limit

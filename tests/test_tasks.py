@@ -100,15 +100,19 @@ def test_a_banned_pattern_is_refused_before_the_task_exists(cur, project):
 
 
 # the hard limits (5.3)
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [("goal", "x" * 301), ("approach", "x" * 501), ("status_text", "x" * 501)],
-)
-def test_a_field_over_its_limit_is_refused_by_name(cur, task_id, field, value):
+@pytest.mark.parametrize("field", tasks.TEXT_LIMITS)
+def test_a_field_over_its_limit_is_refused_by_name(cur, task_id, field):
     with pytest.raises(OverLimitError) as raised:
-        update_task(cur, task_id, **{field: value})
-    assert raised.value.field == field
-    assert raised.value.actual == len(value)
+        update_task(cur, task_id, **{field: "x" * (tasks.TEXT_LIMITS[field] + 1)})
+    assert (raised.value.field, raised.value.actual) == (field, tasks.TEXT_LIMITS[field] + 1)
+
+
+def test_a_long_state_written_before_the_card_limits_is_carried_but_not_rewritten(cur, task_id):
+    cur.execute("UPDATE task_state SET status_text = %s WHERE task_id = %s", ("s" * 400, task_id))
+    tasks.append_next_action(cur, task_id, "add the check", actor="agent")
+    assert update_task(cur, task_id, blockers=["none"])["state"]["status_text"] == "s" * 400
+    with pytest.raises(OverLimitError, match="what_changed"):
+        update_task(cur, task_id, status_text="t" * 400)
 
 
 @pytest.mark.parametrize("field", tasks.LIST_FIELDS)
@@ -123,9 +127,7 @@ def test_a_list_over_five_entries_or_with_an_entry_over_its_limit_is_refused(cur
 @pytest.mark.parametrize(
     ("column", "value"), [("goal", "x" * 301), ("blockers", [f"line {n}" for n in range(6)])]
 )
-def test_the_database_refuses_the_same_limits_when_the_code_is_gone_round(
-    cur, task_id, column, value
-):
+def test_the_database_keeps_its_ceilings_when_the_code_is_gone_round(cur, task_id, column, value):
     with pytest.raises(psycopg.errors.CheckViolation):
         cur.execute(f"UPDATE task_state SET {column} = %s WHERE task_id = %s", (value, task_id))
 
@@ -172,10 +174,10 @@ def test_each_scope_has_an_independent_project_state_share(cur, scope_id, monkey
     new_project(cur, "project here", scope_id=scope_id)
     new_project(cur, "project there", scope_id=elsewhere)
 
-    here = new_task(cur, "fill this scope", "project here", status_text="x" * 240)
+    here = new_task(cur, "fill this scope", "project here", status_text="x" * 120)
     cost = tasks.card_cost(here["task"]["name"], here["state"])
     monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(cost))
-    there = new_task(cur, "fill this scope", "project there", status_text="x" * 240)
+    there = new_task(cur, "fill this scope", "project there", status_text="x" * 120)
 
     totals = tasks.pushed_totals(cur)
     assert totals["count"] == 2
@@ -205,7 +207,7 @@ def test_an_unscoped_write_is_weighed_against_the_busiest_scope(cur, scope_id, m
     new_project(cur, "busy project", scope_id=scope_id)
     new_project(cur, "light project", scope_id=lighter_scope)
     new_project(cur, "global project")
-    busy = new_task(cur, "busy work", "busy project", status_text="x" * 240)
+    busy = new_task(cur, "busy work", "busy project", status_text="x" * 120)
     new_task(cur, "light work", "light project")
 
     busy_cost = tasks.card_cost(busy["task"]["name"], busy["state"])
@@ -266,14 +268,14 @@ def test_a_first_task_too_large_for_the_share_never_reaches_the_table(cur, proje
 
 def test_a_store_over_its_ceiling_can_still_be_shrunk_but_not_grown(cur, project, monkeypatch):
     for n in ("alpha", "beta", "gamma"):
-        new_task(cur, f"task {n}", project["project_id"], status_text="x" * 240)
+        new_task(cur, f"task {n}", project["project_id"], status_text="x" * 120)
     seated = tasks.active_state_costs(cur)
     monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(min(row["tokens"] for row in seated)))
 
     target = seated[0]["task_id"]
     assert update_task(cur, target, status_text="tiny")["state"]["status_text"] == "tiny"
     with pytest.raises(ProjectBudgetError):
-        update_task(cur, seated[1]["task_id"], status_text="x" * 240, goal="and now a goal")
+        update_task(cur, seated[1]["task_id"], status_text="x" * 120, goal="and now a goal")
 
 
 def test_a_task_over_new_card_and_detail_limits_can_still_be_shrunk(cur, project, monkeypatch):
@@ -281,9 +283,9 @@ def test_a_task_over_new_card_and_detail_limits_can_still_be_shrunk(cur, project
         cur,
         "oversized after configuration changed",
         project["project_id"],
-        goal="g" * 250,
+        goal="g" * 80,
         approach="a" * 400,
-        status_text="s" * 400,
+        status_text="s" * 120,
         next_actions=["n" * 250],
     )
     current = made["state"]
