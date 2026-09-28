@@ -39,15 +39,6 @@ def status(dsn, task_id):
     return task_row(dsn, task_id)["task"]["status"]
 
 
-def test_the_grounds_are_on_the_screen_and_leaving_decides_nothing(dsn, monkeypatch, capsys):
-    task_id = a_task(dsn, "drop the close-up tool", propose="completed")
-    keys(monkeypatch, "q")
-
-    assert close_ui.run(dsn) == 0
-    assert MERGED in capsys.readouterr().out
-    assert status(dsn, task_id) == "open"
-
-
 def test_superseded_takes_the_reason_typed_for_it(dsn, monkeypatch):
     task_id = a_task(dsn, "rework the hull")
     keys(monkeypatch, "s", "ship-parts took this over", "q")
@@ -59,32 +50,21 @@ def test_superseded_takes_the_reason_typed_for_it(dsn, monkeypatch):
     assert row["task"]["close_reason"] == "ship-parts took this over"
 
 
-def test_dropping_a_proposal_leaves_the_task_open_with_its_lease_renewed(dsn, monkeypatch):
+@pytest.mark.parametrize(("key", "proposal"), [("w", None), ("t", "completed")])
+def test_drop_and_renew_leave_the_task_open_with_its_lease_renewed(dsn, monkeypatch, key, proposal):
     task_id = a_task(dsn, "drop the close-up tool", propose="completed", dormant=True)
-    keys(monkeypatch, "w", "q")
+    keys(monkeypatch, key, "q")
 
     assert close_ui.run(dsn) == 0
 
     row = task_row(dsn, task_id)
-    assert row["task"]["status"] == "open"
-    assert row["proposal"] is None
-    assert row["activity"] == "active"
+    assert (row["task"]["status"], row["activity"]) == ("open", "active")
+    assert (row["proposal"] and row["proposal"]["outcome"]) == proposal
 
 
-def test_renewing_says_nothing_about_whether_the_work_is_finished(dsn, monkeypatch):
-    task_id = a_task(dsn, "drop the close-up tool", propose="completed")
-    keys(monkeypatch, "t", "q")
-
-    assert close_ui.run(dsn) == 0
-
-    row = task_row(dsn, task_id)
-    assert row["task"]["status"] == "open"
-    assert row["proposal"]["outcome"] == "completed"
-
-
-def test_the_proposals_lead_the_list_and_the_arrows_reach_the_rest(dsn, monkeypatch):
+def test_proposals_lead_dormant_ones_included_and_arrows_reach_the_rest(dsn, monkeypatch):
     unproposed = a_task(dsn, "rework the hull")
-    proposed = a_task(dsn, "drop the close-up tool", propose="completed")
+    proposed = a_task(dsn, "drop the close-up tool", propose="completed", dormant=True)
     keys(monkeypatch, "enter", "q")
     assert close_ui.run(dsn) == 0
     assert status(dsn, proposed) == "closed"
@@ -101,22 +81,14 @@ def test_a_store_with_nothing_open_says_so_rather_than_painting_a_list(dsn, monk
     assert "no open tasks" in capsys.readouterr().out
 
 
-def test_the_screen_reads_the_dormant_tasks_too(dsn, monkeypatch):
-    task_id = a_task(dsn, "drop the close-up tool", propose="completed", dormant=True)
-    keys(monkeypatch, "enter", "q")
-
-    assert close_ui.run(dsn) == 0
-    assert status(dsn, task_id) == "closed"
-
-
-def test_the_preview_shows_decision_context_and_marks_a_stale_proposal(dsn, monkeypatch, capsys):
-    a_task(dsn, "replace the launch rail", propose="completed", **DETAIL)
+def test_preview_shows_grounds_and_context_and_leaving_decides_nothing(dsn, monkeypatch, capsys):
+    task_id = a_task(dsn, "replace the launch rail", propose="completed", **DETAIL)
     keys(monkeypatch, "q")
 
     assert close_ui.run(dsn) == 0
+    assert status(dsn, task_id) == "open"
     out = capsys.readouterr().out
-    assert "PROPOSAL" in out
-    assert "STALE" in out
+    assert MERGED in out and "PROPOSAL" in out and "STALE" in out
     for value in DETAIL.values():
         assert (value[0] if isinstance(value, list) else value) in out
     for label in ("goal", "status", "approach", "open questions", "blockers", "next actions"):

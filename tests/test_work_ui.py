@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import committed_task, expire, keys, new_project, task_row, update_task
-from mashu import db, projects, routing, scopes, task_history, tasks, work_ui
+from mashu import db, projects, routing, scopes, screen, task_history, tasks, work_ui
 
 STATE = {
     "goal": "launch without the old rail",
@@ -15,6 +15,14 @@ STATE = {
 }
 
 pytestmark = pytest.mark.usefixtures("known_screen")
+
+
+def test_unchanged_list_keeps_a_pipe_inside_an_item(monkeypatch):
+    current = ["check printf x | tool"]
+    monkeypatch.setattr(screen, "editline", lambda _prompt, initial: screen.Submitted(initial))
+    assert work_ui._replacement_list("next actions", current) == current
+    monkeypatch.setattr(screen, "editline", lambda *_args: screen.Submitted("-"))
+    assert work_ui._replacement_list("next actions", current) == []
 
 
 @pytest.fixture
@@ -137,17 +145,13 @@ def test_duplicate_task_is_forced_only_after_explicit_confirmation(dsn, monkeypa
     assert work_ui.run(dsn) == 0
     assert [row["task"]["task_id"] for row in listed(dsn)] == [original]
 
-    keys(monkeypatch, "n", "calibrate the same rail", "enrai", "", "y", "q")
+    keys(monkeypatch, "n", "calibrate the same rail", "", "close without binding", "y", "q")
     assert work_ui.run(dsn) == 0
-    assert len(listed(dsn)) == 2
-
-
-def test_new_task_is_created_by_the_user(dsn, monkeypatch):
-    keys(monkeypatch, "n", "fit the hatch", "", "close without binding", "q")
-    assert work_ui.run(dsn) == 0
-    row = listed(dsn)[0]
-    assert row["task"]["created_by"] == "user"
-    assert row["state"]["goal"] == "close without binding"
+    rows = listed(dsn)
+    assert len(rows) == 2
+    made = next(row for row in rows if row["task"]["task_id"] != original)
+    assert made["task"]["created_by"] == "user"
+    assert made["state"]["goal"] == "close without binding"
 
 
 def test_task_creation_asks_for_a_project_only_when_more_than_one_is_available(dsn, monkeypatch):
@@ -177,31 +181,13 @@ def test_task_creation_prefers_the_only_project_in_the_routed_scope(dsn, monkeyp
     assert len(made) == 1 and made[0]["task"]["project_name"] == "hull work"
 
 
-def test_touch_reactivates_a_dormant_task(dsn, monkeypatch):
-    task_id = make_task(dsn, "wake the rail", activity="dormant")
-    keys(monkeypatch, "t", "q")
-
-    assert work_ui.run(dsn, initial_view="dormant") == 0
-    assert task_row(dsn, task_id)["activity"] == "active"
-
-
 def test_task_name_project_and_current_state_can_be_edited(dsn, monkeypatch):
     task_id = make_task(dsn, "old rail wording")
     with db.transaction(dsn) as cur:
         update_task(cur, task_id, **STATE)
-    keys(
-        monkeypatch,
-        "e",
-        "new rail wording",
-        "",
-        "ship the new rail",
-        "-",
-        "fitted for trial",
-        "load certified? | paint complete?",
-        "-",
-        "run trial | publish report",
-        "q",
-    )
+    fields = ("new rail wording", "", "ship the new rail", "-", "fitted for trial")
+    lists = ("load certified? | paint complete?", "-", "run trial | publish report")
+    keys(monkeypatch, "e", *fields, *lists, "q")
 
     assert work_ui.run(dsn) == 0
 
@@ -216,8 +202,12 @@ def test_task_name_project_and_current_state_can_be_edited(dsn, monkeypatch):
     assert row["state"]["next_actions"] == ["run trial", "publish report"]
 
 
-def test_a_task_closed_here_can_be_reopened_from_the_closed_view(dsn, monkeypatch):
-    task_id = make_task(dsn, "retire the old rail")
+def test_a_dormant_task_can_be_touched_closed_and_reopened_from_the_closed_view(dsn, monkeypatch):
+    task_id = make_task(dsn, "retire the old rail", activity="dormant")
+    keys(monkeypatch, "t", "q")
+    assert work_ui.run(dsn, initial_view="dormant") == 0
+    assert task_row(dsn, task_id)["activity"] == "active"
+
     keys(monkeypatch, "c", "s", "replaced by the carbon rail", "q")
     assert work_ui.run(dsn) == 0
     assert task_row(dsn, task_id)["task"]["outcome"] == "superseded"
@@ -227,38 +217,20 @@ def test_a_task_closed_here_can_be_reopened_from_the_closed_view(dsn, monkeypatc
     assert task_row(dsn, task_id)["task"]["status"] == "open"
 
 
-def test_project_view_shows_counts_and_creates_an_optionally_scoped_project(
-    dsn, monkeypatch, capsys
-):
+def test_project_view_counts_edits_creates_and_notes_a_refusal(dsn, monkeypatch, capsys):
     make_task(dsn, "one active task")
     with db.transaction(dsn) as cur:
         scopes.create_scope(cur, name="repository", actor="user")
-    keys(monkeypatch, "n", "shipyard", "repository", "q")
+    edit, refused = ("e", "enrai renamed", "repository"), ("n", "SECRETMARKER7 project", "")
+    keys(monkeypatch, *edit, *refused, "n", "shipyard", "repository", "q")
 
     assert work_ui.run(dsn, initial_view="projects") == 0
+    out = capsys.readouterr().out
+    assert "1a  0d  0c" in out
+    assert "matches banned pattern" in out
     with db.transaction(dsn) as cur:
-        assert projects.show_project(cur, "shipyard")["scope_name"] == "repository"
-    assert "1a  0d  0c" in capsys.readouterr().out
-
-
-def test_project_name_and_scope_can_be_edited(dsn, monkeypatch):
-    with db.transaction(dsn) as cur:
-        scopes.create_scope(cur, name="repository", actor="user")
-    keys(monkeypatch, "e", "enrai renamed", "repository", "q")
-
-    assert work_ui.run(dsn, initial_view="projects") == 0
-
-    with db.transaction(dsn) as cur:
-        assert projects.show_project(cur, "enrai renamed")["scope_name"] == "repository"
-
-
-def test_refused_project_write_becomes_a_note_and_changes_nothing(dsn, monkeypatch, capsys):
-    keys(monkeypatch, "n", "SECRETMARKER7 project", "", "q")
-
-    assert work_ui.run(dsn, initial_view="projects") == 0
-    with db.transaction(dsn) as cur:
-        assert [row["name"] for row in projects.list_projects(cur)] == ["enrai"]
-    assert "matches banned pattern" in capsys.readouterr().out
+        made = {row["name"]: row["scope_name"] for row in projects.list_projects(cur)}
+    assert made == {"enrai renamed": "repository", "shipyard": "repository"}
 
 
 def test_navigation_zero_results_and_non_tty_output_stay_bounded(dsn, monkeypatch, capsys):

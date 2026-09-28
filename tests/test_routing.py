@@ -21,15 +21,10 @@ def test_a_route_to_nothing_is_an_answer(cur):
     assert routing.resolve(cur, "/work/scratch/today") == (None, True)
 
 
-def test_an_unmapped_directory_says_so(cur, scope_id):
+@pytest.mark.parametrize("cwd", ["/elsewhere", None, "/work/project-old"])
+def test_an_unmapped_directory_says_so_even_beside_a_route(cur, scope_id, cwd):
     routing.add_route(cur, path_prefix="/work/project", scope_id=scope_id, actor="user")
-    assert routing.resolve(cur, "/elsewhere") == (None, False)
-    assert routing.resolve(cur, None) == (None, False)
-
-
-def test_a_neighbour_with_a_longer_name_is_not_inside_the_route(cur, scope_id):
-    routing.add_route(cur, path_prefix="/work/project", scope_id=scope_id, actor="user")
-    assert routing.resolve(cur, "/work/project-old") == (None, False)
+    assert routing.resolve(cur, cwd) == (None, False)
 
 
 def test_routing_a_directory_again_replaces_the_earlier_answer(cur, scope_id):
@@ -41,21 +36,15 @@ def test_routing_a_directory_again_replaces_the_earlier_answer(cur, scope_id):
     assert routing.resolve(cur, "/work/project") == (other, True)
 
 
-def test_a_removed_route_leaves_the_directory_unmapped(cur, scope_id):
-    routing.add_route(cur, path_prefix="/work/project", scope_id=scope_id, actor="user")
-    assert routing.remove_route(cur, path_prefix="/work/project", actor="user") is True
+def test_a_removed_route_leaves_the_directory_unmapped_and_names_who_removed_it(cur, scope_id):
+    routing.add_route(cur, path_prefix="/work/project", scope_id=scope_id, actor="the author")
+    assert routing.remove_route(cur, path_prefix="/work/project", actor="somebody else") is True
     assert routing.remove_route(cur, path_prefix="/work/project", actor="user") is False
     assert routing.resolve(cur, "/work/project") == (None, False)
 
-
-def test_the_removal_is_filed_under_whoever_removed_it(cur, scope_id):
-    routing.add_route(cur, path_prefix="/work/project", scope_id=scope_id, actor="the author")
-    routing.remove_route(cur, path_prefix="/work/project", actor="somebody else")
-
     cur.execute("SELECT actor, detail FROM event_log WHERE event_type = 'route_removed'")
-    row = cur.fetchone()
-    assert row["actor"] == "somebody else"
-    assert row["detail"]["path_prefix"] == "/work/project"
+    got = [(row["actor"], row["detail"]["path_prefix"]) for row in cur.fetchall()]
+    assert got == [("somebody else", "/work/project")]
 
 
 def test_one_spelling_per_directory(cur, scope_id):

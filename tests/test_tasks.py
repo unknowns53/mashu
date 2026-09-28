@@ -93,9 +93,12 @@ def test_different_work_or_another_project_is_not_a_duplicate(cur, task_id):
     assert new_task(cur, SCHEMA, "thesis")["task"]["task_id"] != task_id
 
 
-def test_a_banned_pattern_is_refused_before_the_task_exists(cur, project):
+def test_a_banned_or_too_large_first_task_never_reaches_the_table(cur, project, monkeypatch):
     with pytest.raises(RefusedError):
         new_task(cur, SCHEMA, "mashu", goal="ask SECRETMARKER9")
+    monkeypatch.setenv("MASHU_PROJECT_CAPACITY", "20")
+    with pytest.raises(ProjectBudgetError):
+        new_task(cur, SCHEMA, "mashu", goal=GOAL + " and the module boundary with it")
     assert count_tasks(cur) == 0
 
 
@@ -125,11 +128,19 @@ def test_a_list_over_five_entries_or_with_an_entry_over_its_limit_is_refused(cur
 
 
 @pytest.mark.parametrize(
-    ("column", "value"), [("goal", "x" * 301), ("blockers", [f"line {n}" for n in range(6)])]
+    ("assignment", "value"),
+    [
+        ("goal = %s", "x" * 301),
+        ("blockers = %s", [f"line {n}" for n in range(6)]),
+        ("closed_at = now(), status = %s", "closed"),
+    ],
 )
-def test_the_database_keeps_its_ceilings_when_the_code_is_gone_round(cur, task_id, column, value):
+def test_the_database_keeps_its_ceilings_when_the_code_is_gone_round(
+    cur, task_id, assignment, value
+):
+    table = "task" if "status" in assignment else "task_state"
     with pytest.raises(psycopg.errors.CheckViolation):
-        cur.execute(f"UPDATE task_state SET {column} = %s WHERE task_id = %s", (value, task_id))
+        cur.execute(f"UPDATE {table} SET {assignment} WHERE task_id = %s", (value, task_id))
 
 
 # replacement per field, not accumulation (5.3)
@@ -187,54 +198,49 @@ def test_each_scope_has_an_independent_project_state_share(cur, scope_id, monkey
     assert there["task"]["project_id"] != here["task"]["project_id"]
 
 
-def test_unscoped_state_spends_a_seat_in_every_scope(cur, scope_id):
-    new_project(cur, "global project")
-    new_project(cur, "local project", scope_id=scope_id)
-    global_task = new_task(cur, "global work", "global project")
-    local_task = new_task(cur, "local work", "local project")
-
-    global_cost = tasks.card_cost(global_task["task"]["name"], global_task["state"])
-    local_cost = tasks.card_cost(local_task["task"]["name"], local_task["state"])
-    totals = tasks.pushed_totals(cur)
-
-    assert totals["unscoped"] == global_cost
-    assert totals["scopes"] == {scope_id: local_cost}
-    assert totals["worst"] == global_cost + local_cost
-
-
-def test_an_unscoped_write_is_weighed_against_the_busiest_scope(cur, scope_id, monkeypatch):
+def test_unscoped_state_spends_a_seat_in_every_scope_and_is_weighed_against_the_busiest(
+    cur, scope_id, monkeypatch
+):
     lighter_scope = scopes.create_scope(cur, name="lighter scope", actor="user")["scope_id"]
     new_project(cur, "busy project", scope_id=scope_id)
     new_project(cur, "light project", scope_id=lighter_scope)
     new_project(cur, "global project")
     busy = new_task(cur, "busy work", "busy project", status_text="x" * 120)
-    new_task(cur, "light work", "light project")
+    light = new_task(cur, "light work", "light project")
 
     busy_cost = tasks.card_cost(busy["task"]["name"], busy["state"])
     global_cost = tasks.card_cost("global work", {})
     monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(busy_cost + global_cost - 1))
-
     with pytest.raises(ProjectBudgetError) as raised:
         new_task(cur, "global work", "global project")
-
     assert {row["name"] for row in raised.value.breakdown} == {"busy work", "global work"}
 
+    monkeypatch.delenv("MASHU_PROJECT_CAPACITY")
+    global_task = new_task(cur, "global work", "global project")
+    global_cost = tasks.card_cost(global_task["task"]["name"], global_task["state"])
+    totals = tasks.pushed_totals(cur)
+    assert totals["unscoped"] == global_cost
+    assert totals["scopes"] == {
+        scope_id: busy_cost,
+        lighter_scope: tasks.card_cost(light["task"]["name"], light["state"]),
+    }
+    assert totals["worst"] == global_cost + busy_cost
 
-def test_a_state_that_would_overflow_the_share_is_refused_with_the_breakdown(
+
+def test_a_state_that_would_overflow_the_share_is_refused_until_another_task_goes_dormant(
     cur, task_id, monkeypatch
 ):
-    new_task(cur, OTHER_WORK, "mashu", goal="find the ternary window")
+    quiet = new_task(cur, OTHER_WORK, "mashu", goal="find the ternary window")
     seated = sum(row["tokens"] for row in tasks.active_state_costs(cur))
     monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(seated))
+    grown = {
+        "goal": GOAL,
+        "approach": "one migration, two modules, and the lease derived rather than stored",
+        "status_text": "tables written; services and tests still to go before the branch merges",
+    }
 
     with pytest.raises(ProjectBudgetError) as raised:
-        update_task(
-            cur,
-            task_id,
-            goal=GOAL,
-            approach="one migration, two modules, and the lease derived rather than stored",
-            status_text="tables written; services and tests still to go before the branch merges",
-        )
+        update_task(cur, task_id, **grown)
 
     breakdown = raised.value.breakdown
     assert {row["name"] for row in breakdown} == {SCHEMA, OTHER_WORK}
@@ -244,26 +250,9 @@ def test_a_state_that_would_overflow_the_share_is_refused_with_the_breakdown(
     cur.execute("SELECT status_text FROM task_state WHERE task_id = %s", (task_id,))
     assert cur.fetchone()["status_text"] is None
 
-
-def test_a_dormant_task_stops_spending_the_share(cur, task_id, monkeypatch):
-    quiet = new_task(cur, OTHER_WORK, "mashu", goal="find the ternary window")
-    seated = sum(row["tokens"] for row in tasks.active_state_costs(cur))
-    monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(seated - 1))
-
-    replace = {"goal": GOAL, "next_actions": ["write the migration", "write the services"]}
-    with pytest.raises(ProjectBudgetError):
-        update_task(cur, task_id, **replace)
-
     expire(cur, quiet["task"]["task_id"])
-    assert update_task(cur, task_id, **replace)["state"]["goal"] == replace["goal"]
+    assert update_task(cur, task_id, **grown)["state"]["status_text"] == grown["status_text"]
     assert [row["name"] for row in tasks.active_state_costs(cur)] == [SCHEMA]
-
-
-def test_a_first_task_too_large_for_the_share_never_reaches_the_table(cur, project, monkeypatch):
-    monkeypatch.setenv("MASHU_PROJECT_CAPACITY", "20")
-    with pytest.raises(ProjectBudgetError):
-        new_task(cur, SCHEMA, "mashu", goal=GOAL + " and the module boundary with it")
-    assert count_tasks(cur) == 0
 
 
 def test_a_store_over_its_ceiling_can_still_be_shrunk_but_not_grown(cur, project, monkeypatch):
@@ -302,10 +291,16 @@ def test_a_task_over_new_card_and_detail_limits_can_still_be_shrunk(cur, project
 
 
 # the lease (7)
-def test_every_mutating_call_extends_the_lease(cur, task_id):
+def test_every_mutating_call_extends_the_lease_and_a_touch_is_the_whole_of_reactivation(
+    cur, task_id
+):
     expire(cur, task_id)
+    before = lease_of(cur, task_id)
     assert tasks.task_get(cur, task_id)["activity"] == "dormant"
     assert tasks.touch(cur, task_id, actor="user")["activity"] == "active"
+    after = lease_of(cur, task_id)
+    assert after["active_until"] > before["active_until"]
+    assert after["last_activity_at"] > before["last_activity_at"]
 
     expire(cur, task_id)
     assert update_task(cur, task_id, goal="ship migration 0004")["activity"] == "active"
@@ -314,21 +309,8 @@ def test_every_mutating_call_extends_the_lease(cur, task_id):
     tasks.close(cur, task_id, outcome="completed", actor="user")
     assert tasks.reopen(cur, task_id, actor="user")["activity"] == "active"
 
-    cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'task_touched'")
-    assert cur.fetchone()["n"] == 1
-
-
-def test_a_touch_is_the_whole_of_reactivation(cur, task_id):
-    expire(cur, task_id)
-    before = lease_of(cur, task_id)
-
-    tasks.touch(cur, task_id, actor="user")
-    after = lease_of(cur, task_id)
-    assert after["active_until"] > before["active_until"]
-    assert after["last_activity_at"] > before["last_activity_at"]
-
     cur.execute("SELECT detail FROM event_log WHERE event_type = 'task_touched'")
-    assert cur.fetchone()["detail"]["was"] == "dormant"
+    assert [row["detail"]["was"] for row in cur.fetchall()] == ["dormant"]
 
 
 def test_a_dormant_state_is_handed_over_as_the_last_thing_anybody_confirmed(cur, task_id):
@@ -363,6 +345,8 @@ def test_the_search_reads_the_state_and_finds_what_stopped_being_delivered(cur, 
 
 # ending, which is a person's judgement (6)
 def test_a_closed_task_refuses_every_write(cur, task_id):
+    with pytest.raises(MashuError, match="outcome must be one of"):
+        tasks.close(cur, task_id, outcome="done", actor="user")
     closed = tasks.close(
         cur, task_id, outcome="completed", reason="merged on the branch", actor="user"
     )
@@ -378,15 +362,6 @@ def test_a_closed_task_refuses_every_write(cur, task_id):
         tasks.close(cur, task_id, outcome="abandoned", actor="user")
     with pytest.raises(ClosedTaskError):
         tasks.append_next_action(cur, task_id, "too late", actor="agent")
-
-
-def test_closing_needs_one_of_the_three_outcomes(cur, task_id):
-    with pytest.raises(MashuError, match="outcome must be one of"):
-        tasks.close(cur, task_id, outcome="done", actor="user")
-    with pytest.raises(psycopg.errors.CheckViolation):
-        cur.execute(
-            "UPDATE task SET status = 'closed', closed_at = now() WHERE task_id = %s", (task_id,)
-        )
 
 
 def test_reopening_clears_the_closure_and_leaves_it_in_the_log(cur, task_id):
@@ -467,7 +442,8 @@ def test_task_card_and_full_detail_have_independent_limits(cur, project, monkeyp
 
 
 # the one append (v3 5.3, and ledger's work path)
-def test_an_append_adds_one_new_action_and_disturbs_nothing_else(cur, task_id):
+def test_an_append_adds_one_new_action_and_meets_what_a_replacement_would(cur, task_id):
+    read_at = tasks.task_get(cur, task_id)["state"]["updated_at"]
     got = tasks.append_next_action(cur, task_id, "add the check", actor="agent")
 
     assert got["appended"] is True
@@ -482,20 +458,12 @@ def test_an_append_adds_one_new_action_and_disturbs_nothing_else(cur, task_id):
     assert again["appended"] is False
     assert again["state"]["next_actions"] == got["state"]["next_actions"]
 
-
-def test_an_append_is_refused_past_the_ceiling_a_replacement_would_meet(cur, task_id):
-    update_task(cur, task_id, next_actions=[f"action {n}" for n in range(tasks.LIST_MAX_ITEMS)])
-
-    with pytest.raises(OverLimitError):
-        tasks.append_next_action(cur, task_id, "one too many", actor="agent")
-
-
-def test_an_append_makes_a_replacement_prepared_before_it_stale(cur, task_id):
-    read_at = tasks.task_get(cur, task_id)["state"]["updated_at"]
-    tasks.append_next_action(cur, task_id, "add the check", actor="agent")
-
     with pytest.raises(StaleStateError):
         update_task(cur, task_id, at=read_at, status_text="carrying on")
+
+    update_task(cur, task_id, next_actions=[f"action {n}" for n in range(tasks.LIST_MAX_ITEMS)])
+    with pytest.raises(OverLimitError):
+        tasks.append_next_action(cur, task_id, "one too many", actor="agent")
 
 
 def test_the_append_gates_the_whole_state_not_only_the_new_item(cur, task_id):

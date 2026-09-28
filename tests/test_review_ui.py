@@ -5,8 +5,8 @@ import sys
 
 import pytest
 
-from conftest import candidate, keys, remember, retire
-from mashu import db, ledger, nominations, review_ui, topics
+from conftest import candidate, keys, read_through, remember, retire
+from mashu import db, ledger, nominations, review_ui, screen, topics
 
 RULE = "run the migration before starting the local server, every time"
 OTHER = "spell out the timezone in every scheduled job, even when it looks obvious"
@@ -48,6 +48,48 @@ def test_opening_a_candidate_and_pressing_y_admits_it_where_it_belongs(dsn, monk
     assert rows[0]["status"] == "active"
     assert rows[0]["delivery"] == "always"
     assert nomination_row(dsn, nomination["nomination_id"])["status"] == "admitted"
+
+
+def test_stale_candidate_shows_new_short_wording_from_the_first_page(dsn, monkeypatch, capsys):
+    nomination = a_candidate(dsn, "\n".join(f"old wording {n}" for n in range(30)))
+    row = review_ui._queue(dsn, False)[0][0]
+    monkeypatch.setenv("LINES", "12")
+    read_through(monkeypatch, review_ui._item_text(row, 1, 1), review_ui._ITEM_KEYS, "y", "", "q")
+    getkey = screen.getkey
+
+    def change_before_admission():
+        key = getkey()
+        if key == "y":
+            with db.transaction(dsn) as cur:
+                nominations.revise(
+                    cur, nomination["nomination_id"], content="new short wording", actor="user"
+                )
+        return key
+
+    monkeypatch.setattr(screen, "getkey", change_before_admission)
+    review_ui.run(dsn)
+    assert "new short wording" in capsys.readouterr().out
+    assert nomination_row(dsn, nomination["nomination_id"])["status"] == "pending"
+
+
+def test_admission_acknowledges_conflict_only_after_its_reason_is_shown(dsn, monkeypatch):
+    body = "\n".join(f"check archive index step {n}" for n in range(30))
+    with db.transaction(dsn) as cur:
+        conflict = remember(cur, body)
+        retire(cur, conflict, "unsafe now")
+        nomination = candidate(cur, body, conflicts=[conflict["memory_id"]])
+    monkeypatch.setenv("LINES", "12")
+    keys(monkeypatch, "", "y", "", "q")
+    review_ui.run(dsn)
+    assert nomination_row(dsn, nomination["nomination_id"])["status"] == "pending"
+
+    row = review_ui._queue(dsn, False)[0][0]
+    read_through(monkeypatch, review_ui._item_text(row, 1, 1), review_ui._ITEM_KEYS, "y", "")
+    review_ui.run(dsn)
+    approved = nomination_row(dsn, nomination["nomination_id"])
+    assert approved["status"] == "admitted"
+    assert approved["approval_source"]["conflict_ids"] == [str(conflict["memory_id"])]
+    assert approved["approval_source"]["conflict_acknowledged_by_action"] is True
 
 
 def test_ctrl_c_at_admission_delivery_keeps_the_candidate_pending(dsn, monkeypatch):
@@ -167,15 +209,19 @@ def test_queue_and_item_use_the_same_candidate_navigation(dsn, monkeypatch, move
     assert statuses.count("pending") == 2
 
 
-def test_left_clears_a_queue_search_before_it_leaves(dsn, monkeypatch, capsys):
-    a_candidate(dsn, RULE)
-    a_candidate(dsn, OTHER)
+def test_the_queue_names_every_candidate_and_left_clears_a_search_first(dsn, monkeypatch, capsys):
+    first = a_candidate(dsn, RULE)
+    second = a_candidate(dsn, OTHER)
     keys(monkeypatch, "/", "timezone", "left", "q")
 
     assert review_ui.run(dsn) == 0
 
     out = capsys.readouterr().out
-    assert "1 of 2 waiting for review  ·  search: timezone" in out
+    searched = "1 of 2 waiting for review  ·  search: timezone"
+    assert searched in out
+    before_search = out[: out.index(searched)]
+    assert str(first["nomination_id"])[:8] in before_search
+    assert str(second["nomination_id"])[:8] in before_search
     assert out.count("2 waiting for review") >= 2
 
 
@@ -221,19 +267,6 @@ def test_editing_persists_the_candidate_then_it_can_be_admitted(dsn, monkeypatch
     assert "and check the standby first" in rows[0]["content"]
     saved = nomination_row(dsn, candidate["nomination_id"])
     assert saved["content"] == rows[0]["content"]
-
-
-def test_the_queue_names_every_candidate_before_any_of_them_is_opened(dsn, monkeypatch, capsys):
-    first = a_candidate(dsn, RULE)
-    second = a_candidate(dsn, OTHER)
-    keys(monkeypatch, "q")
-
-    assert review_ui.run(dsn) == 0
-
-    out = capsys.readouterr().out
-    assert "2 waiting for review" in out
-    assert str(first["nomination_id"])[:8] in out
-    assert str(second["nomination_id"])[:8] in out
 
 
 def test_a_candidate_that_walks_back_a_retirement_says_so_above_its_evidence(

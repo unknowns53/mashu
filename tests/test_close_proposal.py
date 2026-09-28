@@ -31,11 +31,13 @@ def proposals(cur, task_id):
     return cur.fetchone()["n"]
 
 
-def test_a_proposal_leaves_the_task_open_and_arrives_with_it_wherever_it_is_read(
+def test_a_proposal_leaves_the_task_open_and_dormant_and_arrives_with_it_wherever_it_is_read(
     cur, task_id, project
 ):
     assert tasks.task_get(cur, task_id)["proposal"] is None
+    expire(cur, task_id)
     row = proposed(cur, task_id)
+    assert row["activity"] == "dormant"
     assert row["task"]["status"] == "open"
     assert row["task"]["outcome"] is None
     assert row["proposal"]["outcome"] == "completed"
@@ -47,22 +49,24 @@ def test_a_proposal_leaves_the_task_open_and_arrives_with_it_wherever_it_is_read
     assert [row["proposal"]["reason"] for row in listed] == [MERGED]
 
 
-def test_a_proposal_does_not_renew_the_lease(cur, task_id):
-    expire(cur, task_id)
-    assert proposed(cur, task_id)["activity"] == "dormant"
-
-
 def test_work_written_after_a_proposal_shows_it_as_overtaken(cur, task_id):
     assert proposed(cur, task_id)["proposal"]["stale"] is False
     update_task(cur, task_id, status_text="turns out the tool is wanted for the deck test")
     assert tasks.task_get(cur, task_id)["proposal"]["stale"] is True
 
 
-def test_proposing_again_replaces_the_one_standing(cur, task_id):
+def test_a_new_proposal_replaces_the_standing_one_and_withdrawing_leaves_it_open(cur, task_id):
     proposed(cur, task_id)
     row = proposed(cur, task_id, outcome="superseded", reason="ship-parts took this over")
     assert row["proposal"]["outcome"] == "superseded"
     assert proposals(cur, task_id) == 1
+
+    row = tasks.withdraw_proposal(cur, task_id, actor="user")
+    assert row["proposal"] is None
+    assert row["task"]["status"] == "open"
+    assert proposals(cur, task_id) == 0
+    with pytest.raises(MashuError):
+        tasks.withdraw_proposal(cur, task_id, actor="user")
 
 
 @pytest.mark.parametrize(
@@ -79,12 +83,6 @@ def test_a_proposal_needs_grounds_and_an_outcome_that_pass_every_state_check(
 ):
     with pytest.raises(error):
         proposed(cur, task_id, **change)
-
-
-def test_a_closed_task_cannot_be_proposed_about(cur, task_id):
-    tasks.close(cur, task_id, outcome="completed", actor="user")
-    with pytest.raises(ClosedTaskError):
-        proposed(cur, task_id)
 
 
 def test_closing_on_the_proposed_outcome_keeps_the_grounds_that_were_written(cur, task_id):
@@ -116,6 +114,8 @@ def test_closing_answers_the_proposal_for_good(cur, task_id):
     assert proposals(cur, task_id) == 0
     cur.execute("SELECT detail FROM event_log WHERE event_type = 'task_closed'")
     assert cur.fetchone()["detail"]["proposed"] == "completed"
+    with pytest.raises(ClosedTaskError):
+        proposed(cur, task_id)
     assert tasks.reopen(cur, task_id, actor="user")["proposal"] is None
 
 
@@ -138,12 +138,3 @@ def test_accepting_a_proposal_rejects_a_snapshot_that_changed(cur, task_id, chan
             actor="user",
         )
     assert tasks.task_get(cur, task_id)["task"]["status"] == "open"
-
-
-def test_withdrawing_leaves_the_task_exactly_as_it_was_and_needs_a_proposal(cur, task_id):
-    proposed(cur, task_id)
-    row = tasks.withdraw_proposal(cur, task_id, actor="user")
-    assert row["proposal"] is None
-    assert row["task"]["status"] == "open"
-    with pytest.raises(MashuError):
-        tasks.withdraw_proposal(cur, task_id, actor="user")

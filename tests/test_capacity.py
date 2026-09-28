@@ -98,7 +98,8 @@ def test_the_totals_separate_what_every_session_pays_from_what_one_scope_does(
 
 def test_the_always_layer_has_a_lower_ceiling_of_its_own(cur, scope_id, monkeypatch):
     monkeypatch.setenv("MASHU_CAPACITY", "400")
-    monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", str(pushed_cost(RULES[:1])))
+    ceiling = pushed_cost(RULES[:1])
+    monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", str(ceiling))
     remember(cur, RULES[0])
 
     got = capacity.check_admission(cur, content=NEW_RULE, delivery="always")
@@ -107,23 +108,15 @@ def test_the_always_layer_has_a_lower_ceiling_of_its_own(cur, scope_id, monkeypa
     assert got["projected"] == pushed_cost(RULES[:1]) + pushed_cost([NEW_RULE])
     # The whole opening had room for it; the layer is what refused.
     assert got["projected"] < config.capacity()
-
-    # The same rule, told which one place it governs, fits.
-    assert (
-        capacity.check_admission(cur, content=NEW_RULE, delivery="scope", scope_id=scope_id)["ok"]
-        is True
-    )
-
-
-def test_the_layer_refusal_names_the_door_a_scope_rule_does_not_have(cur, monkeypatch):
-    monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", "10")
-    got = capacity.check_admission(cur, content=NEW_RULE, delivery="always")
-    assert got["ok"] is False
-    assert "the always layer seats 10 tokens" in got["refusal"]
+    assert f"the always layer seats {ceiling} tokens" in got["refusal"]
     assert "mashu deliver <id> scope" in got["refusal"]
-
     with pytest.raises(RefusedError, match="the always layer seats"):
         remember(cur, NEW_RULE)
+
+    # The same rule, told which one place it governs, fits and is weighed against the opening.
+    scoped = capacity.check_admission(cur, content=NEW_RULE, delivery="scope", scope_id=scope_id)
+    assert scoped["ok"] is True
+    assert scoped["capacity"] == config.capacity()
 
 
 def test_a_dated_condition_is_not_weighed_against_the_seats(cur, scope_id, monkeypatch):
@@ -136,10 +129,3 @@ def test_a_dated_condition_is_not_weighed_against_the_seats(cur, scope_id, monke
 
     monkeypatch.setenv("MASHU_CAPACITY", str(pushed_cost([NEW_RULE])))
     assert capacity.check_admission(cur, content=NEW_RULE, delivery="always")["ok"] is True
-
-
-def test_a_scope_rule_is_not_weighed_against_the_layer_ceiling(cur, scope_id, monkeypatch):
-    monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", "1")
-    got = capacity.check_admission(cur, content=NEW_RULE, delivery="scope", scope_id=scope_id)
-    assert got["ok"] is True
-    assert got["capacity"] == config.capacity()

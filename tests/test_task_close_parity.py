@@ -42,15 +42,6 @@ def run_entry(dsn: str, task_id, entry: str, monkeypatch, *lines: str) -> None:
     assert run(dsn, task_id, entry) == 0
 
 
-def test_accepting_a_proposal_has_the_same_result_from_both_entries(dsn, monkeypatch, entry):
-    task_id = make_task(dsn, proposal=True)
-    run_entry(dsn, task_id, entry, monkeypatch, "enter")
-
-    closed = task_row(dsn, task_id)
-    assert closed["task"]["outcome"] == "completed"
-    assert closed["task"]["close_reason"] == PROPOSAL_REASON
-
-
 def test_enter_without_a_proposal_is_a_noop_from_both_entries(dsn, monkeypatch, entry):
     task_id = make_task(dsn)
     run_entry(dsn, task_id, entry, monkeypatch, "enter")
@@ -60,16 +51,20 @@ def test_enter_without_a_proposal_is_a_noop_from_both_entries(dsn, monkeypatch, 
     assert row["proposal"] is None
 
 
-@pytest.mark.parametrize(("answer", "status"), [("y", "closed"), ("n", "open")])
-def test_a_stale_proposal_is_taken_only_on_the_same_confirmation(
-    dsn, monkeypatch, entry, answer, status
+@pytest.mark.parametrize(
+    ("stale", "answers", "status"),
+    [(False, (), "closed"), (True, ("y",), "closed"), (True, ("n",), "open")],
+)
+def test_enter_takes_a_proposal_and_a_stale_one_only_on_the_same_confirmation(
+    dsn, monkeypatch, entry, stale, answers, status
 ):
-    task_id = make_task(dsn, proposal=True, stale=True)
-    run_entry(dsn, task_id, entry, monkeypatch, "enter", answer)
+    task_id = make_task(dsn, proposal=True, stale=stale)
+    run_entry(dsn, task_id, entry, monkeypatch, "enter", *answers)
 
     row = task_row(dsn, task_id)
     assert row["task"]["status"] == status
     if status == "closed":
+        assert row["task"]["outcome"] == "completed"
         assert row["task"]["close_reason"] == PROPOSAL_REASON
 
 

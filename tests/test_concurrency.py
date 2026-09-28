@@ -8,7 +8,8 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
-from mashu import ledger, memories, memory_changes, nominations, scopes
+from conftest import propose_change, remember, retire
+from mashu import ledger, memory_changes, nominations, scopes
 from mashu.errors import MashuError, RetiredConflictError
 
 RULE = "always run the migration before starting the local server"
@@ -40,32 +41,25 @@ def impatient(conn: psycopg.Connection) -> psycopg.Cursor:
 def test_two_admissions_cannot_read_the_same_free_seat(two):
     first, second = two
     with first.cursor() as writing:
-        memories.remember(writing, content=RULE, actor="user")
+        remember(writing, RULE)
 
         with impatient(second) as waiting, pytest.raises(psycopg.errors.LockNotAvailable):
-            memories.remember(waiting, content=OTHER_RULE, actor="user")
+            remember(waiting, OTHER_RULE)
 
 
 def test_direct_remember_serializes_with_retirement_conflict_checks(two):
     first, second = two
     content = f"the race-only migration check is {uuid4()}"
     with first.cursor() as writing:
-        memory = memories.remember(writing, content=content, actor="user")
-        memories.retire(
-            writing,
-            memory["memory_id"],
-            reason="the migration now runs before startup",
-            retirement_kind="invalidated",
-            actor="user",
-        )
+        retire(writing, remember(writing, content), reason="the migration now runs before startup")
 
         with impatient(second) as waiting, pytest.raises(psycopg.errors.LockNotAvailable):
-            memories.remember(waiting, content=content, actor="user")
+            remember(waiting, content)
 
     first.commit()
     second.rollback()
     with second.cursor() as writing, pytest.raises(RetiredConflictError):
-        memories.remember(writing, content=content, actor="user")
+        remember(writing, content)
     second.rollback()
 
 
@@ -114,66 +108,38 @@ def test_a_nomination_being_decided_is_held_against_the_other_decision(committin
                 waiting, nomination["nomination_id"], actor="user", reason="not worth a seat"
             )
 
-
-def test_a_candidate_decided_once_is_not_decided_again(committing_dsn):
-    with psycopg.connect(committing_dsn, row_factory=dict_row) as conn, conn.cursor() as cur:
-        nomination = nominations.nominate_user_explicit(cur, content=OTHER_RULE, actor="agent")[
-            "nomination"
-        ]
-        nominations.admit(
-            cur,
-            nomination["nomination_id"],
-            actor="user",
-            delivery="always",
-            expected_version=nomination["version"],
-            approval={"kind": "user_direct"},
-            request_id=uuid4(),
-        )
-
         with pytest.raises(MashuError, match="no longer pending"):
             nominations.decline(
-                cur, nomination["nomination_id"], actor="user", reason="changed my mind"
+                deciding, nomination["nomination_id"], actor="user", reason="changed my mind"
             )
-        conn.rollback()
 
 
 def test_two_connections_replaying_one_memory_change_create_one_result(committing_dsn, two):
     with psycopg.connect(committing_dsn, row_factory=dict_row) as setup, setup.cursor() as cur:
-        memory = memories.remember(
-            cur, content="the exporter records its checksum in the signed index", actor="user"
-        )
-        detail = memories.memory_details(cur, memory["memory_id"])
-        proposal = memory_changes.propose(
+        memory = remember(cur, "the exporter records its checksum in the signed index")
+        proposal = propose_change(
             cur,
-            target_memory_id=memory["memory_id"],
-            target_revision_id=detail["current_revision_id"],
-            target_updated_at=detail["updated_at"],
-            operation="retire",
+            memory,
+            "retire",
             retirement_kind="out_of_scope",
             retire_reason="the exporter now records its checksum in the index",
-            evidence=[
-                {
-                    "kind": "ledger",
-                    "id": str(memory["evidence"][0]),
-                    "observation": "the export job now includes the checksum",
-                }
-            ],
-            actor="agent",
         )
 
     first, second = two
     request_id = uuid4()
-    approval = {"kind": "user_direct"}
-    with first.cursor() as cur:
-        result = memory_changes.apply(
-            cur,
-            proposal["change_id"],
-            version=1,
-            request_id=request_id,
-            approval=approval,
-            actor="user",
-        )
 
+    def apply(conn: psycopg.Connection) -> dict:
+        with conn.cursor() as cur:
+            return memory_changes.apply(
+                cur,
+                proposal["change_id"],
+                version=1,
+                request_id=request_id,
+                approval={"kind": "user_direct"},
+                actor="user",
+            )
+
+    result = apply(first)
     started, completed = Event(), Event()
     replay_result: list[dict] = []
     failures: list[BaseException] = []
@@ -181,17 +147,7 @@ def test_two_connections_replaying_one_memory_change_create_one_result(committin
     def replay() -> None:
         started.set()
         try:
-            with second.cursor() as cur:
-                replay_result.append(
-                    memory_changes.apply(
-                        cur,
-                        proposal["change_id"],
-                        version=1,
-                        request_id=request_id,
-                        approval=approval,
-                        actor="user",
-                    )
-                )
+            replay_result.append(apply(second))
         except BaseException as error:
             failures.append(error)
         finally:

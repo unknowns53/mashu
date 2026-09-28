@@ -37,6 +37,8 @@ def test_a_rule_for_every_session_reaches_every_session(cur, scope_id):
 
     assert [row["content"] for row in blind["always"]] == [DISCIPLINE]
     assert [row["content"] for row in scoped["always"]] == [DISCIPLINE]
+    # A pushed row carries an id and a body and nothing else.
+    assert set(blind["always"][0]) == {"memory_id", "content"}
 
 
 def test_a_scope_rule_waits_for_a_session_in_that_scope(cur, scope_id):
@@ -50,12 +52,6 @@ def test_a_scope_rule_waits_for_a_session_in_that_scope(cur, scope_id):
     assert [row["content"] for row in here["scoped"]] == [LOCAL]
 
 
-def test_a_pushed_row_carries_an_id_and_a_body_and_nothing_else(cur):
-    memories.remember(cur, content=DISCIPLINE, actor="user")
-    row = bootstrap.session_bootstrap(cur, actor="agent")["always"][0]
-    assert set(row) == {"memory_id", "content"}
-
-
 def test_the_conditions_of_the_week_come_with_the_opening(cur, scope_id):
     temporary.put_temporary(cur, content="the licence server is offline", actor="user", days=3)
     got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
@@ -67,11 +63,7 @@ def test_a_candidate_waiting_is_worth_one_number(cur):
     assert bootstrap.session_bootstrap(cur, actor="agent")["pending"] == 0
 
     ledger.report_pain(
-        cur,
-        kind="incident",
-        what="the wrong branch was deployed",
-        prevention=LOCAL,
-        actor="agent",
+        cur, kind="incident", what="deployed it wrong", prevention=LOCAL, actor="agent"
     )
     assert bootstrap.session_bootstrap(cur, actor="agent")["pending"] == 1
 
@@ -92,17 +84,14 @@ def test_the_opening_reports_each_share_and_the_total(cur, scope_id, task):
     assert got["over_budget"] is False
 
 
-def test_a_temporary_context_no_longer_spends_the_memory_seats(cur, scope_id):
-    temporary.put_temporary(cur, content=THIS_WEEK, actor="user", days=3)
-    got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
-    assert got["memory_tokens"] == 0
-    assert got["temporary_tokens"] == pushed_cost([THIS_WEEK])
-
-
 def test_an_opening_over_the_total_is_recorded_rather_than_quietly_served(
     cur, scope_id, task, monkeypatch
 ):
     memories.remember(cur, content=DISCIPLINE, actor="user")
+    bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
+    cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'bootstrap_over_capacity'")
+    assert cur.fetchone()["n"] == 0
+
     monkeypatch.setenv("MASHU_TOTAL_CAPACITY", "10")
 
     got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
@@ -116,14 +105,11 @@ def test_an_opening_over_the_total_is_recorded_rather_than_quietly_served(
     assert detail["tokens"] == got["tokens"] and detail["capacity"] == 10
 
 
-def test_nothing_is_recorded_when_the_opening_fits(cur, scope_id, task):
-    bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
-    cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'bootstrap_over_capacity'")
-    assert cur.fetchone()["n"] == 0
-
-
-def test_the_state_of_current_work_arrives_under_the_date_it_was_confirmed(cur, task):
-    row = bootstrap.session_bootstrap(cur, actor="agent")["states"][0]
+def test_the_state_of_current_work_arrives_under_its_date_with_a_call_to_fetch_it(cur, task):
+    got = bootstrap.session_bootstrap(cur, actor="agent")
+    assert "call task_get" in got["task_instruction"]
+    assert "full task_id" in got["task_instruction"]
+    row = got["states"][0]
     assert set(row) == {"task", "task_id", "heading", "content"}
     assert row["task"] == str(task["task"]["task_id"])[:8]
     assert row["task_id"] == task["task"]["task_id"]
@@ -136,14 +122,6 @@ def test_the_state_of_current_work_arrives_under_the_date_it_was_confirmed(cur, 
 
     full = tasks.task_get(cur, task["task"]["task_id"])
     assert full["state"]["next_actions"] == ["count the three shares apart"]
-
-
-def test_bootstrap_requires_full_task_fetch_before_work(cur, task):
-    got = bootstrap.session_bootstrap(cur, actor="agent")
-
-    assert "call task_get" in got["task_instruction"]
-    assert "full task_id" in got["task_instruction"]
-    assert got["states"][0]["task_id"] == task["task"]["task_id"]
 
 
 def test_a_task_whose_lease_ran_out_is_not_in_the_opening(cur, task):
@@ -168,14 +146,10 @@ def test_the_states_arrive_in_a_fixed_order(cur, task):
         (task["task"]["task_id"],),
     )
 
-    got = bootstrap.session_bootstrap(cur, actor="agent")["states"]
-    assert [row["task"] for row in got] == [
-        str(second["task"]["task_id"])[:8],
-        str(task["task"]["task_id"])[:8],
-    ]
-    assert [row["task"] for row in bootstrap.session_bootstrap(cur, actor="agent")["states"]] == [
-        row["task"] for row in got
-    ]
+    order = [str(second["task"]["task_id"])[:8], str(task["task"]["task_id"])[:8]]
+    for _ in range(2):
+        got = bootstrap.session_bootstrap(cur, actor="agent")["states"]
+        assert [row["task"] for row in got] == order
 
 
 def test_work_belonging_to_another_scope_stays_there(cur, scope_id, task):
@@ -257,3 +231,12 @@ def test_an_opening_and_the_hook_reader_survive_pending_topic_migrations(cur, sc
     assert [row["content"] for row in got["always"]] == ["Always rule"]
     assert got["topics"] == []
     assert got["schema_pending"] == ["0010_topics.sql", "0011_guard_into_topics.sql"]
+
+
+@pytest.mark.parametrize("missing", ["0004_project_state.sql", "0007_close_proposal.sql"])
+def test_an_opening_survives_pending_task_migrations(old_store, missing):
+    from mashu import db
+
+    with db.transaction(old_store(missing)) as cur:
+        got = bootstrap.session_bootstrap(cur, actor="agent")
+    assert got["states"] == [] and missing in got["schema_pending"]

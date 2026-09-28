@@ -79,12 +79,9 @@ def test_a_third_pain_lands_under_the_candidate_instead_of_beside_it(cur):
     assert count(cur, "nomination") == 1
 
 
-def test_a_person_recording_by_hand_does_not_come_through_here(cur):
+def test_hand_recording_and_a_banned_pattern_are_refused_and_nothing_is_written(cur):
     with pytest.raises(MashuError, match="reserved"):
         report(cur, "explicit", HOLE)
-
-
-def test_a_banned_pattern_is_refused_and_nothing_is_written(cur):
     with pytest.raises(RefusedError):
         report(cur, "incident", "the path under SECRETMARKER1 is the one that matters")
 
@@ -133,17 +130,6 @@ def test_out_of_scope_and_relocated_memories_do_not_suppress_new_candidates(cur,
         assert conflict["relocated_to_id"] == destination["context_id"]
 
 
-def test_a_superseded_tombstone_with_an_active_successor_is_a_delivery_problem(cur):
-    old = remember(cur, HOLE)
-    successor = remember(cur, HOLE)
-    retire(cur, old, "replaced", "superseded", superseded_by=successor["memory_id"])
-
-    got = report(cur, "incident", HOLE)
-    assert got["delivery_suspect"] is True
-    assert got["nomination"] is None
-    assert got["retirement_conflicts"][0]["superseded_by"] == successor["memory_id"]
-
-
 def test_the_ledger_lists_the_scope_it_was_filtered_by(cur, scope_id):
     report(cur, "friction", HOLE, scope_id=scope_id)
     report(cur, "friction", OTHER_HOLE)
@@ -153,12 +139,15 @@ def test_the_ledger_lists_the_scope_it_was_filtered_by(cur, scope_id):
 
 
 def test_a_pain_landing_on_a_rule_already_delivered_indicts_the_delivery(cur):
+    old = remember(cur, HOLE)
     kept = remember(cur, HOLE)
+    retire(cur, old, "replaced", "superseded", superseded_by=kept["memory_id"])
 
     got = report(cur, "incident", SAME_HOLE)
 
     assert got["delivery_suspect"] is True
     assert got["nomination"] is None
+    assert got["retirement_conflicts"][0]["superseded_by"] == kept["memory_id"]
     assert got["matches"]["memories"][0]["memory_id"] == kept["memory_id"]
     assert "delivery" in got["note"]
     assert count(cur, "nomination") == 0
@@ -208,34 +197,37 @@ def test_work_never_asks_for_a_seat_and_lands_on_the_task_that_will_make_it(cur,
     assert ledger.ledger_entries(cur)[0]["filed_task"] == task_id
 
 
-def test_work_with_no_task_says_so_instead_of_going_quiet(cur):
-    got = report(cur, "incident", FIX, prevention_kind="work")
+@pytest.mark.parametrize(
+    ("home", "note"),
+    [("none", "filed nowhere"), ("closed", "still needs a home"), ("full", "still needs a home")],
+)
+def test_work_that_finds_no_home_says_so_and_keeps_the_pain(cur, task_id, home, note):
+    if home == "closed":
+        tasks.close(cur, task_id, outcome="completed", actor="user")
+    elif home == "full":
+        update_task(cur, task_id, next_actions=[f"n {n}" for n in range(tasks.LIST_MAX_ITEMS)])
+
+    got = report(
+        cur, "incident", FIX, prevention_kind="work", task_id=None if home == "none" else task_id
+    )
 
     assert got["nomination"] is None
     assert got["filed_task"] is None
-    assert "filed nowhere" in got["note"]
+    assert note in got["note"]
     assert ledger.ledger_entries(cur)[0]["prevention"] == FIX
 
 
-@pytest.mark.parametrize("refusal", ["closed", "full"])
-def test_a_refused_filing_does_not_take_the_pain_down_with_it(cur, task_id, refusal):
-    if refusal == "closed":
-        tasks.close(cur, task_id, outcome="completed", actor="user")
-    else:
-        update_task(cur, task_id, next_actions=[f"n {n}" for n in range(tasks.LIST_MAX_ITEMS)])
-
-    got = report(cur, "incident", FIX, prevention_kind="work", task_id=task_id)
-
-    assert got["filed_task"] is None
-    assert "still needs a home" in got["note"]
-    assert ledger.ledger_entries(cur)[0]["prevention"] == FIX
-
-
-def test_a_rule_is_not_filed_on_a_task_and_an_unknown_prevention_kind_is_refused(cur, task_id):
+def test_a_rule_is_never_filed_on_a_task_and_an_unknown_prevention_kind_is_refused(cur, task_id):
     with pytest.raises(MashuError):
         report(cur, "incident", FIX, task_id=task_id)
     with pytest.raises(MashuError):
         report(cur, "incident", FIX, prevention_kind="maybe")
+    with pytest.raises(psycopg.errors.CheckViolation):
+        cur.execute(
+            "INSERT INTO ledger (kind, what, prevention, created_by, prevention_kind, filed_task) "
+            "VALUES ('incident', 'w', 'p', 'agent', 'rule', %s)",
+            (task_id,),
+        )
 
 
 def test_a_work_friction_can_still_be_the_prior_half_of_a_rederivation(cur, task_id):
@@ -246,15 +238,6 @@ def test_a_work_friction_can_still_be_the_prior_half_of_a_rederivation(cur, task
 
     assert second["nomination"]["kind"] == "rederivation"
     assert second["nomination"]["evidence"] == [first["ledger_id"], second["ledger_id"]]
-
-
-def test_a_rule_row_can_never_carry_a_filing(cur, task_id):
-    with pytest.raises(psycopg.errors.CheckViolation):
-        cur.execute(
-            "INSERT INTO ledger (kind, what, prevention, created_by, prevention_kind, filed_task) "
-            "VALUES ('incident', 'w', 'p', 'agent', 'rule', %s)",
-            (task_id,),
-        )
 
 
 @pytest.mark.parametrize(

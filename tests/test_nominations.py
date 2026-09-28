@@ -53,6 +53,10 @@ def admit_on_instruction(cur, nomination, approval, *, version=None, request_id=
     )
 
 
+def count(cur, rows):
+    return cur.execute(f"SELECT count(*) AS n FROM {rows}").fetchone()["n"]
+
+
 def two_pains(cur, scope_id=None):
     """A rederivation candidate, standing on the two frictions that proved it."""
     first = ledger.report_pain(
@@ -135,6 +139,7 @@ def test_a_decision_is_made_once_and_closes_the_candidate_to_every_other_change(
     _, _, nomination = two_pains(cur)
     nomination_id = nomination["nomination_id"]
     admit(cur, nomination_id)
+    assert nominations.pending_nominations(cur) == []
     with pytest.raises(MashuError, match="already admitted"):
         admit(cur, nomination_id)
     with pytest.raises(MashuError, match="already admitted"):
@@ -149,29 +154,15 @@ def test_declining_needs_a_reason_because_the_pain_will_come_back(cur):
     _, _, nomination = two_pains(cur)
     with pytest.raises(MashuError, match="reason"):
         nominations.decline(cur, nomination["nomination_id"], actor="user", reason="")
+    with pytest.raises(RefusedError):
+        nominations.decline(cur, nomination["nomination_id"], actor="user", reason="SECRETMARKER9")
 
+    assert len(nominations.pending_nominations(cur)) == 1
     declined = nominations.decline(
         cur, nomination["nomination_id"], actor="user", reason="the tool now refuses on its own"
     )
     assert declined["status"] == "declined"
     assert declined["decision_reason"] == "the tool now refuses on its own"
-
-
-def test_a_decided_candidate_leaves_the_queue(cur):
-    _, _, nomination = two_pains(cur)
-    assert len(nominations.pending_nominations(cur)) == 1
-
-    nominations.decline(cur, nomination["nomination_id"], actor="user", reason="not worth a seat")
-    assert nominations.pending_nominations(cur) == []
-
-    other = nominations.create_nomination(
-        cur,
-        content="answer in the language that was asked",
-        kind="user_explicit",
-        evidence=[nomination["evidence"][0]],
-        actor="agent",
-    )
-    admit(cur, other["nomination_id"])
     assert nominations.pending_nominations(cur) == []
 
 
@@ -179,6 +170,8 @@ def test_putting_a_candidate_off_needs_a_reason_and_keeps_it_pending_behind_the_
     _, _, nomination = two_pains(cur)
     with pytest.raises(MashuError, match="reason"):
         nominations.defer(cur, nomination["nomination_id"], actor="user", reason="   ")
+    with pytest.raises(RefusedError):
+        nominations.defer(cur, nomination["nomination_id"], actor="user", reason="SECRETMARKER9")
 
     deferred = nominations.defer(
         cur, nomination["nomination_id"], actor="user", reason="the other team owns this call"
@@ -238,7 +231,13 @@ def test_the_database_refuses_evidence_that_names_nothing_when_the_code_is_gone_
 
 
 # an instruction an agent says it was given (5.1, path three)
-def test_a_carried_instruction_reaches_the_queue_and_stops_there(cur, scope_id):
+def test_a_carried_instruction_reaches_the_queue_once_and_stops_there(cur, scope_id):
+    with pytest.raises(RefusedError):
+        nominations.nominate_user_explicit(
+            cur, content="write it under SECRETMARKER3 from now on", actor="agent"
+        )
+    assert count(cur, "ledger") == 0
+
     got = nominations.nominate_user_explicit(
         cur, content=HOLE, actor="the agent", scope_id=scope_id
     )
@@ -254,9 +253,18 @@ def test_a_carried_instruction_reaches_the_queue_and_stops_there(cur, scope_id):
     assert evidence["prevention"] == HOLE
     assert "approval source" in evidence["what"]
     assert evidence["created_by"] == "the agent"
+    assert count(cur, "memory") == 0
 
-    cur.execute("SELECT count(*) AS n FROM memory")
-    assert cur.fetchone()["n"] == 0
+    second = nominations.nominate_user_explicit(
+        cur, content=SAME_HOLE, actor="agent", scope_id=scope_id
+    )
+    assert second["nomination_existing"] is True
+    assert second["nomination"]["nomination_id"] == nomination["nomination_id"]
+    assert second["ledger_id"] is not None
+    assert second["ledger_id"] in second["nomination"]["evidence"]
+    assert len(second["nomination"]["evidence"]) == 2
+    assert count(cur, "nomination WHERE status = 'pending'") == 1
+    assert count(cur, "ledger WHERE kind = 'claimed'") == 2
 
 
 def test_explicit_instruction_admits_in_the_same_session_and_keeps_agent_as_actor(cur):
@@ -284,21 +292,29 @@ def test_explicit_instruction_admits_in_the_same_session_and_keeps_agent_as_acto
     assert row["approval_source"] == REMEMBER
 
 
-def test_a_banned_pattern_in_an_instruction_quote_is_refused(cur):
+@pytest.mark.parametrize(
+    "field", ["instruction", "conversation_ref", "conflict_instruction", "reversal_instruction"]
+)
+def test_a_banned_pattern_in_an_instruction_quote_is_refused(cur, field):
     nomination = nominations.nominate_user_explicit(cur, content=HOLE, actor="the agent")[
         "nomination"
     ]
+    approval = {**REMEMBER, field: "write SECRETMARKER9 into the memory"}
     with pytest.raises(RefusedError):
-        admit_on_instruction(
-            cur, nomination, {**REMEMBER, "instruction": "write SECRETMARKER9 into the memory"}
+        admit_on_instruction(cur, nomination, approval)
+    # A one-call remember raises the refusal instead of stopping at a candidate.
+    with pytest.raises(RefusedError):
+        nominations.remember_explicit(
+            cur, content=OTHER_HOLE, actor="agent", approval=approval, request_id=uuid4()
         )
+    assert count(cur, "memory") == 0
     cur.execute(
         "SELECT status FROM nomination WHERE nomination_id = %s", (nomination["nomination_id"],)
     )
     assert cur.fetchone()["status"] == "pending"
 
 
-def test_admission_rejects_a_candidate_version_changed_after_reading(cur):
+def test_admission_rejects_a_candidate_whose_content_or_scope_changed_after_reading(cur):
     nomination = nominations.nominate_user_explicit(
         cur, content="the original migration rule is signed before storage", actor="agent"
     )["nomination"]
@@ -310,38 +326,19 @@ def test_admission_rejects_a_candidate_version_changed_after_reading(cur):
     )
     assert changed["version"] > nomination["version"]
 
-    with pytest.raises(MashuError, match="nomination version changed"):
-        admit_on_instruction(cur, nomination, REMEMBER)
-    memory = admit_on_instruction(cur, nomination, REMEMBER, version=changed["version"])
-    assert memory["content"] == changed["content"]
-
-
-def test_nomination_version_changes_when_scope_changes(cur, scope_id):
-    nomination = nominations.nominate_user_explicit(
-        cur, content="scope-bound checksum rule waits", actor="agent", scope_id=scope_id
-    )["nomination"]
     next_scope = scopes.create_scope(cur, name="a different candidate scope", actor="user")
     cur.execute(
         "UPDATE nomination SET scope_id = %s WHERE nomination_id = %s RETURNING version",
         (next_scope["scope_id"], nomination["nomination_id"]),
     )
-    assert cur.fetchone()["version"] > nomination["version"]
+    moved = cur.fetchone()["version"]
+    assert moved > changed["version"]
 
-
-def test_the_same_instruction_carried_twice_queues_once_and_counts_twice(cur):
-    first = nominations.nominate_user_explicit(cur, content=HOLE, actor="agent")
-    second = nominations.nominate_user_explicit(cur, content=SAME_HOLE, actor="agent")
-
-    assert second["nomination_existing"] is True
-    assert second["nomination"]["nomination_id"] == first["nomination"]["nomination_id"]
-    assert second["ledger_id"] is not None
-    assert second["ledger_id"] in second["nomination"]["evidence"]
-    assert len(second["nomination"]["evidence"]) == 2
-
-    cur.execute("SELECT count(*) AS n FROM nomination WHERE status = 'pending'")
-    assert cur.fetchone()["n"] == 1
-    cur.execute("SELECT count(*) AS n FROM ledger WHERE kind = 'claimed'")
-    assert cur.fetchone()["n"] == 2
+    for stale in (nomination["version"], changed["version"]):
+        with pytest.raises(MashuError, match="nomination version changed"):
+            admit_on_instruction(cur, nomination, REMEMBER, version=stale)
+    memory = admit_on_instruction(cur, nomination, REMEMBER, version=moved)
+    assert memory["content"] == changed["content"]
 
 
 def test_a_carried_instruction_reaches_the_queue_carrying_the_retirement_it_repeats(cur):
@@ -363,15 +360,6 @@ def test_a_carried_instruction_reaches_the_queue_carrying_the_retirement_it_repe
     assert all("content" not in row for row in waiting[0]["conflict_rows"])
 
 
-def test_a_banned_pattern_is_refused_before_anything_is_carried(cur):
-    with pytest.raises(RefusedError):
-        nominations.nominate_user_explicit(
-            cur, content="write it under SECRETMARKER3 from now on", actor="agent"
-        )
-    cur.execute("SELECT count(*) AS n FROM ledger")
-    assert cur.fetchone()["n"] == 0
-
-
 def test_evidence_is_added_once_and_never_to_a_candidate_already_decided(cur):
     first = ledger.report_pain(
         cur, kind="incident", what="wrong path", prevention=HOLE, actor="agent"
@@ -379,10 +367,7 @@ def test_evidence_is_added_once_and_never_to_a_candidate_already_decided(cur):
     nomination_id = first["nomination"]["nomination_id"]
     once = nominations.add_evidence(cur, nomination_id, first["ledger_id"], actor="agent")
     assert once["evidence"] == [first["ledger_id"]]
-    cur.execute(
-        "SELECT count(*) AS n FROM event_log WHERE event_type = 'nomination_evidence_added'"
-    )
-    assert cur.fetchone()["n"] == 0
+    assert count(cur, "event_log WHERE event_type = 'nomination_evidence_added'") == 0
 
     admit(cur, nomination_id)
     later = ledger.report_pain(
@@ -392,7 +377,9 @@ def test_evidence_is_added_once_and_never_to_a_candidate_already_decided(cur):
 
 
 # an explicit remember carried in one call
-def test_content_is_nominated_and_admitted_in_one_call_with_the_same_provenance(cur, scope_id):
+def test_one_call_nominates_and_admits_with_the_same_provenance_and_replays_its_answer(
+    cur, scope_id
+):
     request_id = uuid4()
     got = nominations.remember_explicit(
         cur,
@@ -421,22 +408,18 @@ def test_content_is_nominated_and_admitted_in_one_call_with_the_same_provenance(
     cur.execute("SELECT kind, prevention FROM ledger WHERE ledger_id = %s", (got["ledger_id"],))
     assert cur.fetchone() == {"kind": "claimed", "prevention": HOLE}
 
-
-def test_a_one_call_remember_replayed_returns_the_first_response(cur):
-    request_id = uuid4()
-    first = nominations.remember_explicit(
-        cur, content=HOLE, actor="agent", approval=REMEMBER, request_id=request_id
-    )
-    retire(cur, first["memory"], "the admitted rule later stopped applying", "out_of_scope")
+    retire(cur, memory, "the admitted rule later stopped applying", "out_of_scope")
     again = nominations.remember_explicit(
-        cur, content=HOLE, actor="agent", approval=REMEMBER, request_id=request_id
+        cur,
+        content=HOLE,
+        actor="agent",
+        approval=REMEMBER,
+        request_id=request_id,
+        scope_id=scope_id,
     )
-
-    assert again == first
-    cur.execute("SELECT count(*) AS n FROM nomination")
-    assert cur.fetchone()["n"] == 1
-    cur.execute("SELECT count(*) AS n FROM ledger")
-    assert cur.fetchone()["n"] == 1
+    assert again == got
+    assert count(cur, "nomination") == 1
+    assert count(cur, "ledger") == 1
 
     with pytest.raises(MashuError, match="request_id was already used"):
         nominations.remember_explicit(
@@ -457,8 +440,7 @@ def test_a_one_call_remember_stops_at_a_pending_candidate_it_has_not_read(cur):
     assert got["nomination"]["nomination_id"] == waiting["nomination_id"]
     assert got["nomination"]["content"] == HOLE
     assert got["ledger_id"] in got["nomination"]["evidence"]
-    cur.execute("SELECT count(*) AS n FROM memory")
-    assert cur.fetchone()["n"] == 0
+    assert count(cur, "memory") == 0
     cur.execute(
         "SELECT status FROM nomination WHERE nomination_id = %s", (waiting["nomination_id"],)
     )
@@ -477,8 +459,7 @@ def test_a_one_call_remember_stops_at_an_unaddressed_invalidated_conflict(cur):
     assert got["nomination_existing"] is False
     assert got["nomination"]["status"] == "pending"
     assert got["nomination"]["conflicts"] == [UUID(retired["memory_id"])]
-    cur.execute("SELECT count(*) AS n FROM memory WHERE status = 'active'")
-    assert cur.fetchone()["n"] == 0
+    assert count(cur, "memory WHERE status = 'active'") == 0
     cur.execute(
         "SELECT status, admit_request_id FROM nomination WHERE nomination_id = %s",
         (got["nomination"]["nomination_id"],),
@@ -501,19 +482,6 @@ def test_a_one_call_remember_admits_through_a_conflict_it_already_addresses(cur)
     )
     assert got["admitted"] is True
     assert [row["memory_id"] for row in got["conflicts"]] == [retired["memory_id"]]
-
-
-def test_a_refused_one_call_remember_raises_instead_of_stopping(cur):
-    with pytest.raises(RefusedError):
-        nominations.remember_explicit(
-            cur,
-            content=HOLE,
-            actor="agent",
-            approval={**REMEMBER, "instruction": "write SECRETMARKER9 into the memory"},
-            request_id=uuid4(),
-        )
-    cur.execute("SELECT count(*) AS n FROM memory")
-    assert cur.fetchone()["n"] == 0
 
 
 @pytest.mark.parametrize(

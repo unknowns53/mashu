@@ -14,7 +14,7 @@ WITHDRAWN = "the tool now refuses on its own"
 PINNED = "delegation goes to the reviewer, not to another writer"
 
 
-def test_a_rule_recorded_by_hand_is_active_at_once_and_carries_its_own_evidence(cur):
+def test_a_rule_recorded_by_hand_is_active_at_once_and_its_revisions_keep_what_it_said(cur):
     memory = remember(cur, RULE)
     assert memory["status"] == "active"
     assert memory["delivery"] == "always"
@@ -23,14 +23,26 @@ def test_a_rule_recorded_by_hand_is_active_at_once_and_carries_its_own_evidence(
     cur.execute("SELECT * FROM ledger WHERE ledger_id = %s", (memory["evidence"][0],))
     assert cur.fetchone()["kind"] == "explicit"
 
-    cur.execute("SELECT content FROM memory_revision WHERE memory_id = %s", (memory["memory_id"],))
-    assert [row["content"] for row in cur.fetchall()] == [RULE]
+    revised = memories.revise(
+        cur, memory["memory_id"], content=REVISED, actor="user", note="say what to paste"
+    )
+    assert revised["content"] == REVISED
+    cur.execute(
+        "SELECT content, note FROM memory_revision WHERE memory_id = %s ORDER BY created_at",
+        (memory["memory_id"],),
+    )
+    rows = cur.fetchall()
+    assert [row["content"] for row in rows] == [RULE, REVISED]
+    assert rows[1]["note"] == "say what to paste"
 
 
-def test_retiring_needs_a_reason_and_a_kind_new_retirements_may_use(cur):
+def test_retiring_needs_a_clean_reason_and_a_new_kind_and_is_not_edited_back(cur):
     memory = remember(cur, RULE)
     with pytest.raises(MashuError, match="reason"):
         retire(cur, memory, "  ")
+    with pytest.raises(RefusedError):
+        retire(cur, memory, "superseded by SECRETMARKER9")
+    assert match.similar_tombstones(cur, RULE) == []
     with pytest.raises(MashuError, match="reserved for existing data and migration"):
         memories.retire(
             cur, memory["memory_id"], reason=WITHDRAWN, actor="user", retirement_kind="legacy"
@@ -41,15 +53,10 @@ def test_retiring_needs_a_reason_and_a_kind_new_retirements_may_use(cur):
     assert retired["status"] == "retired"
     assert retired["retire_reason"] == WITHDRAWN
     assert retired["retired_at"] is not None
-
-
-def test_a_reason_carrying_a_banned_pattern_does_not_retire_anything(cur):
-    memory = remember(cur, RULE)
-    with pytest.raises(RefusedError):
-        retire(cur, memory, "superseded by SECRETMARKER9")
-
-    assert memories.get_memory(cur, memory["memory_id"])["status"] == "active"
-    assert match.similar_tombstones(cur, RULE) == []
+    with pytest.raises(MashuError, match="retired"):
+        memories.revise(cur, memory["memory_id"], content=REVISED, actor="user")
+    with pytest.raises(MashuError, match="retired"):
+        retire(cur, memory, "again")
 
 
 def test_the_gate_says_when_it_did_not_run(cur, monkeypatch, tmp_path):
@@ -69,12 +76,12 @@ def test_the_gate_says_when_it_did_not_run(cur, monkeypatch, tmp_path):
     assert rewritten["unchecked"] is True
 
 
-def test_a_retired_rule_answers_with_why_it_was_withdrawn_and_never_with_itself(cur):
-    memory = remember(cur, RULE)
-    retire(cur, memory, WITHDRAWN)
+def test_a_retired_rule_answers_with_why_it_was_withdrawn_and_stops_being_written_back(cur):
+    kept = remember(cur, RULE)
+    retire(cur, kept, WITHDRAWN)
 
     found = match.similar_tombstones(cur, RULE)
-    assert [row["memory_id"] for row in found] == [memory["memory_id"]]
+    assert [row["memory_id"] for row in found] == [kept["memory_id"]]
     assert found[0]["retire_reason"] == WITHDRAWN
     assert {
         "memory_id",
@@ -87,32 +94,28 @@ def test_a_retired_rule_answers_with_why_it_was_withdrawn_and_never_with_itself(
         "score",
     } == set(found[0])
 
+    with pytest.raises(RetiredConflictError) as raised:
+        remember(cur, REVISED)
+    assert [row["memory_id"] for row in raised.value.tombstones] == [kept["memory_id"]]
+    assert raised.value.tombstones[0]["retire_reason"] == WITHDRAWN
+    # The withdrawn body is not handed back with its own tombstone.
+    assert "content" not in raised.value.tombstones[0]
 
-def test_a_revision_keeps_what_the_rule_used_to_say(cur):
-    memory = remember(cur, RULE)
-    revised = memories.revise(
-        cur, memory["memory_id"], content=REVISED, actor="user", note="say what to paste"
-    )
-    assert revised["content"] == REVISED
+    cur.execute("SELECT count(*) AS n FROM memory WHERE status = 'active'")
+    assert cur.fetchone()["n"] == 0
+
+    written = remember(cur, REVISED, acknowledged_conflicts=[kept["memory_id"]])
+    assert written["status"] == "active"
+    assert [row["memory_id"] for row in written["overrides"]] == [kept["memory_id"]]
 
     cur.execute(
-        "SELECT content, note FROM memory_revision WHERE memory_id = %s ORDER BY created_at",
-        (memory["memory_id"],),
+        "SELECT detail FROM event_log WHERE event_type = 'memory_created' AND memory_id = %s",
+        (written["memory_id"],),
     )
-    rows = cur.fetchall()
-    assert [row["content"] for row in rows] == [RULE, REVISED]
-    assert rows[1]["note"] == "say what to paste"
+    assert cur.fetchone()["detail"]["overrides"] == [str(kept["memory_id"])]
 
-
-def test_a_withdrawn_rule_is_not_edited_back_into_life(cur):
-    memory = remember(cur, RULE)
-    retire(cur, memory, "superseded", "legacy")
-    assert memories.get_memory(cur, memory["memory_id"])["retirement_kind"] == "legacy"
-
-    with pytest.raises(MashuError, match="retired"):
-        memories.revise(cur, memory["memory_id"], content=REVISED, actor="user")
-    with pytest.raises(MashuError, match="retired"):
-        retire(cur, memory, "again")
+    unrelated = remember(cur, "quotas on the shared queue reset at midnight every day")
+    assert unrelated["overrides"] == []
 
 
 def test_superseded_links_must_exist_and_cannot_form_cycles(cur):
@@ -177,49 +180,27 @@ def test_listing_a_scope_shows_what_lives_there_by_whatever_route(cur, scope_id)
     ]
 
 
-def test_writing_a_retired_rule_back_stops_to_show_why_it_was_withdrawn(cur):
-    kept = remember(cur, RULE)
-    retire(cur, kept, WITHDRAWN)
-
-    with pytest.raises(RetiredConflictError) as raised:
-        remember(cur, REVISED)
-    assert [row["memory_id"] for row in raised.value.tombstones] == [kept["memory_id"]]
-    assert raised.value.tombstones[0]["retire_reason"] == WITHDRAWN
-    # The withdrawn body is not handed back with its own tombstone.
-    assert "content" not in raised.value.tombstones[0]
-
-    cur.execute("SELECT count(*) AS n FROM memory WHERE status = 'active'")
-    assert cur.fetchone()["n"] == 0
-
-    written = remember(cur, REVISED, acknowledged_conflicts=[kept["memory_id"]])
-    assert written["status"] == "active"
-    assert [row["memory_id"] for row in written["overrides"]] == [kept["memory_id"]]
-
-    cur.execute(
-        "SELECT detail FROM event_log WHERE event_type = 'memory_created' AND memory_id = %s",
-        (written["memory_id"],),
-    )
-    assert cur.fetchone()["detail"]["overrides"] == [str(kept["memory_id"])]
-
-    unrelated = remember(cur, "quotas on the shared queue reset at midnight every day")
-    assert unrelated["overrides"] == []
-
-
-def test_an_always_memory_can_become_temporary_and_back(cur):
-    original = remember(cur, RULE)
+@pytest.mark.parametrize("scoped", [False, True])
+def test_a_memory_can_become_temporary_and_back_where_it_was_delivered(cur, scope_id, scoped):
+    placed = {"scope_id": scope_id, "delivery": "scope"} if scoped else {}
+    here = placed.get("scope_id")
+    original = remember(cur, RULE, **placed)
 
     converted = memories.convert_to_temporary(cur, original["memory_id"], days=2, actor="user")
     context = converted["temporary"]
     assert converted["memory"]["status"] == "retired"
     assert "converted to temporary context until" in converted["memory"]["retire_reason"]
-    assert context["scope_id"] is None
-    assert [row["context_id"] for row in temporary.active_temporary(cur)] == [context["context_id"]]
+    assert context["scope_id"] == here
+    assert [row["context_id"] for row in temporary.active_temporary(cur, scope_id=here)] == [
+        context["context_id"]
+    ]
 
     restored = temporary.convert_to_memory(cur, context["context_id"], actor="user")
     assert restored["memory"]["content"] == RULE
-    assert restored["memory"]["delivery"] == "always"
+    assert restored["memory"]["delivery"] == placed.get("delivery", "always")
+    assert restored["memory"]["scope_id"] == here
     assert restored["memory"]["status"] == "active"
-    assert temporary.active_temporary(cur) == []
+    assert temporary.active_temporary(cur, scope_id=here) == []
 
     cur.execute(
         "SELECT event_type FROM event_log WHERE event_type LIKE '%%converted%%' ORDER BY event_id"
@@ -228,18 +209,6 @@ def test_an_always_memory_can_become_temporary_and_back(cur):
         "memory_converted_to_temporary",
         "temporary_converted_to_memory",
     ]
-
-
-def test_a_scoped_memory_keeps_its_scope_through_temporary_conversion(cur, scope_id):
-    original = remember(cur, RULE, scope_id=scope_id, delivery="scope")
-
-    converted = memories.convert_to_temporary(cur, original["memory_id"], days=1, actor="user")
-    context = converted["temporary"]
-    assert context["scope_id"] == scope_id
-
-    restored = temporary.convert_to_memory(cur, context["context_id"], actor="user")["memory"]
-    assert restored["scope_id"] == scope_id
-    assert restored["delivery"] == "scope"
 
 
 def test_temporary_round_trip_does_not_override_an_unrelated_invalidated_memory(cur):

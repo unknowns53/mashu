@@ -4,6 +4,7 @@ import pytest
 
 from conftest import candidate, expire, getkeys, new_project, new_task, remember
 from mashu import db, nominations, routing, scopes, settings_ui, tasks, temporary, topics
+from mashu.errors import RefusedError
 
 pytestmark = pytest.mark.usefixtures("known_screen")
 
@@ -108,12 +109,13 @@ def test_bootstrap_preview_resolves_cwd_and_shows_every_payload_share(dsn, monke
 
 
 @pytest.mark.parametrize("summary", ["Release and rollback knowledge", ""])
-def test_scope_page_creates_a_scope_whose_summary_is_optional(dsn, monkeypatch, summary):
-    getkeys(monkeypatch, "n", "q")
-    answers(monkeypatch, "deployment", summary)
+def test_scope_page_summary_is_optional_and_a_duplicate_refused(dsn, monkeypatch, capsys, summary):
+    getkeys(monkeypatch, "n", "n", "q")
+    answers(monkeypatch, "deployment", summary, "deployment", "another summary")
 
     settings_ui._scopes_page(dsn)
 
+    assert "already exists" in capsys.readouterr().out
     with db.transaction(dsn) as cur:
         row = scopes.require_scope(cur, "deployment")
     assert row["summary"] == (summary or None)
@@ -134,17 +136,6 @@ def test_ctrl_c_at_an_optional_scope_summary_cancels_creation(dsn, monkeypatch):
         assert scopes.get_scope(cur, "deployment") is None
 
 
-def test_scope_errors_stay_on_the_page_as_feedback(dsn, monkeypatch, capsys):
-    with db.transaction(dsn) as cur:
-        scopes.create_scope(cur, name="duplicate", actor="user")
-    getkeys(monkeypatch, "n", "q")
-    answers(monkeypatch, "duplicate", "another summary")
-
-    settings_ui._scopes_page(dsn)
-
-    assert "already exists" in capsys.readouterr().out
-
-
 def test_scope_name_and_summary_can_be_edited(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
         scope = scopes.create_scope(cur, name="old scope", summary="old summary", actor="user")
@@ -159,34 +150,31 @@ def test_scope_name_and_summary_can_be_edited(dsn, monkeypatch):
     assert row["summary"] == "new summary"
 
 
-def test_routes_can_be_added_ignored_and_removed(dsn, monkeypatch):
-    with db.transaction(dsn) as cur:
-        scopes.create_scope(cur, name="route scope", actor="user")
-    getkeys(monkeypatch, "n", "i", "x", "q")
-    answers(monkeypatch, "/tmp/settings-scoped/a/long/path", "route scope", "/tmp/i", "y")
-
-    settings_ui._routes_page(dsn)
-
-    rows = settings_ui._route_rows(dsn)
-    assert [(row["path_prefix"], row["scope_id"]) for row in rows] == [("/tmp/i", None)]
+def test_scope_refuses_banned_text_and_flags_unreadable_patterns(cur, tmp_path, monkeypatch):
+    for field in ("name", "summary"):
+        with pytest.raises(RefusedError):
+            scopes.create_scope(
+                cur, actor="user", **{"name": "clean", "summary": "clean", field: "SECRETMARKER9"}
+            )
+    monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(tmp_path))
+    assert scopes.create_scope(cur, name="clean", actor="user")["unchecked"] is True
 
 
-def test_route_path_and_destination_can_be_edited(dsn, monkeypatch):
+def test_routes_can_be_edited_added_ignored_and_removed(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
         scope = scopes.create_scope(cur, name="route scope", actor="user")
         route = routing.add_route(
             cur, path_prefix="/tmp/old", scope_id=scope["scope_id"], actor="user"
         )
-    getkeys(monkeypatch, "e", "q")
-    answers(monkeypatch, "/tmp/new", "-")
+    getkeys(monkeypatch, "e", "n", "i", "x", "q")
+    answers(monkeypatch, "/tmp/new", "-", "/tmp/scoped/a/long/path", "route scope", "/tmp/i", "y")
 
     settings_ui._routes_page(dsn)
 
     rows = settings_ui._route_rows(dsn)
-    assert len(rows) == 1
+    kept = [(row["path_prefix"], row["scope_id"]) for row in rows]
+    assert kept == [("/tmp/new", None), ("/tmp/i", None)]
     assert rows[0]["route_id"] == route["route_id"]
-    assert rows[0]["path_prefix"] == "/tmp/new"
-    assert rows[0]["scope_id"] is None
 
 
 def test_schema_apply_is_confirmed_and_reports_a_noop(dsn, monkeypatch, capsys):

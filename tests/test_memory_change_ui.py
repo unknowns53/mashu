@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import candidate, keys, propose_change, remember
-from mashu import db, memories, memory_change_ui, memory_changes, nominations, topics
+from conftest import candidate, keys, propose_change, read_through, remember, retire
+from mashu import db, memories, memory_change_ui, memory_changes, nominations, screen, topics
+from mashu.temporary import put_temporary
 
 RULE = "the signed archive index is checked before extraction"
 REASON = "the archived format is no longer used"
@@ -55,6 +56,20 @@ def test_change_review_edits_the_prefilled_reason_before_apply(dsn, monkeypatch)
         assert change["status"] == "applied"
 
 
+@pytest.mark.parametrize("key,status", [("y", "applied"), ("d", "declined"), ("w", "withdrawn")])
+def test_color_does_not_leave_decided_proposals_in_the_queue(dsn, monkeypatch, capsys, key, status):
+    proposal = _proposal(dsn)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    assert screen.success("  ✓ done").startswith("\x1b[")
+    keys(monkeypatch, "", key, *(("because",) if key != "y" else ()))
+    assert memory_change_ui.run(dsn) == 0
+    assert capsys.readouterr().out.count("target Memory") == 1
+    with db.transaction(dsn) as cur:
+        assert memory_changes.get(cur, proposal["change_id"])["status"] == status
+    assert memory_change_ui._queue(dsn) == []
+
+
 def test_replace_detail_shows_the_successor_snapshot_and_delivery(cur):
     home = topics.create_topic(cur, name="deploy", trigger="Before releasing", actor="user")
     old = remember(
@@ -104,3 +119,75 @@ def test_redeliver_detail_shows_where_the_rule_moves_and_the_topic_it_opens(cur,
     assert "delivery: always -> topic:calibration" in shown
     assert "opens topic calibration for test scope: Before calibrating difficulty" in shown
     assert "redeliver" in memory_change_ui._summary(proposal)
+
+
+def test_relocated_proposal_shows_its_own_destination(cur, scope_id):
+    target = remember(cur, RULE)
+    context = put_temporary(cur, content="archive check", actor="user", days=2, scope_id=scope_id)
+    proposal = propose_change(
+        cur,
+        target,
+        "retire",
+        retirement_kind="relocated",
+        retire_reason=REASON,
+        relocated_to_kind="temporary_context",
+        relocated_to_id=context["context_id"],
+    )
+    shown = memory_change_ui._detail(proposal, 1, 1)
+    assert str(context["context_id"]) in shown
+    assert context["content"] in shown
+    assert "destination scope: test scope" in shown
+    assert str(context["expires_at"]) in shown
+
+
+def test_stale_proposal_shows_new_short_target_from_the_first_page(dsn, monkeypatch, capsys):
+    row = _proposal(dsn)
+    row["target"]["content"] = "\n".join(f"old wording {n}" for n in range(30))
+    monkeypatch.setenv("LINES", "12")
+    monkeypatch.setattr(memory_change_ui, "_queue", lambda _dsn: [row])
+    read_through(
+        monkeypatch, memory_change_ui._detail(row, 1, 1), memory_change_ui._DETAIL_KEYS, "y", "q"
+    )
+    getkey = screen.getkey
+
+    def change_before_apply():
+        key = getkey()
+        if key == "y":
+            with db.transaction(dsn) as cur:
+                memories.revise(
+                    cur, row["target_memory_id"], content="new short target", actor="user"
+                )
+        return key
+
+    monkeypatch.setattr(screen, "getkey", change_before_apply)
+    memory_change_ui.run(dsn)
+    assert "new short target" in capsys.readouterr().out
+
+
+def test_restore_acknowledges_conflict_only_after_its_reason_is_shown(dsn, monkeypatch):
+    body = "\n".join(f"check archive index step {n}" for n in range(30))
+    with db.transaction(dsn) as cur:
+        target = remember(cur, body)
+        conflict = remember(cur, body)
+        retire(cur, target, "scope ended", kind="out_of_scope")
+        retire(cur, conflict, "unsafe now")
+        proposal = propose_change(cur, target, "restore", restore_reason="needed again")
+    monkeypatch.setenv("LINES", "12")
+    keys(monkeypatch, "", "y", "q")
+    memory_change_ui.run(dsn)
+    with db.transaction(dsn) as cur:
+        assert memory_changes.get(cur, proposal["change_id"])["status"] == "pending"
+
+    read_through(
+        monkeypatch, memory_change_ui._detail(proposal, 1, 1), memory_change_ui._DETAIL_KEYS, "y"
+    )
+    memory_change_ui.run(dsn)
+    with db.transaction(dsn) as cur:
+        assert memory_changes.get(cur, proposal["change_id"])["status"] == "applied"
+        cur.execute(
+            "SELECT detail FROM event_log WHERE event_type = 'memory_restored' AND memory_id = %s",
+            (target["memory_id"],),
+        )
+        source = cur.fetchone()["detail"]["approval_source"]
+    assert source["conflict_ids"] == [str(conflict["memory_id"])]
+    assert source["conflict_acknowledged_by_action"] is True

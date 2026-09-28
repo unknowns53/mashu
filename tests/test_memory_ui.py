@@ -52,36 +52,12 @@ def test_views_show_active_retired_and_unexpired_temporary_rows(dsn, monkeypatch
     assert "the canary is paused" in out
 
 
-def test_full_detail_explains_evidence_and_revision_history(dsn, monkeypatch, capsys):
+def test_long_detail_pages_through_evidence_and_revision_history(dsn, monkeypatch, capsys):
     memory = remember(dsn)
     with db.transaction(dsn) as cur:
-        memories.revise(
-            cur, memory["memory_id"], content=REVISED, actor="user", note="say what to paste"
-        )
-    keys(monkeypatch, "enter", "q")
-
-    assert memory_ui.run(dsn) == 0
-    out = capsys.readouterr().out
-    assert "evidence" in out
-    assert "explicit" in out
-    assert "recorded by the user's own hand" in out
-    assert f"prevention: {RULE}" in out
-    assert "revisions" in out
-    assert RULE in out and REVISED in out
-    assert "note: say what to paste" in out
-    assert "by user" in out
-
-
-def test_long_detail_can_be_paged_forward_and_back(dsn, monkeypatch, capsys):
-    memory = remember(dsn)
-    with db.transaction(dsn) as cur:
-        for number in range(8):
+        for n, content in enumerate([REVISED, *(f"wording {i}" for i in range(8))]):
             memories.revise(
-                cur,
-                memory["memory_id"],
-                content=f"revision wording number {number}",
-                actor="user",
-                note=f"revision note number {number}",
+                cur, memory["memory_id"], content=content, actor="user", note=f"note {n}"
             )
     monkeypatch.setenv("LINES", "12")
     keys(monkeypatch, "enter", *("space" for _ in range(12)), "b", "q")
@@ -89,7 +65,15 @@ def test_long_detail_can_be_paged_forward_and_back(dsn, monkeypatch, capsys):
     assert memory_ui.run(dsn) == 0
     out = capsys.readouterr().out
     assert "more line(s), space to go on" in out
-    assert "revision note number 7" in out
+    assert "note 8" in out
+    assert "evidence" in out
+    assert "explicit" in out
+    assert "recorded by the user's own hand" in out
+    assert f"prevention: {RULE}" in out
+    assert "revisions" in out
+    assert RULE in out and REVISED in out
+    assert "note: note 0" in out
+    assert "by user" in out
 
 
 def test_search_is_case_insensitive_zero_results_can_be_researched_and_left_clears(
@@ -106,10 +90,16 @@ def test_search_is_case_insensitive_zero_results_can_be_researched_and_left_clea
     assert out.count("active memories  2") >= 2
 
 
-def test_new_durable_memory_can_choose_a_scope_delivery(dsn, monkeypatch):
+def test_new_durable_memory_can_choose_a_scope_delivery_explained_in_one_line_each(
+    dsn, monkeypatch, capsys
+):
     keys(monkeypatch, "n", RULE, "scope", "deployments", "q")
 
     assert memory_ui.run(dsn) == 0
+    out = capsys.readouterr().out
+    assert "always  every session, at start" in out
+    assert "scope   sessions in one Scope, at start" in out
+    assert "topic   its trigger is listed at start; read when that work begins" in out
     with db.transaction(dsn) as cur:
         cur.execute("SELECT * FROM memory")
         row = cur.fetchone()
@@ -118,14 +108,6 @@ def test_new_durable_memory_can_choose_a_scope_delivery(dsn, monkeypatch):
     assert row["delivery"] == "scope"
     assert row["scope_id"] == scope["scope_id"]
     assert row["created_by"] == "user"
-
-
-def test_revision_without_an_editor_uses_safe_line_input(dsn, monkeypatch):
-    memory = remember(dsn)
-    keys(monkeypatch, "e", REVISED, "q")
-
-    assert memory_ui.run(dsn) == 0
-    assert memory_row(dsn, memory["memory_id"])["content"] == REVISED
 
 
 def test_retirement_selects_a_kind_and_applies_after_entering_its_reason(dsn, monkeypatch):
@@ -150,27 +132,23 @@ def test_retirement_cancellation_and_legacy_selection_leave_the_memory_active(ds
     assert memory_row(dsn, memory["memory_id"])["status"] == "active"
 
 
-def test_delivery_edit_moves_to_a_scope_and_keeps_its_defaults_on_empty_input(dsn, monkeypatch):
-    memory = remember(dsn)
-    keys(monkeypatch, "d", "scope", "deployments", "d", "", "", "q")
-
-    assert memory_ui.run(dsn) == 0
-    row = memory_row(dsn, memory["memory_id"])
-    with db.transaction(dsn) as cur:
-        assert row["scope_id"] == scopes.require_scope(cur, "deployments")["scope_id"]
-    assert row["delivery"] == "scope"
-
-
-def test_selection_stays_on_the_same_id_when_a_delivery_change_reorders_the_list(dsn, monkeypatch):
+def test_delivery_edit_keeps_the_selection_and_its_defaults_on_empty_input(dsn, monkeypatch):
     selected = remember(dsn)
     other = remember(dsn, "spell out the timezone in scheduled jobs")
-    keys(monkeypatch, "d", "scope", "deployments", "e", REVISED, "q")
+    keys(monkeypatch, "d", "scope", "deployments", "e", REVISED, "d", "", "", "q")
 
     assert memory_ui.run(dsn) == 0
-    assert memory_row(dsn, selected["memory_id"])["content"] == REVISED
-    assert memory_row(dsn, other["memory_id"])["content"] == (
-        "spell out the timezone in scheduled jobs"
-    )
+    row = memory_row(dsn, selected["memory_id"])
+    assert (row["content"], row["delivery"]) == (REVISED, "scope")
+    assert memory_row(dsn, other["memory_id"])["content"] == other["content"]
+    with db.transaction(dsn) as cur:
+        assert row["scope_id"] == scopes.require_scope(cur, "deployments")["scope_id"]
+        cur.execute(
+            "SELECT detail FROM event_log WHERE event_type = 'delivery_changed' AND memory_id = %s",
+            (selected["memory_id"],),
+        )
+        sources = [event["detail"]["approval_source"] for event in cur.fetchall()]
+    assert sources == [{"kind": "user_direct"}] * 2
 
 
 def test_temporary_add_is_global_and_rejects_an_out_of_range_lifetime(dsn, monkeypatch, capsys):
@@ -258,16 +236,6 @@ def test_non_tty_rendering_contains_no_ansi(monkeypatch):
     assert "\x1b[" not in rendered
     assert RULE in rendered
     assert "topic:deploy" in rendered
-
-
-def test_the_delivery_prompt_explains_each_choice_in_one_line(dsn, monkeypatch, capsys):
-    keys(monkeypatch, "n", RULE, "always", "q")
-
-    assert memory_ui.run(dsn) == 0
-    out = capsys.readouterr().out
-    assert "always  every session, at start" in out
-    assert "scope   sessions in one Scope, at start" in out
-    assert "topic   its trigger is listed at start; read when that work begins" in out
 
 
 def test_a_new_rule_can_open_a_new_topic_without_typing_an_id(dsn, monkeypatch):

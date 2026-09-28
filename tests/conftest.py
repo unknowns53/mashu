@@ -117,6 +117,14 @@ def keys(monkeypatch: pytest.MonkeyPatch, *typed: str) -> None:
     monkeypatch.setattr("sys.stdin", io.StringIO("".join(f"{line}\n" for line in typed)))
 
 
+def read_through(monkeypatch: pytest.MonkeyPatch, text: str, under: str, *after: str) -> None:
+    """Open an item and press space until its last page shows, then press the keys after."""
+    offset, spaces = 0, []
+    while offset := screen.paged(text, offset, under)[1]:
+        spaces.append("space")
+    keys(monkeypatch, "", *spaces, *after)
+
+
 def getkeys(monkeypatch: pytest.MonkeyPatch, *pressed: str) -> None:
     """Hand a raw-key screen its keys, one per read."""
     values = iter(pressed)

@@ -57,21 +57,6 @@ def _topic_settings(name, trigger=None, scope_id=None):
     return settings
 
 
-def test_memory_get_returns_full_retired_memory_without_putting_body_in_matches(cur):
-    memory = remember(cur, RULE)
-    retired = retire(cur, memory, "the storage adapter enforces this itself")
-
-    detail = memories.memory_details(cur, memory["memory_id"])
-    assert detail["content"] == RULE
-    assert detail["current_revision_id"] is not None
-    assert detail["basis"][0]["ledger_id"] == memory["evidence"][0]
-    assert detail["retirement"]["kind"] == "invalidated"
-    assert detail["retirement"]["reason"] == retired["retire_reason"]
-    assert detail["retirement_history"][-1]["event_type"] == "memory_retired"
-    assert "content" not in match.similar_tombstones(cur, RULE)[0]
-    assert RULE not in str(bootstrap.session_bootstrap(cur, actor="agent"))
-
-
 def test_agent_proposal_stays_pending_until_explicit_instruction_and_replay_is_idempotent(cur):
     memory = remember(cur, RULE)
     proposal = propose_change(
@@ -91,6 +76,8 @@ def test_agent_proposal_stays_pending_until_explicit_instruction_and_replay_is_i
 
     request_id = uuid4()
     instruction = "Retire this rule because the adapter now checks it"
+    with pytest.raises(RefusedError):
+        apply_change(cur, proposal, instruction, reversal_instruction="SECRETMARKER9")
     applied = apply_change(cur, proposal, instruction, request_id=request_id)
     replay = apply_change(cur, proposal, instruction, request_id=request_id)
 
@@ -165,13 +152,23 @@ def test_new_conflict_after_replace_proposal_requires_reread_and_acknowledgment(
     assert refreshed_nomination["conflicts"] == [invalidated["memory_id"]]
 
 
-def test_restore_keeps_retirement_history(cur):
+def test_memory_get_shows_a_retired_rule_whole_and_restore_keeps_its_history(cur):
     memory = remember(cur, RULE)
     retired = retire(cur, memory, "the adapter was expected to reject unsigned manifests", "legacy")
+
+    detail = memories.memory_details(cur, memory["memory_id"])
+    assert detail["content"] == RULE
+    assert detail["current_revision_id"] is not None
+    assert detail["basis"][0]["ledger_id"] == memory["evidence"][0]
+    assert detail["retirement"]["kind"] == "legacy"
+    assert detail["retirement"]["reason"] == retired["retire_reason"]
+    assert detail["retirement_history"][-1]["event_type"] == "memory_retired"
+    assert "content" not in match.similar_tombstones(cur, RULE)[0]
+    assert RULE not in str(bootstrap.session_bootstrap(cur, actor="agent"))
+
     proposal = propose_change(
         cur, memory, "restore", restore_reason="the check was removed", evidence=RESTORE_EVIDENCE
     )
-
     result = apply_change(cur, proposal, "Restore this rule", **REVERSAL)
     assert result["memory"]["status"] == "active"
     assert result["memory"]["retirement_kind"] is None
@@ -220,8 +217,12 @@ def test_replace_seats_against_the_final_active_set_and_refusal_rolls_back(cur, 
     assert memory_changes.get(cur, second_proposal["change_id"])["status"] == "pending"
 
 
-def test_replace_rejects_a_successor_changed_after_proposal(cur):
-    old = remember(cur, f"old adapter rule {uuid4()}")
+def test_replace_proposal_version_follows_its_successor_and_its_delivery(cur):
+    old_scope = scopes.create_scope(cur, name=f"old delivery scope {uuid4()}", actor="user")
+    new_scope = scopes.create_scope(cur, name=f"new delivery scope {uuid4()}", actor="user")
+    old = remember(
+        cur, f"old adapter rule {uuid4()}", delivery="scope", scope_id=old_scope["scope_id"]
+    )
     revised_content = f"verify the transport envelope before sending {uuid4()}"
     successor = _successor(cur, f"verify the export digest before sending {uuid4()}")
     proposal = _replace(cur, old, successor)
@@ -240,8 +241,23 @@ def test_replace_rejects_a_successor_changed_after_proposal(cur):
     refreshed = _replace(cur, old, successor, revised["version"], change_id=proposal["change_id"])
     assert refreshed["version"] == proposal["version"] + 1
     assert refreshed["successor_snapshot"]["content"] == revised_content
-    applied = apply_change(cur, refreshed, "Replace it with the revised transport envelope rule")
+
+    moved = {"delivery": "scope", "scope_id": new_scope["scope_id"]}
+    changed = _replace(
+        cur,
+        old,
+        successor,
+        revised["version"],
+        successor_settings=moved,
+        change_id=proposal["change_id"],
+    )
+    assert changed["version"] == refreshed["version"] + 1
+    with pytest.raises(MashuError, match="version changed"):
+        apply_change(cur, refreshed, "Replace it and move delivery to the new scope")
+    applied = apply_change(cur, changed, "Replace it and move delivery to the new scope")
     assert applied["memory"]["content"] == revised_content
+    assert applied["memory"]["delivery"] == "scope"
+    assert applied["memory"]["scope_id"] == str(new_scope["scope_id"])
 
 
 def test_replace_inherits_topic_settings_clears_nomination_scope_and_refuses_guard(cur):
@@ -275,33 +291,22 @@ def test_replace_inherits_topic_settings_clears_nomination_scope_and_refuses_gua
     }
 
 
-def test_changed_successor_delivery_is_part_of_the_proposal_version(cur):
-    old_scope = scopes.create_scope(cur, name=f"old delivery scope {uuid4()}", actor="user")
-    new_scope = scopes.create_scope(cur, name=f"new delivery scope {uuid4()}", actor="user")
-    old = remember(
-        cur,
-        f"keep the legacy importer scoped {uuid4()}",
-        delivery="scope",
-        scope_id=old_scope["scope_id"],
-    )
-    successor = _successor(cur, f"validate the signed import manifest {uuid4()}")
-    proposal = _replace(cur, old, successor)
-    moved = {"delivery": "scope", "scope_id": new_scope["scope_id"]}
-    changed = _replace(
-        cur, old, successor, successor_settings=moved, change_id=proposal["change_id"]
-    )
-    assert changed["version"] == proposal["version"] + 1
-    with pytest.raises(MashuError, match="version changed"):
-        apply_change(cur, proposal, "Replace it and move delivery to the new scope")
-
-    applied = apply_change(cur, changed, "Replace it and move delivery to the new scope")
-    assert applied["memory"]["delivery"] == "scope"
-    assert applied["memory"]["scope_id"] == str(new_scope["scope_id"])
-
-
 def test_redeliver_moves_a_rule_into_an_existing_topic_without_touching_its_body(cur):
     memory = remember(cur, RULE)
+    with pytest.raises(MashuError, match="as they are"):
+        _redeliver(cur, memory, {"delivery": "always", "scope_id": None})
     topics.create_topic(cur, name="calibration", trigger="Before calibrating", actor="user")
+    with pytest.raises(MashuError, match="already exists"):
+        _redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))
+    with pytest.raises(MashuError, match="only changes delivery settings"):
+        propose_change(
+            cur,
+            memory,
+            "redeliver",
+            retire_reason="not a retirement",
+            successor_settings=_topic_settings("calibration"),
+        )
+
     proposal = _redeliver(cur, memory, _topic_settings("calibration"))
     assert proposal["delivery_move"] == ["delivery: always -> topic:calibration"]
     assert memories.get_memory(cur, memory["memory_id"])["delivery"] == "always"
@@ -322,16 +327,23 @@ def test_redeliver_moves_a_rule_into_an_existing_topic_without_touching_its_body
     assert cur.fetchone()["detail"]["approval_source"]["kind"] == "user_instruction"
 
 
-def test_redeliver_opens_a_described_topic_when_applied(cur, scope_id):
+def test_redeliver_opens_a_described_topic_only_when_it_fits(cur, scope_id, monkeypatch):
     memory = remember(cur, RULE)
     proposal = _redeliver(
         cur, memory, _topic_settings("calibration", "Before calibrating", scope_id)
     )
-    assert topics.get_topic(cur, "calibration") is None
     assert proposal["delivery_move"][1] == (
         "opens topic calibration for test scope: Before calibrating"
     )
 
+    monkeypatch.setenv("MASHU_TOPIC_CAPACITY", "1")
+    with pytest.raises(RefusedError), cur.connection.transaction():
+        apply_change(cur, proposal, "Put it in a new calibration topic")
+    assert topics.get_topic(cur, "calibration") is None
+    assert memories.get_memory(cur, memory["memory_id"])["delivery"] == "always"
+    assert memory_changes.get(cur, proposal["change_id"])["status"] == "pending"
+
+    monkeypatch.delenv("MASHU_TOPIC_CAPACITY")
     apply_change(cur, proposal, "Put it in a new calibration topic")
 
     topic = topics.get_topic(cur, "calibration")
@@ -355,33 +367,3 @@ def test_redeliver_refuses_a_topic_opened_differently_or_a_target_changed_after_
     memories.revise(cur, memory["memory_id"], content=UPDATED, actor="user")
     with pytest.raises(MashuError, match="changed after this proposal was read"):
         apply_change(cur, proposal, "Scope it")
-
-
-def test_redeliver_over_a_topic_bound_leaves_everything_as_it_was(cur, monkeypatch):
-    memory = remember(cur, RULE)
-    proposal = _redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))
-    monkeypatch.setenv("MASHU_TOPIC_CAPACITY", "1")
-
-    with pytest.raises(RefusedError), cur.connection.transaction():
-        apply_change(cur, proposal, "Put it in a new calibration topic")
-
-    assert topics.get_topic(cur, "calibration") is None
-    assert memories.get_memory(cur, memory["memory_id"])["delivery"] == "always"
-    assert memory_changes.get(cur, proposal["change_id"])["status"] == "pending"
-
-
-def test_redeliver_refuses_a_move_that_changes_nothing_or_carries_retirement(cur):
-    memory = remember(cur, RULE)
-    with pytest.raises(MashuError, match="as they are"):
-        _redeliver(cur, memory, {"delivery": "always", "scope_id": None})
-    topics.create_topic(cur, name="calibration", trigger="Before calibrating", actor="user")
-    with pytest.raises(MashuError, match="already exists"):
-        _redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))
-    with pytest.raises(MashuError, match="only changes delivery settings"):
-        propose_change(
-            cur,
-            memory,
-            "redeliver",
-            retire_reason="not a retirement",
-            successor_settings=_topic_settings("calibration"),
-        )

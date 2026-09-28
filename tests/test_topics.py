@@ -46,6 +46,9 @@ def test_bootstrap_lists_a_visible_topic_line_and_never_its_rules(cur, scope_id)
     assert LEVER not in str(got) and PLACEMENT not in str(got)
     assert got["topic_tokens"] == pushed_cost([line(subject, 2)])
     assert got["memory_tokens"] == got["topic_tokens"]
+    keys = list(got)
+    order = ["always", "scoped", "topics", "states", "temporary", "pending"]
+    assert sorted(order, key=keys.index) == order
 
 
 def test_empty_archived_and_other_scope_topics_are_not_listed(cur, scope_id):
@@ -62,22 +65,6 @@ def test_empty_archived_and_other_scope_topics_are_not_listed(cur, scope_id):
     assert unrouted["topics"] == []
     there = bootstrap.session_bootstrap(cur, actor="agent", scope_id=elsewhere)
     assert [row["topic"] for row in there["topics"]] == ["away"]
-
-
-def test_the_opening_comes_in_the_documented_order(cur, scope_id):
-    remember(cur, ALWAYS)
-    subject = topic(cur, scope_id=scope_id)
-    filed(cur, subject)
-    got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
-    keys = list(got)
-    assert (
-        keys.index("always")
-        < keys.index("scoped")
-        < keys.index("topics")
-        < keys.index("states")
-        < keys.index("temporary")
-        < keys.index("pending")
-    )
 
 
 # pulling a topic
@@ -110,16 +97,7 @@ def test_reading_a_topic_records_the_session_and_a_person_reading_records_nothin
     ]
 
 
-def test_an_archived_topic_cannot_be_read_or_filled(cur):
-    subject = topic(cur)
-    topics.archive_topic(cur, subject["topic_id"], actor="user")
-    with pytest.raises(MashuError, match="archived"):
-        topics.topic_rules(cur, "difficulty")
-    with pytest.raises(MashuError, match="archived"):
-        filed(cur, subject)
-
-
-def test_removing_deletes_an_unused_topic_and_archives_a_used_one(cur):
+def test_removing_deletes_an_unused_topic_and_archives_a_used_one_that_stays_shut(cur):
     unused = topic(cur, "unused")
     assert topics.remove_topic(cur, unused["topic_id"], actor="user")["removed"] == "deleted"
     assert topics.get_topic(cur, "unused") is None
@@ -131,6 +109,10 @@ def test_removing_deletes_an_unused_topic_and_archives_a_used_one(cur):
     retire(cur, rule, "lever gone", "out_of_scope")
     assert topics.remove_topic(cur, used["topic_id"], actor="user")["removed"] == "archived"
     assert topics.get_topic(cur, "difficulty")["archived_at"] is not None
+    with pytest.raises(MashuError, match="archived"):
+        topics.topic_rules(cur, "difficulty")
+    with pytest.raises(MashuError, match="archived"):
+        filed(cur, used)
 
 
 def test_topic_names_and_triggers_are_one_bounded_line(cur):
@@ -159,6 +141,18 @@ def test_editing_a_topic_moves_its_rules_scope_with_it(cur, scope_id):
     cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'topic_updated'")
     assert cur.fetchone()["n"] == 2
 
+    # A retired rule is restored into its topic and the scope the topic has by then.
+    retire(cur, rule, "the lever moved", "out_of_scope")
+    topics.update_topic(cur, subject["topic_id"], actor="user", scope_id=scope_id)
+    restored = memories.restore(
+        cur,
+        rule["memory_id"],
+        reason="the lever is back",
+        actor="user",
+        approval_source={"kind": "user_direct"},
+    )
+    assert restored["scope_id"] == scope_id and restored["topic_id"] == subject["topic_id"]
+
 
 def test_one_action_leads_to_one_open_topic_served_where_it_is_listed(cur, scope_id):
     subject = topic(cur, scope_id=scope_id)
@@ -184,23 +178,24 @@ def test_one_action_leads_to_one_open_topic_served_where_it_is_listed(cur, scope
 # capacity
 
 
-def test_a_global_topic_line_counts_in_the_always_layer(cur, scope_id):
-    subject = topic(cur)
+def test_a_topic_line_counts_in_the_layer_it_lands_in_and_its_bodies_apart(cur, scope_id):
+    everywhere = topic(cur)
     assert capacity.bootstrap_totals(cur)["always"] == 0  # an empty topic pushes nothing
-    filed(cur, subject)
+    filed(cur, everywhere)
     totals = capacity.bootstrap_totals(cur)
-    assert totals["always"] == pushed_cost([line(subject, 1)])
+    assert totals["always"] == pushed_cost([line(everywhere, 1)])
     assert totals["scopes"] == {}
 
-
-def test_a_scoped_topic_line_counts_in_its_scope(cur, scope_id):
-    subject = topic(cur, scope_id=scope_id)
-    filed(cur, subject)
-    filed(cur, subject, PLACEMENT)
+    scoped = topic(cur, "placement", scope_id=scope_id)
+    filed(cur, scoped)
+    filed(cur, scoped, PLACEMENT)
     totals = capacity.bootstrap_totals(cur)
-    assert totals["always"] == 0
-    assert totals["scopes"] == {scope_id: pushed_cost([line(subject, 2)])}
-    assert capacity.topic_bodies(cur) == {subject["topic_id"]: pushed_cost([LEVER, PLACEMENT])}
+    assert totals["always"] == pushed_cost([line(everywhere, 1)])
+    assert totals["scopes"] == {scope_id: pushed_cost([line(scoped, 2)])}
+    assert capacity.topic_bodies(cur) == {
+        everywhere["topic_id"]: pushed_cost([LEVER]),
+        scoped["topic_id"]: pushed_cost([LEVER, PLACEMENT]),
+    }
 
 
 def test_the_first_rule_of_a_topic_is_refused_when_its_line_does_not_fit(cur, monkeypatch):
@@ -303,13 +298,16 @@ def test_remember_files_a_rule_under_its_topic_with_the_topic_scope(cur, scope_i
         remember(cur, PLACEMENT, delivery="always", topic_id=subject["topic_id"])
 
 
-def test_delivery_can_move_into_and_out_of_a_topic(cur):
+def test_delivery_moves_into_and_out_of_a_topic_but_a_topic_rule_never_turns_temporary(cur):
     subject = topic(cur)
     row = remember(cur, LEVER)
     moved = memories.set_delivery(
         cur, row["memory_id"], delivery="topic", topic_id=subject["topic_id"], actor="user"
     )
     assert (moved["delivery"], moved["topic_id"]) == ("topic", subject["topic_id"])
+    with pytest.raises(MashuError, match="trigger would be lost"):
+        memories.convert_to_temporary(cur, row["memory_id"], days=2, actor="user")
+    assert memories.get_memory(cur, row["memory_id"])["status"] == "active"
     back = memories.set_delivery(cur, row["memory_id"], delivery="always", actor="user")
     assert (back["delivery"], back["topic_id"]) == ("always", None)
     cur.execute(
@@ -320,8 +318,8 @@ def test_delivery_can_move_into_and_out_of_a_topic(cur):
     assert details[1]["from_topic_id"] == str(subject["topic_id"])
 
 
-def test_admission_can_file_a_candidate_under_a_topic(cur):
-    subject = topic(cur)
+def test_admission_files_a_candidate_under_a_topic_and_its_scope(cur, scope_id):
+    subject = topic(cur, scope_id=scope_id)
     answer = nominations.remember_explicit(
         cur,
         content=LEVER,
@@ -334,12 +332,11 @@ def test_admission_can_file_a_candidate_under_a_topic(cur):
     assert answer["admitted"] is True
     assert answer["memory"]["delivery"] == "topic"
     assert answer["memory"]["topic_id"] == str(subject["topic_id"])
+    assert answer["memory"]["scope_id"] == str(scope_id)
 
-
-def test_admission_by_id_takes_the_topic_and_its_scope(cur, scope_id):
-    subject = topic(cur, scope_id=scope_id)
-    nominated = nominations.nominate_user_explicit(cur, content=LEVER, actor="agent")
-    nomination = nominated["nomination"]
+    nomination = nominations.nominate_user_explicit(cur, content=PLACEMENT, actor="agent")[
+        "nomination"
+    ]
     admitted = nominations.admit(
         cur,
         nomination["nomination_id"],
@@ -352,29 +349,6 @@ def test_admission_by_id_takes_the_topic_and_its_scope(cur, scope_id):
     )
     assert admitted["topic_id"] == str(subject["topic_id"])
     assert admitted["scope_id"] == str(scope_id)
-
-
-def test_a_topic_memory_cannot_become_temporary(cur):
-    subject = topic(cur)
-    row = filed(cur, subject)
-    with pytest.raises(MashuError, match="trigger would be lost"):
-        memories.convert_to_temporary(cur, row["memory_id"], days=2, actor="user")
-    assert memories.get_memory(cur, row["memory_id"])["status"] == "active"
-
-
-def test_a_retired_topic_rule_is_restored_into_its_topic(cur, scope_id):
-    subject = topic(cur)
-    row = filed(cur, subject)
-    retire(cur, row, "the lever moved", "out_of_scope")
-    topics.update_topic(cur, subject["topic_id"], actor="user", scope_id=scope_id)
-    restored = memories.restore(
-        cur,
-        row["memory_id"],
-        reason="the lever is back",
-        actor="user",
-        approval_source={"kind": "user_direct"},
-    )
-    assert restored["scope_id"] == scope_id and restored["topic_id"] == subject["topic_id"]
 
 
 # the schema
@@ -474,14 +448,11 @@ def mcp(committing_dsn, monkeypatch):
     return call
 
 
-def test_memory_list_takes_exactly_one_of_scope_or_topic(mcp):
-    assert "exactly one" in mcp("memory_list")["error"]
-    assert "exactly one" in mcp("memory_list", scope="a", topic="b")["error"]
-
-
-def test_memory_list_reads_a_topic_and_records_this_server_session(mcp, committing_dsn):
+def test_memory_list_and_admit_reach_a_topic_by_name_for_this_server_session(mcp, committing_dsn):
     from mashu import db
 
+    assert "exactly one" in mcp("memory_list")["error"]
+    assert "exactly one" in mcp("memory_list", scope="a", topic="b")["error"]
     name = f"topic {uuid4().hex[:8]}"
     with db.transaction(committing_dsn) as cur:
         subject = topic(cur, name, trigger="Before touching the exporter")
@@ -502,14 +473,6 @@ def test_memory_list_reads_a_topic_and_records_this_server_session(mcp, committi
         sessions = {row["detail"]["session"] for row in cur.fetchall()}
     assert len(sessions) == 1
     assert second["ok"] is True
-
-
-def test_memory_admit_files_content_under_a_named_topic(mcp, committing_dsn):
-    from mashu import db
-
-    name = f"topic {uuid4().hex[:8]}"
-    with db.transaction(committing_dsn) as cur:
-        topic(cur, name, trigger="Before cutting a release branch")
 
     answer = mcp(
         "memory_admit",

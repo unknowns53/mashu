@@ -7,17 +7,13 @@ from mashu import projects, tasks
 from mashu.errors import MashuError, RefusedError, UnknownProjectError
 
 
-def test_a_project_name_is_taken_once(cur, scope_id):
+def test_a_project_name_is_taken_once_and_a_near_miss_is_answered_with_it(cur, scope_id):
     first = projects.create_project(cur, name="mashu", actor="user", scope_id=scope_id)
     assert first["scope_id"] == scope_id
     assert first["archived_at"] is None
 
     with pytest.raises(MashuError, match="already exists"):
         projects.create_project(cur, name="mashu", actor="user")
-
-
-def test_an_unknown_project_answers_with_the_ones_that_exist(cur):
-    projects.create_project(cur, name="mashu", actor="user")
     with pytest.raises(UnknownProjectError, match="mashu"):
         projects.require_project(cur, "mashi")
 
@@ -43,8 +39,9 @@ def test_a_listing_counts_what_each_project_is_carrying(cur):
     assert working["activity"] == "active"
 
 
-def test_archiving_takes_a_project_off_the_list_and_happens_once(cur):
+def test_archiving_takes_a_project_off_the_list_once_and_leaves_its_tasks_alone(cur):
     projects.create_project(cur, name="mashu", actor="user")
+    task = tasks.task_create(cur, project="mashu", name="implement the v3 schema", actor="agent")
     archived = projects.archive_project(cur, "mashu", actor="user")
     assert archived["archived_at"] is not None
 
@@ -53,12 +50,5 @@ def test_archiving_takes_a_project_off_the_list_and_happens_once(cur):
 
     with pytest.raises(MashuError, match="already archived"):
         projects.archive_project(cur, "mashu", actor="user")
-
-
-def test_archiving_says_nothing_about_the_tasks_underneath(cur):
-    projects.create_project(cur, name="mashu", actor="user")
-    task = tasks.task_create(cur, project="mashu", name="implement the v3 schema", actor="agent")
-    projects.archive_project(cur, "mashu", actor="user")
-
     assert tasks.task_get(cur, task["task"]["task_id"])["activity"] == "active"
     assert projects.show_project(cur, "mashu")["n_active"] == 1

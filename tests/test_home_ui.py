@@ -187,28 +187,22 @@ def test_non_tty_dashboard_contains_no_ansi(monkeypatch):
     assert "3 active" in rendered and "4 dormant" in rendered
 
 
-def test_nested_terminal_sessions_use_one_discarded_screen(monkeypatch):
-    terminal = TtyBuffer()
-    monkeypatch.setattr("sys.stdout", terminal)
-
-    with screen.terminal_session():
-        screen.paint("dashboard")
-        with screen.terminal_session():
-            screen.paint("review")
-
-    output = terminal.getvalue()
-    assert output.count("\x1b[?1049h") == 1
-    assert output.count("\x1b[?1049l") == 1
-    assert "dashboard" in output and "review" in output
-
-
-def test_terminal_session_enters_lazily_and_restores_after_an_error(monkeypatch):
+def test_terminal_session_enters_lazily_once_when_nested_and_restores_after_an_error(monkeypatch):
     terminal = TtyBuffer()
     monkeypatch.setattr("sys.stdout", terminal)
 
     with screen.terminal_session():
         print("empty queue")
     assert terminal.getvalue() == "empty queue\n"
+
+    with screen.terminal_session():
+        screen.paint("dashboard")
+        with screen.terminal_session():
+            screen.paint("review")
+    output = terminal.getvalue()
+    assert output.count("\x1b[?1049h") == 1
+    assert output.count("\x1b[?1049l") == 1
+    assert "dashboard" in output and "review" in output
 
     with pytest.raises(RuntimeError, match="boom"):
         with screen.terminal_session():
