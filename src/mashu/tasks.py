@@ -26,8 +26,20 @@ OUTCOMES = ("completed", "abandoned", "superseded")
 #: Advisory lock class, in the namespace capacity.py opened.
 LOCK_PROJECT_STATE = 3
 
-#: The ceilings 5.3 puts on one current state.
-TEXT_LIMITS = {"goal": 300, "approach": 500, "status_text": 500}
+#: The ceilings 5.3 puts on one current state. goal and status ride on every bootstrap
+#: card of the scope, so they are held to a line each. The CHECK constraints keep the
+#: wider ceilings of 0004, because states written under them are carried forward.
+TEXT_LIMITS = {"goal": 80, "approach": 500, "status_text": 120}
+
+#: Where the words that do not fit on the card belong.
+CARD_FIELD_ADVICE = {
+    "goal": "goal names the outcome that ends the task; put requirements and method in approach",
+    "status_text": (
+        "status says where the task stands in a sentence or two; put what was done in a "
+        "checkpoint's what_changed, commits and paths in artifacts, and remaining work in "
+        "next_actions"
+    ),
+}
 LIST_FIELDS = ("open_questions", "blockers", "next_actions")
 LIST_MAX_ITEMS = 5
 LIST_MAX_CHARS = 300
@@ -128,11 +140,16 @@ def _check_limits(
     previous_name: str | None = None,
     previous_state: dict[str, Any] | None = None,
 ) -> None:
-    """Refuse an oversized field in words, before the CHECK constraint does."""
+    """Refuse an oversized field in words, before the CHECK constraint does.
+
+    A text carried forward unchanged was admitted under the ceiling of its day, so only a
+    text this write sets is held to the current one.
+    """
+    carried = previous_state or {}
     for field, limit in TEXT_LIMITS.items():
         value = state.get(field)
-        if value and len(value) > limit:
-            raise OverLimitError(field, limit, len(value))
+        if value and len(value) > limit and value != carried.get(field):
+            raise OverLimitError(field, limit, len(value), advice=CARD_FIELD_ADVICE.get(field))
     for field in LIST_FIELDS:
         items = state.get(field) or []
         if len(items) > LIST_MAX_ITEMS:
@@ -760,7 +777,9 @@ def append_next_action(
     if text in state["next_actions"]:
         return {**current, "appended": False, "reason": "this next action is already on the task"}
     state["next_actions"] = [*state["next_actions"], text]
-    _check_limits(state, name=task["name"])
+    _check_limits(
+        state, name=task["name"], previous_name=task["name"], previous_state=current["state"]
+    )
     verdict = _gate(*_texts(state))
     home = projects.require_project(cur, task["project_id"])
     _check_budget(cur, task_id=task_id, name=task["name"], state=state, scope_id=home["scope_id"])
