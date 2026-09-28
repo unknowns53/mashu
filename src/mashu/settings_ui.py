@@ -378,13 +378,17 @@ def _scopes_page(dsn: str | None) -> None:
                 continue
             try:
                 with db.transaction(dsn) as cur:
-                    scopes.create_scope(
+                    created = scopes.create_scope(
                         cur,
                         name=name_answer.text,
                         summary=summary_answer.text or None,
                         actor=ACTOR,
                     )
                 note = f"  created scope {name_answer.text}"
+                if created.get("unchecked"):
+                    note += "; banned-pattern list unavailable, so nothing was checked"
+                elif created.get("malformed"):
+                    note += "; some banned-pattern lines could not be compiled"
             except MashuError as error:
                 note = f"  {error}"
 

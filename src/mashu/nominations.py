@@ -454,8 +454,9 @@ def admit(
             "retirement conflicts changed since this nomination was read; read the updated "
             "candidate and confirm it again"
         )
+    gate: dict[str, Any] = {}
     approval_source = approvals.validate(
-        approval, required_conflicts=blocking_conflicts(current_conflicts)
+        approval, required_conflicts=blocking_conflicts(current_conflicts), gate=gate
     )
 
     from mashu import memories
@@ -467,6 +468,10 @@ def admit(
     verdict = redact.check(final)
     if not verdict.allowed:
         raise RefusedError(verdict.reason())
+    if verdict.unchecked:
+        gate["unchecked"] = True
+    if verdict.malformed:
+        gate["malformed"] = verdict.malformed
     active = [
         row
         for row in match.similar_active_memories(cur, final)
@@ -502,6 +507,7 @@ def admit(
         "INSERT INTO memory_revision (memory_id, content, actor, note) VALUES (%s, %s, %s, %s)",
         (memory["memory_id"], final, actor, f"admitted from nomination {nomination_id}"),
     )
+    result = {**approvals.json_value(memory), **gate}
     cur.execute(
         """
         UPDATE nomination
@@ -516,7 +522,7 @@ def admit(
             Jsonb(approval_source),
             request_id,
             Jsonb(request),
-            Jsonb(approvals.json_value(memory)),
+            Jsonb(result),
             nomination_id,
         ),
     )
@@ -543,7 +549,7 @@ def admit(
         nomination_id=nomination_id,
         detail={"approval_source": approval_source, "request_id": str(request_id)},
     )
-    return approvals.json_value(memory)
+    return result
 
 
 #: Why a one-call remember stopped at the queue instead of admitting.
@@ -643,6 +649,9 @@ def decline(cur: psycopg.Cursor, nomination_id: UUID, *, actor: str, reason: str
     _require_pending(cur, nomination_id)
     if not reason or not reason.strip():
         raise MashuError("declining needs a reason: the next report of this pain will read it")
+    verdict = redact.check(reason)
+    if not verdict.allowed:
+        raise RefusedError(verdict.reason())
     cur.execute(
         """
         UPDATE nomination
@@ -662,6 +671,9 @@ def decline(cur: psycopg.Cursor, nomination_id: UUID, *, actor: str, reason: str
         nomination_id=nomination_id,
         detail={"reason": reason},
     )
+    row["unchecked"] = verdict.unchecked
+    if verdict.malformed:
+        row["malformed"] = verdict.malformed
     return row
 
 
@@ -670,6 +682,9 @@ def defer(cur: psycopg.Cursor, nomination_id: UUID, *, actor: str, reason: str) 
     _require_pending(cur, nomination_id)
     if not reason or not reason.strip():
         raise MashuError("putting a candidate off needs a reason: it is all the next reader gets")
+    verdict = redact.check(reason)
+    if not verdict.allowed:
+        raise RefusedError(verdict.reason())
     cur.execute(
         """
         UPDATE nomination
@@ -689,4 +704,7 @@ def defer(cur: psycopg.Cursor, nomination_id: UUID, *, actor: str, reason: str) 
         nomination_id=nomination_id,
         detail={"reason": reason},
     )
+    row["unchecked"] = verdict.unchecked
+    if verdict.malformed:
+        row["malformed"] = verdict.malformed
     return row

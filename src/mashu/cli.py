@@ -237,7 +237,7 @@ def _parse_days(value: str) -> float:
 def _gate_warnings(result: dict[str, Any]) -> None:
     """Say when the entrance check did not run, or ran on a broken list."""
     if result.get("unchecked"):
-        print("warning: banned-pattern list not found; nothing was checked", file=sys.stderr)
+        print("warning: banned-pattern list unavailable; nothing was checked", file=sys.stderr)
     malformed = result.get("malformed") or 0
     if malformed:
         print(
@@ -1089,7 +1089,10 @@ def cmd_review(args: argparse.Namespace) -> int:
             )
         with db.transaction(args.dsn) as cur:
             nomination = _pending_by_id(cur, args.decline)
-            nominations.decline(cur, nomination["nomination_id"], actor=ACTOR, reason=args.reason)
+            row = nominations.decline(
+                cur, nomination["nomination_id"], actor=ACTOR, reason=args.reason
+            )
+        _gate_warnings(row)
         print(f"declined  {args.decline}")
         return 0
 
@@ -1149,9 +1152,12 @@ def cmd_scope(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
         if args.add:
             row = scopes.create_scope(cur, name=args.add, summary=args.about, actor=ACTOR)
-            print(f"created  {row['name']}")
-            return 0
-        rows = scopes.list_scopes(cur)
+        else:
+            rows = scopes.list_scopes(cur)
+    if args.add:
+        _gate_warnings(row)
+        print(f"created  {row['name']}")
+        return 0
     print("name                         active  push_tokens")
     for row in rows:
         print(f"{row['name'][:28]:28}  {row['n_active']:6}  {row['push_tokens']:11}")

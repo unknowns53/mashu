@@ -730,10 +730,12 @@ def apply(
         if duplicates:
             raise MashuError("a similar active Memory already exists; resolve that Memory first")
 
+    gate: dict[str, Any] = {}
     approval_source = approvals.validate(
         approval,
         required_conflicts=_blocking_conflicts(conflict_rows),
         reversal_required=reversal_required,
+        gate=gate,
     )
 
     result: dict[str, Any]
@@ -797,7 +799,7 @@ def apply(
         )
         result = {"operation": "restore", "memory": restored}
 
-    safe_result = approvals.json_value(result)
+    safe_result = {**approvals.json_value(result), **gate}
     cur.execute(
         """
         UPDATE memory_change

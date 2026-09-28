@@ -347,9 +347,13 @@ def _decide(dsn: str | None, row: dict[str, Any], verb: str, reason: str) -> str
     act = nominations.decline if verb == "r" else nominations.defer
     try:
         with db.transaction(dsn) as cur:
-            act(cur, row["nomination_id"], actor="user", reason=reason)
+            result = act(cur, row["nomination_id"], actor="user", reason=reason)
     except MashuError as refusal:
         return screen.danger(f"  {refusal}")
+    if result.get("unchecked"):
+        return screen.warning("  ! banned-pattern list unavailable; reason was not checked")
+    if result.get("malformed"):
+        return screen.warning("  ! some banned-pattern lines could not be compiled")
     return ""
 
 

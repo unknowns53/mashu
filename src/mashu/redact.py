@@ -20,14 +20,14 @@ class Verdict:
     allowed: bool
     #: Index of the pattern that matched, never the text it matched.
     pattern_index: int | None = None
-    #: True when no pattern file was found.
+    #: True when the pattern file could not be read.
     unchecked: bool = False
     #: How many lines of the list would not compile.
     malformed: int = 0
 
     def reason(self) -> str:
         if self.unchecked:
-            return "the banned-pattern list was not found, so nothing was checked"
+            return "the banned-pattern list was unavailable, so nothing was checked"
         if self.allowed:
             return "no banned pattern"
         return f"matches banned pattern #{self.pattern_index}"
@@ -52,7 +52,11 @@ def load() -> tuple[list[re.Pattern[str]], int] | None:
         return None
     out = []
     malformed = 0
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    for line in lines:
         line = line.strip()
         if not line or line.startswith("#"):
             continue

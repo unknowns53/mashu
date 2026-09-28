@@ -15,6 +15,9 @@ def create_scope(
     cur: psycopg.Cursor, *, name: str, summary: str | None = None, actor: str
 ) -> dict[str, Any]:
     """Open a scope, refusing a name that is already taken."""
+    verdict = redact.check(name, summary)
+    if not verdict.allowed:
+        raise RefusedError(verdict.reason())
     if get_scope(cur, name) is not None:
         raise MashuError(f"scope '{name}' already exists")
     cur.execute(
@@ -23,6 +26,9 @@ def create_scope(
     )
     row = cur.fetchone()
     events.record(cur, "scope_created", actor, detail={"name": name})
+    row["unchecked"] = verdict.unchecked
+    if verdict.malformed:
+        row["malformed"] = verdict.malformed
     return row
 
 

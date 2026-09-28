@@ -26,6 +26,7 @@ def validate(
     *,
     required_conflicts: list[UUID] | None = None,
     reversal_required: bool = False,
+    gate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate the caller's stated authorization without claiming to authenticate it."""
     kind = approval.get("kind")
@@ -33,6 +34,15 @@ def validate(
         raise MashuError("approval kind must be user_direct, user_instruction, or policy")
     if kind == "policy":
         raise MashuError("no server-side Memory change condition is registered for policy approval")
+
+    verdict = redact.check(*_snapshot_strings(json_value(approval)))
+    if not verdict.allowed:
+        raise RefusedError(verdict.reason())
+    if gate is not None:
+        if verdict.unchecked:
+            gate["unchecked"] = True
+        if verdict.malformed:
+            gate["malformed"] = verdict.malformed
 
     source: dict[str, Any] = {"kind": kind}
     if kind == "user_instruction":
@@ -70,6 +80,20 @@ def validate(
             source["reversal_approved_by_action"] = True
 
     return source
+
+
+def _snapshot_strings(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [
+            text
+            for key, item in value.items()
+            for text in (*_snapshot_strings(key), *_snapshot_strings(item))
+        ]
+    if isinstance(value, list):
+        return [text for item in value for text in _snapshot_strings(item)]
+    return []
 
 
 def acknowledges_conflicts(approval: dict[str, Any], required_conflicts: list[UUID]) -> bool:
