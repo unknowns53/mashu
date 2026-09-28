@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to a pull request makes the older run moot, but every commit on main keeps its result.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+
+      - run: uv sync --locked
+
+      - run: uv run ruff check
+
+      - run: uv run ruff format --check
+
+      # The pre-commit hook holds tests/ to its budget only in checkouts that ran hooks/install.sh
+      # and commits made without --no-verify, so the same count is taken here.
+      - name: tests/ line budget
+        run: |
+          . hooks/_budget.sh
+          budget=$(budget_staged)
+          count=$(budget_count)
+          echo "tests/ has $count non-blank lines against a budget of $budget"
+          [ "$count" -eq "$budget" ]
+
+  test:
+    name: test (${{ matrix.os }}, Python ${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.11" }
+          - { os: ubuntu-latest, python: "3.13" }
+          - { os: windows-latest, python: "3.13" }
+    runs-on: ${{ matrix.os }}
+    # Service containers run only on Linux runners, and an empty image leaves the service out.
+    # Windows runners come with PostgreSQL installed, and the step below starts it.
+    services:
+      postgres:
+        image: ${{ matrix.os == 'ubuntu-latest' && 'postgres:17' || '' }}
+        env:
+          POSTGRES_PASSWORD: root
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    # The tests connect with bare dbname= strings, so libpq takes the rest from these.
+    # root is the password the Windows runner image gives the postgres user.
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: root
+    steps:
+      # The image ships the service disabled, and a disabled service refuses to start.
+      - name: Start PostgreSQL
+        if: runner.os == 'Windows'
+        run: |
+          Get-Service -Name 'postgresql*' |
+            Set-Service -StartupType Manual -PassThru |
+            Start-Service -PassThru
+
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: ${{ matrix.python }}
+
+      # Tests that need the MCP server call importorskip, so without the extra they skip instead of failing.
+      - run: uv sync --locked --extra mcp
+
+      - run: uv run pytest -q -rs

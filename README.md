@@ -490,13 +490,15 @@ topic の本文、approach、open questions、blockers、next actions の本文�
 
 ~~~bash
 uv run pytest -q
-uv run ruff check src tests
-uv run ruff format src tests
+uv run ruff check
+uv run ruff format
 ~~~
 
 テストは実 PostgreSQL に対して実行し、テスト用データベースは実行ごとに作り直す。既定値は mashu_test、変更には MASHU_TEST_DB を使う。
 
-tests/ の空行を除いた行数には予算があり、`tests/line-budget` が持つ。Agent は変更のたびにテストを足して減らさないので、放っておくとテストがコードより速く育つ。tests/ に触れる commit では、pre-commit hook が予算と実際の行数の一致を確かめる。行数が予算を超えた commit は拒否され、減った commit では予算をその値まで下げる必要がある。テストを足すときは、先に既存のテストを広げること、conftest の共有 fixture で状態を作ること、一つの不変条件を一つの層でだけ確かめること、画面や CLI の文言ではなく状態を確かめることで場所を空ける。予算を上げるかどうかはユーザーが決める。上げるときは予算ファイルだけを変える commit を作り、ユーザーの指示を `Test-Budget-Instruction:` の trailer に引用する。
+main への push と pull request では、GitHub Actions の CI（`.github/workflows/ci.yml`）が ruff の lint と format の確認、tests/ の行数予算の確認、テストを実行する。テストは Ubuntu の Python 3.11 と 3.13、Windows の Python 3.13 で、それぞれ PostgreSQL 17 に対して走る。
+
+tests/ の空行を除いた行数には予算があり、`tests/line-budget` が持つ。Agent は変更のたびにテストを足して減らさないので、放っておくとテストがコードより速く育つ。tests/ に触れる commit では pre-commit hook が、push と pull request では CI が、予算と実際の行数の一致を確かめる。行数が予算を超えた commit は拒否され、減った commit では予算をその値まで下げる必要がある。テストを足すときは、先に既存のテストを広げること、conftest の共有 fixture で状態を作ること、一つの不変条件を一つの層でだけ確かめること、画面や CLI の文言ではなく状態を確かめることで場所を空ける。予算を上げるかどうかはユーザーが決める。上げるときは予算ファイルだけを変える commit を作り、ユーザーの指示を `Test-Budget-Instruction:` の trailer に引用する。
 
 仕様を変えるときは、コードと対応する設計書を一緒に更新する。撤回した設計は削除せず、何を撤回したかと理由を設計書に残す。
 
@@ -511,6 +513,7 @@ tests/                       実 PostgreSQL に対するテスト
 tools/pretooluse_guard.py    action つき topic 用 PreToolUse hook
 tools/sessionstart_guard.py  SessionStart 用 hook
 hooks/                       pre-commit / commit-msg
+.github/workflows/ci.yml     GitHub Actions の CI
 ~~~
 
 *摩周湖は世界最高クラスの透明度が観測されたことで知られており、どこまでも遡って追跡できる Knowledge State を目指して命名された。摩周湖の流入する川も流出する川もなく、外部の流れに属さない閉じた水盆という地形は、特定の Agent に依存しない独立の Knowledge Layer という設計思想に対応する。摩周湖は霧で見えないことで有名であり、本プロジェクトの意義は霧を晴らして何を信頼してよいかを人が判断できる状態にすることである。*
