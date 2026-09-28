@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 from mashu import (
     bootstrap,
     db,
+    events,
     memories,
     memory_changes,
     nominations,
@@ -24,6 +25,7 @@ from mashu import (
 from mashu.errors import (
     DuplicateTaskError,
     MashuError,
+    OverLimitError,
     ProjectBudgetError,
     StaleStateError,
 )
@@ -73,15 +75,69 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def _failure(error: MashuError) -> dict[str, Any]:
+def _task_card_view(row: dict[str, Any]) -> dict[str, Any]:
+    """A task row with its state cut to what the bootstrap card carries.
+
+    task_get is the one full-state read, so every other task answer stays card-sized.
+    """
+    state = row["state"]
+    return {
+        **{key: value for key, value in row.items() if key != "state"},
+        "state": {
+            "goal": state["goal"],
+            "status_text": state["status_text"],
+            "details": {
+                "approach": bool(state["approach"]),
+                **{field: len(state[field] or []) for field in tasks.LIST_FIELDS},
+            },
+            "updated_at": state["updated_at"],
+            "updated_by": state["updated_by"],
+        },
+    }
+
+
+def _failure(
+    error: MashuError, *, task_write: str | None = None, task_id: UUID | None = None
+) -> dict[str, Any]:
     answer: dict[str, Any] = {"ok": False, "error": str(error)}
     if isinstance(error, DuplicateTaskError):
-        answer["candidates"] = error.candidates
+        answer["candidates"] = [_task_card_view(row) for row in error.candidates]
     elif isinstance(error, StaleStateError):
-        answer["current"] = error.current
+        answer["current"] = _task_card_view(error.current)
     elif isinstance(error, ProjectBudgetError):
         answer["breakdown"] = error.breakdown
+    elif isinstance(error, OverLimitError):
+        answer.update(
+            field=error.field,
+            limit=error.limit,
+            actual=error.actual,
+            unit=error.unit,
+            over_by=error.over_by,
+            breakdown=error.breakdown,
+        )
+        if task_write and error.field == "task bootstrap card":
+            answer["refusal_recorded"] = _record_card_refusal(error, task_write, task_id)
     return _plain(answer)
+
+
+def _record_card_refusal(error: OverLimitError, tool: str, task_id: UUID | None) -> bool:
+    """Log a refused card write after its own transaction rolled back (v3 17)."""
+    detail = {
+        "tool": tool,
+        "task_id": str(task_id) if task_id else None,
+        "limit": error.limit,
+        "actual": error.actual,
+        "over_by": error.over_by,
+        "unit": error.unit,
+        "breakdown": error.breakdown,
+    }
+    # The refusal is the answer the agent needs; a failed log write must not replace it.
+    try:
+        with db.transaction() as cur:
+            events.record(cur, "task_card_write_refused", actor(), detail=detail)
+    except Exception:
+        return False
+    return True
 
 
 def _scope(cur: Any, name: str | None) -> tuple[UUID | None, str | None, bool]:
@@ -498,6 +554,9 @@ def build_server() -> Any:
 
         `goal` (80 chars) names the outcome and `status_text` (120 chars) says where the
         task stands; both ride on every bootstrap card, so details go in approach or next_actions.
+        Success and duplicate candidates return the card view (goal, status_text, detail
+        counts) with the card and detail budgets; call task_get for the full state. A card
+        over its limit is refused with `over_by` and a per-component `breakdown`.
         """
         try:
             with db.transaction() as cur:
@@ -514,9 +573,10 @@ def build_server() -> Any:
                     next_actions=next_actions,
                     force=force,
                 )
-                return _plain({"ok": True, **answer})
+                answer["candidates"] = [_task_card_view(row) for row in answer["candidates"]]
+                return _plain({"ok": True, **_task_card_view(answer)})
         except MashuError as error:
-            return _failure(error)
+            return _failure(error, task_write="task_create")
 
     @server.tool()
     def task_get(
@@ -526,7 +586,11 @@ def build_server() -> Any:
         artifacts: bool = False,
         checkpoints: bool = False,
     ) -> dict[str, Any]:
-        """Get full current state and requested history; call before working on a task."""
+        """Get full current state and requested history; call before working on a task.
+
+        The only tool returning full state; it adds card_tokens, card_limit, card_remaining,
+        detail_tokens, and detail_limit.
+        """
         try:
             with db.transaction() as cur:
                 answer = task_history.expanded_task(
@@ -548,7 +612,10 @@ def build_server() -> Any:
         include_closed: bool = False,
         limit: int = 10,
     ) -> dict[str, Any]:
-        """Search task names and current state, including closed tasks on request."""
+        """Search task names and current state, including closed tasks on request.
+
+        Results carry the card view; call task_get for a task's full state.
+        """
         try:
             with db.transaction() as cur:
                 found = tasks.task_search(
@@ -558,7 +625,7 @@ def build_server() -> Any:
                     include_closed=include_closed,
                     limit=limit,
                 )
-                return _plain({"ok": True, "tasks": found})
+                return _plain({"ok": True, "tasks": [_task_card_view(row) for row in found]})
         except MashuError as error:
             return _failure(error)
 
@@ -566,6 +633,7 @@ def build_server() -> Any:
     def task_update(
         task_id: UUID,
         expect_updated_at: datetime,
+        name: str | None = None,
         goal: str | None = None,
         approach: str | None = None,
         status_text: str | None = None,
@@ -575,9 +643,12 @@ def build_server() -> Any:
     ) -> dict[str, Any]:
         """Replace the state fields given; omitted fields keep their value, "" or [] clears.
 
-        Pass the read state's `updated_at` as `expect_updated_at`.
+        Pass the read state's `updated_at` as `expect_updated_at`. `name` renames the task
+        unless it reads like another open one; omitted, the name stays.
         `goal` (80 chars) names the outcome and `status_text` (120 chars) says where the
         task stands; both ride on every bootstrap card, so details go in approach or next_actions.
+        Success returns the card view with the card and detail budgets; a card over its
+        limit is refused with `over_by` and a per-component `breakdown`.
         """
         try:
             with db.transaction() as cur:
@@ -592,10 +663,11 @@ def build_server() -> Any:
                     open_questions=open_questions,
                     blockers=blockers,
                     next_actions=next_actions,
+                    name=name,
                 )
-                return _plain({"ok": True, **answer})
+                return _plain({"ok": True, **_task_card_view(answer)})
         except MashuError as error:
-            return _failure(error)
+            return _failure(error, task_write="task_update", task_id=task_id)
 
     @server.tool()
     def task_checkpoint(
@@ -625,6 +697,8 @@ def build_server() -> Any:
         re-derive, and `artifacts` items `{kind, locator, label?}` for external sources.
         Artifact kinds: git_commit, git_branch, file, document, obsidian, issue, dataset,
         log, url, other. Artifacts linked here join `evidence` automatically.
+        Success returns the card view with the card and detail budgets; a card over its
+        limit is refused with `over_by` and a per-component `breakdown`.
         """
         try:
             with db.transaction() as cur:
@@ -645,9 +719,14 @@ def build_server() -> Any:
                     decisions=decisions,
                     artifacts=artifacts,
                 )
-                return _plain({"ok": True, **answer})
+                answer["checkpoint"] = {
+                    key: value
+                    for key, value in answer["checkpoint"].items()
+                    if key not in tasks.EDITABLE_FIELDS
+                }
+                return _plain({"ok": True, **_task_card_view(answer)})
         except MashuError as error:
-            return _failure(error)
+            return _failure(error, task_write="task_checkpoint", task_id=task_id)
 
     @server.tool()
     def task_propose_close(
@@ -664,7 +743,7 @@ def build_server() -> Any:
                 answer = tasks.propose_close(
                     cur, task_id, outcome=outcome, reason=reason, actor=actor()
                 )
-                return _plain({"ok": True, **answer})
+                return _plain({"ok": True, **_task_card_view(answer)})
         except MashuError as error:
             return _failure(error)
 
@@ -674,7 +753,7 @@ def build_server() -> Any:
         try:
             with db.transaction() as cur:
                 answer = tasks.withdraw_proposal(cur, task_id, actor=actor())
-                return _plain({"ok": True, **answer})
+                return _plain({"ok": True, **_task_card_view(answer)})
         except MashuError as error:
             return _failure(error)
 

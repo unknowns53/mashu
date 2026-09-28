@@ -18,7 +18,7 @@ from mashu.errors import (
     RefusedError,
     StaleStateError,
 )
-from mashu.tokens import pushed_cost
+from mashu.tokens import ROW_OVERHEAD, estimate_tokens, pushed_cost
 
 #: The three ways a task can end (6).
 OUTCOMES = ("completed", "abandoned", "superseded")
@@ -40,6 +40,12 @@ CARD_FIELD_ADVICE = {
         "next_actions"
     ),
 }
+
+#: How a card over its own ceiling gets back under it.
+CARD_ADVICE = (
+    "shorten the task name, goal, or status, or drop detail indicators by clearing "
+    "approach or list fields that are no longer needed"
+)
 LIST_FIELDS = ("open_questions", "blockers", "next_actions")
 LIST_MAX_ITEMS = 5
 LIST_MAX_CHARS = 300
@@ -191,7 +197,12 @@ def _check_limits(
     card_limit = config.task_card_capacity()
     if card_tokens > card_limit and not (previous_card is not None and card_tokens < previous_card):
         raise OverLimitError(
-            "task bootstrap card", card_limit, card_tokens, unit="estimated tokens"
+            "task bootstrap card",
+            card_limit,
+            card_tokens,
+            unit="estimated tokens",
+            advice=CARD_ADVICE,
+            breakdown=card_breakdown(name, state),
         )
 
 
@@ -237,12 +248,12 @@ def state_cost(name: str, state: dict[str, Any]) -> int:
     return pushed_cost([state_text(name, state)])
 
 
-def card_text(name: str, state: dict[str, Any]) -> str:
-    """The compact pointer pushed at bootstrap so full detail can be fetched."""
-    parts = [name]
+def _card_lines(name: str, state: dict[str, Any]) -> list[tuple[str, str]]:
+    """The card's lines in the order shown, each under the component it comes from."""
+    parts = [("name", name)]
     for field in ("goal", "status_text"):
         if state.get(field):
-            parts.append(f"{STATE_LABELS[field]}: {state[field]}")
+            parts.append((field, f"{STATE_LABELS[field]}: {state[field]}"))
     available: list[str] = []
     if state.get("approach"):
         available.append("approach")
@@ -252,13 +263,48 @@ def card_text(name: str, state: dict[str, Any]) -> str:
             singular, plural = CARD_COUNT_LABELS[field]
             available.append(f"{count} {singular if count == 1 else plural}")
     if available:
-        parts.append(f"details: {', '.join(available)}")
-    return "\n".join(parts)
+        parts.append(("details", f"details: {', '.join(available)}"))
+    return parts
+
+
+def card_text(name: str, state: dict[str, Any]) -> str:
+    """The compact pointer pushed at bootstrap so full detail can be fetched."""
+    return "\n".join(line for _, line in _card_lines(name, state))
 
 
 def card_cost(name: str, state: dict[str, Any]) -> int:
     """Push cost of one task's bootstrap index card."""
     return pushed_cost([card_text(name, state)])
+
+
+def card_breakdown(name: str, state: dict[str, Any]) -> dict[str, int]:
+    """Attribute the card cost to its components; the parts sum to `card_cost`.
+
+    The estimate rounds up over the whole text, so each line is charged what adding it
+    (with its separator) adds to the running estimate rather than its own estimate.
+    """
+    breakdown = {"name": 0, "goal": 0, "status_text": 0, "details": 0, "overhead": ROW_OVERHEAD}
+    lines: list[str] = []
+    before = 0
+    for component, line in _card_lines(name, state):
+        lines.append(line)
+        now = estimate_tokens("\n".join(lines))
+        breakdown[component] += now - before
+        before = now
+    return breakdown
+
+
+def _budget_report(name: str, state: dict[str, Any]) -> dict[str, int]:
+    """Where a state stands against the card and full-detail ceilings."""
+    card_tokens = card_cost(name, state)
+    card_limit = config.task_card_capacity()
+    return {
+        "card_tokens": card_tokens,
+        "card_limit": card_limit,
+        "card_remaining": card_limit - card_tokens,
+        "detail_tokens": state_cost(name, state),
+        "detail_limit": config.task_detail_capacity(),
+    }
 
 
 def heading(activity: str, updated_at: dt.datetime) -> str:
@@ -315,7 +361,8 @@ def task_get(cur: psycopg.Cursor, task_id: UUID) -> dict[str, Any]:
     row = cur.fetchone()
     if row is None:
         raise MashuError(f"no task {task_id}")
-    return _split(row)
+    result = _split(row)
+    return {**result, **_budget_report(result["task"]["name"], result["state"])}
 
 
 def task_list(

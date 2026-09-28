@@ -431,30 +431,13 @@ def test_migration_refuses_guard_rules_it_cannot_fold_into_one_topic(old_store, 
 # the MCP boundary
 
 
-@pytest.fixture
-def mcp(committing_dsn, monkeypatch):
-    pytest.importorskip("mcp.server")
-    import asyncio
-
-    from mashu import server
-
-    monkeypatch.setenv("MASHU_DATABASE_URL", committing_dsn)
-    tool_server = server.build_server()
-
-    def call(tool, **arguments):
-        result = asyncio.run(tool_server.call_tool(tool, arguments))
-        return result.structured_content
-
-    return call
-
-
-def test_memory_list_and_admit_reach_a_topic_by_name_for_this_server_session(mcp, committing_dsn):
+def test_memory_list_and_admit_reach_a_topic_by_name_for_this_server_session(mcp, dsn):
     from mashu import db
 
     assert "exactly one" in mcp("memory_list")["error"]
     assert "exactly one" in mcp("memory_list", scope="a", topic="b")["error"]
     name = f"topic {uuid4().hex[:8]}"
-    with db.transaction(committing_dsn) as cur:
+    with db.transaction(dsn) as cur:
         subject = topic(cur, name, trigger="Before touching the exporter")
         filed(cur, subject, f"read the exporter manifest first {uuid4().hex}")
 
@@ -464,7 +447,7 @@ def test_memory_list_and_admit_reach_a_topic_by_name_for_this_server_session(mcp
     assert first["topic"]["name"] == name
     assert len(first["memories"]) == 1
 
-    with db.transaction(committing_dsn) as cur:
+    with db.transaction(dsn) as cur:
         cur.execute(
             "SELECT detail FROM event_log WHERE event_type = 'topic_read' "
             "AND detail ->> 'topic_id' = %s",

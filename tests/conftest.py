@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import pathlib
@@ -11,7 +12,7 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
-from mashu import db, ledger, memories, memory_changes, nominations, projects, screen, tasks
+from mashu import db, ledger, memories, memory_changes, nominations, projects, screen, server, tasks
 from mashu.migrate import migrate, migration_files
 
 TEST_DB = os.environ.get("MASHU_TEST_DB", "mashu_test")
@@ -73,6 +74,17 @@ def old_store(tmp_path: pathlib.Path) -> Iterator[Callable[[str], str]]:
     yield build
     with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
+@pytest.fixture
+def mcp(dsn: str, monkeypatch: pytest.MonkeyPatch) -> Callable[..., dict]:
+    """Call one MCP tool, as a client would, against the test's own committed database."""
+    pytest.importorskip("mcp.server")
+    monkeypatch.setenv("MASHU_DATABASE_URL", dsn)
+    tools = server.build_server()
+    return lambda tool, **arguments: (
+        asyncio.run(tools.call_tool(tool, arguments)).structured_content
+    )
 
 
 @pytest.fixture

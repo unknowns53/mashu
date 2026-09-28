@@ -142,6 +142,10 @@ goal と status は Scope の全セッションへ card として push される
 
 初期値であり、実測後に変更してよい。bootstrap card は Task 名・goal・statusと、approach / open questions / blockers / next actions が存在することを示す件数だけから作る。full detail は全欄を含むが常時配信しない。長文が必要なら原典を Artifact Reference に置く。
 
+**上限までの距離を書き手に返す。**上限は拒否されて初めて知るものにしない。`task_get` と MCP の `task_create` / `task_update` / `task_checkpoint` の成功応答は `card_tokens`・`card_limit`・`card_remaining`・`detail_tokens`・`detail_limit` を含む。card 上限を超えた書き込みは、`field`・`limit`・`actual`・`unit`・`over_by` と、card の token を Task 名・goal・status_text・詳細件数・行 overhead に割り振った `breakdown` を構造化して返す。内訳の合計は card の token 数に一致するので、Agent はどの欄を何 token 削れば通るかを試行せずに知れる。MCP の write がこの理由で拒否されたときは、本文を保存せず、拒否された書き込みの transaction とは別に `task_card_write_refused` を event_log に記録し、応答の `refusal_recorded` で記録できたかを示す。
+
+MCP で全文の state を返すのは `task_get` だけである。検索結果、重複候補、楽観チェックで返す現在の state、write の成功応答は card view、つまり goal・status_text・詳細の有無と件数・`updated_at`・`updated_by` だけを返す。全文を write の応答で返すと、読んだつもりのない state が文脈に積もり、card と full detail を分けた意味が薄れる。checkpoint の応答も凍結した state の本文を除く。
+
 **追記は一箇所だけ許す。**`append_next_action` は next_actions に 1 件足すだけで他の欄に触れない。呼び出すのは痛みの記録（9 節の `work`）であって、state を読み終えたセッションではない。痛みは痛かった当人がその場で書くものである。置換は next_actions を丸ごと置き換え、読み取り時の `updated_at` も要求するので、置換で書かせれば、報告は既存の next actions を消すか、state を読みに行く往復のせいで行われないかのどちらかになる。上限・入口拒否・予算判定は置換とまったく同じものを通すので、追記で書ける state は置換でも書けた state に限られる。追記も `updated_at` を動かすため、追記前に読んだ置換は楽観チェックで拒否される。
 
 **並行する置換は楽観チェックで受ける。**複数セッションが同じ Task を同時に更新しうる。`task_update` は読み取り時の `updated_at` を添えて置換し、不一致なら拒否して現在の state を返す。黙って last-writer-wins にすると、並行セッションの一方の作業が痕跡なく消える。
@@ -336,11 +340,11 @@ Memory 関連 Tool は `docs/mashu-v2.md` 8.1 節に記す。`session_bootstrap`
 |---|---|
 | `task_create` | 重複照合つきの Task 作成（5.2 節） |
 | `task_get` / `task_search` / `project_list` | 明示取得・検索 |
-| `task_update` | Current State の置換（楽観チェック・hard limit・予算判定つき） |
+| `task_update` | Current State の置換と任意の Task 名変更（楽観チェック・重複照合・hard limit・予算判定つき） |
 | `task_checkpoint` | 置換 + attempt / decision / artifact の追記 + 履歴凍結（5.6 節） |
 | `task_propose_close` / `task_withdraw_close_proposal` | 終了の提案と取り下げ（6.1 節） |
 
-`attempt_list` / `decision_list` / `artifact_list` は `task_get` の展開引数として提供し、Tool 数の増殖を避ける。**`task_close` は Agent 用 MCP に置かない。**提案は close ではないので `task_propose_close` はこの禁止に触れない。
+`attempt_list` / `decision_list` / `artifact_list` は `task_get` の展開引数として提供し、Tool 数の増殖を避ける。全文の state を返すのは `task_get` だけで、他の Task 系 Tool は card view と予算を返す（5.3 節）。**`task_close` は Agent 用 MCP に置かない。**提案は close ではないので `task_propose_close` はこの禁止に触れない。
 
 ### 13.2 CLI 追加
 
@@ -433,11 +437,12 @@ MCP Tool 追加、server instructions への 9 節の規律の追記、CLI 追�
 
 ## 17. 観測指標と、この設計が誤りだったと知る方法
 
-event_log から最低限次を測れるようにする。active / dormant Task 数、自動 dormant 率、reactivate 頻度、Task card と full detail の token 使用量、Task あたり attempt 数、checkpoint の打たれた率、stale-state incident（古い state を信じて誤った作業が出た pain_report）。
+event_log から最低限次を測れるようにする。active / dormant Task 数、自動 dormant 率、reactivate 頻度、Task card と full detail の token 使用量、`task_card_write_refused` の件数と超過量、Task あたり attempt 数、checkpoint の打たれた率、stale-state incident（古い state を信じて誤った作業が出た pain_report）。
 
 | 観測 | 意味 |
 |---|---|
 | Task card が長文化する | goal / status が索引でなく日誌になっている。card 上限を較正する |
+| `task_card_write_refused` が多い | card 上限が実際の書き方に対して狭いか、goal / status に詳細を書いている。内訳でどの欄が超過を生んだかを見る |
 | full detail が長文化する | schema が広すぎるか、原典を Task に複製している。field 数・上限を見直す |
 | active Task が増え続ける | lease が長すぎるか activity の定義が広すぎる |
 | dormant から頻繁に reactivate される | lease が短すぎる（研究のリズムに合っていない） |

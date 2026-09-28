@@ -345,7 +345,7 @@ bootstrap が常時配信するのは、完全な Task ID、Task 名、goal、st
 - Task を closed にできるのは User だけ。outcome は completed、abandoned、superseded のいずれか
 - Agent は task_propose_close で「終わったと思う」と根拠つきで提案できる。提案は open / closed を動かさず、lease も延ばさない。User が同じ outcome で理由を書かずに close すると、提案の根拠がそのまま close_reason になる
 
-task_update と task_checkpoint は、渡した欄だけを置き換える。省いた欄は前の値を保ち、欄を空にするときは空文字か空リストを渡す。
+task_update と task_checkpoint は、渡した欄だけを置き換える。省いた欄は前の値を保ち、欄を空にするときは空文字か空リストを渡す。MCP で Current State 全文を返すのは task_get だけで、他の Task 系 Tool は goal・status・詳細件数からなる card view を返す。task_get と write の成功応答は card と full detail の予算残量を含み、card 上限を超えた write は超過量と欄ごとの内訳を返して event_log に記録される。
 
 ## Agent から使う
 
@@ -381,7 +381,7 @@ MCP tool は 19 個ある。
 | Project State | task_create | 類似する open Task を確認して Task を作る |
 | Project State | task_get | Task の Current State 全文を取得し、指定した履歴だけ展開する。着手前に必須 |
 | Project State | task_search | Task 名と Current State を検索する |
-| Project State | task_update | Current State を置換する |
+| Project State | task_update | Current State を置換する。`name` を渡すと Task 名も変える |
 | Project State | task_checkpoint | Current State を置換し、区切りとして履歴を凍結する。`attempts`（試したことと結果）、`decisions`（判断と理由）、`artifacts`（外部成果物の原典）も同じ transaction で追記し、artifacts は checkpoint の evidence になる |
 | Project State | task_propose_close | Task の終了案を理由つきで置く |
 | Project State | task_withdraw_close_proposal | close proposal を取り下げる |

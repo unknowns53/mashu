@@ -4,7 +4,7 @@ import psycopg
 import pytest
 
 from conftest import expire, new_project, new_task, update_task
-from mashu import scopes, tasks
+from mashu import db, scopes, tasks
 from mashu.errors import (
     ClosedTaskError,
     DuplicateTaskError,
@@ -63,8 +63,10 @@ def test_a_new_task_starts_open_active_and_dated(cur, task):
     assert task["candidates"] == []
     cur.execute("SELECT detail FROM event_log WHERE event_type = 'task_created'")
     detail = cur.fetchone()["detail"]
-    assert detail["tokens"] == tasks.card_cost(task["task"]["name"], task["state"])
-    assert detail["detail_tokens"] == tasks.state_cost(task["task"]["name"], task["state"])
+    got = tasks.task_get(cur, task["task"]["task_id"])
+    assert got["card_tokens"] == detail["tokens"] == tasks.card_cost(SCHEMA, got["state"])
+    assert got["detail_tokens"] == detail["detail_tokens"] == tasks.state_cost(SCHEMA, got["state"])
+    assert got["card_remaining"] == got["card_limit"] - got["card_tokens"]
 
 
 def test_a_task_that_reads_like_an_open_one_even_a_dormant_one_is_created_only_when_forced(
@@ -135,9 +137,7 @@ def test_a_list_over_five_entries_or_with_an_entry_over_its_limit_is_refused(cur
         ("closed_at = now(), status = %s", "closed"),
     ],
 )
-def test_the_database_keeps_its_ceilings_when_the_code_is_gone_round(
-    cur, task_id, assignment, value
-):
+def test_the_database_keeps_its_ceilings_without_the_code(cur, task_id, assignment, value):
     table = "task" if "status" in assignment else "task_state"
     with pytest.raises(psycopg.errors.CheckViolation):
         cur.execute(f"UPDATE {table} SET {assignment} WHERE task_id = %s", (value, task_id))
@@ -145,16 +145,7 @@ def test_the_database_keeps_its_ceilings_when_the_code_is_gone_round(
 
 # replacement per field, not accumulation (5.3)
 def test_an_update_replaces_the_fields_given_and_keeps_the_omitted_ones(cur, task_id):
-    updated = update_task(
-        cur,
-        task_id,
-        goal=GOAL,
-        status_text="tables written, services next",
-        next_actions=["write the services"],
-    )
-    assert updated["state"]["next_actions"] == ["write the services"]
-    assert updated["state"]["status_text"] == "tables written, services next"
-
+    update_task(cur, task_id, status_text="tables written", next_actions=["write the services"])
     changed = update_task(cur, task_id, status_text="", next_actions=["wire the MCP tools"])
     assert changed["state"]["next_actions"] == ["wire the MCP tools"]
     assert changed["state"]["status_text"] is None
@@ -172,9 +163,9 @@ def test_a_replacement_written_against_a_replaced_state_is_rejected(cur, task):
     with pytest.raises(StaleStateError) as raised:
         update_task(cur, task_id, at=stale, status_text="still writing the tables")
 
-    current = raised.value.current
-    assert current["state"]["status_text"] == "all seven tables are in"
-    assert current["state"]["updated_by"] == "the other session"
+    won = raised.value.current["state"]
+    assert won["status_text"] == "all seven tables are in"
+    assert won["updated_by"] == "the other session"
     cur.execute("SELECT status_text FROM task_state WHERE task_id = %s", (task_id,))
     assert cur.fetchone()["status_text"] == "all seven tables are in"
 
@@ -220,10 +211,8 @@ def test_unscoped_state_spends_a_seat_in_every_scope_and_is_weighed_against_the_
     global_cost = tasks.card_cost(global_task["task"]["name"], global_task["state"])
     totals = tasks.pushed_totals(cur)
     assert totals["unscoped"] == global_cost
-    assert totals["scopes"] == {
-        scope_id: busy_cost,
-        lighter_scope: tasks.card_cost(light["task"]["name"], light["state"]),
-    }
+    light_cost = tasks.card_cost(light["task"]["name"], light["state"])
+    assert totals["scopes"] == {scope_id: busy_cost, lighter_scope: light_cost}
     assert totals["worst"] == global_cost + busy_cost
 
 
@@ -268,17 +257,9 @@ def test_a_store_over_its_ceiling_can_still_be_shrunk_but_not_grown(cur, project
 
 
 def test_a_task_over_new_card_and_detail_limits_can_still_be_shrunk(cur, project, monkeypatch):
-    made = new_task(
-        cur,
-        "oversized after configuration changed",
-        project["project_id"],
-        goal="g" * 80,
-        approach="a" * 400,
-        status_text="s" * 120,
-        next_actions=["n" * 250],
-    )
+    name, fields = "big", {"goal": "g" * 80, "approach": "a" * 400, "status_text": "s" * 120}
+    made = new_task(cur, name, project["project_id"], next_actions=["n" * 250], **fields)
     current = made["state"]
-    name = made["task"]["name"]
     monkeypatch.setenv("MASHU_TASK_CARD_CAPACITY", str(tasks.card_cost(name, current) - 20))
     monkeypatch.setenv("MASHU_TASK_DETAIL_CAPACITY", str(tasks.state_cost(name, current) - 20))
 
@@ -430,7 +411,8 @@ def test_task_card_and_full_detail_have_independent_limits(cur, project, monkeyp
 
     with pytest.raises(OverLimitError) as card_error:
         new_task(cur, name, "mashu", goal=state["goal"], status_text=state["status_text"])
-    assert card_error.value.field == "task bootstrap card"
+    assert (card_error.value.field, card_error.value.over_by) == ("task bootstrap card", 1)
+    assert sum(card_error.value.breakdown.values()) == tasks.card_cost(name, state)
 
     monkeypatch.delenv("MASHU_TASK_CARD_CAPACITY")
     detail = {"goal": "short goal", "approach": "x" * 400, "next_actions": ["y" * 250, "z" * 250]}
@@ -474,3 +456,23 @@ def test_the_append_gates_the_whole_state_not_only_the_new_item(cur, task_id):
 
     with pytest.raises(RefusedError):
         tasks.append_next_action(cur, task_id, "a perfectly clean action", actor="agent")
+
+
+# the MCP boundary (5.3)
+def test_mcp_task_writes_answer_with_the_card_and_log_a_refused_card(mcp, dsn, monkeypatch):
+    with db.transaction(dsn) as cur:
+        new_project(cur, "mashu")
+    made = mcp("task_create", project="mashu", name=SCHEMA, goal=GOAL, approach="a", blockers=["b"])
+    assert set(made["state"]) == {"goal", "status_text", "details", "updated_at", "updated_by"}
+    assert (made["state"]["goal"], made["state"]["details"]["blockers"]) == (GOAL, 1)
+    assert made["card_remaining"] == made["card_limit"] - made["card_tokens"]
+
+    at, task_id = made["state"]["updated_at"], made["task"]["task_id"]
+    monkeypatch.setenv("MASHU_TASK_CARD_CAPACITY", str(made["card_tokens"]))
+    refused = mcp("task_update", task_id=task_id, expect_updated_at=at, name=SAME_WORK)
+    assert refused["over_by"] == refused["actual"] - refused["limit"] > 0
+    assert refused["refusal_recorded"] is True
+    with db.transaction(dsn) as cur:
+        cur.execute("SELECT detail FROM event_log WHERE event_type = 'task_card_write_refused'")
+        assert cur.fetchone()["detail"]["breakdown"] == refused["breakdown"]
+        assert tasks.task_get(cur, task_id)["task"]["name"] == SCHEMA
