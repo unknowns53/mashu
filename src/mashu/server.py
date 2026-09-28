@@ -285,7 +285,6 @@ def build_server() -> Any:
         conflict_instruction: str | None = None,
         delivery: str | None = None,
         scope: str | None = None,
-        guard_action: str | None = None,
         topic: str | None = None,
     ) -> dict[str, Any]:
         """Admit a new Memory with explicit instruction provenance.
@@ -334,7 +333,6 @@ def build_server() -> Any:
                         request_id=request_id,
                         scope_id=scope_id,
                         delivery=delivery,
-                        guard_action=guard_action,
                         topic_id=topic_id,
                     )
                     return _plain({"ok": answer["admitted"], **answer})
@@ -358,7 +356,6 @@ def build_server() -> Any:
                     expected_version=nomination_version,
                     scope_id=scope_id,
                     scope_override=True,
-                    guard_action=guard_action,
                     topic_id=topic_id,
                     approval=approval,
                     request_id=request_id,
@@ -388,10 +385,10 @@ def build_server() -> Any:
 
         Call memory_get first. For replace, pass the successor nomination version just
         read; if it changed, reread it and update the proposal. Old delivery settings carry
-        over by default; pass a complete `successor_settings` object with `delivery`,
-        `scope_id`, and `guard_action` only when the requested change includes new
-        delivery settings. `redeliver` changes only those settings of an active Memory
-        and requires `successor_settings`; its evidence observations say why. For
+        over by default; pass a complete `successor_settings` object with `delivery` and
+        `scope_id` only when the requested change includes new delivery settings.
+        `redeliver` changes only those settings of an active Memory and requires
+        `successor_settings`; its evidence observations say why. For
         `delivery='topic'` add `topic`: an existing topic takes that topic's scope_id or
         null, and a new topic also needs `topic_trigger` (one sentence saying when to read
         it) with `scope_id` naming where it is listed, or null for every session.

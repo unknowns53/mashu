@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import candidate, keys, propose_change, remember
-from mashu import db, memories, memory_change_ui, memory_changes, nominations
+from mashu import db, memories, memory_change_ui, memory_changes, nominations, topics
 
 RULE = "the signed archive index is checked before extraction"
 REASON = "the archived format is no longer used"
@@ -56,8 +56,9 @@ def test_change_review_edits_the_prefilled_reason_before_apply(dsn, monkeypatch)
 
 
 def test_replace_detail_shows_the_successor_snapshot_and_delivery(cur):
+    home = topics.create_topic(cur, name="deploy", trigger="Before releasing", actor="user")
     old = remember(
-        cur, "the old signature guard blocks releases", delivery="guard", guard_action="deploy"
+        cur, "the old signature check blocks releases", delivery="topic", topic_id=home["topic_id"]
     )
     successor = candidate(
         cur, "verify the signed archive envelope before extraction", kind="user_explicit"
@@ -67,13 +68,13 @@ def test_replace_detail_shows_the_successor_snapshot_and_delivery(cur):
         old,
         "replace",
         retirement_kind="superseded",
-        retire_reason="the signed archive rule replaces the old guard",
+        retire_reason="the signed archive rule replaces the old check",
         successor_nomination_id=successor["nomination_id"],
         successor_nomination_version=successor["version"],
     )
     detail = memory_change_ui._detail(proposal, 1, 1)
     assert "verify the signed archive envelope before extraction" in detail
-    assert "replacement delivery: guard:deploy" in detail
+    assert "replacement delivery: topic:deploy" in detail
     assert f"candidate version: {successor['version']}" in detail
     assert "candidate scope: -" in detail
     assert "candidate kind: user_explicit" in detail
@@ -94,7 +95,6 @@ def test_redeliver_detail_shows_where_the_rule_moves_and_the_topic_it_opens(cur,
         successor_settings={
             "delivery": "topic",
             "scope_id": scope_id,
-            "guard_action": None,
             "topic": "calibration",
             "topic_trigger": "Before calibrating difficulty",
         },

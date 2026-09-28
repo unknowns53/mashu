@@ -59,7 +59,7 @@ LIMIT %(limit)s
 # The body is returned here, unlike the tombstones above, and the difference is not an
 # inconsistency.
 _ACTIVE = """
-SELECT m.memory_id, m.content, m.delivery, m.guard_action, m.scope_id, m.topic_id,
+SELECT m.memory_id, m.content, m.delivery, m.scope_id, m.topic_id,
        similarity(m.content, %(text)s) AS score
 FROM memory m
 WHERE m.status = 'active'

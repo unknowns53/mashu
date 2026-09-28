@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check tool actions against configured guard rules."""
+"""Show the rules of the topic linked to a tool call's action before the call runs."""
 
 from __future__ import annotations
 
@@ -139,7 +139,8 @@ def main() -> int:
     MARKERS.mkdir(parents=True, exist_ok=True)
     marker.write_text("", encoding="utf-8")
 
-    lines = [f"Mashu holds this about {action}. Read it, then decide again.", ""]
+    topic = pinned[0].get("topic") if pinned else None
+    lines = [f"Mashu topic '{topic}' applies before {action}. Read it, then decide again.", ""]
     for row in pinned:
         lines.append(row["content"])
         lines.append("")

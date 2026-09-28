@@ -84,7 +84,7 @@ def _successor_snapshot(row: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-_SETTING_KEYS = {"delivery", "scope_id", "guard_action"}
+_SETTING_KEYS = {"delivery", "scope_id"}
 _TOPIC_KEYS = {"topic", "topic_trigger"}
 
 
@@ -101,7 +101,7 @@ def _successor_settings(
         or not set(requested) <= _SETTING_KEYS | _TOPIC_KEYS
     ):
         raise MashuError(
-            "successor_settings must specify delivery, scope_id, and guard_action together, "
+            "successor_settings must specify delivery and scope_id together, "
             "plus topic for delivery 'topic' and topic_trigger when that topic is new"
         )
     delivery = requested["delivery"]
@@ -116,19 +116,11 @@ def _successor_settings(
         cur.execute("SELECT 1 FROM scope WHERE scope_id = %s", (scope_id,))
         if cur.fetchone() is None:
             raise MashuError(f"no successor scope {scope_id}")
-    guard_action = requested["guard_action"]
     if delivery == "scope" and scope_id is None:
         raise MashuError("successor delivery 'scope' needs a scope_id")
-    if delivery == "guard":
-        if not isinstance(guard_action, str) or not guard_action.strip():
-            raise MashuError("successor delivery 'guard' needs a guard_action")
-        guard_action = guard_action.strip()
-    elif guard_action is not None:
-        raise MashuError("successor guard_action only applies to guard delivery")
     settings: dict[str, Any] = {
         "delivery": delivery,
         "scope_id": scope_id,
-        "guard_action": guard_action,
         "topic_id": None,
         "topic_name": None,
         "topic_trigger": None,
@@ -173,7 +165,6 @@ def stored_settings_of_memory(cur: psycopg.Cursor, memory: dict[str, Any]) -> di
     return {
         "delivery": memory["delivery"],
         "scope_id": memory["scope_id"],
-        "guard_action": memory["guard_action"],
         "topic_id": memory["topic_id"],
         "topic_name": name,
         "topic_trigger": None,
@@ -187,7 +178,6 @@ def requested_settings(row: dict[str, Any]) -> dict[str, Any] | None:
     settings: dict[str, Any] = {
         "delivery": row["successor_delivery"],
         "scope_id": row["successor_scope_id"],
-        "guard_action": row["successor_guard_action"],
     }
     if row["successor_topic_name"] is not None:
         settings["topic"] = row["successor_topic_name"]
@@ -472,11 +462,11 @@ def propose(
                 (target_memory_id, target_revision_id, target_updated_at, operation,
                  retirement_kind, retire_reason, relocated_to_kind, relocated_to_id,
                  successor_nomination_id, successor_snapshot, successor_delivery,
-                 successor_scope_id, successor_guard_action, successor_topic_id,
-                 successor_topic_name, successor_topic_trigger, restore_reason, evidence,
-                 conflict_ids, conflict_snapshot, proposed_by)
+                 successor_scope_id, successor_topic_id, successor_topic_name,
+                 successor_topic_trigger, restore_reason, evidence, conflict_ids,
+                 conflict_snapshot, proposed_by)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s)
+                    %s, %s, %s, %s)
             RETURNING *
             """,
             (
@@ -492,7 +482,6 @@ def propose(
                 Jsonb(successor_snapshot) if successor_snapshot is not None else None,
                 successor_settings["delivery"] if successor_settings else None,
                 successor_settings["scope_id"] if successor_settings else None,
-                successor_settings["guard_action"] if successor_settings else None,
                 successor_settings["topic_id"] if successor_settings else None,
                 successor_settings["topic_name"] if successor_settings else None,
                 successor_settings["topic_trigger"] if successor_settings else None,
@@ -511,7 +500,7 @@ def propose(
                 retirement_kind = %s, retire_reason = %s, relocated_to_kind = %s,
                 relocated_to_id = %s, successor_nomination_id = %s,
                 successor_snapshot = %s, successor_delivery = %s, successor_scope_id = %s,
-                successor_guard_action = %s, successor_topic_id = %s,
+                successor_topic_id = %s,
                 successor_topic_name = %s, successor_topic_trigger = %s,
                 restore_reason = %s, evidence = %s,
                 conflict_ids = %s, conflict_snapshot = %s, proposed_by = %s,
@@ -531,7 +520,6 @@ def propose(
                 Jsonb(successor_snapshot) if successor_snapshot is not None else None,
                 successor_settings["delivery"] if successor_settings else None,
                 successor_settings["scope_id"] if successor_settings else None,
-                successor_settings["guard_action"] if successor_settings else None,
                 successor_settings["topic_id"] if successor_settings else None,
                 successor_settings["topic_name"] if successor_settings else None,
                 successor_settings["topic_trigger"] if successor_settings else None,
@@ -573,9 +561,7 @@ def propose(
     return _detail(cur, row)
 
 
-def _delivery_label(delivery: str, guard_action: str | None, topic_name: str | None) -> str:
-    if delivery == "guard":
-        return f"guard:{guard_action or '-'}"
+def _delivery_label(delivery: str, topic_name: str | None) -> str:
     if delivery == "topic":
         return f"topic:{topic_name or '-'}"
     return delivery
@@ -595,16 +581,12 @@ def _delivery_move(
     """What a proposal does to delivery, in the words both review screens print."""
     if row["successor_delivery"] is None:
         return []
-    after = _delivery_label(
-        row["successor_delivery"], row["successor_guard_action"], row["successor_topic_name"]
-    )
+    after = _delivery_label(row["successor_delivery"], row["successor_topic_name"])
     if row["successor_delivery"] == "scope":
         after += f" ({_scope_name(cur, row['successor_scope_id'])})"
     lines = []
     if target is not None and row["operation"] == "redeliver":
-        before = _delivery_label(
-            target["delivery"], target.get("guard_action"), target.get("topic_name")
-        )
+        before = _delivery_label(target["delivery"], target.get("topic_name"))
         if target["delivery"] == "scope":
             before += f" ({target.get('scope_name') or '-'})"
         lines.append(f"delivery: {before} -> {after}")
@@ -778,7 +760,6 @@ def apply(
             expected_version=change["successor_snapshot"]["version"],
             scope_id=change["successor_scope_id"],
             scope_override=True,
-            guard_action=change["successor_guard_action"],
             topic_id=_successor_topic(cur, change, actor),
             approval=approval_source,
             request_id=request_id,
@@ -800,7 +781,6 @@ def apply(
             target["memory_id"],
             actor=actor,
             delivery=change["successor_delivery"],
-            guard_action=change["successor_guard_action"],
             scope_id=change["successor_scope_id"],
             clear_scope=change["successor_scope_id"] is None,
             topic_id=_successor_topic(cur, change, actor),
@@ -859,7 +839,6 @@ def apply(
                 {
                     "delivery": change["successor_delivery"],
                     "scope_id": change["successor_scope_id"],
-                    "guard_action": change["successor_guard_action"],
                     "topic_id": change["successor_topic_id"],
                     "topic_name": change["successor_topic_name"],
                     "topic_trigger": change["successor_topic_trigger"],

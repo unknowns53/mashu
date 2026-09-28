@@ -51,7 +51,7 @@ def _redeliver(cur, memory, settings):
 
 
 def _topic_settings(name, trigger=None, scope_id=None):
-    settings = {"delivery": "topic", "scope_id": scope_id, "guard_action": None, "topic": name}
+    settings = {"delivery": "topic", "scope_id": scope_id, "topic": name}
     if trigger is not None:
         settings["topic_trigger"] = trigger
     return settings
@@ -244,22 +244,23 @@ def test_replace_rejects_a_successor_changed_after_proposal(cur):
     assert applied["memory"]["content"] == revised_content
 
 
-def test_replace_inherits_guard_settings_and_clears_nomination_scope(cur):
+def test_replace_inherits_topic_settings_clears_nomination_scope_and_refuses_guard(cur):
     scope = scopes.create_scope(cur, name=f"candidate-only scope {uuid4()}", actor="user")
+    home = topics.create_topic(cur, name="deploy", trigger="Before deploying", actor="user")
     old = remember(
-        cur, f"run the deployment checksum guard {uuid4()}", delivery="guard", guard_action="deploy"
+        cur, f"run the deployment checksum {uuid4()}", delivery="topic", topic_id=home["topic_id"]
     )
     successor = _successor(
         cur, f"verify the release signature {uuid4()}", "incident", scope_id=scope["scope_id"]
     )
+    with pytest.raises(MashuError, match="must be one of always, scope, topic"):
+        _replace(cur, old, successor, successor_settings={"delivery": "guard", "scope_id": None})
     proposal = _replace(cur, old, successor)
-    assert proposal["successor_delivery"] == "guard"
+    assert proposal["successor_delivery"] == "topic"
     assert proposal["successor_scope_id"] is None
-    assert proposal["successor_guard_action"] == "deploy"
 
-    applied = apply_change(cur, proposal, "Replace the guard with the release signature check")
-    assert applied["memory"]["delivery"] == "guard"
-    assert applied["memory"]["guard_action"] == "deploy"
+    applied = apply_change(cur, proposal, "Replace it with the release signature check")
+    assert applied["memory"]["delivery"] == "topic"
     assert applied["memory"]["scope_id"] is None
     cur.execute(
         "SELECT detail FROM event_log WHERE event_type = 'memory_change_applied' "
@@ -267,9 +268,10 @@ def test_replace_inherits_guard_settings_and_clears_nomination_scope(cur):
         (old["memory_id"],),
     )
     assert cur.fetchone()["detail"]["successor_settings"] == {
-        "delivery": "guard",
+        "delivery": "topic",
         "scope_id": None,
-        "guard_action": "deploy",
+        "topic_id": str(home["topic_id"]),
+        "topic_name": "deploy",
     }
 
 
@@ -284,7 +286,7 @@ def test_changed_successor_delivery_is_part_of_the_proposal_version(cur):
     )
     successor = _successor(cur, f"validate the signed import manifest {uuid4()}")
     proposal = _replace(cur, old, successor)
-    moved = {"delivery": "scope", "scope_id": new_scope["scope_id"], "guard_action": None}
+    moved = {"delivery": "scope", "scope_id": new_scope["scope_id"]}
     changed = _replace(
         cur, old, successor, successor_settings=moved, change_id=proposal["change_id"]
     )
@@ -348,7 +350,7 @@ def test_redeliver_refuses_a_topic_opened_differently_or_a_target_changed_after_
         apply_change(cur, proposal, "Put it in a new calibration topic")
     assert memories.get_memory(cur, memory["memory_id"])["delivery"] == "always"
 
-    scoped = {"delivery": "scope", "scope_id": scope_id, "guard_action": None}
+    scoped = {"delivery": "scope", "scope_id": scope_id}
     proposal = _redeliver(cur, memory, scoped)
     memories.revise(cur, memory["memory_id"], content=UPDATED, actor="user")
     with pytest.raises(MashuError, match="changed after this proposal was read"):
@@ -371,7 +373,7 @@ def test_redeliver_over_a_topic_bound_leaves_everything_as_it_was(cur, monkeypat
 def test_redeliver_refuses_a_move_that_changes_nothing_or_carries_retirement(cur):
     memory = remember(cur, RULE)
     with pytest.raises(MashuError, match="as they are"):
-        _redeliver(cur, memory, {"delivery": "always", "scope_id": None, "guard_action": None})
+        _redeliver(cur, memory, {"delivery": "always", "scope_id": None})
     topics.create_topic(cur, name="calibration", trigger="Before calibrating", actor="user")
     with pytest.raises(MashuError, match="already exists"):
         _redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))

@@ -29,7 +29,6 @@ DELIVERY_CHOICES = (
     ("always", "every session, at start"),
     ("scope", "sessions in one Scope, at start"),
     ("topic", "its trigger is listed at start; read when that work begins"),
-    ("guard", "just before one action (e.g. delegate)"),
 )
 
 
@@ -125,8 +124,6 @@ def _memory_record(dsn: str | None, memory_id: UUID) -> dict[str, Any]:
 
 def _delivery(row: dict[str, Any]) -> str:
     delivery = row["delivery"]
-    if delivery == "guard":
-        return f"guard:{row.get('guard_action') or '-'}"
     if delivery == "topic":
         return f"topic:{row.get('topic_name') or '-'}"
     return delivery
@@ -168,8 +165,6 @@ def _detail(row: dict[str, Any], view: str, limit: int = 8) -> str:
         ]
         if row.get("delivery") == "topic":
             lines.append(_field("trigger", row.get("topic_trigger") or "-"))
-        else:
-            lines.append(_field("guard", row.get("guard_action") or "-"))
         if view == "retired":
             lines.append(_field("kind", row.get("retirement_kind") or "legacy"))
             lines.append(_field("retired", _date(row.get("retired_at"))))
@@ -208,7 +203,6 @@ def _full_detail(row: dict[str, Any]) -> str:
         "",
         _field("delivery", _delivery(row)),
         _field("scope", row.get("scope_name") or "-"),
-        _field("guard", row.get("guard_action") or "-"),
     ]
     if row.get("delivery") == "topic":
         lines.extend(
@@ -306,7 +300,6 @@ def _matches(row: dict[str, Any], view: str, query: str) -> bool:
         row.get("content"),
         row.get("scope_name"),
         row.get("delivery"),
-        row.get("guard_action"),
         row.get("topic_name"),
         row.get("retire_reason"),
         row.get("expires_at"),
@@ -476,28 +469,24 @@ def _chosen_delivery(text: str) -> str:
     for name, _meaning in DELIVERY_CHOICES:
         if chosen in (name, name[0]):
             return name
-    raise MashuError("delivery must be always, scope, topic, or guard")
+    raise MashuError("delivery must be always, scope, or topic")
 
 
 def _delivery_answers(
     default: str = "always",
     *,
     scope_default: str | None = None,
-    action_default: str | None = None,
     topic_default: Any = None,
     dsn: str | None = None,
-) -> tuple[str, str | None, str | None, dict[str, Any] | None] | None:
+) -> tuple[str, str | None, dict[str, Any] | None] | None:
     """Ask for a route and its route-specific fields before opening a transaction."""
     print(screen.bold("  where should this rule be delivered?"))
     print(delivery_legend())
-    chosen_answer = screen.editline(
-        "  delivery [always/scope/topic/guard; edit existing]: ", default
-    )
+    chosen_answer = screen.editline("  delivery [always/scope/topic; edit existing]: ", default)
     if isinstance(chosen_answer, screen.Cancelled):
         return None
     chosen = _chosen_delivery(chosen_answer.text or default)
     scope_name: str | None = None
-    action: str | None = None
     topic: dict[str, Any] | None = None
     if chosen == "topic":
         topic = pick_topic(dsn, topic_default)
@@ -515,32 +504,9 @@ def _delivery_answers(
         scope_name = entered_scope.text or scope_default
         if scope_name is None:
             return None
-    elif chosen == "guard":
-        action_prompt = (
-            f"  guard action [enter={action_default}]: "
-            if action_default
-            else "  guard action [required]: "
-        )
-        entered_action = screen.editline(action_prompt, action_default or "")
-        if isinstance(entered_action, screen.Cancelled):
-            return None
-        action = entered_action.text or action_default
-        if action is None:
-            return None
-        scope_prompt = (
-            f"  scope name [enter={scope_default}; '-' means every scope]: "
-            if scope_default
-            else "  scope name [empty means every scope]: "
-        )
-        entered_scope = screen.editline(scope_prompt, scope_default or "")
-        if isinstance(entered_scope, screen.Cancelled):
-            return None
-        scope_name = scope_default if not entered_scope.text else entered_scope.text
-        if scope_name == "-":
-            scope_name = None
     elif scope_default:
         scope_name = scope_default
-    return chosen, scope_name, action, topic
+    return chosen, scope_name, topic
 
 
 def _revise(dsn: str | None, row: dict[str, Any]) -> str:
@@ -640,13 +606,12 @@ def _set_delivery(dsn: str | None, row: dict[str, Any]) -> str:
     answers = _delivery_answers(
         row["delivery"],
         scope_default=row.get("scope_name"),
-        action_default=row.get("guard_action"),
         topic_default=row.get("topic_id"),
         dsn=dsn,
     )
     if answers is None:
         return screen.warning("  ! delivery unchanged")
-    delivery, scope_name, action, topic = answers
+    delivery, scope_name, topic = answers
     with db.transaction(dsn) as cur:
         scope_id = _scope_id(cur, scope_name)
         changed = memories.set_delivery(
@@ -654,7 +619,6 @@ def _set_delivery(dsn: str | None, row: dict[str, Any]) -> str:
             row["memory_id"],
             delivery=delivery,
             actor=ACTOR,
-            guard_action=action,
             scope_id=scope_id,
             clear_scope=scope_id is None,
             topic_id=topic_id_for(cur, topic),
@@ -680,7 +644,7 @@ def _remember(dsn: str | None) -> tuple[str, UUID | None]:
     answers = _delivery_answers(dsn=dsn)
     if answers is None:
         return screen.warning("  ! nothing remembered"), None
-    delivery, scope_name, action, topic = answers
+    delivery, scope_name, topic = answers
     acknowledged: list[UUID] | None = None
     while True:
         try:
@@ -691,7 +655,6 @@ def _remember(dsn: str | None) -> tuple[str, UUID | None]:
                     actor=ACTOR,
                     scope_id=_scope_id(cur, scope_name),
                     delivery=delivery,
-                    guard_action=action,
                     topic_id=topic_id_for(cur, topic),
                     acknowledged_conflicts=acknowledged,
                 )
@@ -750,8 +713,6 @@ def _temporary(dsn: str | None) -> tuple[str, UUID | None]:
 
 
 def _convert_to_temporary(dsn: str | None, row: dict[str, Any]) -> tuple[str, UUID | None]:
-    if row["delivery"] == "guard":
-        return screen.warning("  ! guard memories cannot become temporary"), None
     if row["delivery"] == "topic":
         return screen.warning("  ! topic memories cannot become temporary"), None
     days = _days()

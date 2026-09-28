@@ -396,7 +396,6 @@ def admit(
     expected_version: int,
     scope_id: UUID | None = None,
     scope_override: bool = False,
-    guard_action: str | None = None,
     topic_id: UUID | None = None,
     content: str | None = None,
     approval: dict[str, Any],
@@ -414,7 +413,6 @@ def admit(
             "delivery": delivery,
             "scope_id": str(scope_id) if scope_id else None,
             "scope_override": scope_override,
-            "guard_action": guard_action,
             "content": content,
             "exclude_memory_id": str(exclude_memory_id) if exclude_memory_id else None,
             "approval": approval,
@@ -462,9 +460,7 @@ def admit(
 
     from mashu import memories
 
-    memories.check_delivery(delivery, home, guard_action, topic_id)
-    if delivery != "guard":
-        guard_action = None
+    memories.check_delivery(delivery, home, topic_id)
     if delivery == "topic":
         home = memories.topic_home(cur, delivery, topic_id)
 
@@ -495,11 +491,11 @@ def admit(
     cur.execute(
         """
         INSERT INTO memory
-            (content, scope_id, delivery, guard_action, topic_id, evidence, created_by)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (content, scope_id, delivery, topic_id, evidence, created_by)
+        VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING *
         """,
-        (final, home, delivery, guard_action, topic_id, list(nomination["evidence"]), actor),
+        (final, home, delivery, topic_id, list(nomination["evidence"]), actor),
     )
     memory = cur.fetchone()
     cur.execute(
@@ -572,7 +568,6 @@ def remember_explicit(
     request_id: UUID,
     scope_id: UUID | None = None,
     delivery: str | None = None,
-    guard_action: str | None = None,
     topic_id: UUID | None = None,
 ) -> dict[str, Any]:
     """Nominate an instruction the agent carries and admit it at once when nothing needs reading.
@@ -586,7 +581,6 @@ def remember_explicit(
         "delivery": chosen_delivery,
         "scope_id": scope_id,
         "scope_override": True,
-        "guard_action": guard_action,
         "topic_id": topic_id,
         "approval": approval,
         "request_id": request_id,

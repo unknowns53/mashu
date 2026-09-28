@@ -139,9 +139,7 @@ def _topic(cur: Any, name: str | None) -> UUID | None:
 
 
 def _delivery_label(row: dict[str, Any]) -> str:
-    """How a delivery reads in a listing: guard with its act, topic with its name."""
-    if row["delivery"] == "guard":
-        return f"guard:{row.get('guard_action') or '-'}"
+    """How a delivery reads in a listing: topic with its name."""
     if row["delivery"] == "topic":
         return f"topic:{row.get('topic_name') or '-'}"
     return row["delivery"]
@@ -343,14 +341,9 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
 def cmd_remember(args: argparse.Namespace) -> int:
     if args.until is not None:
-        if (
-            args.scope is not None
-            or args.delivery is not None
-            or args.action is not None
-            or args.force
-        ):
+        if args.scope is not None or args.delivery is not None or args.force:
             raise MashuError(
-                "--until cannot be combined with --scope, --delivery, --action, or --force; "
+                "--until cannot be combined with --scope, --delivery, or --force; "
                 "omit those options when recording a temporary condition"
             )
         days = _parse_days(args.until)
@@ -377,7 +370,6 @@ def cmd_remember(args: argparse.Namespace) -> int:
                     actor=ACTOR,
                     scope_id=scope_id,
                     delivery=delivery,
-                    guard_action=args.action,
                     topic_id=_topic(cur, args.topic),
                     acknowledged_conflicts=acknowledged,
                 )
@@ -1078,7 +1070,6 @@ def cmd_review(args: argparse.Namespace) -> int:
                 delivery=delivery,
                 expected_version=args.version,
                 scope_id=scope_id,
-                guard_action=args.action,
                 topic_id=_topic(cur, args.topic),
                 approval={"kind": "user_direct", "conflict_ids": args.ack_conflict or []},
                 request_id=request_id,
@@ -1109,7 +1100,6 @@ def cmd_deliver(args: argparse.Namespace) -> int:
             _memory_ref(cur, args.memory_id),
             delivery=args.delivery,
             actor=ACTOR,
-            guard_action=args.action,
             scope_id=_scope(cur, args.scope) if args.scope else None,
             clear_scope=args.no_scope,
             topic_id=_topic(cur, args.topic),
@@ -1120,48 +1110,28 @@ def cmd_deliver(args: argparse.Namespace) -> int:
 
 def cmd_guard(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
-        memory_ref = args.pin or args.unpin
-        if memory_ref:
-            memory_id = _memory_ref(cur, memory_ref)
-            current = memories.get_memory(cur, memory_id)
-            if current is None:
-                raise MashuError(f"memory '{memory_ref}' not found")
-            if args.pin:
-                row = memories.set_delivery(
-                    cur,
-                    memory_id,
-                    delivery="guard",
-                    actor=ACTOR,
-                    guard_action=args.action,
-                )
-                print(f"pinned  {row['memory_id']}  {args.action}")
-                return 0
-            delivery = "scope" if current.get("scope_id") else "always"
-            row = memories.set_delivery(
-                cur,
-                memory_id,
-                delivery=delivery,
-                actor=ACTOR,
-                scope_id=current.get("scope_id"),
-            )
-            print(f"unpinned  {row['memory_id']}")
-            return 0
-
         scope_id, _, _ = _routed_scope(cur)
-        pinned = memories.guard_pins(cur, action=args.action, scope_id=scope_id)
-        if pinned:
+        topic, rules = topics.action_rules(cur, args.action, scope_id)
+        if rules:
             events.record(
                 cur,
                 "guard_served",
                 ACTOR,
-                detail={"action": args.action, "count": len(pinned)},
+                detail={
+                    "action": args.action,
+                    "count": len(rules),
+                    "topic_id": str(topic["topic_id"]),
+                },
             )
 
-    if not pinned:
+    if not rules:
         if args.json:
             print("[]")
         return 0
-    pinned = [{"memory_id": row["memory_id"], "content": row["content"]} for row in pinned]
+    pinned = [
+        {"memory_id": row["memory_id"], "content": row["content"], "topic": topic["name"]}
+        for row in rules
+    ]
     if args.json:
         print(json.dumps(_plain(pinned), ensure_ascii=False))
     else:
@@ -1190,9 +1160,10 @@ def _print_topic_rows(rows: list[dict[str, Any]]) -> None:
     width = max(_cells("name"), *(_cells(row["name"]) for row in rows))
     print(f"{_pad('name', width)}  {'scope':<20}  rules  body  trigger")
     for row in rows:
+        before = f"  (before: {row['action']})" if row.get("action") else ""
         print(
             f"{_pad(row['name'], width)}  {(row['scope_name'] or 'every session')[:20]:20}  "
-            f"{row['rules']:5}  {row['body_tokens']:4}  {row['trigger']}"
+            f"{row['rules']:5}  {row['body_tokens']:4}  {row['trigger']}{before}"
         )
 
 
@@ -1206,14 +1177,16 @@ def cmd_topic(args: argparse.Namespace) -> int:
         _field("topic", topic["name"])
         _field("scope", topic["scope"] or "every session")
         _field("trigger", topic["trigger"])
+        if topic["action"]:
+            _field("before", topic["action"])
         print("rules")
         for row in answer["memories"]:
             print(f"  {_short(row['memory_id'])}  {row['content']}")
         return 0
     if args.add is None and args.edit is None and (args.trigger or args.scope or args.rename):
         raise MashuError("--trigger and --scope go with --add or --edit; --rename with --edit")
-    if args.rename is not None and args.edit is None:
-        raise MashuError("--rename goes with --edit")
+    if args.edit is None and (args.rename is not None or args.action or args.no_action):
+        raise MashuError("--rename, --action, and --no-action go with --edit")
     with db.transaction(args.dsn) as cur:
         if args.add is not None:
             if args.trigger is None:
@@ -1242,6 +1215,8 @@ def cmd_topic(args: argparse.Namespace) -> int:
                 trigger=args.trigger,
                 scope_id=_scope(cur, args.scope) if args.scope not in (None, "-") else None,
                 clear_scope=args.scope == "-",
+                action=args.action,
+                clear_action=args.no_action,
             )
             print(f"edited  {row['name']}")
             return 0
@@ -1563,7 +1538,7 @@ Managing durable rules:
   review                    A User decides pending candidates.
   show                      Inspect one memory, candidate, or ledger row.
   retire / revise / deliver Withdraw, rewrite, or change delivery of a memory.
-  guard                     Read or change rules delivered before an action.
+  guard                     Print the topic rules that apply before an action.
   topic                     Group rules read only when one kind of work begins.
 
 Work state and routing:
@@ -1678,7 +1653,6 @@ def build_parser() -> argparse.ArgumentParser:
         examples=(
             'mashu remember "Run migrations before restarting the service"',
             'mashu remember "The staging host is down" --until 2d',
-            'mashu remember "Check the remote before pushing" --delivery guard --action Bash',
             'mashu remember "Keep the win rate between 40 and 60 percent" --topic difficulty',
         ),
     )
@@ -1695,7 +1669,6 @@ def build_parser() -> argparse.ArgumentParser:
     remember.add_argument(
         "--topic", help="file it under this topic, read when the topic's work begins"
     )
-    remember.add_argument("--action", help="the tool the rule stands in front of, for guard")
     remember.add_argument(
         "--until", help="record a dated condition expiring in N days instead (at most 14)"
     )
@@ -1891,7 +1864,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="where the admitted memory is delivered",
     )
     review.add_argument("--scope", help="the scope the admitted memory belongs to")
-    review.add_argument("--action", help="the tool it stands in front of, for guard")
     review.add_argument("--topic", help="the topic it is read with, for topic")
     review.add_argument(
         "--ack-conflict",
@@ -1908,16 +1880,15 @@ def build_parser() -> argparse.ArgumentParser:
     deliver = _command(
         sub,
         "deliver",
-        "move a memory between the opening and the act gate",
+        "move a memory between the opening, a scope, and a topic",
         description=(
-            "Change where an active memory is delivered. Scope delivery requires --scope; guard "
-            "delivery requires --action; topic delivery requires --topic."
+            "Change where an active memory is delivered. Scope delivery requires --scope; "
+            "topic delivery requires --topic."
         ),
         examples=(
             "mashu deliver 1a2b3c4d always",
             "mashu deliver 1a2b3c4d scope --scope deployment",
             "mashu deliver 1a2b3c4d topic --topic difficulty",
-            "mashu deliver 1a2b3c4d guard --action Bash",
         ),
     )
     deliver.add_argument("memory_id", help=_REF_HELP)
@@ -1925,35 +1896,29 @@ def build_parser() -> argparse.ArgumentParser:
         "delivery", choices=memories.DELIVERIES, help="where it is delivered from now on"
     )
     deliver.add_argument("--topic", help="the topic it is read with, for topic")
-    deliver.add_argument("--action", help="the tool it stands in front of, for guard")
     deliver.add_argument("--scope", help="the scope it belongs to, for scope")
     deliver.add_argument(
         "--no-scope",
         action="store_true",
-        help="drop the scope it carried, so a guard rule stands at the act everywhere",
+        help="drop the scope it carried, so an always rule belongs to no scope",
     )
     deliver.set_defaults(func=cmd_deliver)
 
     guard = _command(
         sub,
         "guard",
-        "the rules standing in front of one act",
+        "the topic rules that apply before one action, for the PreToolUse hook",
         description=(
-            "Without --pin or --unpin, print rules guarding ACTION. A non-empty gate exits 2 so "
-            "a hook can show the rules and ask the caller to retry; an empty gate exits 0."
+            "Print the active rules of the topic linked to ACTION (mashu topic --edit NAME "
+            "--action ACTION) when that topic is listed in this directory's sessions. Rules "
+            "exit 2 so a hook can show them and ask the caller to retry; none exits 0."
         ),
         examples=(
-            "mashu guard Bash",
-            "mashu guard Bash --json",
-            "mashu guard Bash --pin 1a2b3c4d",
+            "mashu guard delegate",
+            "mashu guard delegate --json",
         ),
     )
-    guard.add_argument("action", help="the tool being guarded")
-    guard_group = guard.add_mutually_exclusive_group()
-    guard_group.add_argument("--pin", metavar="REF", help=f"pin a memory here: {_REF_HELP}")
-    guard_group.add_argument(
-        "--unpin", metavar="REF", help=f"return a memory to the opening: {_REF_HELP}"
-    )
+    guard.add_argument("action", help="the action a tool call carries out, such as delegate")
     guard.add_argument("--json", action="store_true", help="print as JSON, for the hook to read")
     guard.set_defaults(func=cmd_guard)
 
@@ -1983,7 +1948,10 @@ def build_parser() -> argparse.ArgumentParser:
             "session start and its rules are read when that work begins. --add requires "
             "--trigger; --scope limits the listing to one Scope, and '-' with --edit lists it "
             "in every session. Removing needs a topic with no active rules: one never used is "
-            "deleted, one whose past rules name it is archived. These are User operations."
+            "deleted, one whose past rules name it is archived. --action with --edit links the "
+            "topic to an action such as delegate (an Agent or Task tool call), so the "
+            "PreToolUse hook shows its rules before that call; one action leads to one open "
+            "topic. These are User operations."
         ),
         examples=(
             "mashu topic",
@@ -1991,6 +1959,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--scope game",
             'mashu topic --edit difficulty --trigger "Before changing win rates"',
             "mashu topic --edit difficulty --scope -",
+            "mashu topic --edit delegation --action delegate",
             "mashu topic --remove difficulty",
             "mashu topic show difficulty",
         ),
@@ -2006,6 +1975,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--scope", help="the Scope whose sessions list it; '-' with --edit means every session"
     )
     topic.add_argument("--rename", metavar="NEW", help="the new name, with --edit")
+    topic_action = topic.add_mutually_exclusive_group()
+    topic_action.add_argument(
+        "--action", metavar="ACT", help="with --edit, the action whose tool calls it precedes"
+    )
+    topic_action.add_argument(
+        "--no-action", action="store_true", help="with --edit, unlink it from its action"
+    )
     topic.set_defaults(func=cmd_topic, topic_command=None)
     topic_sub = topic.add_subparsers(dest="topic_command", metavar="COMMAND")
     topic_show = _command(

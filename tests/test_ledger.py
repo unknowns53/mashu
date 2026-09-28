@@ -258,18 +258,20 @@ def test_a_rule_row_can_never_carry_a_filing(cur, task_id):
 
 
 @pytest.mark.parametrize(
-    ("read_first", "session", "topic_read", "route"),
+    ("read_first", "session", "action", "topic_read", "route"),
     [
-        (True, uuid4(), True, "topic_read"),
-        (False, uuid4(), False, "topic_unread"),
-        (False, None, None, "unknown"),
+        (True, uuid4(), "delegate", True, "topic_read"),
+        (False, uuid4(), None, False, "topic_unread"),
+        (False, uuid4(), "delegate", False, "guard"),
+        (False, None, None, None, "unknown"),
     ],
 )
 def test_a_pain_on_a_topic_rule_says_whether_its_session_read_the_topic(
-    cur, read_first, session, topic_read, route
+    cur, read_first, session, action, topic_read, route
 ):
     rule = "keep ship stats fixed when calibrating difficulty levels"
     topic = topics.create_topic(cur, name="calibration", trigger="Before calibrating", actor="user")
+    topics.update_topic(cur, topic["topic_id"], actor="user", action=action)
     remember(cur, rule, delivery="topic", topic_id=topic["topic_id"])
     if read_first:
         topics.read_for_session(cur, "calibration", actor="agent", session=session)
@@ -279,5 +281,5 @@ def test_a_pain_on_a_topic_rule_says_whether_its_session_read_the_topic(
     cur.execute("SELECT detail FROM event_log WHERE event_type = 'delivery_failure_suspected'")
     detail = cur.fetchone()["detail"]
     assert detail["delivery"] == "topic"
-    assert detail["topic_read"] is topic_read
+    assert (detail["topic_read"], detail["topic_action"]) == (topic_read, action)
     assert application.status_snapshot(cur).delivery_failures_by_route == {route: 1}
