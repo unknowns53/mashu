@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Reject staged paths or staged content matching the local banned-pattern list.
 set -eu
 
@@ -7,36 +7,46 @@ hook_dir=$(dirname "$0")
 . "$hook_dir/_budget.sh"
 
 banned_load || exit 1
-trap 'rm -f "$BANNED_PATTERNS_FILE"' EXIT
+scratch=$(mktemp -d) || exit 1
+trap 'rm -f "$BANNED_PATTERNS_FILE"; rm -rf "$scratch"' EXIT
 
-files=$(git diff --cached --name-only --diff-filter=ACMR)
-[ -n "$files" ] || exit 0
-
-failed=0
-
-# Check staged paths.
-offending_paths=$(printf '%s\n' "$files" | grep -E -f "$BANNED_PATTERNS_FILE" || true)
-if [ -n "$offending_paths" ]; then
-    printf '%s\n' "pre-commit: banned pattern in staged path(s):" >&2
-    printf '%s\n' "$offending_paths" | sed 's/^/    /' >&2
-    failed=1
+if ! git diff --cached --name-only -z --diff-filter=ACMR > "$scratch/paths"; then
+    printf '%s\n' "pre-commit: cannot list staged paths." >&2
+    exit 1
 fi
 
-# Check staged blobs, not just added lines.
-# Set IFS to newline so paths with spaces stay intact and updates to $failed persist.
-old_ifs=$IFS
-IFS='
-'
-for f in $files; do
-    [ -n "$f" ] || continue
-    hits=$(git show ":$f" 2>/dev/null | grep -n -E -f "$BANNED_PATTERNS_FILE" || true)
-    if [ -n "$hits" ]; then
+failed=0
+while IFS= read -r -d '' f; do
+    if hits=$(banned_scan <<< "$f"); then
+        printf '%s\n' "pre-commit: banned pattern in staged path:" >&2
+        printf '    %s\n' "$f" >&2
+        failed=1
+    else
+        status=$?
+        if [ "$status" -ne 1 ]; then
+            printf '%s\n' "pre-commit: cannot check banned patterns in staged path $f." >&2
+            failed=1
+        fi
+    fi
+
+    if ! git cat-file blob ":$f" > "$scratch/blob" 2> "$scratch/git-error"; then
+        printf '%s\n' "pre-commit: cannot read staged blob $f:" >&2
+        cat "$scratch/git-error" >&2
+        failed=1
+        continue
+    fi
+    if hits=$(banned_scan -n -- "$scratch/blob"); then
         printf '%s\n' "pre-commit: banned pattern in $f:" >&2
         printf '%s\n' "$hits" | sed 's/^/    /' >&2
         failed=1
+    else
+        status=$?
+        if [ "$status" -ne 1 ]; then
+            printf '%s\n' "pre-commit: cannot check banned patterns in staged blob $f." >&2
+            failed=1
+        fi
     fi
-done
-IFS=$old_ifs
+done < "$scratch/paths"
 
 if [ "$failed" -ne 0 ]; then
     printf '%s\n' "pre-commit: commit aborted. Remove the flagged text; do not use --no-verify." >&2
@@ -44,7 +54,17 @@ if [ "$failed" -ne 0 ]; then
 fi
 
 # Hold tests/ to its line budget whenever the commit touches tests/.
-if printf '%s\n' "$(git diff --cached --name-only)" | grep -q '^tests/'; then
+if git diff --cached --quiet -- tests/; then
+    budget_changed=0
+else
+    status=$?
+    if [ "$status" -ne 1 ]; then
+        printf '%s\n' "pre-commit: cannot inspect staged tests/ changes." >&2
+        exit 1
+    fi
+    budget_changed=1
+fi
+if [ "$budget_changed" -eq 1 ]; then
     budget=$(budget_staged)
     count=$(budget_count)
     if [ -z "$budget" ]; then

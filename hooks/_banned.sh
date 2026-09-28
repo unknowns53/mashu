@@ -12,7 +12,16 @@ banned_load() {
     fi
 
     BANNED_PATTERNS_FILE=$(mktemp) || return 1
-    grep -vE '^[[:space:]]*(#|$)' "$src" > "$BANNED_PATTERNS_FILE" 2>/dev/null
+    if grep -vE '^[[:space:]]*(#|$)' "$src" > "$BANNED_PATTERNS_FILE"; then
+        :
+    else
+        status=$?
+        if [ "$status" -ne 1 ]; then
+            printf '%s\n' "hook: cannot check banned patterns in $src." >&2
+            rm -f "$BANNED_PATTERNS_FILE"
+            return 1
+        fi
+    fi
 
     if [ ! -s "$BANNED_PATTERNS_FILE" ]; then
         printf '%s\n' "hook: .git-banned-patterns contains no patterns." >&2
@@ -20,6 +29,21 @@ banned_load() {
         return 1
     fi
 
+    if grep -E -f "$BANNED_PATTERNS_FILE" /dev/null >/dev/null; then
+        :
+    else
+        status=$?
+        if [ "$status" -ne 1 ]; then
+            printf '%s\n' "hook: cannot check banned patterns in $src." >&2
+            rm -f "$BANNED_PATTERNS_FILE"
+            return 1
+        fi
+    fi
+
     export BANNED_PATTERNS_FILE
     return 0
+}
+
+banned_scan() {
+    grep -E -f "$BANNED_PATTERNS_FILE" "$@"
 }

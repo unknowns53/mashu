@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 
+from sessionstart_guard import mashu_command
+
 #: Which judgement a tool carries out, for the tools the client itself ships.
 ACTIONS = {
     "Task": "delegate",
@@ -119,7 +121,7 @@ def main() -> int:
 
     try:
         done = subprocess.run(
-            ["mashu", "guard", action, "--json"],
+            [mashu_command(), "guard", "--json", "--", action],
             capture_output=True,
             text=True,
             timeout=20,

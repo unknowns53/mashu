@@ -9,12 +9,17 @@ hook_dir=$(dirname "$0")
 banned_load || exit 1
 trap 'rm -f "$BANNED_PATTERNS_FILE"' EXIT
 
-hits=$(grep -n -E -f "$BANNED_PATTERNS_FILE" "$1" || true)
-if [ -n "$hits" ]; then
+if hits=$(banned_scan -n -- "$1"); then
     printf '%s\n' "commit-msg: banned pattern in the commit message:" >&2
     printf '%s\n' "$hits" | sed 's/^/    /' >&2
     printf '%s\n' "commit-msg: commit aborted. Rewrite the message; do not use --no-verify." >&2
     exit 1
+else
+    status=$?
+    if [ "$status" -ne 1 ]; then
+        printf '%s\n' "commit-msg: cannot check banned patterns in the commit message." >&2
+        exit 1
+    fi
 fi
 
 if budget_raised && ! grep -q -E '^Test-Budget-Instruction: .+' "$1"; then

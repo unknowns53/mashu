@@ -12,6 +12,11 @@ import sys
 _VENV = pathlib.Path(__file__).resolve().parent.parent / ".venv"
 MASHU = _VENV / "Scripts" / "mashu.exe" if os.name == "nt" else _VENV / "bin" / "mashu"
 
+
+def mashu_command() -> str:
+    return str(MASHU) if MASHU.exists() else "mashu"
+
+
 #: Context preamble used after compaction.
 REDELIVERY = (
     "Mashu: 直前の圧縮で、セッション開始時に配信された知識が文脈から落ちた。"
@@ -41,10 +46,9 @@ def main() -> int:
     if not where or not pathlib.Path(where).is_dir():
         where = None
 
-    command = str(MASHU) if MASHU.exists() else "mashu"
     try:
         done = subprocess.run(
-            [command, "bootstrap"],
+            [mashu_command(), "bootstrap"],
             capture_output=True,
             text=True,
             timeout=20,
