@@ -341,9 +341,14 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
 def cmd_remember(args: argparse.Namespace) -> int:
     if args.until is not None:
-        if args.scope is not None or args.delivery is not None or args.force:
+        if (
+            args.scope is not None
+            or args.delivery is not None
+            or args.topic is not None
+            or args.force
+        ):
             raise MashuError(
-                "--until cannot be combined with --scope, --delivery, or --force; "
+                "--until cannot be combined with --scope, --delivery, --topic, or --force; "
                 "omit those options when recording a temporary condition"
             )
         days = _parse_days(args.until)
@@ -1507,6 +1512,8 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
+    if args.dsn is not None:
+        os.environ[db.DSN_ENV_VAR] = args.dsn
     if args.agent:
         os.environ["MASHU_AGENT"] = args.agent
     from mashu import server
@@ -1648,7 +1655,8 @@ def build_parser() -> argparse.ArgumentParser:
         "write a rule straight into the active set (the only immediate path)",
         description=(
             "Write a User-confirmed rule directly into active memory. Use --until instead for "
-            "a temporary condition; it cannot be combined with delivery options."
+            "a temporary condition; it cannot be combined with --scope, --delivery, "
+            "--topic, or --force."
         ),
         examples=(
             'mashu remember "Run migrations before restarting the service"',

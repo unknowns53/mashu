@@ -92,18 +92,30 @@ _PROPOSAL_COLUMNS = """
        cp.state_at AS proposed_against, cp.proposed_at, cp.proposed_by
 """
 _PROPOSAL_JOIN = "LEFT JOIN task_close_proposal cp ON cp.task_id = t.task_id"
+_NO_PROPOSAL_COLUMNS = """
+       NULL AS proposed_outcome, NULL AS proposed_reason,
+       NULL AS proposed_against, NULL AS proposed_at, NULL AS proposed_by
+"""
 
-_TASK_ROW = f"""
+
+def _task_row(include_proposals: bool) -> str:
+    proposal_columns = _PROPOSAL_COLUMNS if include_proposals else _NO_PROPOSAL_COLUMNS
+    proposal_join = _PROPOSAL_JOIN if include_proposals else ""
+    return f"""
 SELECT t.*, p.name AS project_name, {_ACTIVITY} AS activity,
        clock_timestamp() - ts.updated_at AS state_age,
        ts.goal, ts.approach, ts.status_text, ts.open_questions, ts.blockers,
        ts.next_actions, ts.updated_at, ts.updated_by,
-{_PROPOSAL_COLUMNS}
+{proposal_columns}
 FROM task t
 JOIN project p ON p.project_id = t.project_id
 JOIN task_state ts ON ts.task_id = t.task_id
-{_PROPOSAL_JOIN}
+{proposal_join}
 """
+
+
+_TASK_ROW = _task_row(True)
+_TASK_ROW_NO_PROPOSALS = _task_row(False)
 
 
 def _floor() -> float:
@@ -307,7 +319,11 @@ def task_get(cur: psycopg.Cursor, task_id: UUID) -> dict[str, Any]:
 
 
 def task_list(
-    cur: psycopg.Cursor, *, project: UUID | str | None = None, activity: str = "active"
+    cur: psycopg.Cursor,
+    *,
+    project: UUID | str | None = None,
+    activity: str = "active",
+    include_proposals: bool = True,
 ) -> list[dict[str, Any]]:
     """Tasks in one activity, newest activity first."""
     if activity not in ("active", "dormant", "open", "closed", "all"):
@@ -320,9 +336,10 @@ def task_list(
         "closed": "t.status = 'closed'",
         "all": "TRUE",
     }[activity]
+    task_row = _TASK_ROW if include_proposals else _TASK_ROW_NO_PROPOSALS
     cur.execute(
         f"""
-        {_TASK_ROW}
+        {task_row}
         WHERE {where} AND (%(project)s::uuid IS NULL OR t.project_id = %(project)s::uuid)
         ORDER BY t.last_activity_at DESC, t.task_id
         """,

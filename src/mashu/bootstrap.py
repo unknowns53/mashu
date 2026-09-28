@@ -18,7 +18,14 @@ TASK_DETAIL_INSTRUCTION = (
 
 def active_states(cur: psycopg.Cursor, scope_id: UUID | None = None) -> list[dict[str, Any]]:
     """The active tasks whose state this session is entitled to, in a fixed order."""
-    rows = tasks.task_list(cur, activity="active")
+    cur.execute(
+        "SELECT to_regclass('task') IS NOT NULL AS tasks, "
+        "to_regclass('task_close_proposal') IS NOT NULL AS proposals"
+    )
+    available = cur.fetchone()
+    if not available["tasks"]:
+        return []
+    rows = tasks.task_list(cur, activity="active", include_proposals=available["proposals"])
     homes = {
         row["project_id"]: row["scope_id"]
         for row in projects.list_projects(cur, include_archived=True)
