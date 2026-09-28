@@ -87,6 +87,18 @@ def _detail(row: dict[str, Any], place: int, total: int) -> str:
                 "",
             ]
         )
+        if row.get("relocated_to_id"):
+            lines.append(f"    moved to {row['relocated_to_kind']}: {row['relocated_to_id']}")
+            destination = row.get("destination")
+            if destination:
+                lines.extend(
+                    [
+                        screen.wrap(destination["content"], indent="    "),
+                        f"    destination scope: {destination['scope_name'] or '-'}",
+                        f"    destination expires: {destination['expires_at']}",
+                    ]
+                )
+            lines.append("")
     if row["operation"] == "restore":
         lines.extend([screen.accent("  restore reason"), screen.wrap(row["restore_reason"]), ""])
     if row["operation"] == "redeliver":
@@ -167,19 +179,19 @@ def _detail(row: dict[str, Any], place: int, total: int) -> str:
     return "\n".join(lines)
 
 
-def _edit_reason(dsn: str | None, row: dict[str, Any]) -> str:
+def _edit_reason(dsn: str | None, row: dict[str, Any]) -> tuple[str, bool]:
     if row["operation"] == "redeliver":
         return screen.warning(
             "  ! a redeliver proposal has no reason to edit; its evidence says why"
-        )
+        ), False
     field = "restore_reason" if row["operation"] == "restore" else "retire_reason"
     current = row[field] or ""
     edited = screen.editline(f"  {field} [enter keeps current]: ", current)
     if isinstance(edited, screen.Cancelled):
-        return screen.warning("  ! proposal unchanged")
+        return screen.warning("  ! proposal unchanged"), False
     reason = edited.text or current
     if not reason:
-        return screen.warning("  ! proposal unchanged — reason is required")
+        return screen.warning("  ! proposal unchanged — reason is required"), False
     try:
         with db.transaction(dsn) as cur:
             updated = memory_changes.propose(
@@ -203,12 +215,12 @@ def _edit_reason(dsn: str | None, row: dict[str, Any]) -> str:
                 change_id=row["change_id"],
             )
     except MashuError as refusal:
-        return screen.danger(f"  {refusal}")
+        return screen.danger(f"  {refusal}"), False
     row.update(updated)
-    return screen.success(f"  ✓ updated proposal v{updated['version']}")
+    return screen.success(f"  ✓ updated proposal v{updated['version']}"), True
 
 
-def _apply(dsn: str | None, row: dict[str, Any]) -> str:
+def _apply(dsn: str | None, row: dict[str, Any]) -> tuple[str, bool, bool]:
     conflicts = [
         item["memory_id"]
         for item in row.get("conflicts", [])
@@ -229,18 +241,26 @@ def _apply(dsn: str | None, row: dict[str, Any]) -> str:
             try:
                 refreshed = _refresh(dsn, row)
             except MashuError:
-                return screen.danger(f"  {refusal}")
+                return screen.danger(f"  {refusal}"), False, False
             row.update(refreshed)
-            return screen.warning(
-                "  ! target, successor, or retirement conflicts changed; read the updated proposal "
-                "and press y again"
+            return (
+                screen.warning(
+                    "  ! target, successor, or retirement conflicts changed; "
+                    "read the updated proposal and press y again"
+                ),
+                False,
+                True,
             )
-        return screen.danger(f"  {refusal}")
+        return screen.danger(f"  {refusal}"), False, False
     body = result.get("memory") or {}
-    return screen.success(
-        f"  ✓ {result['operation']} {_short(row['target_memory_id'])}"
-        + (f" → {_short(body['memory_id'])}" if result["operation"] == "replace" else "")
-        + (f"  {row['delivery_move'][0]}" if result["operation"] == "redeliver" else "")
+    return (
+        screen.success(
+            f"  ✓ {result['operation']} {_short(row['target_memory_id'])}"
+            + (f" → {_short(body['memory_id'])}" if result["operation"] == "replace" else "")
+            + (f"  {row['delivery_move'][0]}" if result["operation"] == "redeliver" else "")
+        ),
+        True,
+        False,
     )
 
 
@@ -290,18 +310,18 @@ def _refresh(dsn: str | None, row: dict[str, Any]) -> dict[str, Any]:
         )
 
 
-def _decide(dsn: str | None, row: dict[str, Any], status: str) -> str:
+def _decide(dsn: str | None, row: dict[str, Any], status: str) -> tuple[str, bool]:
     answer = screen.typed(f"  why {status} this proposal? ")
     if isinstance(answer, screen.Cancelled) or not answer.text:
-        return screen.warning("  ! proposal left pending")
+        return screen.warning("  ! proposal left pending"), False
     try:
         with db.transaction(dsn) as cur:
             memory_changes.decide(
                 cur, row["change_id"], status=status, actor="user", reason=answer.text
             )
     except MashuError as refusal:
-        return screen.danger(f"  {refusal}")
-    return screen.success(f"  ✓ {status} {_short(row['change_id'])}")
+        return screen.danger(f"  {refusal}"), False
+    return screen.success(f"  ✓ {status} {_short(row['change_id'])}"), True
 
 
 def _move(at: int, total: int, key: str) -> int:
@@ -326,6 +346,7 @@ def run(dsn: str | None = None) -> int:
         return 0
     at, offset, more = 0, 0, 0
     reading = False
+    conflicts_seen = False
     note = ""
     while rows:
         at = min(at, len(rows) - 1)
@@ -333,6 +354,8 @@ def run(dsn: str | None = None) -> int:
             under = screen.trailer(_DETAIL_KEYS, note)
             page, more = screen.paged(_detail(rows[at], at + 1, len(rows)), offset, under)
             screen.paint(page + "\n" + under)
+            # A conflict's reason can sit on any page, so applying waits for the last one.
+            conflicts_seen = conflicts_seen or not more
         else:
             screen.paint(
                 screen.list_screen(
@@ -350,12 +373,15 @@ def run(dsn: str | None = None) -> int:
             moved = _move(at, len(rows), key)
             if moved != at:
                 at, offset = moved, 0
+                conflicts_seen = False
             continue
         if not reading and key in ("enter", "right", "l"):
             reading, offset = True, 0
+            conflicts_seen = False
             continue
         if reading and key in ("left", "h"):
             reading, offset = False, 0
+            conflicts_seen = False
             continue
         if reading and key == "space" and more:
             offset = more
@@ -365,25 +391,39 @@ def run(dsn: str | None = None) -> int:
 
         current = rows[at]
         if key == "e":
-            note = _edit_reason(dsn, current)
-            if "updated proposal" in note:
+            note, updated = _edit_reason(dsn, current)
+            if updated:
                 rows = _queue(dsn)
                 at = min(at, max(0, len(rows) - 1))
+                offset, conflicts_seen = 0, False
         elif key == "y":
-            note = _apply(dsn, current)
-            if note.startswith("  ✓"):
+            if (
+                any(
+                    item.get("retirement_kind") in ("invalidated", "legacy")
+                    for item in current.get("conflicts", [])
+                )
+                and not conflicts_seen
+            ):
+                note = screen.warning("  ! read the retirement conflict reasons before applying")
+                continue
+            note, applied, refreshed = _apply(dsn, current)
+            if refreshed:
+                offset, conflicts_seen = 0, False
+            if applied:
                 rows = _queue(dsn)
                 if not rows:
                     print(note)
                     return 0
                 at = min(at, len(rows) - 1)
+                offset, conflicts_seen = 0, False
         elif key in ("d", "w"):
-            note = _decide(dsn, current, "declined" if key == "d" else "withdrawn")
-            if note.startswith("  ✓"):
+            note, decided = _decide(dsn, current, "declined" if key == "d" else "withdrawn")
+            if decided:
                 rows = _queue(dsn)
                 if not rows:
                     print(note)
                     return 0
                 at = min(at, len(rows) - 1)
+                offset, conflicts_seen = 0, False
     print(note or "nothing waiting for Memory change review")
     return 0

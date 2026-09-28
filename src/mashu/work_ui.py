@@ -427,13 +427,14 @@ def _replacement(
 
 
 def _replacement_list(label: str, current: list[str]) -> list[str] | screen.Cancelled:
+    initial = " | ".join(current)
     answer = screen.editline(
         f"  {label} [edit existing; ' | ' separates; '-' clears]: ",
-        " | ".join(current),
+        initial,
     )
     if isinstance(answer, screen.Cancelled):
         return answer
-    if answer.text == "":
+    if answer.text == initial or answer.text == "":
         return current
     if answer.text == "-":
         return []

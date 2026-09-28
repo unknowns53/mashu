@@ -432,6 +432,7 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
     at, scroll, more = 0, 0, 0
     back: list[int] = []
     reading = False
+    conflicts_seen = False
     note = ""
 
     while True:
@@ -446,6 +447,8 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
             under = screen.trailer(_ITEM_KEYS, note)
             page, more = screen.paged(_item_text(rows[at], at + 1, len(rows)), scroll, under)
             screen.paint(page + "\n" + under)
+            # A conflict's reason can sit on any page, so admitting waits for the last one.
+            conflicts_seen = conflicts_seen or not more
         else:
             more = 0
             screen.paint(
@@ -478,13 +481,13 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
                 (number for number, row in enumerate(rows) if row["nomination_id"] == selected),
                 0,
             )
-            back, scroll = [], 0
+            back, scroll, conflicts_seen = [], 0, False
             continue
 
         if key in ("left", "h"):
             if reading:
                 reading = False
-                back, scroll = [], 0
+                back, scroll, conflicts_seen = [], 0, False
                 continue
             if query:
                 selected = rows[at]["nomination_id"] if rows else None
@@ -526,13 +529,13 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
             "pageup",
         ):
             at = moved
-            back, scroll = [], 0
+            back, scroll, conflicts_seen = [], 0, False
             continue
 
         if not reading:
             if key in ("enter", "right", "l"):
                 reading = True
-                back, scroll = [], 0
+                back, scroll, conflicts_seen = [], 0, False
             elif key == "s":
                 answer = screen.typed("  why put it off? ")
                 if isinstance(answer, screen.Cancelled) or not answer.text:
@@ -548,7 +551,19 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
 
         decided = rows[at]
         if key in ("y", "enter"):
+            if (
+                any(
+                    item.get("retirement_kind") in ("invalidated", "legacy")
+                    for item in decided.get("conflict_rows", [])
+                )
+                and not conflicts_seen
+            ):
+                note = screen.warning("  ! read the retirement conflict reasons before admitting")
+                continue
+            version = decided["version"]
             note = _admit(dsn, decided)
+            if decided["version"] != version:
+                back, scroll, conflicts_seen = [], 0, False
             verb = "y"
         elif key == "e":
             note = _revise(dsn, decided)
@@ -571,4 +586,4 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
         if not rows:
             reading = False
         at = min(at, max(0, len(rows) - 1))
-        back, scroll = [], 0
+        back, scroll, conflicts_seen = [], 0, False

@@ -605,6 +605,15 @@ def _detail(cur: psycopg.Cursor, row: dict[str, Any]) -> dict[str, Any]:
     row["target"] = target
     row["delivery_move"] = _delivery_move(cur, row, target)
     row["conflicts"] = nominations.conflict_rows(cur, row["conflict_ids"])
+    row["destination"] = None
+    if row["relocated_to_id"]:
+        cur.execute(
+            "SELECT t.content, t.expires_at, s.name AS scope_name "
+            "FROM temporary_context t LEFT JOIN scope s ON s.scope_id = t.scope_id "
+            "WHERE t.context_id = %s",
+            (row["relocated_to_id"],),
+        )
+        row["destination"] = cur.fetchone()
     if row["successor_nomination_id"] is not None:
         cur.execute(
             "SELECT * FROM nomination WHERE nomination_id = %s", (row["successor_nomination_id"],)

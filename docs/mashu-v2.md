@@ -290,7 +290,7 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 | `mashu bootstrap` | push される内容と token を表示 |
 | `mashu admin migrate` | migration 実行 |
 
-Review UI は nomination と Memory change proposal の一覧・個別画面を持つ。Memory change の詳細では対象本文、対象 revision、退役種別、入力済み理由、evidence、conflict、後継または移動先を同時に読める。理由は編集して proposal version を更新できる。`y` で適用し、そのキー操作自体が直接承認になるため二度目の確認は挟まない。対象 revision や conflict が表示後に変わっていれば適用を止め、新しい情報を再読してから適用する。定員などで store が拒んだときは、決定にならず同じ proposal に留まり、拒否の文面がその場に出る。
+Review UI は nomination と Memory change proposal の一覧・個別画面を持つ。Memory change の詳細では対象本文、対象 revision、退役種別、入力済み理由、evidence、conflict、後継または移動先を同時に読める。理由は編集して proposal version を更新できる。`y` で適用し、そのキー操作自体が直接承認になるため二度目の確認は挟まない。invalidated / legacy の conflict を持つ項目は、最後のページまで表示するまで `y` を受け付けない。理由がどのページに載るかは本文の長さで変わるからである。対象 revision や conflict が表示後に変わっていれば適用を止め、先頭ページに戻して新しい情報を再読させる。定員などで store が拒んだときは、決定にならず同じ proposal に留まり、拒否の文面がその場に出る。
 
 まとめて承認するキーは無い。席は 1 件ずつ、その根拠を見て渡す。決めずに退ける保留（`s`、理由必須）だけは別で、status は pending のまま `deferred_at` と理由を持ち、既定の一覧から外れる。決定ではないので pending の件数も短縮 ID での直接操作も変わらず、`mashu review --all` で一覧に戻る。
 

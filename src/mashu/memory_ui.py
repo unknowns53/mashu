@@ -622,6 +622,7 @@ def _set_delivery(dsn: str | None, row: dict[str, Any]) -> str:
             scope_id=scope_id,
             clear_scope=scope_id is None,
             topic_id=topic_id_for(cur, topic),
+            approval_source={"kind": "user_direct"},
         )
     label = f"topic:{topic['name']}" if topic else changed["delivery"]
     return screen.success(f"  ✓ delivery {_short(row['memory_id'])}  {label}")
