@@ -269,7 +269,7 @@ TOTAL            4000 tokens
 
 重要なのは、**Agent に押し込まれる総量を Mashu が一元管理し、subsystem が互いの枠を暗黙に借りない**ことである。Memory が余った Task card 枠を恒久的に使うことも、その逆もしない。Memory の定員判定は v2 のまま admission 時に、Task card は Scope ごとの配信量を 5.3 節のとおり書き込み時に判定する。`mashu status` は card の全 Scope 合計ではなく、最も重い Scope の配信量を表示する。full detail は「入りきらないため検索へ落とす」のではない。存在と取得先を必ず push したうえで、選んだ Task の既知の IDから決定的に pull する。Memory は存在自体を忘れるため本文 push が必要だが、Work は card が取得契機を運ぶため、この二段構造を取れる。
 
-行為の門（v2 6.2 節、action を持つ topic）は Durable Memory の配信機構であり、Project State はそこに使わない。
+guard（v2 6.2 節、action を持つ topic）は Durable Memory の配信機構であり、Project State はそこに使わない。
 
 ## 9. 書き込み規律 — Agent が覚える動詞を最小にする
 
