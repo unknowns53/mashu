@@ -1,0 +1,2 @@
+# Git for Windows checks text out with CRLF by default, and sh cannot run a CRLF script.
+hooks/* text eol=lf
