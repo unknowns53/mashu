@@ -2227,8 +2227,8 @@ def main(argv: list[str] | None = None) -> int:
     except MashuError as error:
         print(str(error), file=sys.stderr)
         return 1
-    except psycopg.errors.UndefinedTable as error:
-        # Explain pending migrations instead of exposing UndefinedTable.
+    except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as error:
+        # A pending migration adds tables and columns alike; explain either instead of raising.
         print(_behind(args) or str(error), file=sys.stderr)
         return 1
 

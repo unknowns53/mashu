@@ -18,7 +18,6 @@ from mashu import (
     tasks,
 )
 from mashu import traces as trace_domain
-from mashu.migrate import migration_files
 
 # Keep test strings dissimilar to prevent cross-test trigram matches.
 RULE = "keep the deployment order in the runbook rather than in anyone's head"
@@ -711,11 +710,11 @@ def test_a_task_prefix_two_rows_answer_to_is_refused_with_both_of_them(run, comm
 
 
 # a checkout ahead of its database (13.2)
-def test_a_store_behind_the_code_says_so_instead_of_raising(capsys, old_store):
-    behind = old_store(migration_files()[-1].name)
+@pytest.mark.parametrize("command", [["review", "--changes", "--list"], ["status"]])
+def test_a_store_behind_the_code_says_so_instead_of_raising(capsys, old_store, command):
+    behind = old_store("0010_topics.sql")
 
-    code = cli.main(["--dsn", behind, "review", "--changes", "--list"])
+    code = cli.main(["--dsn", behind, *command])
     captured = capsys.readouterr()
-    assert code == 1
-    assert "behind the code" in captured.err
-    assert migration_files()[-1].name in captured.err
+    assert code == 1 and "behind the code" in captured.err
+    assert "0010_topics.sql" in captured.err
