@@ -6,7 +6,6 @@ import os
 import re
 import shutil
 import sys
-import textwrap
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -311,20 +310,69 @@ def pad(text: str, limit: int) -> str:
     return clipped + " " * max(0, limit - cells(clipped))
 
 
-def wrap(text: str, indent: str = "  ") -> str:
+def wrap(text: str, indent: str = "  ", width: int | None = None) -> str:
     """Wrap for reading, keeping the line breaks whoever wrote it put in."""
+    width = width or text_width()
     out = []
     for line in text.strip().splitlines():
         if not line.strip():
             out.append("")
             continue
         hang = indent + "  " if line.lstrip().startswith(("-", "*", "•")) else indent
-        out.append(
-            textwrap.fill(
-                line.strip(), width=text_width(), initial_indent=indent, subsequent_indent=hang
-            )
-        )
+        out.extend(_rows(line.strip(), width, indent, hang))
     return "\n".join(out)
+
+
+# The line-start and line-end prohibitions of JIS X 4051 (kinsoku), cut down to the
+# characters agents actually write.
+_NO_LINE_START = frozenset(
+    "、。，．,.)）」』】〕〉》］｝・ー！？!?：；:;ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ々"
+)
+_NO_LINE_END = frozenset("(（「『【〔〈《［｛")
+
+
+def _wide(ch: str) -> bool:
+    return unicodedata.east_asian_width(ch) in "WF"
+
+
+def _breakable(line: str, at: int) -> bool:
+    """Whether a row may end just before line[at].
+
+    Japanese breaks between any two characters, Latin only at a space, so a word like
+    verify_board is never split while a sentence around it still fills the row.
+    """
+    before, after = line[at - 1], line[at]
+    if after == " ":
+        return False
+    if before == " ":
+        return True
+    if after in _NO_LINE_START or before in _NO_LINE_END:
+        return False
+    return _wide(before) or _wide(after)
+
+
+def _rows(line: str, width: int, indent: str, hang: str) -> list[str]:
+    rows, start, lead = [], 0, indent
+    while cells(lead) + cells(line[start:]) > width:
+        room = max(1, width - cells(lead))
+        used, at, cut = 0, start, None
+        while at < len(line):
+            used += cells(line[at])
+            if used > room:
+                break
+            at += 1
+            if at < len(line) and _breakable(line, at):
+                cut = at
+        if line[at] == " ":
+            cut = at + 1
+        elif cut is None:
+            # A single word wider than the row has nowhere else to go.
+            cut = max(at, start + 1)
+        end = cut - 1 if line[cut - 1] == " " else cut
+        rows.append(lead + line[start:end])
+        start, lead = cut, hang
+    rows.append(lead + line[start:])
+    return rows
 
 
 def trailer(*parts: str) -> str:

@@ -415,7 +415,8 @@ TRACED = (
 )
 
 
-def test_a_trace_is_shown_dated_named_and_wrapped_instead_of_as_one_long_line(run, committing_dsn):
+def test_a_trace_is_shown_dated_named_and_wrapped_on_a_terminal(run, committing_dsn, monkeypatch):
+    monkeypatch.setattr(cli, "_width", lambda: 60)
     with db.transaction(committing_dsn) as cur:
         left = trace_domain.put_trace(cur, content=TRACED, actor="agent")
     code, out, _ = run("trace")
@@ -429,7 +430,6 @@ def test_a_trace_is_shown_dated_named_and_wrapped_instead_of_as_one_long_line(ru
         if not line or not line.startswith("  "):
             break
         body.append(line)
-    # Wrapped into several indented rows, none of it lost at the seams.
     assert len(body) >= 3
     assert "".join(line.strip() for line in body) == TRACED
 

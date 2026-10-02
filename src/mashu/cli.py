@@ -32,6 +32,7 @@ from mashu import (
     references,
     routing,
     scopes,
+    screen,
     task_actions,
     task_history,
     tasks,
@@ -174,32 +175,23 @@ def _pad(text: str, width: int) -> str:
 def _flow(text: str, indent: str = "  ", width: int | None = None) -> str:
     """Wrap a long body for reading, counting double-width characters as two."""
     if width is None:
-        width = min(88, max(40, shutil.get_terminal_size((88, 24)).columns))
-    out: list[str] = []
-    for line in text.splitlines() or [""]:
-        line = line.strip()
-        if not line:
-            out.append("")
-            continue
-        row, used = indent, len(indent)
-        for ch in line:
-            cost = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
-            if used + cost > width:
-                cut = row.rfind(" ", len(indent) + 1)
-                if cut > len(indent):
-                    out.append(row[:cut].rstrip())
-                    row = indent + row[cut + 1 :]
-                else:
-                    out.append(row)
-                    row = indent
-                used = len(indent) + _cells(row[len(indent) :])
-                # Drop only the wrap-boundary space; preserve spaces within the text.
-                if ch == " " and row == indent:
-                    continue
-            row += ch
-            used += cost
-        out.append(row)
-    return "\n".join(out)
+        width = _width()
+    if width is None:
+        lines = text.splitlines()
+        return "\n".join(indent + line.strip() if line.strip() else "" for line in lines)
+    return screen.wrap(text, indent, width)
+
+
+def _width() -> int | None:
+    """The width to wrap at, or None when the reader is not a terminal.
+
+    Piped output (the session-start hook, an agent running the CLI) is wrapped again by
+    whatever displays it, at a width this process cannot see, and a second wrap over the
+    first leaves fragments of a line between the breaks.
+    """
+    if not sys.stdout.isatty():
+        return None
+    return min(88, max(40, shutil.get_terminal_size((88, 24)).columns))
 
 
 def _editor_text(content: str) -> str:
