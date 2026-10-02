@@ -317,7 +317,7 @@ def _scopes_page(dsn: str | None) -> None:
             line = screen.clip(
                 f"    {screen.pad(row['name'], 24)} {row['n_active']:>3} memories"
                 f"  ·  {row['push_tokens']:>4} tokens",
-                screen.text_width(),
+                screen.terminal_width(),
             )
             lines.append(screen.selected(line) if index == at else line)
         detail = _scope_detail(rows[at]) if rows else "  No scopes yet. Press n to create one."
@@ -442,7 +442,7 @@ def _topics_page(dsn: str | None) -> None:
                 f"{screen.pad(row.get('scope_name') or 'every session', 16)}"
                 f"{_rules(row['rules']):>9}  ·  {row['body_tokens']:>4} tokens"
                 + (f"  ·  before: {row['action']}" if row.get("action") else ""),
-                screen.text_width(),
+                screen.terminal_width(),
             )
             lines.append(screen.selected(line) if index == at else line)
         detail = _topic_detail(rows[at]) if rows else "  No topics yet. Press n to create one."
@@ -556,7 +556,7 @@ def _route_rows(dsn: str | None) -> list[dict[str, Any]]:
 
 def _route_line(row: dict[str, Any]) -> str:
     destination = row.get("scope_name") or "ignored"
-    return screen.clip(f"    {row['path_prefix']}  →  {destination}", screen.text_width())
+    return screen.clip(f"    {row['path_prefix']}  →  {destination}", screen.terminal_width())
 
 
 def _routes_page(dsn: str | None) -> None:
@@ -725,7 +725,7 @@ def _schema_page(dsn: str | None) -> None:
 def _top_text(at: int, note: str = "") -> str:
     rows = []
     for index, (label, detail) in enumerate(_TOP_ITEMS):
-        line = screen.clip(f"    {screen.pad(label, 23)} {detail}", screen.text_width())
+        line = screen.clip(f"    {screen.pad(label, 23)} {detail}", screen.terminal_width())
         rows.append(screen.selected(line) if index == at else line)
     keys = screen.trailer(_TOP_KEYS, note)
     subtitle = screen.dim("Inspect the store, then change only what you choose.")

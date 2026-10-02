@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - these are absent on Windows
     termios = None
     tty = None
 
-#: The width text is laid out at when the terminal is wider than reads well.
+#: The width assumed when there is no terminal to measure.
 WIDTH = 88
 
 
@@ -259,13 +259,8 @@ def paint(text: str) -> None:
 
 # measuring, so that nothing is printed past the bottom of the screen
 def terminal_width() -> int:
-    """How wide the terminal is, not how wide the writing was laid out to be."""
+    """How wide the terminal is, which is also the width text is laid out at."""
     return max(40, shutil.get_terminal_size((WIDTH, 24)).columns)
-
-
-def text_width() -> int:
-    """The width to lay text out at: the terminal's, but never wider than reads well."""
-    return min(WIDTH, terminal_width())
 
 
 def room_under(*fixed: str) -> int:
@@ -312,7 +307,7 @@ def pad(text: str, limit: int) -> str:
 
 def wrap(text: str, indent: str = "  ", width: int | None = None) -> str:
     """Wrap for reading, keeping the line breaks whoever wrote it put in."""
-    width = width or text_width()
+    width = width or terminal_width()
     out = []
     for line in text.strip().splitlines():
         if not line.strip():

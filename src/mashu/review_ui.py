@@ -146,7 +146,7 @@ def _queue_screen(
 def _item_text(row: dict[str, Any], place: int, total: int) -> str:
     """One candidate as a page of its own, with the pains it rests on under it."""
     label = f" {place} of {total} "
-    across = screen.text_width()
+    across = screen.terminal_width()
     cost = tokens.pushed_cost([row["content"]])
     lines = [
         screen.dim("─" * 4 + label + "─" * max(4, across - 4 - screen.cells(label))),

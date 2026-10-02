@@ -7,7 +7,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -191,7 +190,7 @@ def _width() -> int | None:
     """
     if not sys.stdout.isatty():
         return None
-    return min(88, max(40, shutil.get_terminal_size((88, 24)).columns))
+    return screen.terminal_width()
 
 
 def _editor_text(content: str) -> str:
