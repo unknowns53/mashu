@@ -139,7 +139,7 @@ def _dashboard(dsn: str | None) -> Dashboard:
 
 
 def _choice(label: str, detail: str, current: bool) -> str:
-    width = screen.text_width()
+    width = screen.terminal_width()
     label_width = min(20, max(16, width // 4))
     line = screen.clip(f"    {screen.pad(label, label_width)} {detail}", width)
     return screen.selected(line) if current else line

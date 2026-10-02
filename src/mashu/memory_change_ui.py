@@ -43,7 +43,7 @@ def _detail(row: dict[str, Any], place: int, total: int) -> str:
     target = row["target"]
     successor = row.get("successor")
     label = f" {place} of {total} "
-    across = screen.text_width()
+    across = screen.terminal_width()
     lines = [
         screen.dim("─" * 4 + label + "─" * max(4, across - 4 - screen.cells(label))),
         screen.bold(
