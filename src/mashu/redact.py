@@ -1,4 +1,4 @@
-"""Check input text against configured banned patterns."""
+"""Check input text against tool-call markup and the configured banned patterns."""
 
 from __future__ import annotations
 
@@ -10,6 +10,10 @@ from dataclasses import dataclass
 #: The gitignored file the commit hooks already use.
 PATTERNS_FILE = ".git-banned-patterns"
 PATTERNS_ENV_VAR = "MASHU_BANNED_PATTERNS"
+
+#: An agent's own tool-call syntax. When a model loses track of where one argument ends,
+#: the next argument's opening tag lands inside the text of the one before it.
+CALL_MARKUP = re.compile(r"</?(?:antml:)?(?:parameter|invoke|function_calls)\b")
 
 
 @dataclass(frozen=True)
@@ -24,8 +28,15 @@ class Verdict:
     unchecked: bool = False
     #: How many lines of the list would not compile.
     malformed: int = 0
+    #: True when the text carries tool-call markup.
+    call_markup: bool = False
 
     def reason(self) -> str:
+        if self.call_markup:
+            return (
+                "contains tool-call markup such as <parameter name=...>, so one argument has "
+                "swallowed the next; send each field as its own argument"
+            )
         if self.unchecked:
             return "the banned-pattern list was unavailable, so nothing was checked"
         if self.allowed:
@@ -72,6 +83,8 @@ def load() -> tuple[list[re.Pattern[str]], int] | None:
 
 def check(*texts: str | None) -> Verdict:
     """Whether these pieces of text may be written."""
+    if any(text and CALL_MARKUP.search(text) for text in texts):
+        return Verdict(allowed=False, call_markup=True)
     loaded = load()
     if loaded is None:
         return Verdict(allowed=True, unchecked=True)

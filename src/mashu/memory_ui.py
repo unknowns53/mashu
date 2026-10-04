@@ -144,7 +144,7 @@ def _line(row: dict[str, Any], view: str, width: int) -> str:
 def _field(label: str, value: Any) -> str:
     prefix = f"  {label:<10}"
     text = " ".join(str(value or "-").splitlines())
-    return f"{screen.bold(prefix)}{screen.clip(text, max(1, screen.text_width() - 12))}"
+    return f"{screen.bold(prefix)}{screen.clip(text, max(1, screen.terminal_width() - 12))}"
 
 
 def _detail(row: dict[str, Any], view: str, limit: int = 8) -> str:

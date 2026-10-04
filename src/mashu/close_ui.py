@@ -122,7 +122,7 @@ def _field(label: str, value: Any, *, value_style=None) -> str:
     else:
         text = " ".join(str(value).splitlines())
     prefix = f"  {label:<13}"
-    available = max(1, screen.text_width() - screen.cells(prefix))
+    available = max(1, screen.terminal_width() - screen.cells(prefix))
     shown = screen.clip(text, available)
     if value_style is not None:
         shown = value_style(shown)
@@ -133,7 +133,7 @@ def _detail(row: dict[str, Any], limit: int | None = None) -> str:
     """The selected task's decision context, kept inside the terminal height."""
     task = row["task"]
     title_prefix = f"  ── {_short(task['task_id'])}  "
-    title = screen.clip(task["name"], max(1, screen.text_width() - screen.cells(title_prefix)))
+    title = screen.clip(task["name"], max(1, screen.terminal_width() - screen.cells(title_prefix)))
     activity = (
         screen.success(row["activity"])
         if row["activity"] == "active"
