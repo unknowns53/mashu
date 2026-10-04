@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 from mashu import (
     bootstrap,
+    capacity,
     db,
     events,
     memories,
@@ -52,7 +53,8 @@ INSTRUCTIONS = (
     "one-time fixes. Temporary Context handles expiry. "
     "Durable Memory changes need an explicit user instruction. For a request to remember, "
     "call memory_admit with the content. For an existing Memory, call memory_get, "
-    "memory_change_propose, then memory_change_apply. Follow each tool's description for "
+    "memory_change_propose, then memory_change_apply; a delivery move the user asked for "
+    "takes one memory_redeliver call. Follow each tool's description for "
     "the required fields. Your own suggestion, confidence, and user silence are not "
     "approval; your independent change idea stays pending. After success, briefly report "
     "the target and reason; if it remains pending, say that review is needed."
@@ -342,6 +344,7 @@ def build_server() -> Any:
         delivery: str | None = None,
         scope: str | None = None,
         topic: str | None = None,
+        topic_trigger: str | None = None,
     ) -> dict[str, Any]:
         """Admit a new Memory with explicit instruction provenance.
 
@@ -355,10 +358,14 @@ def build_server() -> Any:
         this provenance is not authentication. Invalidated or legacy conflicts need
         `conflict_ids` and a `conflict_instruction` in which the user addresses them.
         For a rule the user wants read only during one kind of work, pass
-        `delivery='topic'` and an existing `topic` name.
+        `delivery='topic'` and a `topic` name. A topic that does not exist yet is opened
+        with the rule, never without it, and needs `topic_trigger` (one sentence saying
+        when to read it); `scope` names where it is listed, or omit it for every session.
         """
         if approval_kind != "user_instruction":
             return _failure(MashuError("MCP admission requires approval_kind='user_instruction'"))
+        if topic_trigger is not None and topic is None:
+            return _failure(MashuError("topic_trigger opens the topic named by topic; pass both"))
         if (nomination_id is None) == (content is None):
             return _failure(
                 MashuError("pass exactly one of nomination_id (with nomination_version) or content")
@@ -377,8 +384,11 @@ def build_server() -> Any:
             "conflict_instruction": conflict_instruction,
         }
         try:
-            with db.transaction() as cur:
-                topic_id = topics.require_topic(cur, topic)["topic_id"] if topic else None
+            with capacity.doors("mcp"), db.transaction() as cur:
+                topic_id, new_topic = None, None
+                if topic:
+                    listed = scopes.require_scope(cur, scope)["scope_id"] if scope else None
+                    topic_id, new_topic = topics.for_filing(cur, topic, topic_trigger, listed)
                 if content is not None:
                     scope_id, _, _ = _scope(cur, scope)
                     answer = nominations.remember_explicit(
@@ -390,8 +400,13 @@ def build_server() -> Any:
                         scope_id=scope_id,
                         delivery=delivery,
                         topic_id=topic_id,
+                        new_topic=new_topic,
                     )
                     return _plain({"ok": answer["admitted"], **answer})
+                if new_topic is not None:
+                    topic_id = topics.open_instructed(
+                        cur, new_topic, approval=approval, actor=actor()
+                    )
                 cur.execute("SELECT * FROM nomination WHERE nomination_id = %s", (nomination_id,))
                 nomination = cur.fetchone()
                 if nomination is None:
@@ -496,7 +511,7 @@ def build_server() -> Any:
         if approval_kind != "user_instruction":
             return _failure(MashuError("MCP apply requires approval_kind='user_instruction'"))
         try:
-            with db.transaction() as cur:
+            with capacity.doors("mcp"), db.transaction() as cur:
                 result = memory_changes.apply(
                     cur,
                     change_id,
@@ -509,6 +524,52 @@ def build_server() -> Any:
                         "conflict_ids": conflict_ids or [],
                         "conflict_instruction": conflict_instruction,
                         "reversal_instruction": reversal_instruction,
+                    },
+                    actor=actor(),
+                )
+                return _plain({"ok": True, **result})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool()
+    def memory_redeliver(
+        memory_id: UUID,
+        delivery: str,
+        request_id: UUID,
+        approval_kind: str,
+        instruction: str,
+        conversation_ref: str,
+        scope: str | None = None,
+        topic: str | None = None,
+        topic_trigger: str | None = None,
+    ) -> dict[str, Any]:
+        """Move one Memory to the delivery the user instructed, proposed and applied in one call.
+
+        Use it only for a move the user asked for; your own idea goes to
+        memory_change_propose and stays pending. Pass `approval_kind='user_instruction'`, a
+        short exact quote as `instruction`, the `conversation_ref` it came from, and a new
+        `request_id`; a resent request_id returns the first answer. `delivery` is always,
+        scope with `scope` (default: the Memory's current scope), or topic with `topic`: an
+        existing topic keeps its own scope, and a new one also needs `topic_trigger` (one
+        sentence saying when to read it) with `scope` naming where it is listed, or omit it
+        for every session. It is recorded as an applied redeliver proposal.
+        """
+        if approval_kind != "user_instruction":
+            return _failure(MashuError("MCP redeliver requires approval_kind='user_instruction'"))
+        try:
+            with capacity.doors("mcp"), db.transaction() as cur:
+                result = memory_changes.redeliver_instructed(
+                    cur,
+                    memory_id,
+                    delivery=delivery,
+                    scope_id=scopes.require_scope(cur, scope)["scope_id"] if scope else None,
+                    topic=topic,
+                    topic_trigger=topic_trigger,
+                    request_id=request_id,
+                    approval={
+                        "kind": approval_kind,
+                        "instruction": instruction,
+                        "conversation_ref": conversation_ref,
                     },
                     actor=actor(),
                 )

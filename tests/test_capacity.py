@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import remember
-from mashu import capacity, config, memories, scopes, temporary
+from mashu import capacity, config, memories, scopes, temporary, topics
 from mashu.errors import RefusedError
 from mashu.tokens import pushed_cost
 
@@ -117,6 +117,28 @@ def test_the_always_layer_has_a_lower_ceiling_of_its_own(cur, scope_id, monkeypa
     scoped = capacity.check_admission(cur, content=NEW_RULE, delivery="scope", scope_id=scope_id)
     assert scoped["ok"] is True
     assert scoped["capacity"] == config.capacity()
+
+
+def test_a_full_always_layer_says_what_a_topic_would_cost_it_in_the_callers_terms(
+    cur, scope_id, monkeypatch
+):
+    held = topics.create_topic(cur, name="held", trigger="Before tuning", actor="user")
+    topics.create_topic(cur, name="empty", trigger="Before calibrating", actor="user")
+    topics.create_topic(cur, name="placed", trigger="Before placing", scope_id=scope_id, actor="u")
+    remember(cur, RULES[0], delivery="topic", topic_id=held["topic_id"])
+    remember(cur, RULES[1])
+    monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", str(capacity.bootstrap_totals(cur)["always"] + 3))
+
+    refusal = capacity.check_admission(cur, content=NEW_RULE, delivery="always")["refusal"]
+    grown = [pushed_cost([capacity.topic_line("held", n, "Before tuning")]) for n in (1, 2)]
+    opened = pushed_cost([capacity.topic_line("empty", 1, "Before calibrating")])
+    assert "has 3 tokens free" in refusal
+    assert f"'held' +{grown[1] - grown[0]}" in refusal and f"'empty' +{opened}" in refusal
+    assert "'placed'" not in refusal and "mashu retire" in refusal
+    with capacity.doors("mcp"):
+        refusal = capacity.check_admission(cur, content=NEW_RULE, delivery="always")["refusal"]
+    assert "memory_change_propose" in refusal and "memory_redeliver" in refusal
+    assert "mashu " not in refusal
 
 
 def test_a_dated_condition_is_not_weighed_against_the_seats(cur, scope_id, monkeypatch):

@@ -8,7 +8,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import capacity, events, redact
+from mashu import approvals, capacity, events, redact
 from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
@@ -118,6 +118,52 @@ def require_topic(cur: psycopg.Cursor, name: str) -> dict[str, Any]:
     return row
 
 
+def unknown(cur: psycopg.Cursor, name: str) -> MashuError:
+    """The error for a topic an agent named without what opening it takes."""
+    return MashuError(
+        f"no topic named '{name}' (existing topics: {_names(cur)}). To open it with this "
+        "rule, also pass topic_trigger, one sentence saying when to read it, and the scope "
+        "it is listed in, or none for every session"
+    )
+
+
+def for_filing(
+    cur: psycopg.Cursor, name: str, trigger: str | None, scope_id: UUID | None
+) -> tuple[UUID | None, dict[str, Any] | None]:
+    """The open topic an instructed rule is filed under, or the topic it opens.
+
+    Returns the existing topic's id, or the cleaned name, trigger, and scope of a topic to
+    open once the rule is sure to land. A trigger for an existing topic is accepted only
+    when it and the scope are the ones the topic has, so a resent request reads the same.
+    """
+    existing = get_topic(cur, name)
+    if existing is None:
+        if trigger is None:
+            raise unknown(cur, name)
+        name, trigger = validate_new(name, trigger)
+        return None, {"name": name, "trigger": trigger, "scope_id": scope_id}
+    if trigger is not None and (trigger.strip(), scope_id) != (
+        existing["trigger"],
+        existing["scope_id"],
+    ):
+        raise MashuError(
+            f"topic '{existing['name']}' already exists, read in "
+            f"{existing['scope_name'] or 'every session'} when: {existing['trigger']}; "
+            "omit topic_trigger to file under it"
+        )
+    return require_topic(cur, name)["topic_id"], None
+
+
+def open_instructed(
+    cur: psycopg.Cursor, topic: dict[str, Any], *, approval: dict[str, Any], actor: str
+) -> UUID:
+    """Open the topic an instructed write files its rule under, keeping whose words opened it."""
+    source = approvals.validate(
+        {key: approval.get(key) for key in ("kind", "instruction", "conversation_ref")}
+    )
+    return create_topic(cur, actor=actor, approval_source=source, **topic)["topic_id"]
+
+
 def lock_open_topic(cur: psycopg.Cursor, topic_id: UUID) -> dict[str, Any]:
     """The topic a write is about to file a rule under, held against a concurrent archive."""
     cur.execute("SELECT * FROM topic WHERE topic_id = %s FOR SHARE", (topic_id,))
@@ -136,8 +182,12 @@ def create_topic(
     trigger: str,
     actor: str,
     scope_id: UUID | None = None,
+    approval_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Open a topic. An empty one pushes nothing, so no seat is checked."""
+    """Open a topic. An empty one pushes nothing, so no seat is checked.
+
+    An agent opens one only on a user's instruction, whose `approval_source` the event keeps.
+    """
     name, trigger = _clean(name, trigger)
     existing = get_topic(cur, name)
     if existing is not None:
@@ -152,17 +202,15 @@ def create_topic(
         (name, scope_id, trigger, actor),
     )
     row = cur.fetchone()
-    events.record(
-        cur,
-        "topic_created",
-        actor,
-        detail={
-            "topic_id": str(row["topic_id"]),
-            "name": name,
-            "trigger": trigger,
-            "scope_id": str(scope_id) if scope_id else None,
-        },
-    )
+    detail = {
+        "topic_id": str(row["topic_id"]),
+        "name": name,
+        "trigger": trigger,
+        "scope_id": str(scope_id) if scope_id else None,
+    }
+    if approval_source is not None:
+        detail["approval_source"] = approval_source
+    events.record(cur, "topic_created", actor, detail=detail)
     return row
 
 

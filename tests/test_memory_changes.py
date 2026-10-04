@@ -367,3 +367,46 @@ def test_redeliver_refuses_a_topic_opened_differently_or_a_target_changed_after_
     memories.revise(cur, memory["memory_id"], content=UPDATED, actor="user")
     with pytest.raises(MashuError, match="changed after this proposal was read"):
         apply_change(cur, proposal, "Scope it")
+
+
+def test_memory_redeliver_proposes_and_applies_an_instructed_move_in_one_call(
+    mcp, dsn, monkeypatch
+):
+    from mashu import db
+
+    with db.transaction(dsn) as cur:
+        memory = remember(cur, RULE)
+    call = {
+        "memory_id": str(memory["memory_id"]),
+        "request_id": str(uuid4()),
+        "approval_kind": "user_instruction",
+        "instruction": "Move it into a calibration topic",
+        "conversation_ref": "conversation:turn-7",
+        "delivery": "topic",
+        "topic": "calibration",
+    }
+    assert "topic_trigger" in mcp("memory_redeliver", **call)["error"]
+    monkeypatch.setenv("MASHU_TOPIC_CAPACITY", "1")
+    assert mcp("memory_redeliver", **call, topic_trigger="Before calibrating")["ok"] is False
+    monkeypatch.delenv("MASHU_TOPIC_CAPACITY")
+    with db.transaction(dsn) as cur:
+        assert topics.get_topic(cur, "calibration") is None
+        assert cur.execute("SELECT count(*) AS n FROM memory_change").fetchone()["n"] == 0
+
+    moved = mcp("memory_redeliver", **call, topic_trigger="Before calibrating")
+    assert moved["ok"] is True
+    assert mcp("memory_redeliver", **call, topic_trigger="Before calibrating") == moved
+    elsewhere = {**{k: v for k, v in call.items() if k != "topic"}, "delivery": "always"}
+    assert "different memory change request" in mcp("memory_redeliver", **elsewhere)["error"]
+
+    with db.transaction(dsn) as cur:
+        change = memory_changes.get(cur, moved["change_id"])
+        cur.execute("SELECT event_type FROM event_log WHERE memory_id = %s", (memory["memory_id"],))
+        logged = {row["event_type"] for row in cur.fetchall()}
+        topic = topics.get_topic(cur, "calibration")
+    assert change["status"] == "applied" and change["operation"] == "redeliver"
+    assert change["evidence"][0]["ref"] == "conversation:turn-7"
+    assert "Move it into a calibration topic" in change["evidence"][0]["observation"]
+    assert change["approval_source"]["conversation_ref"] == "conversation:turn-7"
+    assert {"memory_change_proposed", "delivery_changed", "memory_change_applied"} <= logged
+    assert change["target"]["topic_id"] == topic["topic_id"]
