@@ -143,6 +143,8 @@ def _successor_settings(
         raise MashuError(
             f"topic '{topic['name']}' already exists; omit topic_trigger to file under it"
         )
+    if topic is None:
+        raise topics.unknown(cur, name)
     topic = topics.require_topic(cur, name)
     if scope_id is not None and scope_id != topic["scope_id"]:
         raise MashuError(
@@ -194,7 +196,9 @@ def _settings_event(settings: dict[str, Any] | None) -> dict[str, Any] | None:
     )
 
 
-def _successor_topic(cur: psycopg.Cursor, change: dict[str, Any], actor: str) -> UUID | None:
+def _successor_topic(
+    cur: psycopg.Cursor, change: dict[str, Any], actor: str, approval_source: dict[str, Any]
+) -> UUID | None:
     """The open topic a proposal files its Memory under, unchanged since it was read.
 
     A proposal that describes a new topic opens it here, inside the applying transaction.
@@ -210,6 +214,7 @@ def _successor_topic(cur: psycopg.Cursor, change: dict[str, Any], actor: str) ->
                 trigger=change["successor_topic_trigger"],
                 scope_id=change["successor_scope_id"],
                 actor=actor,
+                approval_source=approval_source,
             )["topic_id"]
         if (
             existing["archived_at"] is not None
@@ -670,14 +675,21 @@ def apply(
     request_id: UUID,
     approval: dict[str, Any],
     actor: str,
+    redeliver: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Apply the exact displayed proposal once, atomically with its evidence and event."""
+    """Apply the exact displayed proposal once, atomically with its evidence and event.
+
+    `redeliver` is the one-call request a proposal was made for, stored with this request
+    so its request_id cannot be replayed as another change.
+    """
     cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (str(request_id),))
     cur.execute("SELECT * FROM memory_change WHERE apply_request_id = %s", (request_id,))
     reused = cur.fetchone()
     request = approvals.json_value(
         {"change_id": str(change_id), "version": version, "approval": approval}
     )
+    if redeliver is not None:
+        request["redeliver"] = redeliver
     if reused is not None:
         if reused["change_id"] != change_id or reused["apply_request"] != request:
             raise MashuError("request_id was already used for a different memory change request")
@@ -771,7 +783,7 @@ def apply(
             expected_version=change["successor_snapshot"]["version"],
             scope_id=change["successor_scope_id"],
             scope_override=True,
-            topic_id=_successor_topic(cur, change, actor),
+            topic_id=_successor_topic(cur, change, actor, approval_source),
             approval=approval_source,
             request_id=request_id,
             exclude_memory_id=target["memory_id"],
@@ -794,7 +806,7 @@ def apply(
             delivery=change["successor_delivery"],
             scope_id=change["successor_scope_id"],
             clear_scope=change["successor_scope_id"] is None,
-            topic_id=_successor_topic(cur, change, actor),
+            topic_id=_successor_topic(cur, change, actor, approval_source),
             approval_source=approval_source,
         )
         result = {"operation": "redeliver", "memory": moved}
@@ -860,6 +872,88 @@ def apply(
         },
     )
     return safe_result
+
+
+def redeliver_instructed(
+    cur: psycopg.Cursor,
+    memory_id: UUID,
+    *,
+    delivery: str,
+    scope_id: UUID | None,
+    topic: str | None,
+    topic_trigger: str | None,
+    request_id: UUID,
+    approval: dict[str, Any],
+    actor: str,
+) -> dict[str, Any]:
+    """Propose and apply one instructed delivery move in a single transaction.
+
+    The quoted instruction and its conversation reference become the proposal's evidence,
+    so the change leaves the same proposal, application, and events as proposing and then
+    applying it. Without `scope_id`, always and scope keep the Memory's scope, an existing
+    topic gives its own, and a new topic is listed in every session. A resent request_id
+    answers with the first result.
+    """
+    request = approvals.json_value(
+        {
+            "memory_id": memory_id,
+            "delivery": delivery,
+            "scope_id": scope_id,
+            "topic": topic,
+            "topic_trigger": topic_trigger,
+        }
+    )
+    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (str(request_id),))
+    cur.execute("SELECT * FROM memory_change WHERE apply_request_id = %s", (request_id,))
+    reused = cur.fetchone()
+    if reused is not None:
+        stored = reused["apply_request"]
+        if stored.get("redeliver") != request or stored["approval"] != approvals.json_value(
+            approval
+        ):
+            raise MashuError("request_id was already used for a different memory change request")
+        return {**reused["applied_result"], "change_id": reused["change_id"]}
+
+    source = approvals.validate(approval)
+    if "conversation_ref" not in source:
+        raise MashuError("an instructed redeliver needs the conversation_ref of the instruction")
+    target = _current(cur, memory_id)
+    settings: dict[str, Any] = {"delivery": delivery, "scope_id": scope_id}
+    if delivery == "topic":
+        settings["topic"] = topic
+        if topic_trigger is not None:
+            settings["topic_trigger"] = topic_trigger
+    else:
+        if topic is not None or topic_trigger is not None:
+            raise MashuError("topic and topic_trigger only apply to delivery 'topic'")
+        if scope_id is None:
+            settings["scope_id"] = target["scope_id"]
+    change = propose(
+        cur,
+        target_memory_id=memory_id,
+        target_revision_id=target["revision_id"],
+        target_updated_at=target["updated_at"],
+        operation="redeliver",
+        evidence=[
+            {
+                "kind": "artifact",
+                "ref": source["conversation_ref"],
+                "observation": f"the user instructed this delivery: {source['instruction']}",
+            }
+        ],
+        successor_settings=settings,
+        actor=actor,
+    )
+    result = apply(
+        cur,
+        change["change_id"],
+        version=change["version"],
+        request_id=request_id,
+        approval=approval,
+        actor=actor,
+        redeliver=request,
+    )
+    return {**result, "change_id": change["change_id"]}
 
 
 def decide(

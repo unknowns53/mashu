@@ -47,6 +47,9 @@ Agent が既存 Memory の変更を考えた（退役・置換・復帰・配信
     └─ memory_get → memory_change_propose → pending proposal
          └─ User の明示指示があれば memory_change_apply
 
+User が会話中に既存 Memory の配信先の変更を指示した
+    └─ memory_redeliver → 提案と適用を 1 回の呼び出しで完了
+
 User が CLI / TUI で Memory を直接登録・変更した
     └─ active Memory / retired Memory（user_direct として記録）
 
@@ -57,6 +60,10 @@ pending candidate
 incident / friction から自動生成された candidate と Agent 独自の提案は pending に留まる。ユーザーが会話中に明示した記録・変更指示は `memory_admit` / `memory_change_apply` に渡し、同じセッションで実行できる。実行者は Agent のまま記録し、指示の原文と会話参照を別に保存する。これは監査用で、サーバーが会話の真正性を認証するものではない。Agent の有用性判断・confidence・ユーザーの沈黙は承認として扱わない。Project State は別扱いで、Agent が更新した active Task の card は次のセッションへ届く。Current State 全文は常時注入せず、card の完全な task_id から `task_get` で明示取得する。
 
 `memory_admit` に `content` を渡すと、候補の作成と採用を一つの transaction で行う。候補が既存の pending candidate に合流した場合と、invalidated / legacy の退役 Memory と衝突し、その conflict に触れた指示が無い場合は採用せずに止まり、作った候補と台帳行だけを残して nomination を返す。Agent はその本文と conflict を読み、`nomination_id` と nomination `version` を `nomination_version` として `memory_admit` に渡して続ける。この経路では本文・scope・根拠・conflict が読み取り後に変わっていれば拒否する。同じ request ID の再送は、どちらの経路でも、Memory が後から編集・退役されていても初回の採用応答を返す。replace は後継 nomination の内容と旧 Memory の配信条件を提案に固定し、配信条件を変える場合は `successor_settings` に `delivery` と `scope_id`（topic なら `topic` も）をまとめて proposal に含める。
+
+`memory_admit` の `delivery='topic'` にまだ無い topic 名を渡すときは、いつ読むかの一文を `topic_trigger` に、見出しを載せる Scope を `scope` に添える（省略すると全セッション）。topic は記憶を採用する直前に同じ transaction で作られるので、採用せずに止まった場合や容量で拒否された場合は作られず、空の topic は残らない。`topic_trigger` が無いときは、何を渡せばよいかを示して拒否する。
+
+User が配信先（always / scope / topic）の変更だけを指示したときは、`memory_redeliver` に対象の `memory_id`、新しい `delivery`（必要なら `scope`・`topic`・`topic_trigger`）、`request_id`、指示の引用、`conversation_ref` を渡す。サーバーが現在の revision を読み、指示の引用と会話参照を evidence にした redeliver 提案を作り、同じ transaction で適用する。残る proposal・承認出所・event は `memory_change_propose` と `memory_change_apply` を別々に呼んだ場合と同じで、同じ request ID の再送は初回の結果を返す。
 
 一度直せば以後は覚えなくてよい変更は、Memory ではなく Task の next_actions に記録する。pain の prevention-kind を work にするとこの扱いになる。
 
@@ -269,6 +276,8 @@ Temporary Context     400 token
 
 Scope ごとの Memory に独立した上限は無い。2000 から always の使用量を引いた残りが、各 Scope で使える量になる。topic の見出しの行もこの席で数える。Scope を持たない topic の行は always に、Scope を持つ topic の行はその Scope に入る。
 
+容量で拒否されたときの文面は、書き込み前の空きを示す。always への追加が拒否されたときは、代わりに topic へ置いた場合に always 層が払う量（Scope を持たない既存 topic ごとの見出しの増分と、新しい topic なら見出し一行ぶん）も添える。空の topic は見出しを出さないので、最初の規則が入ると見出しの行全体が席に載る。topic への追加がこの行で拒否されたときは、行の全文と token 数を示す。席を空ける方法は、CLI からの書き込みなら `mashu` のコマンドで、MCP からの書き込みなら `memory_change_propose` や `memory_redeliver` の tool 名で示す。
+
 環境変数 MASHU_TOTAL_CAPACITY、MASHU_CAPACITY、MASHU_ALWAYS_CAPACITY、MASHU_PROJECT_CAPACITY、MASHU_TASK_CARD_CAPACITY、MASHU_TASK_DETAIL_CAPACITY、MASHU_TEMPORARY_CAPACITY、MASHU_TOPIC_CAPACITY で変更できる。
 
 Task card の枠は Scope ごとに独立している。Scope を持たない Project の card は全 Scope 共通分として各枠に含まれ、unrouted session にはこの共通分だけが届く。`mashu status` の card 使用量は、最も重い Scope の値である。Task detail は配信枠には含めず、1 Task ごとの上限だけを持つ。
@@ -307,7 +316,7 @@ mashu remember "Do not change ship stats to set difficulty" --topic 難易度較
 mashu deliver 1a2b3c4d topic --topic 難易度較正
 ~~~
 
-使い分けの目安は次のとおり。プロジェクトのどの作業でも守るなら scope、そのプロジェクトの一部の作業でだけ効くなら topic を選び、特定の操作の直前に必ず目に入れたいなら、その topic に action を結びつける。action は topic の編集でだけ設定でき、作成時には聞かれない。一つの action に結びつく open な topic は一つだけで、別の topic に移すときは先に元の topic から外す。一覧と `mashu topic show` は結びついた action を `before: delegate` のように示す。remove できるのは active なルールを持たない topic だけだ。一度も使われていない topic は削除され、名前も空く。退役したルールや提案が名前を参照している topic は、履歴を保つために archive され、一覧から消える。topic の作成と編集は Settings TUI の Topics からもできる。
+使い分けの目安は次のとおり。プロジェクトのどの作業でも守るなら scope、そのプロジェクトの一部の作業でだけ効くなら topic を選び、特定の操作の直前に必ず目に入れたいなら、その topic に action を結びつける。action は topic の編集でだけ設定でき、作成時には聞かれない。一つの action に結びつく open な topic は一つだけで、別の topic に移すときは先に元の topic から外す。一覧と `mashu topic show` は結びついた action を `before: delegate` のように示す。remove できるのは active なルールを持たない topic だけだ。一度も使われていない topic は削除され、名前も空く。退役したルールや提案が名前を参照している topic は、履歴を保つために archive され、一覧から消える。topic の作成と編集は Settings TUI の Topics からもできる。Agent が topic を作れるのは、User の明示指示で記憶を追加・移動するときだけだ。`memory_admit` と `memory_redeliver` に `topic_trigger` を添えると、その記憶とともに新しい topic が作られ、作成の event に指示の引用が残る。
 
 ## Project と Task
 
@@ -362,7 +371,7 @@ claude mcp add mashu \
 
 Agent 名は serve の --agent、または MASHU_AGENT で指定する。別の MCP client を使う場合も、同じく mashu serve を stdio server として登録する。
 
-MCP tool は 19 個ある。
+MCP tool は 20 個ある。
 
 | 分類 | Tool | 役割 |
 |---|---|---|
@@ -373,9 +382,10 @@ MCP tool は 19 個ある。
 | Knowledge | memory_list | 指定 Scope の active Memory を一覧する。`topic` を渡すと、その topic の本文を読み、読んだことを記録する |
 | Knowledge | memory_get | 指定 Memory の本文、revision、evidence、退役種別・理由・後継を読む |
 | Knowledge | memory_nominate | 新規 Memory の pending candidate を作る。replace の後継に使う |
-| Knowledge | memory_admit | 承認根拠を必須にして採用する。`content` を渡せば候補の作成と採用を 1 回で行い、読むべき候補や conflict があれば止まる。止まった候補は `nomination_id` と読み取った version で採用する。request replay は初回応答を返す |
+| Knowledge | memory_admit | 承認根拠を必須にして採用する。`content` を渡せば候補の作成と採用を 1 回で行い、読むべき候補や conflict があれば止まる。止まった候補は `nomination_id` と読み取った version で採用する。まだ無い topic は `topic_trigger` を添えると記憶とともに作る。request replay は初回応答を返す |
 | Knowledge | memory_change_propose | retire / replace / restore / redeliver を作成または更新する。redeliver は本文を変えずに配信条件だけを移し、新しい topic も作れる。replace は後継の内容・version と配信条件を固定する |
 | Knowledge | memory_change_apply | proposal の version と対象・conflict・承認根拠を照合して適用する |
+| Knowledge | memory_redeliver | User が指示した配信先の変更を、redeliver 提案の作成と適用まで 1 回で行う。指示の引用と会話参照が evidence になり、request replay は初回応答を返す |
 | Knowledge | memory_change_withdraw | 不要になった pending proposal を取り下げる |
 | Project State | project_list | Project と Task 件数を一覧する |
 | Project State | task_create | 類似する open Task を確認して Task を作る |
@@ -393,6 +403,7 @@ Agent が守る基本の動詞は次のとおり。
 実際に困った            → pain_report
 User が「覚えて」と言った → memory_admit（content）
 User が既存 Memory の変更を指示 → memory_get → memory_change_propose → memory_change_apply
+User が配信先の変更を指示 → memory_redeliver
 作業の区切り            → task_checkpoint（attempts / decisions / artifacts を添える）
 ~~~
 

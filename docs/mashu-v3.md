@@ -314,7 +314,8 @@ task_checkpoint の `attempts` と `decisions` は「失敗した試行の結末
 | Memory admission / retire / replace / restore / redeliver | 明示指示どおりの実行、または pending proposal | 直接操作 |
 | Memory revise | × | ○ |
 | Temporary Context | × | ○ |
-| Scope / Route / Topic | × | ○（Topic は適用された redeliver / replace 提案でも作られる） |
+| Scope / Route | × | ○ |
+| Topic | 明示指示どおりの採用・配信変更に伴う作成のみ | ○（適用された redeliver / replace 提案でも作られる） |
 
 ## 10. PII と入口拒否
 
