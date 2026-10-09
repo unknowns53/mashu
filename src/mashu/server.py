@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import os
+import sys
 from datetime import date, datetime
-from typing import Any
+from typing import Annotated, Any, NotRequired
 from uuid import UUID, uuid4
+
+if sys.version_info >= (3, 12):
+    from typing import TypedDict
+else:
+    # pydantic, which builds the tool schemas, refuses typing.TypedDict before 3.12.
+    from typing_extensions import TypedDict
 
 from mashu import (
     bootstrap,
@@ -24,9 +31,11 @@ from mashu import (
 )
 from mashu.errors import (
     DuplicateTaskError,
+    MalformedRequestError,
     MashuError,
     OverLimitError,
     ProjectBudgetError,
+    RefusedError,
     StaleStateError,
 )
 
@@ -57,6 +66,32 @@ INSTRUCTIONS = (
     "approval; your independent change idea stays pending. After success, briefly report "
     "the target and reason; if it remains pending, say that review is needed."
 )
+
+
+class EvidenceItem(TypedDict):
+    """An observation behind a Memory change: ledger or trace with id, or artifact with ref."""
+
+    kind: memory_changes.EvidenceKind
+    id: NotRequired[UUID]
+    ref: NotRequired[str]
+    observation: str
+
+
+class _EvidenceSchema:
+    """Show EvidenceItem in the tool schema while the argument still takes any objects.
+
+    A malformed item then reaches the shape pass in memory_changes and is reported with the
+    request's other problems, instead of stopping alone at argument validation.
+    """
+
+    def __get_pydantic_json_schema__(self, core_schema: Any, handler: Any) -> dict[str, Any]:
+        from pydantic import TypeAdapter
+
+        items = TypeAdapter(EvidenceItem).json_schema()
+        return {"type": "array", "minItems": 1, "items": items}
+
+
+EvidenceList = Annotated[list[dict[str, Any]], _EvidenceSchema()]
 
 
 def actor() -> str:
@@ -117,6 +152,12 @@ def _failure(
         )
         if task_write and error.field == "task bootstrap card":
             answer["refusal_recorded"] = _record_card_refusal(error, task_write, task_id)
+    elif isinstance(error, RefusedError) and error.field is not None:
+        answer["field"] = error.field
+        if error.span is not None:
+            answer["span"] = list(error.span)
+    elif isinstance(error, MalformedRequestError):
+        answer["problems"] = error.problems
     return _plain(answer)
 
 
@@ -425,10 +466,10 @@ def build_server() -> Any:
         target_memory_id: UUID,
         target_revision_id: UUID,
         target_updated_at: datetime,
-        operation: str,
-        evidence: list[dict[str, Any]],
+        operation: memory_changes.Operation,
+        evidence: EvidenceList,
         change_id: UUID | None = None,
-        retirement_kind: str | None = None,
+        retirement_kind: memory_changes.RetirementKind | None = None,
         retire_reason: str | None = None,
         successor_nomination_id: UUID | None = None,
         successor_nomination_version: int | None = None,
@@ -437,17 +478,29 @@ def build_server() -> Any:
         relocated_to_id: UUID | None = None,
         restore_reason: str | None = None,
     ) -> dict[str, Any]:
-        """Create or refresh a retire, replace, restore, or redeliver proposal.
+        """Create or refresh (with `change_id`) a retire, replace, restore, or redeliver proposal.
 
-        Call memory_get first. For replace, pass the successor nomination version just
-        read; if it changed, reread it and update the proposal. Old delivery settings carry
-        over by default; pass a complete `successor_settings` object with `delivery` and
-        `scope_id` only when the requested change includes new delivery settings.
-        `redeliver` changes only those settings of an active Memory and requires
-        `successor_settings`; its evidence observations say why. For
-        `delivery='topic'` add `topic`: an existing topic takes that topic's scope_id or
-        null, and a new topic also needs `topic_trigger` (one sentence saying when to read
-        it) with `scope_id` naming where it is listed, or null for every session.
+        Call memory_get first; pass its memory_id, current_revision_id, and updated_at as
+        the target fields. Each operation takes only its own fields:
+        - retire (active Memory): `retire_reason` and `retirement_kind`, one of
+          `invalidated` (the content is wrong), `out_of_scope` (the conditions it served
+          ended), or `relocated` (moved to Temporary Context; also pass
+          `relocated_to_kind='temporary_context'` and `relocated_to_id`).
+        - replace (active Memory): `retire_reason`, plus the nomination_id and version of a
+          successor from memory_nominate as `successor_nomination_id` and
+          `successor_nomination_version` (reread and update if that version changes);
+          `retirement_kind` is `superseded` and may be left out.
+        - restore (retired Memory): `restore_reason`.
+        - redeliver (active Memory): `successor_settings`; the evidence says why.
+        Every `evidence` item cites a ledger row or trace by `id`, or an artifact by `ref`,
+        and says what it shows in `observation`; an observation alone is refused. All shape
+        problems come back together in `problems`.
+
+        Replace keeps the old delivery settings unless `successor_settings` gives both
+        `delivery` and `scope_id`. For `delivery='topic'` add `topic`: an existing topic
+        takes that topic's scope_id or null, and a new topic also needs `topic_trigger`
+        (one sentence saying when to read it) with `scope_id` naming where it is listed, or
+        null for every session.
         """
         try:
             with db.transaction() as cur:

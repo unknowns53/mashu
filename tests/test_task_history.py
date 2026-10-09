@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 
 from conftest import expire, new_project, new_task, update_task
-from mashu import task_history, tasks
+from mashu import server, task_history, tasks
 from mashu.errors import (
     ClosedTaskError,
     MashuError,
@@ -192,19 +192,17 @@ def test_close_freezes_the_last_state_with_the_closing_actor(cur, task_id):
     assert closed["task"]["status"] == "closed"
 
 
-def test_artifact_locator_is_still_checked_as_text(cur, task_id, monkeypatch, tmp_path):
-    patterns = tmp_path / "banned-patterns"
-    patterns.write_text(re.escape(str(Path.home())) + "\n", encoding="utf-8")
-    monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(patterns))
+def test_artifact_locator_is_checked_and_named_without_echoing_it(cur, task, monkeypatch, tmp_path):
+    home = str(Path.home())
+    (tmp_path / "patterns").write_text(re.escape(home) + "\n", encoding="utf-8")
+    monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(tmp_path / "patterns"))
 
-    with pytest.raises(RefusedError):
-        task_history.artifact_link(
-            cur,
-            task_id,
-            actor="agent",
-            kind="file",
-            locator=str(Path.home() / "private" / "result.txt"),
-        )
+    with pytest.raises(RefusedError) as refused:
+        checkpoint(cur, task, artifacts=[{"kind": "file", "locator": f"in {home}/result.txt"}])
+    answer = server._failure(refused.value)
+    assert (answer["field"], answer["span"]) == ("artifacts[0].locator", [3, 3 + len(home)])
+    assert str(refused.value).startswith("artifacts[0].locator matches banned pattern #0 at ")
+    assert home not in str(refused.value)
 
 
 def test_checkpoint_writes_attempts_decisions_and_artifacts_with_the_state(cur, task, task_id):
@@ -287,8 +285,6 @@ def test_one_refused_item_leaves_the_checkpoint_unwritten(cur, task, task_id, it
 def test_history_is_written_only_through_task_checkpoint_over_mcp(monkeypatch):
     pytest.importorskip("mcp.server")
     import asyncio
-
-    from mashu import server
 
     monkeypatch.setenv("MASHU_DATABASE_URL", "dbname=mashu_test_never_created")
     names = {tool.name for tool in asyncio.run(server.build_server().list_tools())}

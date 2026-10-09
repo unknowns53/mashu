@@ -10,9 +10,23 @@ class MashuError(Exception):
 class RefusedError(MashuError):
     """A write the layer refuses to accept."""
 
-    def __init__(self, reason: str):
+    def __init__(
+        self, reason: str, *, field: str | None = None, span: tuple[int, int] | None = None
+    ):
         super().__init__(reason)
         self.reason = reason
+        #: The argument the refused text came from, when the check knew it.
+        self.field = field
+        #: Where in that argument's text the refusal applies, as a slice.
+        self.span = span
+
+
+class MalformedRequestError(MashuError):
+    """A request whose shape is wrong in one or more ways, all reported together."""
+
+    def __init__(self, problems: list[str]):
+        super().__init__("; ".join(problems))
+        self.problems = problems
 
 
 class RetiredConflictError(MashuError):

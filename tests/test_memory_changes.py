@@ -5,8 +5,8 @@ from uuid import uuid4
 import pytest
 
 from conftest import apply_change, propose_change, remember, retire
-from mashu import bootstrap, match, memories, memory_changes, nominations, scopes, topics
-from mashu.errors import MashuError, RefusedError
+from mashu import bootstrap, match, memories, memory_changes, nominations, scopes, server, topics
+from mashu.errors import MalformedRequestError, MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
 RULE = "the storage adapter trusts the signed manifest before selecting a mirror"
@@ -38,7 +38,6 @@ def _replace(cur, old, successor, version=None, **kwargs):
         old,
         "replace",
         ledger_id=successor["evidence"][0],
-        retirement_kind="superseded",
         retire_reason="the successor rule replaces this one",
         successor_nomination_id=successor["nomination_id"],
         successor_nomination_version=version or successor["version"],
@@ -46,8 +45,8 @@ def _replace(cur, old, successor, version=None, **kwargs):
     )
 
 
-def _redeliver(cur, memory, settings):
-    return propose_change(cur, memory, "redeliver", successor_settings=settings)
+def _redeliver(cur, memory, settings, **kwargs):
+    return propose_change(cur, memory, "redeliver", successor_settings=settings, **kwargs)
 
 
 def _topic_settings(name, trigger=None, scope_id=None):
@@ -55,6 +54,19 @@ def _topic_settings(name, trigger=None, scope_id=None):
     if trigger is not None:
         settings["topic_trigger"] = trigger
     return settings
+
+
+def test_a_malformed_proposal_reports_every_shape_problem_at_once(cur):
+    malformed = {"evidence": [{"observation": "x"}], "restore_reason": "r"}
+    with pytest.raises(MalformedRequestError) as refused:
+        propose_change(cur, remember(cur, RULE), "replace", **malformed)
+    assert server._failure(refused.value)["problems"] == [
+        "replace does not take restore_reason",
+        "replace needs retire_reason",
+        "replace needs successor_nomination_id",
+        "replace needs successor_nomination_version, the successor version just read",
+        f"evidence[0] needs {memory_changes.EVIDENCE_SHAPE} (missing: kind, id or ref)",
+    ]
 
 
 def test_agent_proposal_stays_pending_until_explicit_instruction_and_replay_is_idempotent(cur):
@@ -299,13 +311,7 @@ def test_redeliver_moves_a_rule_into_an_existing_topic_without_touching_its_body
     with pytest.raises(MashuError, match="already exists"):
         _redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))
     with pytest.raises(MashuError, match="only changes delivery settings"):
-        propose_change(
-            cur,
-            memory,
-            "redeliver",
-            retire_reason="not a retirement",
-            successor_settings=_topic_settings("calibration"),
-        )
+        _redeliver(cur, memory, _topic_settings("calibration"), retire_reason="no")
 
     proposal = _redeliver(cur, memory, _topic_settings("calibration"))
     assert proposal["delivery_move"] == ["delivery: always -> topic:calibration"]

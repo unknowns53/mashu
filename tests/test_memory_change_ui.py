@@ -82,7 +82,6 @@ def test_replace_detail_shows_the_successor_snapshot_and_delivery(cur):
         cur,
         old,
         "replace",
-        retirement_kind="superseded",
         retire_reason="the signed archive rule replaces the old check",
         successor_nomination_id=successor["nomination_id"],
         successor_nomination_version=successor["version"],

@@ -17,9 +17,7 @@ def create_project(
     """Open a project, refusing a name already taken."""
     if not name or not name.strip():
         raise MashuError("a project needs a name: it is what tasks are filed under")
-    verdict = redact.check(name)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    redact.gate({"name": name})
     if get_project(cur, name) is not None:
         raise MashuError(f"project '{name}' already exists")
 
@@ -52,9 +50,7 @@ def update_project(
     name = (name or "").strip()
     if not name:
         raise MashuError("a project needs a name: it is what tasks are filed under")
-    verdict = redact.check(name)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    redact.gate({"name": name})
 
     cur.execute(
         "SELECT pg_advisory_xact_lock(%s, %s)",

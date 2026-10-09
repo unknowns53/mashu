@@ -108,9 +108,7 @@ def put_temporary(
     """Record a condition together with the moment it stops being one."""
     if not 0 < days <= config.TEMPORARY_MAX_DAYS:
         raise RefusedError(_TOO_LONG.format(max=config.TEMPORARY_MAX_DAYS, asked=f"{days:g} days"))
-    verdict = redact.check(content)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    verdict = redact.gate({"content": content})
 
     # Pushed, so it is weighed before it is written (v3 8).
     _check_room(cur, content=content, scope_id=scope_id)
@@ -143,9 +141,7 @@ def revise(
     content = (content or "").strip()
     if not content:
         raise MashuError("temporary context cannot be empty")
-    verdict = redact.check(content)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    verdict = redact.gate({"content": content})
     cur.execute(
         "SELECT * FROM temporary_context WHERE context_id = %s AND expires_at > now() FOR UPDATE",
         (context_id,),

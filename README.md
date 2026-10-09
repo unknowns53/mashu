@@ -374,7 +374,7 @@ MCP tool は 19 個ある。
 | Knowledge | memory_get | 指定 Memory の本文、revision、evidence、退役種別・理由・後継を読む |
 | Knowledge | memory_nominate | 新規 Memory の pending candidate を作る。replace の後継に使う |
 | Knowledge | memory_admit | 承認根拠を必須にして採用する。`content` を渡せば候補の作成と採用を 1 回で行い、読むべき候補や conflict があれば止まる。止まった候補は `nomination_id` と読み取った version で採用する。request replay は初回応答を返す |
-| Knowledge | memory_change_propose | retire / replace / restore / redeliver を作成または更新する。redeliver は本文を変えずに配信条件だけを移し、新しい topic も作れる。replace は後継の内容・version と配信条件を固定する |
+| Knowledge | memory_change_propose | retire / replace / restore / redeliver を作成または更新する。redeliver は本文を変えずに配信条件だけを移し、新しい topic も作れる。replace は後継の内容・version と配信条件を固定し、retirement_kind を省略すると superseded になる。形の誤りは一度の拒否で `problems` にまとめて返る |
 | Knowledge | memory_change_apply | proposal の version と対象・conflict・承認根拠を照合して適用する |
 | Knowledge | memory_change_withdraw | 不要になった pending proposal を取り下げる |
 | Project State | project_list | Project と Task 件数を一覧する |
@@ -484,6 +484,7 @@ topic の本文、approach、open questions、blockers、next actions の本文�
 - 禁止パターンはリポジトリ外の .git-banned-patterns に置く。MASHU_BANNED_PATTERNS で場所を変更できる
 - 禁止パターンの一覧が見つからない場合は、検査を通すのではなく「検査できない」として扱う
 - エージェントのツール呼び出しの記法（`<parameter name=...>` など）を含む書き込みも入口で拒否される。ある引数の本文に次の引数が入り込んだ状態で保存されるのを防ぐためで、禁止パターンの一覧が無くても検査される
+- 拒否の応答は、当たった引数を `artifacts[0].locator` のように位置まで含めて `field` に、その本文の何文字目から何文字目かを `span` に返す。当たった文字列とパターンそのものは応答にもログにも出さない
 - commit hook は staged path と blob、commit message を検査し、禁止パターンの構文エラーや staged blob の取得失敗でも commit を拒否する
 - Ledger、Memory の revision history、event_log は append-only で、DB の trigger が書き換えを拒否する
 - bootstrap と類似照合結果は退役した Memory の本文を返さない。明示的な `memory_get` / `mashu show` では管理判断のため全文・revision・evidence と退役種別・理由・後継または移動先を返す。invalidated / legacy conflict を採用するには理由を踏まえた明示指示が要る

@@ -133,7 +133,7 @@ def _freeze_current(
     _check_text_limit("what_changed", what_changed)
     evidence_ids = list(evidence or [])
     _validate_evidence(cur, task_id, evidence_ids)
-    tasks._gate(what_changed, *tasks._texts(current["state"]))
+    tasks._gate({"what_changed": what_changed, **tasks._texts(current["state"])})
     return _insert_checkpoint(
         cur,
         task_id,
@@ -216,10 +216,18 @@ def checkpoint(
     tasks._lock(cur)
     tasks._require_open(cur, task_id)
     _validate_evidence(cur, task_id, evidence_ids)
-    verdicts = [tasks._gate(what_changed)]
-    verdicts += [_check_attempt(**item) for item in attempt_items]
-    verdicts += [_check_decision(cur, task_id, **item) for item in decision_items]
-    verdicts += [_check_artifact(**item) for item in artifact_items]
+    verdicts = [tasks._gate({"what_changed": what_changed})]
+    verdicts += [
+        _check_attempt(at=f"attempts[{index}].", **item) for index, item in enumerate(attempt_items)
+    ]
+    verdicts += [
+        _check_decision(cur, task_id, at=f"decisions[{index}].", **item)
+        for index, item in enumerate(decision_items)
+    ]
+    verdicts += [
+        _check_artifact(at=f"artifacts[{index}].", **item)
+        for index, item in enumerate(artifact_items)
+    ]
 
     updated = tasks.task_update(
         cur,
@@ -267,6 +275,7 @@ def checkpoint(
 
 def _check_attempt(
     *,
+    at: str = "",
     attempt: str,
     result: str | None = None,
     reason: str | None = None,
@@ -280,7 +289,9 @@ def _check_attempt(
         ("next", next),
     ):
         _check_text_limit(field, value)
-    return tasks._gate(attempt, result, reason, next)
+    return tasks._gate(
+        {f"{at}attempt": attempt, f"{at}result": result, f"{at}reason": reason, f"{at}next": next}
+    )
 
 
 def _insert_attempt(
@@ -335,6 +346,7 @@ def _check_decision(
     cur: psycopg.Cursor,
     task_id: UUID,
     *,
+    at: str = "",
     decision: str,
     reason: str | None = None,
     supersedes_id: UUID | None = None,
@@ -342,7 +354,7 @@ def _check_decision(
     _require_text("decision", decision)
     _check_text_limit("decision", decision)
     _check_text_limit("reason", reason)
-    verdict = tasks._gate(decision, reason)
+    verdict = tasks._gate({f"{at}decision": decision, f"{at}reason": reason})
 
     if supersedes_id is not None:
         cur.execute("SELECT task_id FROM decision WHERE decision_id = %s", (supersedes_id,))
@@ -406,7 +418,9 @@ def decision_record(
     return {**row, **_gate_report(verdict)}
 
 
-def _check_artifact(*, kind: str, locator: str, label: str | None = None) -> redact.Verdict:
+def _check_artifact(
+    *, at: str = "", kind: str, locator: str, label: str | None = None
+) -> redact.Verdict:
     if kind not in ARTIFACT_KINDS:
         raise MashuError(
             f"unknown artifact kind '{kind}' (expected one of {', '.join(ARTIFACT_KINDS)})"
@@ -414,7 +428,7 @@ def _check_artifact(*, kind: str, locator: str, label: str | None = None) -> red
     _require_text("locator", locator)
     _check_text_limit("locator", locator)
     _check_text_limit("label", label)
-    return tasks._gate(locator, label)
+    return tasks._gate({f"{at}locator": locator, f"{at}label": label})
 
 
 def _insert_artifact(

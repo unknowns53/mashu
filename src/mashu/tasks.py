@@ -15,7 +15,6 @@ from mashu.errors import (
     MashuError,
     OverLimitError,
     ProjectBudgetError,
-    RefusedError,
     StaleStateError,
 )
 from mashu.tokens import ROW_OVERHEAD, estimate_tokens, pushed_cost
@@ -136,12 +135,9 @@ def _lock(cur: psycopg.Cursor) -> None:
     )
 
 
-def _gate(*texts: str | None) -> redact.Verdict:
+def _gate(fields: dict[str, str | None]) -> redact.Verdict:
     """The entrance check every project-state write passes (v3 10)."""
-    verdict = redact.check(*texts)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
-    return verdict
+    return redact.gate(fields)
 
 
 def _gate_report(verdict: redact.Verdict) -> dict[str, Any]:
@@ -464,7 +460,7 @@ def task_create(
         next_actions=next_actions,
     )
     _check_limits(state, name=name)
-    verdict = _gate(name, *_texts(state))
+    verdict = _gate({"name": name, **_texts(state)})
 
     # Held from before the match until the insert commits.
     _lock(cur)
@@ -519,12 +515,12 @@ def task_create(
     return {**task_get(cur, task_id), "candidates": candidates, **_gate_report(verdict)}
 
 
-def _texts(state: dict[str, Any]) -> list[str]:
-    """Every free-text field of a state, flattened for the entrance check."""
-    out = [state.get(field) for field in TEXT_LIMITS]
+def _texts(state: dict[str, Any]) -> dict[str, str | None]:
+    """Every free-text field of a state, labelled for the entrance check."""
+    out = {field: state.get(field) for field in TEXT_LIMITS}
     for field in LIST_FIELDS:
-        out.extend(state.get(field) or [])
-    return [text for text in out if text]
+        out.update(redact.items(field, state.get(field)))
+    return out
 
 
 # search (5.2, 13.1)
@@ -754,7 +750,7 @@ def task_update(
         previous_name=task["name"],
         previous_state=current["state"],
     )
-    verdict = _gate(new_name, *_texts(state))
+    verdict = _gate({"name": new_name, **_texts(state)})
 
     if current["state"]["updated_at"] != expect_updated_at:
         raise StaleStateError(
@@ -844,7 +840,7 @@ def append_next_action(
     _check_limits(
         state, name=task["name"], previous_name=task["name"], previous_state=current["state"]
     )
-    verdict = _gate(*_texts(state))
+    verdict = _gate(_texts(state))
     home = projects.require_project(cur, task["project_id"])
     _check_budget(cur, task_id=task_id, name=task["name"], state=state, scope_id=home["scope_id"])
 
@@ -905,7 +901,7 @@ def propose_close(
         raise OverLimitError("reason", PROPOSAL_REASON_MAX, len(reason))
     _lock(cur)
     task = _require_open(cur, task_id)
-    verdict = _gate(reason)
+    verdict = _gate({"reason": reason})
     current = task_get(cur, task_id)
     cur.execute(
         """
@@ -961,7 +957,7 @@ def close(
         (task_id,),
     )
     proposal = cur.fetchone()
-    verdict = _gate(reason)
+    verdict = _gate({"reason": reason})
     what_changed = f"closed as {outcome}" + (f": {reason}" if reason else "")
     from mashu import task_history
 

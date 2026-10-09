@@ -8,16 +8,14 @@ from uuid import UUID
 import psycopg
 
 from mashu import capacity, events, redact
-from mashu.errors import MashuError, RefusedError
+from mashu.errors import MashuError
 
 
 def create_scope(
     cur: psycopg.Cursor, *, name: str, summary: str | None = None, actor: str
 ) -> dict[str, Any]:
     """Open a scope, refusing a name that is already taken."""
-    verdict = redact.check(name, summary)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    verdict = redact.gate({"name": name, "summary": summary})
     if get_scope(cur, name) is not None:
         raise MashuError(f"scope '{name}' already exists")
     cur.execute(
@@ -45,9 +43,7 @@ def update_scope(
     summary = summary.strip() if summary and summary.strip() else None
     if not name:
         raise MashuError("a scope needs a name")
-    verdict = redact.check(name, summary)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    redact.gate({"name": name, "summary": summary})
 
     cur.execute("SELECT * FROM scope WHERE scope_id = %s FOR UPDATE", (scope_id,))
     current = cur.fetchone()

@@ -8,7 +8,6 @@ from uuid import UUID
 import psycopg
 
 from mashu import config, events, match, redact
-from mashu.errors import RefusedError
 
 _INSERT = """
 INSERT INTO trace (content, scope_id, source, created_by, expires_at)
@@ -32,9 +31,7 @@ def put_trace(
     source: str | None = None,
 ) -> dict[str, Any]:
     """Leave one line about something worked out, and say if it has been here before."""
-    verdict = redact.check(content)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    verdict = redact.gate({"content": content})
 
     cur.execute(_INSERT, (content, scope_id, source, actor, config.trace_ttl_days()))
     row = cur.fetchone()
