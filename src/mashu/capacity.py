@@ -102,11 +102,6 @@ def bootstrap_totals(cur: psycopg.Cursor) -> dict[str, Any]:
     }
 
 
-def topic_bodies(cur: psycopg.Cursor) -> dict[Any, int]:
-    """What each non-empty topic's rules cost to read, which no opening pays."""
-    return _measure(_opening(cur))["bodies"]
-
-
 def _room(projected: int, cost: int, what: str) -> str:
     """The arithmetic every refusal opens with."""
     return (

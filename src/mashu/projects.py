@@ -160,22 +160,3 @@ def show_project(cur: psycopg.Cursor, project: UUID | str) -> dict[str, Any]:
     scope = cur.fetchone()
     row["scope_name"] = scope["name"] if scope else None
     return row
-
-
-def archive_project(cur: psycopg.Cursor, project: UUID | str, *, actor: str) -> dict[str, Any]:
-    """Take a project off the working list."""
-    row = require_project(cur, project)
-    if row["archived_at"] is not None:
-        raise MashuError(f"project '{row['name']}' was already archived")
-    cur.execute(
-        "UPDATE project SET archived_at = now() WHERE project_id = %s RETURNING *",
-        (row["project_id"],),
-    )
-    archived = cur.fetchone()
-    events.record(
-        cur,
-        "project_archived",
-        actor,
-        detail={"project_id": str(row["project_id"]), "name": row["name"]},
-    )
-    return archived

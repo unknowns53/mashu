@@ -541,15 +541,6 @@ def test_the_history_and_the_artifact_locators_are_visible_on_one_task(run, comm
 
     with db.transaction(committing_dsn) as cur:
         task_id = cli._task_ref(cur, short)
-        artifact = task_history.artifact_link(
-            cur, task_id, actor="agent", kind="git_commit", locator=LOCATOR, label="the manifest"
-        )
-        task_history.attempt_record(
-            cur, task_id, actor="agent", attempt=ATTEMPT, result="the count came out short"
-        )
-        task_history.decision_record(
-            cur, task_id, actor="agent", decision=DECISION, reason="a half-run must not look whole"
-        )
         state = tasks.task_get(cur, task_id)["state"]
         task_history.checkpoint(
             cur,
@@ -558,7 +549,9 @@ def test_the_history_and_the_artifact_locators_are_visible_on_one_task(run, comm
             what_changed=CHANGED,
             expect_updated_at=state["updated_at"],
             status_text=CHANGED,
-            evidence=[artifact["reference_id"]],
+            attempts=[{"attempt": ATTEMPT, "result": "the count came out short"}],
+            decisions=[{"decision": DECISION, "reason": "a half-run must not look whole"}],
+            artifacts=[{"kind": "git_commit", "locator": LOCATOR, "label": "the manifest"}],
         )
 
     code, out, _ = run("task", "show", short)

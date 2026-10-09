@@ -312,25 +312,6 @@ def _insert_attempt(
     return row
 
 
-def attempt_record(
-    cur: psycopg.Cursor,
-    task_id: UUID,
-    *,
-    actor: str,
-    attempt: str,
-    result: str | None = None,
-    reason: str | None = None,
-    next: str | None = None,
-) -> dict[str, Any]:
-    """Append what was tried, what came of it, and what should happen next."""
-    tasks._lock(cur)
-    tasks._require_open(cur, task_id)
-    fields = {"attempt": attempt, "result": result, "reason": reason, "next": next}
-    verdict = _check_attempt(**fields)
-    row = _insert_attempt(cur, task_id, actor=actor, **fields)
-    return {**row, **_gate_report(verdict)}
-
-
 def _check_decision(
     cur: psycopg.Cursor,
     task_id: UUID,
@@ -388,24 +369,6 @@ def _insert_decision(
     return row
 
 
-def decision_record(
-    cur: psycopg.Cursor,
-    task_id: UUID,
-    *,
-    actor: str,
-    decision: str,
-    reason: str | None = None,
-    supersedes_id: UUID | None = None,
-) -> dict[str, Any]:
-    """Append a decision, optionally superseding one from this same task."""
-    tasks._lock(cur)
-    tasks._require_open(cur, task_id)
-    fields = {"decision": decision, "reason": reason, "supersedes_id": supersedes_id}
-    verdict = _check_decision(cur, task_id, **fields)
-    row = _insert_decision(cur, task_id, actor=actor, **fields)
-    return {**row, **_gate_report(verdict)}
-
-
 def _check_artifact(*, kind: str, locator: str, label: str | None = None) -> redact.Verdict:
     if kind not in ARTIFACT_KINDS:
         raise MashuError(
@@ -443,24 +406,6 @@ def _insert_artifact(
         detail={"task_id": str(task_id), "reference_id": str(row["reference_id"])},
     )
     return row
-
-
-def artifact_link(
-    cur: psycopg.Cursor,
-    task_id: UUID,
-    *,
-    actor: str,
-    kind: str,
-    locator: str,
-    label: str | None = None,
-) -> dict[str, Any]:
-    """Append a reference to the external place where the artifact lives."""
-    tasks._lock(cur)
-    tasks._require_open(cur, task_id)
-    fields = {"kind": kind, "locator": locator, "label": label}
-    verdict = _check_artifact(**fields)
-    row = _insert_artifact(cur, task_id, actor=actor, **fields)
-    return {**row, **_gate_report(verdict)}
 
 
 def attempt_list(cur: psycopg.Cursor, task_id: UUID) -> list[dict[str, Any]]:

@@ -82,28 +82,13 @@ def test_checkpoint_replaces_and_freezes_the_same_state(cur, task):
     assert detail["evidence"] == []
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [("attempt", "x" * 301), ("result", "x" * 501), ("reason", "x" * 501), ("next", "x" * 301)],
-)
-def test_attempt_limit_is_refused_before_an_attempt_row(cur, task_id, field, value):
-    with pytest.raises(OverLimitError) as raised:
-        task_history.attempt_record(
-            cur, task_id, actor="agent", **{"attempt": "try it", field: value}
-        )
-    assert raised.value.field == field
-    assert _history_counts(cur)["attempt"] == 0
-
-
 def test_a_refused_checkpoint_leaves_no_frozen_row(cur, task, monkeypatch):
     with pytest.raises(OverLimitError):
         checkpoint(cur, task, goal="x" * 301)
 
     other = new_task(cur, "other task", "history")
-    foreign = task_history.artifact_link(
-        cur, other["task"]["task_id"], actor="agent", kind="file", locator="results/other.txt"
-    )
-    for evidence in ([uuid4()], [foreign["reference_id"]]):
+    foreign = checkpoint(cur, other, artifacts=[{"kind": "file", "locator": "results/other.txt"}])
+    for evidence in ([uuid4()], [foreign["artifacts"][0]["reference_id"]]):
         with pytest.raises(MashuError):
             checkpoint(cur, task, evidence=evidence)
 
@@ -122,51 +107,31 @@ def test_a_refused_checkpoint_leaves_no_frozen_row(cur, task, monkeypatch):
     with pytest.raises(MashuError):
         checkpoint(cur, task, status_text="still stale")
 
-    assert _history_counts(cur)["task_checkpoint"] == 0
+    assert task_history.checkpoint_list(cur, task["task"]["task_id"]) == []
 
 
-def test_history_writes_renew_the_lease_and_are_refused_once_the_task_is_closed(cur, task_id):
+def test_a_checkpoint_renews_the_lease_and_is_refused_once_the_task_is_closed(cur, task, task_id):
     lease = "SELECT active_until, last_activity_at FROM task WHERE task_id = %s"
-    writes = (
-        lambda: task_history.attempt_record(cur, task_id, actor="agent", attempt="try a"),
-        lambda: task_history.decision_record(cur, task_id, actor="agent", decision="keep it"),
-        lambda: task_history.artifact_link(
-            cur, task_id, actor="agent", kind="url", locator="https://example.test"
-        ),
-    )
-    for write in writes:
-        expire(cur, task_id)
-        before = cur.execute(lease, (task_id,)).fetchone()
-        assert write()["task_id"] == task_id
-        after = cur.execute(lease, (task_id,)).fetchone()
-        assert after["active_until"] > before["active_until"]
-        assert after["last_activity_at"] > before["last_activity_at"]
+    expire(cur, task_id)
+    before = cur.execute(lease, (task_id,)).fetchone()
+    checkpoint(cur, task, attempts=[{"attempt": "try a"}])
+    after = cur.execute(lease, (task_id,)).fetchone()
+    assert after["active_until"] > before["active_until"]
+    assert after["last_activity_at"] > before["last_activity_at"]
 
     closed = tasks.close(cur, task_id, outcome="completed", actor="user")
-    for write in (*writes, lambda: checkpoint(cur, closed, "too late")):
-        with pytest.raises(ClosedTaskError):
-            write()
+    with pytest.raises(ClosedTaskError):
+        checkpoint(cur, closed, "too late")
 
 
-def test_decisions_form_a_same_task_supersedes_chain(cur, task_id):
-    first = task_history.decision_record(cur, task_id, actor="agent", decision="use one module")
-    second = task_history.decision_record(
-        cur,
-        task_id,
-        actor="agent",
-        decision="keep the module boundary",
-        supersedes_id=first["decision_id"],
-    )
+def test_decisions_form_a_same_task_supersedes_chain(cur, task, task_id):
+    first = checkpoint(cur, task, decisions=[{"decision": "use one module"}])["decisions"][0]
+    later = {"decision": "keep the module boundary", "supersedes_id": first["decision_id"]}
+    second = checkpoint(cur, tasks.task_get(cur, task_id), decisions=[later])["decisions"][0]
     other = new_task(cur, "different task", "history")
 
     with pytest.raises(MashuError):
-        task_history.decision_record(
-            cur,
-            other["task"]["task_id"],
-            actor="agent",
-            decision="cannot cross the boundary",
-            supersedes_id=first["decision_id"],
-        )
+        checkpoint(cur, other, decisions=[{**later, "decision": "cannot cross the boundary"}])
 
     decisions = task_history.decision_list(cur, task_id)
     assert [row["decision_id"] for row in decisions] == [
@@ -192,29 +157,27 @@ def test_close_freezes_the_last_state_with_the_closing_actor(cur, task_id):
     assert closed["task"]["status"] == "closed"
 
 
-def test_artifact_locator_is_still_checked_as_text(cur, task_id, monkeypatch, tmp_path):
+def test_artifact_locator_is_still_checked_as_text(cur, task, monkeypatch, tmp_path):
     patterns = tmp_path / "banned-patterns"
     patterns.write_text(re.escape(str(Path.home())) + "\n", encoding="utf-8")
     monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(patterns))
 
+    locator = str(Path.home() / "private" / "result.txt")
     with pytest.raises(RefusedError):
-        task_history.artifact_link(
-            cur,
-            task_id,
-            actor="agent",
-            kind="file",
-            locator=str(Path.home() / "private" / "result.txt"),
-        )
+        checkpoint(cur, task, artifacts=[{"kind": "file", "locator": locator}])
 
 
 def test_checkpoint_writes_attempts_decisions_and_artifacts_with_the_state(cur, task, task_id):
-    earlier = task_history.decision_record(cur, task_id, actor="agent", decision="use one module")
-    linked = task_history.artifact_link(
-        cur, task_id, actor="agent", kind="file", locator="results/table.csv", label="the table"
-    )
-    checkpointed = checkpoint(
+    first = checkpoint(
         cur,
         task,
+        decisions=[{"decision": "use one module"}],
+        artifacts=[{"kind": "file", "locator": "results/table.csv", "label": "the table"}],
+    )
+    earlier, linked = first["decisions"][0], first["artifacts"][0]
+    checkpointed = checkpoint(
+        cur,
+        first,
         "history arrives with the checkpoint",
         status_text="checkpoint carries its history",
         evidence=[linked["reference_id"]],
@@ -267,6 +230,9 @@ def test_checkpoint_writes_attempts_decisions_and_artifacts_with_the_state(cur, 
             },
             "^attempt is 301 chars and the limit is 300;",
         ),
+        ({"attempts": [{"attempt": "try", "result": "x" * 501}]}, "^result is 501 chars"),
+        ({"attempts": [{"attempt": "try", "reason": "x" * 501}]}, "^reason is 501 chars"),
+        ({"attempts": [{"attempt": "try", "next": "x" * 301}]}, "^next is 301 chars"),
         ({"attempts": [{"attempt": "try", "outcome": "worked"}]}, "unknown key"),
         ({"decisions": [{"reason": "no decision given"}]}, "missing required"),
         ({"artifacts": [{"kind": "file"}]}, "missing required"),
