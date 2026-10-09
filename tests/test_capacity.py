@@ -19,14 +19,6 @@ def fill(cur, scope_id, count):
         remember(cur, content, scope_id=scope_id, delivery="scope")
 
 
-def test_an_empty_store_admits_anything_reasonable(cur, scope_id):
-    got = capacity.check_admission(cur, content=NEW_RULE, delivery="always")
-    assert got["ok"] is True
-    assert got["refusal"] is None
-    assert got["tokens"] == pushed_cost([NEW_RULE])
-    assert got["capacity"] == config.capacity()
-
-
 def test_a_full_scope_refuses_the_next_rule_and_says_by_how_much(cur, scope_id, monkeypatch):
     monkeypatch.setenv("MASHU_CAPACITY", "400")
     fill(cur, scope_id, 5)

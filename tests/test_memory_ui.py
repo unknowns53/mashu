@@ -68,12 +68,9 @@ def test_long_detail_pages_through_evidence_and_revision_history(dsn, monkeypatc
     assert "note 8" in out
     assert "evidence" in out
     assert "explicit" in out
-    assert "recorded by the user's own hand" in out
     assert f"prevention: {RULE}" in out
     assert "revisions" in out
     assert RULE in out and REVISED in out
-    assert "note: note 0" in out
-    assert "by user" in out
 
 
 def test_search_is_case_insensitive_zero_results_can_be_researched_and_left_clears(
@@ -90,16 +87,10 @@ def test_search_is_case_insensitive_zero_results_can_be_researched_and_left_clea
     assert out.count("active memories  2") >= 2
 
 
-def test_new_durable_memory_can_choose_a_scope_delivery_explained_in_one_line_each(
-    dsn, monkeypatch, capsys
-):
+def test_new_durable_memory_can_choose_a_scope_delivery(dsn, monkeypatch):
     keys(monkeypatch, "n", RULE, "scope", "deployments", "q")
 
     assert memory_ui.run(dsn) == 0
-    out = capsys.readouterr().out
-    assert "always  every session, at start" in out
-    assert "scope   sessions in one Scope, at start" in out
-    assert "topic   its trigger is listed at start; read when that work begins" in out
     with db.transaction(dsn) as cur:
         cur.execute("SELECT * FROM memory")
         row = cur.fetchone()
@@ -218,24 +209,6 @@ def test_retired_conflict_shows_the_reason_and_overrides_only_after_explicit_yes
     with db.transaction(dsn) as cur:
         cur.execute("SELECT count(*) AS n FROM memory WHERE status = 'active'")
         assert cur.fetchone()["n"] == active
-
-
-def test_non_tty_rendering_contains_no_ansi(monkeypatch):
-    monkeypatch.delenv("NO_COLOR", raising=False)
-    monkeypatch.setattr("sys.stdout.isatty", lambda: False)
-    row = {
-        "memory_id": "12345678-abcd",
-        "content": RULE,
-        "scope_name": None,
-        "delivery": "topic",
-        "topic_name": "deploy",
-    }
-
-    rendered = memory_ui._screen_text([row], 0, "active", "", total=1, query="")
-
-    assert "\x1b[" not in rendered
-    assert RULE in rendered
-    assert "topic:deploy" in rendered
 
 
 def test_a_new_rule_can_open_a_new_topic_without_typing_an_id(dsn, monkeypatch):

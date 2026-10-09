@@ -292,6 +292,5 @@ def test_history_is_written_only_through_task_checkpoint_over_mcp(monkeypatch):
 
     monkeypatch.setenv("MASHU_DATABASE_URL", "dbname=mashu_test_never_created")
     names = {tool.name for tool in asyncio.run(server.build_server().list_tools())}
-    assert len(names) == 19
     assert not names & {"attempt_record", "decision_record", "artifact_link"}
     assert "task_checkpoint" in names

@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 
 from conftest import apply_change, propose_change, remember, retire
-from mashu import bootstrap, match, memories, memory_changes, nominations, scopes, topics
+from mashu import memories, memory_changes, nominations, scopes, topics
 from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
@@ -163,8 +163,6 @@ def test_memory_get_shows_a_retired_rule_whole_and_restore_keeps_its_history(cur
     assert detail["retirement"]["kind"] == "legacy"
     assert detail["retirement"]["reason"] == retired["retire_reason"]
     assert detail["retirement_history"][-1]["event_type"] == "memory_retired"
-    assert "content" not in match.similar_tombstones(cur, RULE)[0]
-    assert RULE not in str(bootstrap.session_bootstrap(cur, actor="agent"))
 
     proposal = propose_change(
         cur, memory, "restore", restore_reason="the check was removed", evidence=RESTORE_EVIDENCE

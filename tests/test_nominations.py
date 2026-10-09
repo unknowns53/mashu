@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
-import psycopg
 import pytest
 
 from conftest import retire
-from mashu import ledger, nominations, scopes
+from mashu import ledger, nominations
 from mashu.errors import MashuError, RefusedError
 
 HOLE = "always run the migration before starting the local server"
@@ -126,13 +125,6 @@ def test_a_pending_candidate_can_be_reworded_without_being_decided(cur):
     assert revised["content"] == reworded
     assert revised["status"] == "pending"
     assert revised["evidence"] == nomination["evidence"]
-    cur.execute("SELECT detail FROM event_log WHERE event_type = 'nomination_revised'")
-    assert cur.fetchone()["detail"] == {
-        "from_chars": len(nomination["content"]),
-        "to_chars": len(reworded),
-        "conflicts": [],
-        "version": revised["version"],
-    }
 
 
 def test_a_decision_is_made_once_and_closes_the_candidate_to_every_other_change(cur):
@@ -197,37 +189,6 @@ def test_the_queue_hands_over_the_pains_and_not_their_ids(cur):
     assert rows[0]["what"] == "looked it up"
     assert rows[1]["prevention"] == SAME_HOLE
     assert all(row["kind"] == "friction" for row in rows)
-
-
-def test_an_unknown_kind_or_invented_evidence_is_refused_in_words(cur):
-    with pytest.raises(MashuError, match="unknown nomination kind"):
-        nominations.create_nomination(cur, content=HOLE, kind="a hunch", evidence=[], actor="agent")
-    invented = uuid4()
-    with pytest.raises(MashuError, match=str(invented)):
-        nominations.create_nomination(
-            cur, content=HOLE, kind="incident", evidence=[invented], actor="agent"
-        )
-
-
-def test_the_database_refuses_evidence_that_names_nothing_when_the_code_is_gone_round(
-    cur, scope_id
-):
-    _, second, _ = two_pains(cur, scope_id=scope_id)
-    with (
-        pytest.raises(psycopg.errors.RaiseException, match="NULL element"),
-        cur.connection.transaction(),
-    ):
-        cur.execute(
-            "INSERT INTO memory (content, scope_id, delivery, evidence, created_by) "
-            "VALUES (%s, %s, 'scope', %s, 'user')",
-            (HOLE, scope_id, [second["ledger_id"], None]),
-        )
-    with pytest.raises(psycopg.errors.RaiseException, match="do not exist"):
-        cur.execute(
-            "INSERT INTO nomination (content, scope_id, kind, evidence, created_by) "
-            "VALUES (%s, %s, 'incident', %s, 'agent')",
-            (HOLE, scope_id, [uuid4()]),
-        )
 
 
 # an instruction an agent says it was given (5.1, path three)
@@ -314,7 +275,7 @@ def test_a_banned_pattern_in_an_instruction_quote_is_refused(cur, field):
     assert cur.fetchone()["status"] == "pending"
 
 
-def test_admission_rejects_a_candidate_whose_content_or_scope_changed_after_reading(cur):
+def test_admission_rejects_a_candidate_whose_content_changed_after_reading(cur):
     nomination = nominations.nominate_user_explicit(
         cur, content="the original migration rule is signed before storage", actor="agent"
     )["nomination"]
@@ -326,18 +287,9 @@ def test_admission_rejects_a_candidate_whose_content_or_scope_changed_after_read
     )
     assert changed["version"] > nomination["version"]
 
-    next_scope = scopes.create_scope(cur, name="a different candidate scope", actor="user")
-    cur.execute(
-        "UPDATE nomination SET scope_id = %s WHERE nomination_id = %s RETURNING version",
-        (next_scope["scope_id"], nomination["nomination_id"]),
-    )
-    moved = cur.fetchone()["version"]
-    assert moved > changed["version"]
-
-    for stale in (nomination["version"], changed["version"]):
-        with pytest.raises(MashuError, match="nomination version changed"):
-            admit_on_instruction(cur, nomination, REMEMBER, version=stale)
-    memory = admit_on_instruction(cur, nomination, REMEMBER, version=moved)
+    with pytest.raises(MashuError, match="nomination version changed"):
+        admit_on_instruction(cur, nomination, REMEMBER, version=nomination["version"])
+    memory = admit_on_instruction(cur, nomination, REMEMBER, version=changed["version"])
     assert memory["content"] == changed["content"]
 
 

@@ -39,7 +39,8 @@ def test_the_search_can_be_narrowed_to_a_scope_without_losing_the_general_ones(c
 
 
 def test_a_friction_that_matches_a_live_trace_freezes_it(cur):
-    traces.put_trace(cur, content=DERIVED, actor="agent")
+    put = traces.put_trace(cur, content=DERIVED, actor="agent")
+    cur.execute("UPDATE trace SET created_at = now() - INTERVAL '3 days'")
     got = ledger.report_pain(
         cur,
         kind="friction",
@@ -52,27 +53,12 @@ def test_a_friction_that_matches_a_live_trace_freezes_it(cur):
     frozen = cur.fetchone()
     assert frozen["kind"] == "friction"
     assert frozen["prevention"] == DERIVED
-    assert "first observed" in frozen["what"]
+    cur.execute("SELECT (now() - INTERVAL '3 days')::date AS day")
+    assert f"first observed {cur.fetchone()['day'].isoformat()}" in frozen["what"]
+    cur.execute("SELECT * FROM event_log WHERE event_type = 'trace_frozen'")
+    event = cur.fetchone()
+    assert (event["ledger_id"], event["trace_id"]) == (frozen["ledger_id"], put["trace_id"])
 
     nomination = got["nomination"]
     assert nomination["kind"] == "rederivation"
     assert nomination["evidence"] == [frozen["ledger_id"], got["ledger_id"]]
-
-
-def test_freezing_records_both_ends_and_when_the_trace_was_derived(cur):
-    put = traces.put_trace(cur, content=DERIVED, actor="agent")
-    cur.execute(
-        "UPDATE trace SET created_at = now() - INTERVAL '3 days' WHERE trace_id = %s",
-        (put["trace_id"],),
-    )
-    cur.execute("SELECT * FROM trace WHERE trace_id = %s", (put["trace_id"],))
-    trace = cur.fetchone()
-    frozen = traces.freeze_trace(cur, trace, actor="agent")
-
-    cur.execute("SELECT * FROM event_log WHERE event_type = 'trace_frozen'")
-    event = cur.fetchone()
-    assert event["ledger_id"] == frozen["ledger_id"]
-    assert event["trace_id"] == put["trace_id"]
-    cur.execute("SELECT (now() - INTERVAL '3 days')::date AS day")
-    expected = cur.fetchone()["day"].isoformat()
-    assert expected in frozen["what"]

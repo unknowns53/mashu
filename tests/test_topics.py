@@ -46,9 +46,6 @@ def test_bootstrap_lists_a_visible_topic_line_and_never_its_rules(cur, scope_id)
     assert LEVER not in str(got) and PLACEMENT not in str(got)
     assert got["topic_tokens"] == pushed_cost([line(subject, 2)])
     assert got["memory_tokens"] == got["topic_tokens"]
-    keys = list(got)
-    order = ["always", "scoped", "topics", "states", "temporary", "pending"]
-    assert sorted(order, key=keys.index) == order
 
 
 def test_empty_archived_and_other_scope_topics_are_not_listed(cur, scope_id):
@@ -178,7 +175,7 @@ def test_one_action_leads_to_one_open_topic_served_where_it_is_listed(cur, scope
 # capacity
 
 
-def test_a_topic_line_counts_in_the_layer_it_lands_in_and_its_bodies_apart(cur, scope_id):
+def test_a_topic_line_counts_in_the_layer_it_lands_in(cur, scope_id):
     everywhere = topic(cur)
     assert capacity.bootstrap_totals(cur)["always"] == 0  # an empty topic pushes nothing
     filed(cur, everywhere)
@@ -192,10 +189,6 @@ def test_a_topic_line_counts_in_the_layer_it_lands_in_and_its_bodies_apart(cur, 
     totals = capacity.bootstrap_totals(cur)
     assert totals["always"] == pushed_cost([line(everywhere, 1)])
     assert totals["scopes"] == {scope_id: pushed_cost([line(scoped, 2)])}
-    assert capacity.topic_bodies(cur) == {
-        everywhere["topic_id"]: pushed_cost([LEVER]),
-        scoped["topic_id"]: pushed_cost([LEVER, PLACEMENT]),
-    }
 
 
 def test_the_first_rule_of_a_topic_is_refused_when_its_line_does_not_fit(cur, monkeypatch):

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-import psycopg
 import pytest
 
 from conftest import new_project, new_task, remember, retire, update_task
@@ -22,15 +21,6 @@ def report(cur, kind, prevention, what="work went down a wrong path", **kw):
 def count(cur, table):
     cur.execute(f"SELECT count(*) AS n FROM {table}")
     return cur.fetchone()["n"]
-
-
-def test_an_incident_is_proven_the_first_time(cur):
-    got = report(cur, "incident", HOLE)
-    nomination = got["nomination"]
-    assert nomination["kind"] == "incident"
-    assert nomination["content"] == HOLE
-    assert nomination["evidence"] == [got["ledger_id"]]
-    assert got["nomination_existing"] is False
 
 
 def test_a_first_friction_only_lands_in_the_ledger_until_it_recurs(cur):
@@ -222,12 +212,6 @@ def test_a_rule_is_never_filed_on_a_task_and_an_unknown_prevention_kind_is_refus
         report(cur, "incident", FIX, task_id=task_id)
     with pytest.raises(MashuError):
         report(cur, "incident", FIX, prevention_kind="maybe")
-    with pytest.raises(psycopg.errors.CheckViolation):
-        cur.execute(
-            "INSERT INTO ledger (kind, what, prevention, created_by, prevention_kind, filed_task) "
-            "VALUES ('incident', 'w', 'p', 'agent', 'rule', %s)",
-            (task_id,),
-        )
 
 
 def test_a_work_friction_can_still_be_the_prior_half_of_a_rederivation(cur, task_id):

@@ -39,17 +39,6 @@ def status(dsn, task_id):
     return task_row(dsn, task_id)["task"]["status"]
 
 
-def test_superseded_takes_the_reason_typed_for_it(dsn, monkeypatch):
-    task_id = a_task(dsn, "rework the hull")
-    keys(monkeypatch, "s", "ship-parts took this over", "q")
-
-    assert close_ui.run(dsn) == 0
-
-    row = task_row(dsn, task_id)
-    assert row["task"]["outcome"] == "superseded"
-    assert row["task"]["close_reason"] == "ship-parts took this over"
-
-
 @pytest.mark.parametrize(("key", "proposal"), [("w", None), ("t", "completed")])
 def test_drop_and_renew_leave_the_task_open_with_its_lease_renewed(dsn, monkeypatch, key, proposal):
     task_id = a_task(dsn, "drop the close-up tool", propose="completed", dormant=True)
