@@ -8,6 +8,7 @@ from mashu import db, scopes, tasks
 from mashu.errors import (
     ClosedTaskError,
     DuplicateTaskError,
+    MalformedRequestError,
     MashuError,
     OverLimitError,
     ProjectBudgetError,
@@ -107,26 +108,30 @@ def test_a_banned_or_too_large_first_task_never_reaches_the_table(cur, project, 
 # the hard limits (5.3)
 @pytest.mark.parametrize("field", tasks.TEXT_LIMITS)
 def test_a_field_over_its_limit_is_refused_by_name(cur, task_id, field):
-    with pytest.raises(OverLimitError) as raised:
+    with pytest.raises(MalformedRequestError) as raised:
         update_task(cur, task_id, **{field: "x" * (tasks.TEXT_LIMITS[field] + 1)})
-    assert (raised.value.field, raised.value.actual) == (field, tasks.TEXT_LIMITS[field] + 1)
+    limit = tasks.TEXT_LIMITS[field]
+    assert raised.value.over_limit == [
+        {"field": field, "limit": limit, "actual": limit + 1, "unit": "chars"}
+    ]
 
 
 def test_a_long_state_written_before_the_card_limits_is_carried_but_not_rewritten(cur, task_id):
     cur.execute("UPDATE task_state SET status_text = %s WHERE task_id = %s", ("s" * 400, task_id))
     tasks.append_next_action(cur, task_id, "add the check", actor="agent")
     assert update_task(cur, task_id, blockers=["none"])["state"]["status_text"] == "s" * 400
-    with pytest.raises(OverLimitError, match="what_changed"):
+    with pytest.raises(MalformedRequestError, match="what_changed"):
         update_task(cur, task_id, status_text="t" * 400)
 
 
 @pytest.mark.parametrize("field", tasks.LIST_FIELDS)
 def test_a_list_over_five_entries_or_with_an_entry_over_its_limit_is_refused(cur, task_id, field):
-    with pytest.raises(OverLimitError, match="items"):
+    with pytest.raises(MalformedRequestError) as raised:
         update_task(cur, task_id, **{field: [f"line {n}" for n in range(6)]})
-    with pytest.raises(OverLimitError) as raised:
+    assert raised.value.over_limit[0]["unit"] == "items"
+    with pytest.raises(MalformedRequestError) as raised:
         update_task(cur, task_id, **{field: ["x" * 301]})
-    assert raised.value.field.startswith(field)
+    assert raised.value.over_limit[0]["field"] == f"{field}[0]"
 
 
 @pytest.mark.parametrize(
@@ -444,7 +449,7 @@ def test_an_append_adds_one_new_action_and_meets_what_a_replacement_would(cur, t
         update_task(cur, task_id, at=read_at, status_text="carrying on")
 
     update_task(cur, task_id, next_actions=[f"action {n}" for n in range(tasks.LIST_MAX_ITEMS)])
-    with pytest.raises(OverLimitError):
+    with pytest.raises(MalformedRequestError):
         tasks.append_next_action(cur, task_id, "one too many", actor="agent")
 
 

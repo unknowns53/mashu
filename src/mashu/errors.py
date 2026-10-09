@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+
 
 class MashuError(Exception):
     """A request that cannot be carried out as asked."""
@@ -21,12 +24,34 @@ class RefusedError(MashuError):
         self.span = span
 
 
-class MalformedRequestError(MashuError):
-    """A request whose shape is wrong in one or more ways, all reported together."""
+@dataclass(frozen=True)
+class OverLimit:
+    """One field longer than its own ceiling, reported among the request's other problems."""
 
-    def __init__(self, problems: list[str]):
-        super().__init__("; ".join(problems))
-        self.problems = problems
+    field: str
+    limit: int
+    actual: int
+    unit: str = "chars"
+    advice: str | None = None
+
+    def __str__(self) -> str:
+        text = f"{self.field} is {self.actual} {self.unit} and the limit is {self.limit}"
+        return f"{text} ({self.advice})" if self.advice else text
+
+
+class MalformedRequestError(MashuError):
+    """A request wrong in ways seen before anything is written, all reported together."""
+
+    def __init__(self, problems: Sequence[str | OverLimit]):
+        texts = [str(problem) for problem in problems]
+        super().__init__("; ".join(texts))
+        self.problems = texts
+        #: The problems that are a field over its ceiling, as field, limit, actual, and unit.
+        self.over_limit = [
+            {"field": p.field, "limit": p.limit, "actual": p.actual, "unit": p.unit}
+            for p in problems
+            if isinstance(p, OverLimit)
+        ]
 
 
 class RetiredConflictError(MashuError):

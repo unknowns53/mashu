@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
-from typing import Any
+from typing import Any, Literal, get_args
 from uuid import UUID
 
 import psycopg
@@ -12,7 +12,9 @@ from mashu import capacity, config, events, projects, redact
 from mashu.errors import (
     ClosedTaskError,
     DuplicateTaskError,
+    MalformedRequestError,
     MashuError,
+    OverLimit,
     OverLimitError,
     ProjectBudgetError,
     StaleStateError,
@@ -20,7 +22,14 @@ from mashu.errors import (
 from mashu.tokens import ROW_OVERHEAD, estimate_tokens, pushed_cost
 
 #: The three ways a task can end (6).
-OUTCOMES = ("completed", "abandoned", "superseded")
+Outcome = Literal["completed", "abandoned", "superseded"]
+OUTCOMES: tuple[str, ...] = get_args(Outcome)
+#: What proposing each outcome claims.
+OUTCOME_MEANINGS = {
+    "completed": "the goal is reached",
+    "abandoned": "the work was given up",
+    "superseded": "another task took it over",
+}
 
 #: Advisory lock class, in the namespace capacity.py opened.
 LOCK_PROJECT_STATE = 3
@@ -147,6 +156,32 @@ def _gate_report(verdict: redact.Verdict) -> dict[str, Any]:
     return report
 
 
+def limit_problems(
+    state: dict[str, Any], previous_state: dict[str, Any] | None = None
+) -> list[OverLimit]:
+    """Every field of this state over its own ceiling.
+
+    A text carried forward unchanged was admitted under the ceiling of its day, so only a
+    text this write sets is held to the current one.
+    """
+    carried = previous_state or {}
+    problems = []
+    for field, limit in TEXT_LIMITS.items():
+        value = state.get(field)
+        if value and len(value) > limit and value != carried.get(field):
+            problems.append(
+                OverLimit(field, limit, len(value), advice=CARD_FIELD_ADVICE.get(field))
+            )
+    for field in LIST_FIELDS:
+        items = state.get(field) or []
+        if len(items) > LIST_MAX_ITEMS:
+            problems.append(OverLimit(field, LIST_MAX_ITEMS, len(items), unit="items"))
+        for index, item in enumerate(items):
+            if item and len(item) > LIST_MAX_CHARS:
+                problems.append(OverLimit(f"{field}[{index}]", LIST_MAX_CHARS, len(item)))
+    return problems
+
+
 def _check_limits(
     state: dict[str, Any],
     *,
@@ -154,23 +189,10 @@ def _check_limits(
     previous_name: str | None = None,
     previous_state: dict[str, Any] | None = None,
 ) -> None:
-    """Refuse an oversized field in words, before the CHECK constraint does.
-
-    A text carried forward unchanged was admitted under the ceiling of its day, so only a
-    text this write sets is held to the current one.
-    """
-    carried = previous_state or {}
-    for field, limit in TEXT_LIMITS.items():
-        value = state.get(field)
-        if value and len(value) > limit and value != carried.get(field):
-            raise OverLimitError(field, limit, len(value), advice=CARD_FIELD_ADVICE.get(field))
-    for field in LIST_FIELDS:
-        items = state.get(field) or []
-        if len(items) > LIST_MAX_ITEMS:
-            raise OverLimitError(field, LIST_MAX_ITEMS, len(items), unit="items")
-        for item in items:
-            if item and len(item) > LIST_MAX_CHARS:
-                raise OverLimitError(f"{field} entry", LIST_MAX_CHARS, len(item))
+    """Refuse oversized fields in words, before the CHECK constraint does."""
+    problems = limit_problems(state, previous_state)
+    if problems:
+        raise MalformedRequestError(problems)
     if name is None:
         return
     previous_detail = (
@@ -212,6 +234,16 @@ def _clean(value: str | None) -> str | None:
 
 def _clean_list(items: list[str] | None) -> list[str]:
     return [item.strip() for item in (items or []) if item and item.strip()]
+
+
+def replaced_state(current: dict[str, Any], **given: Any) -> dict[str, Any]:
+    """The state a replacement leaves: each field given replaces, each omitted one stays."""
+    return _state_of(
+        **{
+            field: current[field] if given.get(field) is None else given[field]
+            for field in EDITABLE_FIELDS
+        }
+    )
 
 
 def _state_of(**fields: Any) -> dict[str, Any]:
@@ -730,19 +762,14 @@ def task_update(
     if not new_name:
         raise MashuError("a task needs a name: it is what the duplicate match reads")
     home = projects.require_project(cur, task["project_id"] if project is None else project)
-    given = {
-        "goal": goal,
-        "approach": approach,
-        "status_text": status_text,
-        "open_questions": open_questions,
-        "blockers": blockers,
-        "next_actions": next_actions,
-    }
-    state = _state_of(
-        **{
-            field: current["state"][field] if value is None else value
-            for field, value in given.items()
-        }
+    state = replaced_state(
+        current["state"],
+        goal=goal,
+        approach=approach,
+        status_text=status_text,
+        open_questions=open_questions,
+        blockers=blockers,
+        next_actions=next_actions,
     )
     _check_limits(
         state,
@@ -889,16 +916,18 @@ def propose_close(
     cur: psycopg.Cursor, task_id: UUID, *, outcome: str, reason: str, actor: str
 ) -> dict[str, Any]:
     """Say that this task looks ended, without ending it."""
+    problems: list[str | OverLimit] = []
     if outcome not in OUTCOMES:
-        raise MashuError(f"outcome must be one of {', '.join(OUTCOMES)}")
+        problems.append(f"outcome must be one of {', '.join(OUTCOMES)}")
     reason = (reason or "").strip()
     if not reason:
-        raise MashuError(
-            "a proposal needs the grounds with it: what makes this look finished, "
-            "given up, or replaced"
+        problems.append(
+            "reason needs the grounds: what makes this look finished, given up, or replaced"
         )
-    if len(reason) > PROPOSAL_REASON_MAX:
-        raise OverLimitError("reason", PROPOSAL_REASON_MAX, len(reason))
+    elif len(reason) > PROPOSAL_REASON_MAX:
+        problems.append(OverLimit("reason", PROPOSAL_REASON_MAX, len(reason)))
+    if problems:
+        raise MalformedRequestError(problems)
     _lock(cur)
     task = _require_open(cur, task_id)
     verdict = _gate({"reason": reason})

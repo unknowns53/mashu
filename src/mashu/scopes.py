@@ -85,6 +85,12 @@ def require_scope(cur: psycopg.Cursor, name: str) -> dict[str, Any]:
     cur.execute("SELECT name FROM scope ORDER BY name")
     known = [r["name"] for r in cur.fetchall()]
     listed = ", ".join(known) if known else "none yet"
+    cur.execute("SELECT 1 FROM topic WHERE name = %s AND archived_at IS NULL", (name,))
+    if cur.fetchone() is not None:
+        raise MashuError(
+            f"'{name}' is a topic, not a scope; read its rules with memory_list(topic='{name}'), "
+            f"and pass a scope name or nothing as scope (existing scopes: {listed})"
+        )
     raise MashuError(f"no scope named '{name}' (existing scopes: {listed})")
 
 

@@ -446,6 +446,7 @@ def test_memory_list_and_admit_reach_a_topic_by_name_for_this_server_session(mcp
     assert first["ok"] is True
     assert first["topic"]["name"] == name
     assert len(first["memories"]) == 1
+    assert f"memory_list(topic='{name}')" in mcp("memory_list", scope=name)["error"]
 
     with db.transaction(dsn) as cur:
         cur.execute(

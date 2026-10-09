@@ -254,7 +254,7 @@ Memory の通常の読み取りは検索ではなく push だ。session_bootstra
 | scope | route が一致するセッション | 開始時の bootstrap | 特定の領域だけで必要なルール |
 | topic:NAME | 見出しは topic の Scope が一致するセッション（Scope が無ければ全セッション） | 見出しは開始時、本文はその作業に入るとき | 特定の作業のあいだだけ必要なルール |
 
-scope は「どこで」、topic は「何の作業のあいだか」を絞る。topic に action を結びつけると、その作業に当たる tool call（`delegate` なら Agent / Task による subagent の起動）の直前に、hook がその topic のルールを示して呼び出しを一度止める。hook が発火するのは topic の見出しが載るセッション、つまり topic に Scope があればその Scope のセッションだけだ。
+scope は「どこで」、topic は「何の作業のあいだか」を絞る。scope を受け取る Tool に topic の名前を渡すと、それが topic であることと `memory_list(topic=...)` での読み方を返す。topic に action を結びつけると、その作業に当たる tool call（`delegate` なら Agent / Task による subagent の起動）の直前に、hook がその topic のルールを示して呼び出しを一度止める。hook が発火するのは topic の見出しが載るセッション、つまり topic に Scope があればその Scope のセッションだけだ。
 
 初期の容量は次のとおり。各枠は独立しており、超過した書き込みは黙って切り捨てず拒否する。
 
@@ -345,7 +345,7 @@ bootstrap が常時配信するのは、完全な Task ID、Task 名、goal、st
 - Task を closed にできるのは User だけ。outcome は completed、abandoned、superseded のいずれか
 - Agent は task_propose_close で「終わったと思う」と根拠つきで提案できる。提案は open / closed を動かさず、lease も延ばさない。User が同じ outcome で理由を書かずに close すると、提案の根拠がそのまま close_reason になる
 
-task_update と task_checkpoint は、渡した欄だけを置き換える。省いた欄は前の値を保ち、欄を空にするときは空文字か空リストを渡す。MCP で Current State 全文を返すのは task_get だけで、他の Task 系 Tool は goal・status・詳細件数からなる card view を返す。task_get と write の成功応答は card と full detail の予算残量を含み、card 上限を超えた write は超過量と欄ごとの内訳を返して event_log に記録される。
+task_update と task_checkpoint は、渡した欄だけを置き換える。省いた欄は前の値を保ち、欄を空にするときは空文字か空リストを渡す。MCP で Current State 全文を返すのは task_get だけで、他の Task 系 Tool は goal・status・詳細件数からなる card view を返す。task_get と write の成功応答は card と full detail の予算残量を含み、card 上限を超えた write は超過量と欄ごとの内訳を返して event_log に記録される。欄ごとの文字数・件数の上限を超えた欄と checkpoint の履歴項目の形の誤りは、最初の一つで止めずに一度の拒否で `problems` にまとめて返り、上限を超えた欄は `over_limit` に `field`・`limit`・`actual` を持つ。各上限の値は Tool の説明にコードの定数から載る。
 
 ## Agent から使う
 

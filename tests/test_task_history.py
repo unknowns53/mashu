@@ -7,11 +7,11 @@ from uuid import uuid4
 import pytest
 
 from conftest import expire, new_project, new_task, update_task
-from mashu import server, task_history, tasks
+from mashu import db, server, task_history, tasks
 from mashu.errors import (
     ClosedTaskError,
+    MalformedRequestError,
     MashuError,
-    OverLimitError,
     ProjectBudgetError,
     RefusedError,
 )
@@ -87,16 +87,16 @@ def test_checkpoint_replaces_and_freezes_the_same_state(cur, task):
     [("attempt", "x" * 301), ("result", "x" * 501), ("reason", "x" * 501), ("next", "x" * 301)],
 )
 def test_attempt_limit_is_refused_before_an_attempt_row(cur, task_id, field, value):
-    with pytest.raises(OverLimitError) as raised:
+    with pytest.raises(MalformedRequestError) as raised:
         task_history.attempt_record(
             cur, task_id, actor="agent", **{"attempt": "try it", field: value}
         )
-    assert raised.value.field == field
+    assert [problem["field"] for problem in raised.value.over_limit] == [field]
     assert _history_counts(cur)["attempt"] == 0
 
 
 def test_a_refused_checkpoint_leaves_no_frozen_row(cur, task, monkeypatch):
-    with pytest.raises(OverLimitError):
+    with pytest.raises(MalformedRequestError):
         checkpoint(cur, task, goal="x" * 301)
 
     other = new_task(cur, "other task", "history")
@@ -263,12 +263,12 @@ def test_checkpoint_writes_attempts_decisions_and_artifacts_with_the_state(cur, 
                 "decisions": [{"decision": "would be recorded"}],
                 "artifacts": [{"kind": "file", "locator": "src/main.py"}],
             },
-            "^attempt is 301 chars and the limit is 300;",
+            r"^attempts\[1\]\.attempt is 301 chars and the limit is 300$",
         ),
         ({"attempts": [{"attempt": "try", "outcome": "worked"}]}, "unknown key"),
         ({"decisions": [{"reason": "no decision given"}]}, "missing required"),
         ({"artifacts": [{"kind": "file"}]}, "missing required"),
-        ({"artifacts": [{"kind": "tarball", "locator": "a.tgz"}]}, "unknown artifact kind"),
+        ({"artifacts": [{"kind": "tarball", "locator": "a.tgz"}]}, r"artifacts\[0\]\.kind"),
         ({"decisions": [{"decision": "d", "supersedes_id": "not-a-uuid"}]}, "UUID"),
         ({"attempts": ["just a string"]}, "must be an object"),
     ],
@@ -282,12 +282,46 @@ def test_one_refused_item_leaves_the_checkpoint_unwritten(cur, task, task_id, it
     assert set(_history_counts(cur).values()) == {0}
 
 
-def test_history_is_written_only_through_task_checkpoint_over_mcp(monkeypatch):
+def test_mcp_writes_history_only_through_task_checkpoint_and_publishes_write_contracts(monkeypatch):
     pytest.importorskip("mcp.server")
     import asyncio
 
     monkeypatch.setenv("MASHU_DATABASE_URL", "dbname=mashu_test_never_created")
-    names = {tool.name for tool in asyncio.run(server.build_server().list_tools())}
-    assert len(names) == 19
-    assert not names & {"attempt_record", "decision_record", "artifact_link"}
-    assert "task_checkpoint" in names
+    tools = {tool.name: tool for tool in asyncio.run(server.build_server().list_tools())}
+    assert len(tools) == 19
+    assert not set(tools) & {"attempt_record", "decision_record", "artifact_link"}
+
+    outcome = tools["task_propose_close"].input_schema["properties"]["outcome"]
+    assert outcome["enum"] == list(tasks.OUTCOMES)
+    history = tools["task_checkpoint"].input_schema["properties"]
+    items = {name: history[name]["anyOf"][0]["items"] for name in task_history.ITEM_KEYS}
+    for name, (required, optional) in task_history.ITEM_KEYS.items():
+        assert items[name]["required"] == list(required)
+        assert set(items[name]["properties"]) == {*required, *optional}
+    assert items["artifacts"]["properties"]["kind"]["enum"] == list(task_history.ARTIFACT_KINDS)
+    for name in ("task_create", "task_update", "task_checkpoint"):
+        assert f"status_text {tasks.TEXT_LIMITS['status_text']}" in tools[name].description
+    limits = task_history.HISTORY_LIMITS
+    assert f"what_changed {limits['what_changed']}" in tools["task_checkpoint"].description
+
+
+def test_one_refused_checkpoint_answers_with_every_problem_over_mcp(mcp, dsn):
+    with db.transaction(dsn) as cur:
+        new_project(cur, "history")
+        made = new_task(cur, "record the task history", "history")
+    too_many = [f"action {n}" for n in range(tasks.LIST_MAX_ITEMS + 1)]
+    refused = mcp(
+        "task_checkpoint",
+        task_id=str(made["task"]["task_id"]),
+        expect_updated_at=made["state"]["updated_at"].isoformat(),
+        what_changed="x" * (task_history.HISTORY_LIMITS["what_changed"] + 1),
+        next_actions=too_many,
+        attempts=[{"result": "the attempt itself is missing"}],
+    )
+    assert refused["ok"] is False
+    assert [(p["field"], p["limit"]) for p in refused["over_limit"]] == [
+        ("what_changed", task_history.HISTORY_LIMITS["what_changed"]),
+        ("next_actions", tasks.LIST_MAX_ITEMS),
+    ]
+    assert len(refused["problems"]) == 3
+    assert refused["problems"][2].startswith("attempts[0]")
