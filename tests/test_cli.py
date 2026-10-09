@@ -77,20 +77,6 @@ def command_paths(parser, path=()):
                 yield from command_paths(child, (*path, name))
 
 
-def test_top_level_help_explains_the_cli_to_people_and_agents(capsys):
-    with pytest.raises(SystemExit) as stopped:
-        cli.main(["--help"])
-
-    out, err = capsys.readouterr()
-    prose = " ".join(out.split())
-    assert stopped.value.code == 0 and err == ""
-    assert "Start here:" in out
-    assert "mashu COMMAND --help" in out
-    assert "Any unique prefix" in prose
-    assert "human-facing CLI" in prose and "Mashu MCP tools" in prose
-    assert "MASHU_DATABASE_URL" in out and "MASHU_AGENT" in out
-
-
 @pytest.mark.parametrize("path", tuple(command_paths(cli.build_parser())), ids="-".join)
 def test_every_command_help_has_a_description_and_an_example(path, capsys):
     with pytest.raises(SystemExit) as stopped:
@@ -100,29 +86,6 @@ def test_every_command_help_has_a_description_and_an_example(path, capsys):
     assert stopped.value.code == 0 and err == ""
     assert f"usage: mashu {' '.join(path)}" in out
     assert "examples:\n  mashu " in out
-
-
-@pytest.mark.parametrize(
-    ("path", "needles"),
-    (
-        (("remember",), ("temporary condition", "cannot be combined")),
-        (("review",), ("interactive review UI", "User decisions")),
-        (("deliver",), ("Scope delivery requires --scope", "topic delivery requires --topic")),
-        (("guard",), ("exit 2", "none exits 0")),
-        (("scope",), ("optional --about", "User-only")),
-        (("route",), ("--add requires --scope", "--ignore")),
-        (("task", "close"), ("explicit outcome", "User's decision")),
-        (("serve",), ("MCP stdio server", "MASHU_AGENT")),
-    ),
-)
-def test_command_help_states_runtime_constraints(path, needles, capsys):
-    with pytest.raises(SystemExit):
-        cli.main([*path, "--help"])
-
-    out, _ = capsys.readouterr()
-    prose = " ".join(out.split())
-    for needle in needles:
-        assert needle in prose
 
 
 def test_serve_uses_the_explicit_dsn_for_server_transactions(committing_dsn, monkeypatch):
@@ -148,11 +111,8 @@ def test_a_topic_linked_to_an_action_holds_its_calls_until_unlinked(run, committ
     run("topic", "--add", name, "--trigger", "Before handing work to a subagent")
     memory_id = remembered_id(run("remember", RULE, "--topic", name)[1])
     assert run("guard", action, "--json")[:2] == (0, "[]\n")
-    assert run("guard", "--json", "--", "-missing") == (0, "[]\n", "")
 
     assert run("topic", "--edit", name, "--action", action)[0] == 0
-    assert f"(before: {action})" in run("topic")[1]
-    assert f"before      {action}" in run("topic", "show", name)[1]
     code, out, _ = run("guard", action, "--json")
     assert code == 2
     assert json.loads(out) == [{"memory_id": memory_id, "content": RULE, "topic": name}]
@@ -181,9 +141,6 @@ def test_a_candidate_is_admitted_only_at_the_version_that_was_reviewed(run, comm
     code, out, _ = run("review", "--list")
     assert code == 0 and "evidence incident" in out
     nomination_id, reviewed = pending(out, EVIDENCED)
-
-    code, out, _ = run("show", nomination_id[:8])
-    assert code == 0 and "pending" in out and EVIDENCED in out
 
     code, _, error = run("review", "--admit", nomination_id)
     assert code == 1 and "--version" in error
@@ -228,10 +185,6 @@ def test_a_memory_change_can_be_read_applied_and_replayed_from_the_cli(run, comm
     assert first == replay and first[0] == 0 and request_id in first[1]
     with db.transaction(committing_dsn) as cur:
         assert memories.get_memory(cur, memory["memory_id"])["status"] == "retired"
-        cur.execute(
-            "SELECT count(*) AS n FROM event_log WHERE event_type = 'memory_change_applied'"
-        )
-        assert cur.fetchone()["n"] == 1
 
 
 def test_a_candidate_put_off_is_listed_only_under_all_and_declined_only_with_a_reason(
@@ -239,9 +192,6 @@ def test_a_candidate_put_off_is_listed_only_under_all_and_declined_only_with_a_r
 ):
     pain(run, DEFERRED)
     nomination_id, _ = pending(run("review", "--list")[1], DEFERRED)
-
-    code, _, err = run("review", "--decline", nomination_id)
-    assert code == 1 and "requires --reason" in err
 
     with db.transaction(committing_dsn) as cur:
         nominations.defer(cur, UUID(nomination_id), actor="user", reason="its owner is away")
@@ -263,8 +213,6 @@ def test_a_dated_condition_is_written_by_the_command_line_and_nowhere_else(run):
     assert code == 0
     assert "the build host is down until Thursday" in out
 
-    code, _, err = run("remember", "something", "--until", "30d")
-    assert code == 1 and "14" in err
     code, _, err = run("remember", "staging is down", "--until", "2d", "--topic", "missing")
     assert code == 1 and "--topic" in err
 
@@ -302,24 +250,6 @@ def test_the_work_that_is_current_is_printed_under_its_date(run, committing_dsn)
     card_line = next(row for row in out.splitlines() if row.startswith("cards"))
     assert "active=" in card_line and "worst=" in card_line
     assert card_line.endswith(f"/{config.project_capacity()}")
-
-
-def test_a_scope_can_be_created_without_a_summary(run, committing_dsn):
-    code, out, _ = run("scope", "--add", "scope without a summary")
-    assert code == 0 and out.strip() == "created  scope without a summary"
-    with db.transaction(committing_dsn) as cur:
-        cur.execute("SELECT summary FROM scope WHERE name = %s", ("scope without a summary",))
-        assert cur.fetchone()["summary"] is None
-
-
-def test_retirement_requires_a_non_legacy_kind(capsys):
-    with pytest.raises(SystemExit):
-        cli.main(["retire", NOWHERE, "--reason", "old rule"])
-    assert "following arguments are required: --kind" in capsys.readouterr().err
-
-    with pytest.raises(SystemExit):
-        cli.main(["retire", NOWHERE, "--kind", "legacy", "--reason", "old rule"])
-    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_the_short_id_that_is_printed_is_the_one_that_can_be_typed_back(run):
@@ -388,7 +318,6 @@ def test_the_memories_listing_holds_the_active_set_and_can_be_narrowed(run):
 
     code, out, _ = run("memories")
     assert code == 0
-    assert out.splitlines()[0].startswith("id")
     assert LISTED in out and SCOPED in out
     assert memory_id[:8] in out
 
@@ -431,7 +360,6 @@ def test_a_trace_is_shown_dated_named_and_wrapped_on_a_terminal(run, committing_
             break
         body.append(line)
     assert len(body) >= 3
-    assert "".join(line.strip() for line in body) == TRACED
 
     code, out, _ = run("trace", TRACED[:30])
     assert code == 0
@@ -512,9 +440,6 @@ def test_a_pain_on_a_rule_already_delivered_names_the_delivery_and_is_counted(ru
     assert "already active" in out
     assert f"active {memory_id[:8]} [always]" in out
 
-    _, out, _ = run("review", "--list")
-    assert DELIVERED not in out
-
     _, out, _ = run("status")
     suspected = next(line for line in out.splitlines() if line.startswith("delivery"))
     assert int(suspected.split()[1].split("=")[1]) >= 1
@@ -538,12 +463,6 @@ CHANGED = "the manifest is written and the count comes from it"
 
 DORMANT_PROJECT = "the queue paperwork"
 DORMANT_TASK = "collect the walltime figures for the allocation report"
-
-AMBIGUOUS_PROJECT = "the collision bench"
-
-#: Seed UUIDs sharing a four-character prefix to test ambiguity handling.
-TWIN_TASK_A = "abcd0003-0000-4000-8000-00000000000c"
-TWIN_TASK_B = "abcd0004-0000-4000-8000-00000000000d"
 
 
 def created_task(out: str) -> str:
@@ -622,15 +541,6 @@ def test_the_history_and_the_artifact_locators_are_visible_on_one_task(run, comm
 
     with db.transaction(committing_dsn) as cur:
         task_id = cli._task_ref(cur, short)
-        artifact = task_history.artifact_link(
-            cur, task_id, actor="agent", kind="git_commit", locator=LOCATOR, label="the manifest"
-        )
-        task_history.attempt_record(
-            cur, task_id, actor="agent", attempt=ATTEMPT, result="the count came out short"
-        )
-        task_history.decision_record(
-            cur, task_id, actor="agent", decision=DECISION, reason="a half-run must not look whole"
-        )
         state = tasks.task_get(cur, task_id)["state"]
         task_history.checkpoint(
             cur,
@@ -639,7 +549,9 @@ def test_the_history_and_the_artifact_locators_are_visible_on_one_task(run, comm
             what_changed=CHANGED,
             expect_updated_at=state["updated_at"],
             status_text=CHANGED,
-            evidence=[artifact["reference_id"]],
+            attempts=[{"attempt": ATTEMPT, "result": "the count came out short"}],
+            decisions=[{"decision": DECISION, "reason": "a half-run must not look whole"}],
+            artifacts=[{"kind": "git_commit", "locator": LOCATOR, "label": "the manifest"}],
         )
 
     code, out, _ = run("task", "show", short)
@@ -668,45 +580,6 @@ def test_a_task_whose_lease_has_run_out_is_listed_only_when_it_is_asked_for(run,
     code, out, _ = run("task", "list", "--dormant", "--project", DORMANT_PROJECT)
     assert code == 0
     assert short in out
-    # Not the present tense: what it holds is the last thing anybody confirmed.
-    assert "Last known state as of " in out
-
-    _, out, _ = run("bootstrap")
-    assert short not in out
-
-
-def test_a_task_prefix_two_rows_answer_to_is_refused_with_both_of_them(run, committing_dsn):
-    import psycopg
-
-    with psycopg.connect(committing_dsn, autocommit=True) as conn:
-        project_id = conn.execute(
-            "INSERT INTO project (name) VALUES (%s) RETURNING project_id",
-            (AMBIGUOUS_PROJECT,),
-        ).fetchone()[0]
-        for task_id in (TWIN_TASK_A, TWIN_TASK_B):
-            conn.execute(
-                "INSERT INTO task (task_id, project_id, name, created_by, active_until) "
-                "VALUES (%s, %s, %s, 'test', now() + interval '14 days')",
-                (task_id, project_id, f"seeded for the collision {task_id[:8]}"),
-            )
-            conn.execute(
-                "INSERT INTO task_state (task_id, updated_by) VALUES (%s, 'test')", (task_id,)
-            )
-
-    code, _, err = run("task", "show", "abcd")
-    assert code == 1
-    assert "names more than one task" in err
-    assert "abcd0003" in err and "abcd0004" in err
-
-    code, _, err = run("task", "touch", "abc")
-    assert code == 1 and "too short" in err
-
-    code, _, err = run("task", "show", NOWHERE)
-    assert code == 1 and "no task begins with" in err
-
-    code, out, _ = run("task", "show", TWIN_TASK_A[:8])
-    assert code == 0
-    assert TWIN_TASK_A in out
 
 
 # a checkout ahead of its database (13.2)

@@ -65,35 +65,25 @@ def test_four_views_can_be_opened_and_initial_view_is_honoured(dsn, monkeypatch,
 def test_task_details_show_all_state_proposal_and_latest_history(dsn, monkeypatch, capsys):
     task_id = make_task(dsn, "replace launch rail", proposal=True)
     with db.transaction(dsn) as cur:
-        updated = update_task(cur, task_id, **STATE)
-        artifact = task_history.artifact_link(
-            cur, task_id, actor="agent", kind="file", locator="reports/rail-load.txt", label="load"
-        )
-        for attempt, result in (("fit the new rail", "aligned"), ("test the forward mount", "ok")):
-            task_history.attempt_record(cur, task_id, actor="agent", attempt=attempt, result=result)
-        for decision, reason in (
-            ("keep aft mountings", "loads pass"),
-            ("document the alternate rail", "future refits need the same dimensions"),
-        ):
-            task_history.decision_record(
-                cur, task_id, actor="agent", decision=decision, reason=reason
-            )
         task_history.checkpoint(
             cur,
             task_id,
             actor="agent",
             what_changed="recorded the fitted rail",
-            expect_updated_at=updated["state"]["updated_at"],
-            evidence=[artifact["reference_id"]],
+            expect_updated_at=tasks.task_get(cur, task_id)["state"]["updated_at"],
+            attempts=[
+                {"attempt": "fit the new rail", "result": "aligned"},
+                {"attempt": "test the forward mount", "result": "ok"},
+            ],
+            decisions=[
+                {"decision": "keep aft mountings", "reason": "loads pass"},
+                {"decision": "document the alternate rail", "reason": "refits need it"},
+            ],
+            artifacts=[
+                {"kind": "file", "locator": "reports/rail-load.txt", "label": "load"},
+                {"kind": "file", "locator": "reports/rail-dimensions.txt", "label": "dimensions"},
+            ],
             **STATE,
-        )
-        task_history.artifact_link(
-            cur,
-            task_id,
-            actor="agent",
-            kind="file",
-            locator="reports/rail-dimensions.txt",
-            label="dimension report",
         )
     keys(monkeypatch, "enter", "space", "q", "q")
 
@@ -120,13 +110,19 @@ def test_search_reads_state_proposal_and_history_case_insensitively(dsn, monkeyp
     wanted = make_task(dsn, "replace launch rail", proposal=True)
     make_task(dsn, "unrelated deck")
     with db.transaction(dsn) as cur:
-        task_history.artifact_link(
+        task_history.checkpoint(
             cur,
             wanted,
             actor="agent",
-            kind="file",
-            locator="reports/Unique-Rail-Load.txt",
-            label="Launch Evidence",
+            what_changed="linked the load report",
+            expect_updated_at=tasks.task_get(cur, wanted)["state"]["updated_at"],
+            artifacts=[
+                {
+                    "kind": "file",
+                    "locator": "reports/Unique-Rail-Load.txt",
+                    "label": "Launch Evidence",
+                }
+            ],
         )
         row = task_history.expanded_task(cur, wanted, artifacts=True)
     assert work_ui._matches_task(row, "unique-rail")

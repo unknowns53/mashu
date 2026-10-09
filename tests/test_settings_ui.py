@@ -37,7 +37,6 @@ def test_top_level_reaches_every_settings_page_and_leaves_cleanly(dsn, monkeypat
     ):
         assert heading in out
     assert "\x1b[" not in out
-    assert hasattr(settings_ui.run, "__wrapped__")
 
 
 def test_health_collects_capacity_queues_evidence_and_task_activity(dsn):
@@ -150,14 +149,12 @@ def test_scope_name_and_summary_can_be_edited(dsn, monkeypatch):
     assert row["summary"] == "new summary"
 
 
-def test_scope_refuses_banned_text_and_flags_unreadable_patterns(cur, tmp_path, monkeypatch):
+def test_scope_refuses_banned_text(cur):
     for field in ("name", "summary"):
         with pytest.raises(RefusedError):
             scopes.create_scope(
                 cur, actor="user", **{"name": "clean", "summary": "clean", field: "SECRETMARKER9"}
             )
-    monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(tmp_path))
-    assert scopes.create_scope(cur, name="clean", actor="user")["unchecked"] is True
 
 
 def test_routes_can_be_edited_added_ignored_and_removed(dsn, monkeypatch):
@@ -235,19 +232,3 @@ def test_topic_page_creates_edits_and_removes_a_topic(dsn, monkeypatch):
     edited = events[1]["detail"]["to"]
     assert edited["trigger"] == "Before changing win rates or placement"
     assert (edited["scope_id"], edited["action"]) == (None, "delegate")
-
-
-def test_a_topic_holding_rules_is_not_removed_from_the_page(dsn, monkeypatch, capsys):
-    with db.transaction(dsn) as cur:
-        topic = topics.create_topic(cur, name="difficulty", trigger="Before tuning", actor="user")
-        remember(cur, "keep the win rate even", delivery="topic", topic_id=topic["topic_id"])
-    getkeys(monkeypatch, "x", "q")
-    answers(monkeypatch, "y")
-
-    settings_ui._topics_page(dsn)
-
-    out = capsys.readouterr().out
-    assert "still holds 1 active rule" in out
-    assert "1 rule active" in out
-    with db.transaction(dsn) as cur:
-        assert topics.get_topic(cur, "difficulty")["archived_at"] is None

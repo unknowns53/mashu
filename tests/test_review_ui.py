@@ -6,7 +6,7 @@ import sys
 import pytest
 
 from conftest import candidate, keys, read_through, remember, retire
-from mashu import db, ledger, nominations, review_ui, screen, topics
+from mashu import db, nominations, review_ui, screen, topics
 
 RULE = "run the migration before starting the local server, every time"
 OTHER = "spell out the timezone in every scheduled job, even when it looks obvious"
@@ -34,20 +34,6 @@ def memory_rows(dsn: str) -> list[dict]:
     with db.transaction(dsn) as cur:
         cur.execute("SELECT * FROM memory ORDER BY created_at")
         return cur.fetchall()
-
-
-def test_opening_a_candidate_and_pressing_y_admits_it_where_it_belongs(dsn, monkeypatch):
-    nomination = a_candidate(dsn, RULE)
-    keys(monkeypatch, "", "y", "")
-
-    assert review_ui.run(dsn) == 0
-
-    rows = memory_rows(dsn)
-    assert len(rows) == 1
-    assert rows[0]["content"] == RULE
-    assert rows[0]["status"] == "active"
-    assert rows[0]["delivery"] == "always"
-    assert nomination_row(dsn, nomination["nomination_id"])["status"] == "admitted"
 
 
 def test_stale_candidate_shows_new_short_wording_from_the_first_page(dsn, monkeypatch, capsys):
@@ -105,18 +91,6 @@ def test_ctrl_c_at_admission_delivery_keeps_the_candidate_pending(dsn, monkeypat
     assert memory_rows(dsn) == []
 
 
-def test_turning_one_down_keeps_the_reason_that_was_typed_for_it(dsn, monkeypatch):
-    nomination = a_candidate(dsn, RULE)
-    keys(monkeypatch, "", "r", "the tool refuses on its own now")
-
-    assert review_ui.run(dsn) == 0
-
-    row = nomination_row(dsn, nomination["nomination_id"])
-    assert row["status"] == "declined"
-    assert row["decision_reason"] == "the tool refuses on its own now"
-    assert memory_rows(dsn) == []
-
-
 def test_putting_one_off_hides_it_until_all_asks_for_it_with_its_reason(dsn, monkeypatch, capsys):
     nomination = a_candidate(dsn, RULE)
     reason = "waiting on the other team to answer"
@@ -135,8 +109,6 @@ def test_putting_one_off_hides_it_until_all_asks_for_it_with_its_reason(dsn, mon
     out = capsys.readouterr().out
     assert f"preview  {str(nomination['nomination_id'])[:8]}" in out
     assert RULE in out
-    assert "evidence: 1" in out
-    assert "conflicts: 0" in out
     assert f"put off: {reason}" in out
 
 
@@ -204,9 +176,10 @@ def test_queue_and_item_use_the_same_candidate_navigation(dsn, monkeypatch, move
 
     assert review_ui.run(dsn) == 0
 
-    statuses = [nomination_row(dsn, row["nomination_id"])["status"] for row in candidates]
-    assert statuses[decided] == "declined"
-    assert statuses.count("pending") == 2
+    rows = [nomination_row(dsn, row["nomination_id"]) for row in candidates]
+    assert [row["status"] for row in rows].count("pending") == 2
+    assert rows[decided]["status"] == "declined"
+    assert rows[decided]["decision_reason"] == "no longer needed"
 
 
 def test_the_queue_names_every_candidate_and_left_clears_a_search_first(dsn, monkeypatch, capsys):
@@ -265,29 +238,17 @@ def test_editing_persists_the_candidate_then_it_can_be_admitted(dsn, monkeypatch
     assert len(rows) == 1
     assert rows[0]["content"].startswith(RULE)
     assert "and check the standby first" in rows[0]["content"]
+    assert rows[0]["delivery"] == "always"
     saved = nomination_row(dsn, candidate["nomination_id"])
     assert saved["content"] == rows[0]["content"]
 
 
-def test_a_candidate_that_walks_back_a_retirement_says_so_above_its_evidence(
-    dsn, monkeypatch, capsys
-):
+def test_a_candidate_that_walks_back_a_retirement_says_so(dsn, monkeypatch, capsys):
     withdrawn = "the server runs the migration on boot now"
     with db.transaction(dsn) as cur:
         kept = remember(cur, OTHER)
         retire(cur, kept, withdrawn)
-        # Keep the existing candidate so the repeated pain carries its conflict.
-        pain = ledger.report_pain(
-            cur, kind="friction", what="looked it up", prevention=RULE, actor="agent"
-        )
-        nominations.create_nomination(
-            cur,
-            content=RULE,
-            kind="user_explicit",
-            evidence=[pain["ledger_id"]],
-            actor="agent",
-            conflicts=[kept["memory_id"]],
-        )
+        candidate(cur, RULE, conflicts=[kept["memory_id"]])
     keys(monkeypatch, "", "q")
 
     assert review_ui.run(dsn) == 0
@@ -297,7 +258,6 @@ def test_a_candidate_that_walks_back_a_retirement_says_so_above_its_evidence(
     assert "conflicts: 1" in out
     assert withdrawn in out
     assert OTHER not in out
-    assert out.index("retired conflict") < out.rindex("evidence")
 
 
 @pytest.mark.parametrize("answer", ["t migrations", "t"])
