@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 
 from conftest import apply_change, propose_change, remember, retire
-from mashu import memories, memory_changes, nominations, scopes, topics
+from mashu import db, memories, memory_changes, nominations, scopes, topics
 from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
@@ -365,3 +365,30 @@ def test_redeliver_refuses_a_topic_opened_differently_or_a_target_changed_after_
     memories.revise(cur, memory["memory_id"], content=UPDATED, actor="user")
     with pytest.raises(MashuError, match="changed after this proposal was read"):
         apply_change(cur, proposal, "Scope it")
+
+
+@pytest.mark.parametrize("kind", ["user_direct", "policy"])
+def test_mcp_admits_and_applies_only_on_a_user_instruction(mcp, dsn, kind):
+    with db.transaction(dsn) as cur:
+        memory = remember(cur, RULE)
+        proposal = propose_change(
+            cur, memory, "retire", retirement_kind="invalidated", retire_reason="now verified"
+        )
+    approval = {"request_id": str(uuid4()), "approval_kind": kind, "instruction": "do it"}
+
+    admitted = mcp("memory_admit", content=SUCCESSOR, **approval)
+    applied = mcp(
+        "memory_change_apply",
+        change_id=str(proposal["change_id"]),
+        version=proposal["version"],
+        **approval,
+    )
+
+    assert admitted["ok"] is False and "user_instruction" in admitted["error"]
+    assert applied["ok"] is False and "user_instruction" in applied["error"]
+    with db.transaction(dsn) as cur:
+        cur.execute("SELECT content, status FROM memory")
+        assert cur.fetchall() == [{"content": RULE, "status": "active"}]
+        cur.execute("SELECT count(*) AS n FROM nomination")
+        assert cur.fetchone()["n"] == 0
+        assert memory_changes.get(cur, proposal["change_id"])["status"] == "pending"

@@ -443,3 +443,20 @@ def test_mcp_task_writes_answer_with_the_card_and_log_a_refused_card(mcp, dsn, m
         cur.execute("SELECT detail FROM event_log WHERE event_type = 'task_card_write_refused'")
         assert cur.fetchone()["detail"]["breakdown"] == refused["breakdown"]
         assert tasks.task_get(cur, task_id)["task"]["name"] == SCHEMA
+
+
+def test_mcp_refuses_a_task_write_carrying_tool_call_markup(mcp, dsn, monkeypatch, tmp_path):
+    with db.transaction(dsn) as cur:
+        new_project(cur, "mashu")
+    made = mcp("task_create", project="mashu", name=SCHEMA)
+    task_id, at = made["task"]["task_id"], made["state"]["updated_at"]
+    leaked = 'one migration <parameter name="x">two modules'
+
+    listed = mcp("task_update", task_id=task_id, expect_updated_at=at, approach=leaked)
+    monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(tmp_path / "absent"))
+    unlisted = mcp("task_update", task_id=task_id, expect_updated_at=at, approach=leaked)
+
+    for refused in (listed, unlisted):
+        assert refused["ok"] is False and "tool-call markup" in refused["error"]
+    with db.transaction(dsn) as cur:
+        assert tasks.task_get(cur, task_id)["state"]["approach"] is None
