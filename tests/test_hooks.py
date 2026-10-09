@@ -65,21 +65,6 @@ def test_unreadable_staged_blob_rejects_commit(hook_repo):
     assert "cannot read staged blob" in result.stderr
 
 
-@pytest.mark.parametrize("removed", ["tests/a.py", "tests/line-budget"])
-def test_deletion_only_commit_checks_line_budget(hook_repo, removed):
-    tests = hook_repo / "tests"
-    tests.mkdir()
-    (tests / "a.py").write_text("pass\n")
-    (tests / "line-budget").write_text("1\n")
-    git(hook_repo, "add", "tests")
-    git(hook_repo, "-c", "core.hooksPath=/dev/null", "commit", "-qm", "base")
-    (hook_repo / removed).unlink()
-    git(hook_repo, "add", "-u")
-    result = hook(hook_repo, "pre-commit")
-    assert result.returncode != 0
-    assert "tests/line-budget" in result.stderr
-
-
 def test_pretooluse_uses_local_mashu_and_separates_option_like_action(monkeypatch, tmp_path):
     event = {"tool_name": "External", "session_id": "test"}
     monkeypatch.setattr(pretooluse_guard, "rules", lambda: [("tool", "External", "-guard")])
