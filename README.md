@@ -261,7 +261,7 @@ Memory の通常の読み取りは検索ではなく push だ。session_bootstra
 | scope | route が一致するセッション | 開始時の bootstrap | 特定の領域だけで必要なルール |
 | topic:NAME | 見出しは topic の Scope が一致するセッション（Scope が無ければ全セッション） | 見出しは開始時、本文はその作業に入るとき | 特定の作業のあいだだけ必要なルール |
 
-scope は「どこで」、topic は「何の作業のあいだか」を絞る。topic に action を結びつけると、その作業に当たる tool call（`delegate` なら Agent / Task による subagent の起動）の直前に、hook がその topic のルールを示して呼び出しを一度止める。hook が発火するのは topic の見出しが載るセッション、つまり topic に Scope があればその Scope のセッションだけだ。
+scope は「どこで」、topic は「何の作業のあいだか」を絞る。scope を受け取る Tool に topic の名前を渡すと、それが topic であることと `memory_list(topic=...)` での読み方を返す。topic に action を結びつけると、その作業に当たる tool call（`delegate` なら Agent / Task による subagent の起動）の直前に、hook がその topic のルールを示して呼び出しを一度止める。hook が発火するのは topic の見出しが載るセッション、つまり topic に Scope があればその Scope のセッションだけだ。
 
 初期の容量は次のとおり。各枠は独立しており、超過した書き込みは黙って切り捨てず拒否する。
 
@@ -354,7 +354,7 @@ bootstrap が常時配信するのは、完全な Task ID、Task 名、goal、st
 - Task を closed にできるのは User だけ。outcome は completed、abandoned、superseded のいずれか
 - Agent は task_propose_close で「終わったと思う」と根拠つきで提案できる。提案は open / closed を動かさず、lease も延ばさない。User が同じ outcome で理由を書かずに close すると、提案の根拠がそのまま close_reason になる
 
-task_update と task_checkpoint は、渡した欄だけを置き換える。省いた欄は前の値を保ち、欄を空にするときは空文字か空リストを渡す。MCP で Current State 全文を返すのは task_get だけで、他の Task 系 Tool は goal・status・詳細件数からなる card view を返す。task_get と write の成功応答は card と full detail の予算残量を含み、card 上限を超えた write は超過量と欄ごとの内訳を返して event_log に記録される。
+task_update と task_checkpoint は、渡した欄だけを置き換える。省いた欄は前の値を保ち、欄を空にするときは空文字か空リストを渡す。MCP で Current State 全文を返すのは task_get だけで、他の Task 系 Tool は goal・status・詳細件数からなる card view を返す。task_get と write の成功応答は card と full detail の予算残量を含み、card 上限を超えた write は超過量と欄ごとの内訳を返して event_log に記録される。欄ごとの文字数・件数の上限を超えた欄と checkpoint の履歴項目の形の誤りは、最初の一つで止めずに一度の拒否で `problems` にまとめて返り、上限を超えた欄は `over_limit` に `field`・`limit`・`actual` を持つ。各上限の値は Tool の説明にコードの定数から載る。
 
 ## Agent から使う
 
@@ -383,7 +383,7 @@ MCP tool は 20 個ある。
 | Knowledge | memory_get | 指定 Memory の本文、revision、evidence、退役種別・理由・後継を読む |
 | Knowledge | memory_nominate | 新規 Memory の pending candidate を作る。replace の後継に使う |
 | Knowledge | memory_admit | 承認根拠を必須にして採用する。`content` を渡せば候補の作成と採用を 1 回で行い、読むべき候補や conflict があれば止まる。止まった候補は `nomination_id` と読み取った version で採用する。まだ無い topic は `topic_trigger` を添えると記憶とともに作る。request replay は初回応答を返す |
-| Knowledge | memory_change_propose | retire / replace / restore / redeliver を作成または更新する。redeliver は本文を変えずに配信条件だけを移し、新しい topic も作れる。replace は後継の内容・version と配信条件を固定する |
+| Knowledge | memory_change_propose | retire / replace / restore / redeliver を作成または更新する。redeliver は本文を変えずに配信条件だけを移し、新しい topic も作れる。replace は後継の内容・version と配信条件を固定し、retirement_kind を省略すると superseded になる。形の誤りは一度の拒否で `problems` にまとめて返る |
 | Knowledge | memory_change_apply | proposal の version と対象・conflict・承認根拠を照合して適用する |
 | Knowledge | memory_redeliver | User が指示した配信先の変更を、redeliver 提案の作成と適用まで 1 回で行う。指示の引用と会話参照が evidence になり、request replay は初回応答を返す |
 | Knowledge | memory_change_withdraw | 不要になった pending proposal を取り下げる |
@@ -495,6 +495,7 @@ topic の本文、approach、open questions、blockers、next actions の本文�
 - 禁止パターンはリポジトリ外の .git-banned-patterns に置く。MASHU_BANNED_PATTERNS で場所を変更できる
 - 禁止パターンの一覧が見つからない場合は、検査を通すのではなく「検査できない」として扱う
 - エージェントのツール呼び出しの記法（`<parameter name=...>` など）を含む書き込みも入口で拒否される。ある引数の本文に次の引数が入り込んだ状態で保存されるのを防ぐためで、禁止パターンの一覧が無くても検査される
+- 拒否の応答は、当たった引数を `artifacts[0].locator` のように位置まで含めて `field` に、その本文の何文字目から何文字目かを `span` に返す。当たった文字列とパターンそのものは応答にもログにも出さない
 - commit hook は staged path と blob、commit message を検査し、禁止パターンの構文エラーや staged blob の取得失敗でも commit を拒否する
 - Ledger、Memory の revision history、event_log は append-only で、DB の trigger が書き換えを拒否する
 - bootstrap と類似照合結果は退役した Memory の本文を返さない。明示的な `memory_get` / `mashu show` では管理判断のため全文・revision・evidence と退役種別・理由・後継または移動先を返す。invalidated / legacy conflict を採用するには理由を踏まえた明示指示が要る
@@ -509,9 +510,9 @@ uv run ruff format
 
 テストは実 PostgreSQL に対して実行し、テスト用データベースは実行ごとに作り直す。既定値は mashu_test、変更には MASHU_TEST_DB を使う。
 
-main への push と pull request では、GitHub Actions の CI（`.github/workflows/ci.yml`）が ruff の lint と format の確認、tests/ の行数予算の確認、テストを実行する。テストは Ubuntu の Python 3.11 と 3.13、Windows の Python 3.13 で、それぞれ PostgreSQL 17 に対して走る。
+main への push と pull request では、GitHub Actions の CI（`.github/workflows/ci.yml`）が ruff の lint と format の確認とテストを実行する。テストは Ubuntu の Python 3.11 と 3.13、Windows の Python 3.13 で、それぞれ PostgreSQL 17 に対して走る。
 
-tests/ の空行を除いた行数には予算があり、`tests/line-budget` が持つ。Agent は変更のたびにテストを足して減らさないので、放っておくとテストがコードより速く育つ。tests/ に触れる commit では pre-commit hook が、push と pull request では CI が、予算と実際の行数の一致を確かめる。行数が予算を超えた commit は拒否され、減った commit では予算をその値まで下げる必要がある。テストを足すときは、先に既存のテストを広げること、conftest の共有 fixture で状態を作ること、一つの不変条件を一つの層でだけ確かめること、画面や CLI の文言ではなく状態を確かめることで場所を空ける。予算を上げるかどうかはユーザーが決める。上げるときは予算ファイルだけを変える commit を作り、ユーザーの指示を `Test-Budget-Instruction:` の trailer に引用する。
+テストを足すときは、先に既存のテストを広げること、conftest の共有 fixture で状態を作ること、一つの不変条件を一つの層でだけ確かめること、画面や CLI の文言ではなく状態を確かめることを優先する。実際の呼び出し元（MCP の tool、CLI、TUI、git hook）が作らない入力や状態のテストは足さない。
 
 仕様を変えるときは、コードと対応する設計書を一緒に更新する。撤回した設計は削除せず、何を撤回したかと理由を設計書に残す。
 

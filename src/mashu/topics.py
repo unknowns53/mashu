@@ -53,9 +53,7 @@ def _text(value: str | None, label: str, limit: int) -> str:
 def _clean(name: str | None, trigger: str | None) -> tuple[str, str]:
     name = _text(name, "name", NAME_LIMIT)
     trigger = _text(trigger, "trigger", TRIGGER_LIMIT)
-    verdict = redact.check(name, trigger)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    redact.gate({"topic": name, "topic_trigger": trigger})
     return name, trigger
 
 

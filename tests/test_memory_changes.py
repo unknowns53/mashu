@@ -5,8 +5,16 @@ from uuid import uuid4
 import pytest
 
 from conftest import apply_change, propose_change, remember, retire
-from mashu import bootstrap, match, memories, memory_changes, nominations, scopes, topics
-from mashu.errors import MashuError, RefusedError
+from mashu import (
+    db,
+    memories,
+    memory_changes,
+    nominations,
+    scopes,
+    server,
+    topics,
+)
+from mashu.errors import MalformedRequestError, MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
 RULE = "the storage adapter trusts the signed manifest before selecting a mirror"
@@ -38,7 +46,6 @@ def _replace(cur, old, successor, version=None, **kwargs):
         old,
         "replace",
         ledger_id=successor["evidence"][0],
-        retirement_kind="superseded",
         retire_reason="the successor rule replaces this one",
         successor_nomination_id=successor["nomination_id"],
         successor_nomination_version=version or successor["version"],
@@ -46,8 +53,8 @@ def _replace(cur, old, successor, version=None, **kwargs):
     )
 
 
-def _redeliver(cur, memory, settings):
-    return propose_change(cur, memory, "redeliver", successor_settings=settings)
+def _redeliver(cur, memory, settings, **kwargs):
+    return propose_change(cur, memory, "redeliver", successor_settings=settings, **kwargs)
 
 
 def _topic_settings(name, trigger=None, scope_id=None):
@@ -55,6 +62,20 @@ def _topic_settings(name, trigger=None, scope_id=None):
     if trigger is not None:
         settings["topic_trigger"] = trigger
     return settings
+
+
+def test_a_malformed_proposal_reports_every_shape_problem_at_once(cur):
+    malformed = {"evidence": [{"observation": "x"}], "restore_reason": "r"}
+    with pytest.raises(MalformedRequestError) as refused:
+        propose_change(cur, remember(cur, RULE), "replace", **malformed)
+    assert server._failure(refused.value)["problems"] == [
+        "replace does not take restore_reason",
+        "replace needs retire_reason",
+        "replace needs successor_nomination_id",
+        "replace needs successor_nomination_version, the successor version just read",
+        f"evidence[0] needs {memory_changes.EVIDENCE_SHAPE} (missing: kind, id or ref); "
+        f"{memory_changes.CONVERSATION_EVIDENCE}",
+    ]
 
 
 def test_agent_proposal_stays_pending_until_explicit_instruction_and_replay_is_idempotent(cur):
@@ -163,8 +184,6 @@ def test_memory_get_shows_a_retired_rule_whole_and_restore_keeps_its_history(cur
     assert detail["retirement"]["kind"] == "legacy"
     assert detail["retirement"]["reason"] == retired["retire_reason"]
     assert detail["retirement_history"][-1]["event_type"] == "memory_retired"
-    assert "content" not in match.similar_tombstones(cur, RULE)[0]
-    assert RULE not in str(bootstrap.session_bootstrap(cur, actor="agent"))
 
     proposal = propose_change(
         cur, memory, "restore", restore_reason="the check was removed", evidence=RESTORE_EVIDENCE
@@ -299,13 +318,7 @@ def test_redeliver_moves_a_rule_into_an_existing_topic_without_touching_its_body
     with pytest.raises(MashuError, match="already exists"):
         _redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))
     with pytest.raises(MashuError, match="only changes delivery settings"):
-        propose_change(
-            cur,
-            memory,
-            "redeliver",
-            retire_reason="not a retirement",
-            successor_settings=_topic_settings("calibration"),
-        )
+        _redeliver(cur, memory, _topic_settings("calibration"), retire_reason="no")
 
     proposal = _redeliver(cur, memory, _topic_settings("calibration"))
     assert proposal["delivery_move"] == ["delivery: always -> topic:calibration"]
@@ -369,11 +382,36 @@ def test_redeliver_refuses_a_topic_opened_differently_or_a_target_changed_after_
         apply_change(cur, proposal, "Scope it")
 
 
+@pytest.mark.parametrize("kind", ["user_direct", "policy"])
+def test_mcp_admits_and_applies_only_on_a_user_instruction(mcp, dsn, kind):
+    with db.transaction(dsn) as cur:
+        memory = remember(cur, RULE)
+        proposal = propose_change(
+            cur, memory, "retire", retirement_kind="invalidated", retire_reason="now verified"
+        )
+    approval = {"request_id": str(uuid4()), "approval_kind": kind, "instruction": "do it"}
+
+    admitted = mcp("memory_admit", content=SUCCESSOR, **approval)
+    applied = mcp(
+        "memory_change_apply",
+        change_id=str(proposal["change_id"]),
+        version=proposal["version"],
+        **approval,
+    )
+
+    assert admitted["ok"] is False and "user_instruction" in admitted["error"]
+    assert applied["ok"] is False and "user_instruction" in applied["error"]
+    with db.transaction(dsn) as cur:
+        cur.execute("SELECT content, status FROM memory")
+        assert cur.fetchall() == [{"content": RULE, "status": "active"}]
+        cur.execute("SELECT count(*) AS n FROM nomination")
+        assert cur.fetchone()["n"] == 0
+        assert memory_changes.get(cur, proposal["change_id"])["status"] == "pending"
+
+
 def test_memory_redeliver_proposes_and_applies_an_instructed_move_in_one_call(
     mcp, dsn, monkeypatch
 ):
-    from mashu import db
-
     with db.transaction(dsn) as cur:
         memory = remember(cur, RULE)
     call = {

@@ -108,6 +108,7 @@ v1 の投機的捕捉との関係。セッションから安く残すという�
 - **evidence の無い active な記憶は存在できない**（User 明示の場合は明示の記録そのものが evidence になる）
 - content の改訂は User のみが行い、revision に旧本文が残る
 - 個人識別情報（本名、所属、学籍番号、ホームディレクトリを含む絶対パス）を含む書き込みは入口で拒否する。パターン一覧はリポジトリ外の既存ファイル（commit hook と共用）を読む。一覧が見つからない、または読めないときは「合格」ではなく「検査できなかった」と報告して書き込みを通す
+- 拒否には、当たった引数の名前（リストの項目なら `artifacts[0].locator` のように位置まで）と、その本文の中の文字位置とパターンの番号を添える。どこを直せばよいかが分からない拒否は、Agent に関係のない欄を書き直させるだけだからである。当たった文字列とパターンそのものは拒否理由にもログにも載せない。一覧は非公開で、拒否は記録に残るからである
 
 ### 5.1 昇格（admission）
 
@@ -325,7 +326,9 @@ pgvector は使わない。拡張は pg_trgm のみ。埋め込みモデルへ�
 
 `memory_nominate` と、採用せずに止まった `memory_admit` が返す nomination は `version` と evidence（根拠の台帳行）のほかに `conflicts`（衝突した退役済み Memory の id）を持つ。本文・scope・kind・evidence・conflict が変わるたびに version を進め、候補 ID で採用する `memory_admit` は読み取った version を必須で照合する。conflict 配列に外部キーは張らないが、Memory 行は削除されず退役するだけなので、書いた時点の id は後から必ず解決できる。
 
-`memory_change` は対象 Memory ID と revision、operation、変更内容、根拠、提案者、version、状態、承認根拠、idempotency request ID を保持する。replace 提案は読み取った後継 nomination version を受け取り、後継の本文、Scope、kind、evidence、conflicts の snapshot を保持する。提案前または適用前に後継が変わっていれば拒否し、再読と提案更新を要求する。後継の delivery と scope は提案に固定し、既定では旧 Memory から引き継ぐ。変更する場合は `successor_settings`（`delivery`・`scope_id`、topic なら `topic`）として提案 version に含め、適用 event にも記録する。旧 Memory の退役と後継採用は同じ transaction で確定する。
+`memory_change` は対象 Memory ID と revision、operation、変更内容、根拠、提案者、version、状態、承認根拠、idempotency request ID を保持する。replace 提案は読み取った後継 nomination version を受け取り、後継の本文、Scope、kind、evidence、conflicts の snapshot を保持する。提案前または適用前に後継が変わっていれば拒否し、再読と提案更新を要求する。後継の delivery と scope は提案に固定し、既定では旧 Memory から引き継ぐ。変更する場合は `successor_settings`（`delivery`・`scope_id`、topic なら `topic`）として提案 version に含め、適用 event にも記録する。旧 Memory の退役と後継採用は同じ transaction で確定する。replace の retirement_kind は `superseded` しか取り得ないので、省略されればそれを補う。
+
+提案の形の誤りは、DB を読む前にまとめて調べ、一度の拒否で全部を返す（MCP では `problems` の一覧）。operation ごとに要る欄の欠落、その operation に当てはまらない欄、evidence の各項目の不備がこれに当たる。一度に一つずつ返すと、Agent は規則を一つ知るたびに呼び直すことになる。evidence の各項目は、kind が `ledger` か `trace` なら `id`、`artifact` なら `ref` で出所を指し、`observation` に何が分かったかを書く。出所を指さない observation だけの項目は受け付けない。会話の中のユーザーの発言は台帳行も trace も持たないので、`artifact` として `ref` に会話を指す参照を書き、`observation` に発言を引用する。
 
 redeliver 提案は、active な Memory の配信条件だけを `successor_settings` として持ち、本文と ID は変えない。理由は根拠の observation が運ぶので、退役理由の欄は使わない。まだ無い topic を指定するときは、名前と発動条件（`topic_trigger`）と Scope を提案に保存し、適用する transaction の中で topic を作る。適用時に同じ名前の topic が別の発動条件か Scope で作られていれば拒否し、再読と提案更新を要求する。Agent はこの経路で配信の振り分けを提案し、User は review で 1 件ずつ `y` を押すか、明示指示で適用させる。`event_log` には退役種別・理由・移動先・actor と別の承認出所を判断時点の記録として保存する。承認出所は認証情報ではない。
 

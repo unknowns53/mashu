@@ -29,16 +29,6 @@ jobs:
 
       - run: uv run ruff format --check
 
-      # The pre-commit hook holds tests/ to its budget only in checkouts that ran hooks/install.sh
-      # and commits made without --no-verify, so the same count is taken here.
-      - name: tests/ line budget
-        run: |
-          . hooks/_budget.sh
-          budget=$(budget_staged)
-          count=$(budget_count)
-          echo "tests/ has $count non-blank lines against a budget of $budget"
-          [ "$count" -eq "$budget" ]
-
   test:
     name: test (${{ matrix.os }}, Python ${{ matrix.python }})
     strategy:

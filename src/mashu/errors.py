@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+
 
 class MashuError(Exception):
     """A request that cannot be carried out as asked."""
@@ -10,9 +13,52 @@ class MashuError(Exception):
 class RefusedError(MashuError):
     """A write the layer refuses to accept."""
 
-    def __init__(self, reason: str):
+    def __init__(
+        self, reason: str, *, field: str | None = None, span: tuple[int, int] | None = None
+    ):
         super().__init__(reason)
         self.reason = reason
+        #: The argument the refused text came from, when the check knew it.
+        self.field = field
+        #: Where in that argument's text the refusal applies, as a slice.
+        self.span = span
+
+
+#: What to do with a text that will not fit, instead of cutting what it says.
+LONG_FORM_ADVICE = "put the long form where its original lives and reference it instead"
+
+
+@dataclass(frozen=True)
+class OverLimit:
+    """One field longer than its own ceiling, reported among the request's other problems."""
+
+    field: str
+    limit: int
+    actual: int
+    unit: str = "chars"
+    advice: str | None = None
+
+    def __str__(self) -> str:
+        text = f"{self.field} is {self.actual} {self.unit} and the limit is {self.limit}"
+        return f"{text} ({self.advice})" if self.advice else text
+
+
+class MalformedRequestError(MashuError):
+    """A request wrong in ways seen before anything is written, all reported together."""
+
+    def __init__(self, problems: Sequence[str | OverLimit]):
+        texts = [str(problem) for problem in problems]
+        message = "; ".join(texts)
+        if any(isinstance(p, OverLimit) and p.advice is None for p in problems):
+            message += f". For a field over its limit, {LONG_FORM_ADVICE}"
+        super().__init__(message)
+        self.problems = texts
+        #: The problems that are a field over its ceiling, as field, limit, actual, and unit.
+        self.over_limit = [
+            {"field": p.field, "limit": p.limit, "actual": p.actual, "unit": p.unit}
+            for p in problems
+            if isinstance(p, OverLimit)
+        ]
 
 
 class RetiredConflictError(MashuError):
@@ -37,7 +83,7 @@ class OverLimitError(RefusedError):
         advice: str | None = None,
         breakdown: dict[str, int] | None = None,
     ):
-        advice = advice or "put the long form where its original lives and reference it instead"
+        advice = advice or LONG_FORM_ADVICE
         over_by = max(0, actual - limit)
         if breakdown is None:
             reason = f"{field} is {actual} {unit} and the limit is {limit}; {advice}"

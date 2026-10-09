@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal, get_args
 from uuid import UUID
 
 import psycopg
@@ -20,11 +20,39 @@ from mashu import (
     redact,
     topics,
 )
-from mashu.errors import MashuError, RefusedError
+from mashu.errors import MalformedRequestError, MashuError
 
-OPERATIONS = ("retire", "replace", "restore", "redeliver")
-RETIREMENT_KINDS = ("invalidated", "superseded", "out_of_scope", "relocated")
+Operation = Literal["retire", "replace", "restore", "redeliver"]
+#: The kinds a proposal may set. `legacy` marks rows retired before kinds existed, so only a
+#: proposal that already carries it may keep it.
+RetirementKind = Literal["invalidated", "superseded", "out_of_scope", "relocated"]
+EvidenceKind = Literal["ledger", "trace", "artifact"]
+
+OPERATIONS: tuple[str, ...] = get_args(Operation)
+RETIREMENT_KINDS: tuple[str, ...] = get_args(RetirementKind)
+EVIDENCE_KINDS: tuple[str, ...] = get_args(EvidenceKind)
 BLOCKING_KINDS = ("invalidated", "legacy")
+OBSERVATION_LIMIT = 2000
+EVIDENCE_SHAPE = "kind 'ledger' or 'trace' with id, or kind 'artifact' with ref, plus observation"
+#: A user's words have no ledger row or trace of their own, so they are cited as an artifact.
+CONVERSATION_EVIDENCE = (
+    "cite what the user said in this conversation as kind 'artifact' with ref naming the "
+    "conversation, and quote their words in observation"
+)
+
+#: The optional fields each operation takes; any other one given is a mistake to report.
+_TAKES = {
+    "retire": {"retirement_kind", "retire_reason", "relocated_to_kind", "relocated_to_id"},
+    "replace": {
+        "retirement_kind",
+        "retire_reason",
+        "successor_nomination_id",
+        "successor_nomination_version",
+        "successor_settings",
+    },
+    "restore": {"restore_reason"},
+    "redeliver": {"successor_settings"},
+}
 
 
 def _current(cur: psycopg.Cursor, memory_id: UUID) -> dict[str, Any]:
@@ -235,43 +263,129 @@ def _successor_topic(
     return topic["topic_id"]
 
 
-def _validate_evidence(cur: psycopg.Cursor, evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _blank(text: Any) -> bool:
+    return not isinstance(text, str) or not text.strip()
+
+
+def _evidence_problems(evidence: Any) -> list[str]:
     if not isinstance(evidence, list) or not evidence:
-        raise MashuError("a memory change needs at least one observation or evidence reference")
+        return [f"evidence needs at least one entry, each with {EVIDENCE_SHAPE}"]
+    problems = []
+    for index, row in enumerate(evidence):
+        where = f"evidence[{index}]"
+        if not isinstance(row, dict):
+            problems.append(f"{where} must be an object with {EVIDENCE_SHAPE}")
+            continue
+        kind = row.get("kind")
+        missing = []
+        if kind in ("ledger", "trace"):
+            if row.get("id") is None:
+                missing.append("id")
+            else:
+                try:
+                    UUID(str(row["id"]))
+                except ValueError:
+                    missing.append("an id that is a UUID")
+        elif kind == "artifact":
+            if _blank(row.get("ref")):
+                missing.append("ref")
+        else:
+            missing.append("kind" if kind is None else f"a kind of {', '.join(EVIDENCE_KINDS)}")
+            if row.get("id") is None and _blank(row.get("ref")):
+                missing.append("id or ref")
+        observation = row.get("observation")
+        if _blank(observation):
+            missing.append("observation")
+        elif len(observation) > OBSERVATION_LIMIT:
+            problems.append(
+                f"{where}.observation is {len(observation)} characters; "
+                f"the limit is {OBSERVATION_LIMIT}"
+            )
+        if missing:
+            problem = f"{where} needs {EVIDENCE_SHAPE} (missing: {', '.join(missing)})"
+            if "id or ref" in missing:
+                problem += f"; {CONVERSATION_EVIDENCE}"
+            problems.append(problem)
+    return problems
+
+
+def _shape_problems(
+    operation: str, evidence: Any, fields: dict[str, Any], *, legacy_possible: bool
+) -> list[str]:
+    """Every problem with the request that can be seen without reading the database."""
+    problems = []
+    if operation not in OPERATIONS:
+        problems.append(f"operation must be one of {', '.join(OPERATIONS)}")
+        return problems + _evidence_problems(evidence)
+    given = [name for name, value in fields.items() if value is not None]
+    extra = [name for name in given if name not in _TAKES[operation]]
+    if extra and operation == "redeliver":
+        problems.append(
+            f"redeliver only changes delivery settings and does not take {', '.join(extra)}; "
+            "its evidence says why"
+        )
+    elif extra:
+        problems.append(f"{operation} does not take {', '.join(extra)}")
+    kind = fields["retirement_kind"]
+    if operation in ("retire", "replace") and _blank(fields["retire_reason"]):
+        problems.append(f"{operation} needs retire_reason")
+    if operation == "retire":
+        if kind == "superseded":
+            problems.append("use replace to retire a memory as superseded")
+        elif kind not in RETIREMENT_KINDS and not (kind == "legacy" and legacy_possible):
+            problems.append("retire needs retirement_kind: invalidated, out_of_scope, or relocated")
+        if kind == "relocated" and (
+            fields["relocated_to_kind"] != "temporary_context" or fields["relocated_to_id"] is None
+        ):
+            problems.append(
+                "relocated retirement needs relocated_to_kind='temporary_context' and "
+                "relocated_to_id"
+            )
+        elif kind != "relocated" and (
+            fields["relocated_to_kind"] is not None or fields["relocated_to_id"] is not None
+        ):
+            problems.append("a relocation destination is only valid for relocated retirement")
+    if operation == "replace":
+        if kind != "superseded":
+            problems.append("replace takes retirement_kind 'superseded' or none")
+        if fields["successor_nomination_id"] is None:
+            problems.append("replace needs successor_nomination_id")
+        if fields["successor_nomination_version"] is None:
+            problems.append(
+                "replace needs successor_nomination_version, the successor version just read"
+            )
+    if operation == "restore" and _blank(fields["restore_reason"]):
+        problems.append("restore needs restore_reason")
+    if operation == "redeliver" and fields["successor_settings"] is None:
+        problems.append("redeliver needs successor_settings naming the new delivery")
+    return problems + _evidence_problems(evidence)
+
+
+def _gate_texts(
+    evidence: list[dict[str, Any]], retire_reason: str | None, restore_reason: str | None
+) -> None:
+    texts = {"retire_reason": retire_reason, "restore_reason": restore_reason}
+    for index, row in enumerate(evidence):
+        texts[f"evidence[{index}].ref"] = row.get("ref")
+        texts[f"evidence[{index}].observation"] = row.get("observation")
+    redact.gate(texts)
+
+
+def _validate_evidence(cur: psycopg.Cursor, evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The cited rows, which the shape pass already found well formed, as stored."""
     cleaned: list[dict[str, Any]] = []
     for row in evidence:
-        if not isinstance(row, dict) or not isinstance(row.get("kind"), str):
-            raise MashuError("evidence entries need a kind and a reference")
         kind = row["kind"]
         if kind in ("ledger", "trace"):
-            try:
-                reference = UUID(str(row.get("id")))
-            except (ValueError, TypeError, AttributeError) as error:
-                raise MashuError(f"{kind} evidence needs a valid id") from error
+            reference = UUID(str(row["id"]))
             table, key = ("ledger", "ledger_id") if kind == "ledger" else ("trace", "trace_id")
             cur.execute(f"SELECT 1 FROM {table} WHERE {key} = %s", (reference,))
             if cur.fetchone() is None:
                 raise MashuError(f"{kind} evidence {reference} does not exist")
             entry = {"kind": kind, "id": str(reference)}
-        elif kind == "artifact":
-            reference = row.get("ref")
-            if not isinstance(reference, str) or not reference.strip():
-                raise MashuError("artifact evidence needs a non-empty ref")
-            verdict = redact.check(reference)
-            if not verdict.allowed:
-                raise RefusedError(verdict.reason())
-            entry = {"kind": kind, "ref": reference.strip()}
         else:
-            raise MashuError("evidence kind must be ledger, trace, or artifact")
-        observation = row.get("observation")
-        if not isinstance(observation, str) or not observation.strip() or len(observation) > 2000:
-            raise MashuError(
-                "each evidence reference needs an observation of at most 2000 characters"
-            )
-        verdict = redact.check(observation)
-        if not verdict.allowed:
-            raise RefusedError(verdict.reason())
-        entry["observation"] = observation.strip()
+            entry = {"kind": kind, "ref": row["ref"].strip()}
+        entry["observation"] = row["observation"].strip()
         cleaned.append(entry)
     return cleaned
 
@@ -282,66 +396,26 @@ def _validate_change(
     target: dict[str, Any],
     operation: str,
     retirement_kind: str | None,
-    retire_reason: str | None,
     successor_nomination_id: UUID | None,
-    relocated_to_kind: str | None,
     relocated_to_id: UUID | None,
-    restore_reason: str | None,
     allow_legacy: bool = False,
 ) -> dict[str, Any]:
-    if operation not in OPERATIONS:
-        raise MashuError(f"operation must be one of {', '.join(OPERATIONS)}")
+    """The checks that read the database, run after the shape pass found nothing."""
     if operation == "redeliver":
-        if any(
-            value is not None
-            for value in (
-                retirement_kind,
-                retire_reason,
-                successor_nomination_id,
-                relocated_to_kind,
-                relocated_to_id,
-                restore_reason,
-            )
-        ):
-            raise MashuError(
-                "redeliver only changes delivery settings; its evidence says why, so "
-                "retirement, successor, and restore fields do not apply"
-            )
         if target["status"] != "active":
             raise MashuError(
                 f"memory {target['memory_id']} is {target['status']}; redeliver needs active memory"
             )
         return {}
-    if operation == "restore" and any(
-        value is not None
-        for value in (
-            retirement_kind,
-            retire_reason,
-            successor_nomination_id,
-            relocated_to_kind,
-            relocated_to_id,
-        )
-    ):
-        raise MashuError("restore only accepts restore_reason; retirement fields do not apply")
     if operation in ("retire", "replace"):
         if target["status"] != "active":
             raise MashuError(
                 f"memory {target['memory_id']} is {target['status']}; retire and replace "
                 "need active memory"
             )
-        if not retire_reason or not retire_reason.strip():
-            raise MashuError("retire_reason is required")
-        verdict = redact.check(retire_reason)
-        if not verdict.allowed:
-            raise RefusedError(verdict.reason())
-        allowed_kinds = RETIREMENT_KINDS + (("legacy",) if allow_legacy else ())
-        if retirement_kind not in allowed_kinds:
-            raise MashuError(f"retirement_kind must be one of {', '.join(allowed_kinds)}")
+        if retirement_kind == "legacy" and not allow_legacy:
+            raise MashuError(f"retirement_kind must be one of {', '.join(RETIREMENT_KINDS)}")
     if operation == "replace":
-        if retirement_kind != "superseded" or successor_nomination_id is None:
-            raise MashuError(
-                "replace needs retirement_kind='superseded' and a successor nomination"
-            )
         cur.execute(
             "SELECT * FROM nomination WHERE nomination_id = %s FOR UPDATE",
             (successor_nomination_id,),
@@ -350,28 +424,12 @@ def _validate_change(
         if successor is None or successor["status"] != "pending":
             raise MashuError("replacement needs a pending successor nomination")
         return successor
-    if successor_nomination_id is not None:
-        raise MashuError("successor_nomination_id is only valid for replace")
-    if operation == "retire" and retirement_kind == "superseded":
-        raise MashuError("use replace to retire a memory as superseded")
     if operation == "retire" and retirement_kind == "relocated":
-        if relocated_to_kind != "temporary_context" or relocated_to_id is None:
-            raise MashuError("relocated retirement needs temporary_context and its id")
         cur.execute("SELECT 1 FROM temporary_context WHERE context_id = %s", (relocated_to_id,))
         if cur.fetchone() is None:
             raise MashuError(f"no temporary context {relocated_to_id}")
-    elif relocated_to_kind is not None or relocated_to_id is not None:
-        raise MashuError("a relocation destination is only valid for relocated retirement")
-    if operation == "restore":
-        if target["status"] != "retired":
-            raise MashuError("restore needs a retired memory")
-        if not restore_reason or not restore_reason.strip():
-            raise MashuError("restore_reason is required")
-        verdict = redact.check(restore_reason)
-        if not verdict.allowed:
-            raise RefusedError(verdict.reason())
-    elif restore_reason is not None:
-        raise MashuError("restore_reason is only valid for restore")
+    if operation == "restore" and target["status"] != "retired":
+        raise MashuError("restore needs a retired memory")
     return {}
 
 
@@ -394,7 +452,31 @@ def propose(
     restore_reason: str | None = None,
     change_id: UUID | None = None,
 ) -> dict[str, Any]:
-    """Propose against the target and successor versions that were read."""
+    """Propose against the target and successor versions that were read.
+
+    Every problem visible without the database is reported in one refusal before any row
+    is read, so a caller can fix them all in one resend.
+    """
+    if operation == "replace" and retirement_kind is None:
+        retirement_kind = "superseded"
+    problems = _shape_problems(
+        operation,
+        evidence,
+        {
+            "retirement_kind": retirement_kind,
+            "retire_reason": retire_reason,
+            "successor_nomination_id": successor_nomination_id,
+            "successor_nomination_version": successor_nomination_version,
+            "successor_settings": successor_settings,
+            "relocated_to_kind": relocated_to_kind,
+            "relocated_to_id": relocated_to_id,
+            "restore_reason": restore_reason,
+        },
+        legacy_possible=change_id is not None,
+    )
+    if problems:
+        raise MalformedRequestError(problems)
+    _gate_texts(evidence, retire_reason, restore_reason)
     current = None
     if change_id is not None:
         cur.execute("SELECT * FROM memory_change WHERE change_id = %s FOR UPDATE", (change_id,))
@@ -411,16 +493,11 @@ def propose(
         target=target,
         operation=operation,
         retirement_kind=retirement_kind,
-        retire_reason=retire_reason,
         successor_nomination_id=successor_nomination_id,
-        relocated_to_kind=relocated_to_kind,
         relocated_to_id=relocated_to_id,
-        restore_reason=restore_reason,
         allow_legacy=bool(current and current["retirement_kind"] == "legacy"),
     )
     if operation == "replace":
-        if successor_nomination_version is None:
-            raise MashuError("replace needs the successor nomination version that was read")
         if successor["version"] != successor_nomination_version:
             raise MashuError(
                 "successor nomination version changed; read the current candidate before proposing"
@@ -428,19 +505,11 @@ def propose(
         successor_settings = _successor_settings(cur, target, successor_settings)
         successor_snapshot = _successor_snapshot(successor)
     elif operation == "redeliver":
-        if successor_nomination_version is not None:
-            raise MashuError("successor_nomination_version only applies to replace")
-        if successor_settings is None:
-            raise MashuError("redeliver needs successor_settings naming the new delivery")
         successor_settings = _successor_settings(cur, target, successor_settings)
         if successor_settings == stored_settings_of_memory(cur, target):
             raise MashuError("redeliver would leave the delivery settings as they are")
         successor_snapshot = None
     else:
-        if successor_nomination_version is not None:
-            raise MashuError("successor_nomination_version only applies to replace")
-        if successor_settings is not None:
-            raise MashuError("successor_settings only applies to replace and redeliver")
         successor_snapshot = None
     basis = _validate_evidence(cur, evidence)
     conflicts = (
@@ -969,9 +1038,7 @@ def decide(
         raise MashuError("a memory change can be declined or withdrawn")
     if not reason or not reason.strip():
         raise MashuError(f"{status} needs a reason")
-    verdict = redact.check(reason)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    redact.gate({"reason": reason})
     cur.execute("SELECT * FROM memory_change WHERE change_id = %s FOR UPDATE", (change_id,))
     row = cur.fetchone()
     if row is None or row["status"] != "pending":

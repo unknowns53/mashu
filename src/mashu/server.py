@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import os
+import sys
 from datetime import date, datetime
-from typing import Any
+from typing import Annotated, Any, NotRequired
 from uuid import UUID, uuid4
+
+if sys.version_info >= (3, 12):
+    from typing import TypedDict
+else:
+    # pydantic, which builds the tool schemas, refuses typing.TypedDict before 3.12.
+    from typing_extensions import TypedDict
 
 from mashu import (
     bootstrap,
     capacity,
+    config,
     db,
     events,
     memories,
@@ -25,9 +33,11 @@ from mashu import (
 )
 from mashu.errors import (
     DuplicateTaskError,
+    MalformedRequestError,
     MashuError,
     OverLimitError,
     ProjectBudgetError,
+    RefusedError,
     StaleStateError,
 )
 
@@ -45,7 +55,7 @@ INSTRUCTIONS = (
     "verify old state against the repository and artifacts. Use task_checkpoint at work "
     "breaks; put failed tries in its attempts, costly-to-rederive reasons in decisions, "
     "and external sources in artifacts. Task completion remains the user's decision. "
-    "If work looks done, use task_propose_close with outcome and grounds; it changes no "
+    "If work looks done, use task_propose_close with outcome and reason; it changes no "
     "task state. "
     "Record lookups or derivations with trace_put. Use pain_report only when missing or "
     "stale knowledge caused an incident or repeated lookup; incidents nominate once, "
@@ -58,6 +68,89 @@ INSTRUCTIONS = (
     "the required fields. Your own suggestion, confidence, and user silence are not "
     "approval; your independent change idea stays pending. After success, briefly report "
     "the target and reason; if it remains pending, say that review is needed."
+)
+
+
+class EvidenceItem(TypedDict):
+    """An observation behind a Memory change: ledger or trace with id, or artifact with ref."""
+
+    kind: memory_changes.EvidenceKind
+    id: NotRequired[UUID]
+    ref: NotRequired[str]
+    observation: str
+
+
+class AttemptItem(TypedDict):
+    attempt: str
+    result: NotRequired[str]
+    reason: NotRequired[str]
+    next: NotRequired[str]
+
+
+class DecisionItem(TypedDict):
+    decision: str
+    reason: NotRequired[str]
+    supersedes_id: NotRequired[UUID]
+
+
+class ArtifactItem(TypedDict):
+    kind: task_history.ArtifactKind
+    locator: str
+    label: NotRequired[str]
+
+
+class _ItemSchema:
+    """Show an item type in the tool schema while the argument still takes any items.
+
+    A malformed item then reaches the code's own shape pass and is reported with the
+    request's other problems, instead of stopping alone at argument validation.
+    """
+
+    def __init__(self, item: type, *, min_items: int = 0):
+        self.item = item
+        self.min_items = min_items
+
+    def __get_pydantic_json_schema__(self, core_schema: Any, handler: Any) -> dict[str, Any]:
+        from pydantic import TypeAdapter
+
+        schema = {"type": "array", "items": TypeAdapter(self.item).json_schema()}
+        if self.min_items:
+            schema["minItems"] = self.min_items
+        return schema
+
+
+EvidenceList = Annotated[list[Any], _ItemSchema(EvidenceItem, min_items=1)]
+AttemptList = Annotated[list[Any], _ItemSchema(AttemptItem)]
+DecisionList = Annotated[list[Any], _ItemSchema(DecisionItem)]
+ArtifactList = Annotated[list[Any], _ItemSchema(ArtifactItem)]
+
+
+def _state_contract() -> str:
+    """The limits every task state write is held to, taken from the code that enforces them."""
+    texts = ", ".join(f"{field} {limit}" for field, limit in tasks.TEXT_LIMITS.items())
+    return (
+        f"Char limits: {texts}; {', '.join(tasks.LIST_FIELDS)} at most "
+        f"{tasks.LIST_MAX_ITEMS} items of {tasks.LIST_MAX_CHARS} each. Budgets in estimated "
+        f"tokens: card {config.task_card_capacity()}, full state "
+        f"{config.task_detail_capacity()}."
+    )
+
+
+def _history_contract() -> str:
+    """The limits on checkpoint history, keyed as each item takes them."""
+    limits = task_history.HISTORY_LIMITS
+    parts = [f"what_changed {limits['what_changed']}"]
+    for name, (required, optional) in task_history.ITEM_KEYS.items():
+        keys = [key for key in (*required, *optional) if key in limits]
+        parts.append(f"{name} {{{', '.join(f'{key} {limits[key]}' for key in keys)}}}")
+    return f"History char limits: {'; '.join(parts)}."
+
+
+#: How a refused task write answers.
+_REFUSALS = (
+    "Every problem found before writing comes back together in `problems`; a field over its "
+    "limit is also in `over_limit` with limit and actual. A card or full state over its "
+    "budget is refused with `over_by`, the card with a per-component `breakdown`."
 )
 
 
@@ -119,6 +212,14 @@ def _failure(
         )
         if task_write and error.field == "task bootstrap card":
             answer["refusal_recorded"] = _record_card_refusal(error, task_write, task_id)
+    elif isinstance(error, RefusedError) and error.field is not None:
+        answer["field"] = error.field
+        if error.span is not None:
+            answer["span"] = list(error.span)
+    elif isinstance(error, MalformedRequestError):
+        answer["problems"] = error.problems
+        if error.over_limit:
+            answer["over_limit"] = error.over_limit
     return _plain(answer)
 
 
@@ -440,10 +541,10 @@ def build_server() -> Any:
         target_memory_id: UUID,
         target_revision_id: UUID,
         target_updated_at: datetime,
-        operation: str,
-        evidence: list[dict[str, Any]],
+        operation: memory_changes.Operation,
+        evidence: EvidenceList,
         change_id: UUID | None = None,
-        retirement_kind: str | None = None,
+        retirement_kind: memory_changes.RetirementKind | None = None,
         retire_reason: str | None = None,
         successor_nomination_id: UUID | None = None,
         successor_nomination_version: int | None = None,
@@ -452,17 +553,31 @@ def build_server() -> Any:
         relocated_to_id: UUID | None = None,
         restore_reason: str | None = None,
     ) -> dict[str, Any]:
-        """Create or refresh a retire, replace, restore, or redeliver proposal.
+        """Create or refresh (with `change_id`) a retire, replace, restore, or redeliver proposal.
 
-        Call memory_get first. For replace, pass the successor nomination version just
-        read; if it changed, reread it and update the proposal. Old delivery settings carry
-        over by default; pass a complete `successor_settings` object with `delivery` and
-        `scope_id` only when the requested change includes new delivery settings.
-        `redeliver` changes only those settings of an active Memory and requires
-        `successor_settings`; its evidence observations say why. For
-        `delivery='topic'` add `topic`: an existing topic takes that topic's scope_id or
-        null, and a new topic also needs `topic_trigger` (one sentence saying when to read
-        it) with `scope_id` naming where it is listed, or null for every session.
+        Call memory_get first; pass its memory_id, current_revision_id, and updated_at as
+        the target fields. Each operation takes only its own fields:
+        - retire (active Memory): `retire_reason` and `retirement_kind`, one of
+          `invalidated` (the content is wrong), `out_of_scope` (the conditions it served
+          ended), or `relocated` (moved to Temporary Context; also pass
+          `relocated_to_kind='temporary_context'` and `relocated_to_id`).
+        - replace (active Memory): `retire_reason`, plus the nomination_id and version of a
+          successor from memory_nominate as `successor_nomination_id` and
+          `successor_nomination_version` (reread and update if that version changes);
+          `retirement_kind` is `superseded` and may be left out.
+        - restore (retired Memory): `restore_reason`.
+        - redeliver (active Memory): `successor_settings`; the evidence says why.
+        Every `evidence` item cites a ledger row or trace by `id`, or an artifact by `ref`,
+        and says what it shows in `observation`; an observation alone is refused. Cite the
+        user's words in this conversation as an artifact whose `ref` names the conversation,
+        quoting them in `observation`. All shape
+        problems come back together in `problems`.
+
+        Replace keeps the old delivery settings unless `successor_settings` gives both
+        `delivery` and `scope_id`. For `delivery='topic'` add `topic`: an existing topic
+        takes that topic's scope_id or null, and a new topic also needs `topic_trigger`
+        (one sentence saying when to read it) with `scope_id` naming where it is listed, or
+        null for every session.
         """
         try:
             with db.transaction() as cur:
@@ -599,7 +714,17 @@ def build_server() -> Any:
         except MashuError as error:
             return _failure(error)
 
-    @server.tool()
+    state_contract = _state_contract()
+
+    @server.tool(
+        description=(
+            "Create a task; likely duplicates are returned unless `force` is true.\n\n"
+            "`goal` names the outcome and `status_text` says where the task stands; both ride "
+            "on every bootstrap card, so details go in approach or next_actions. "
+            f"{state_contract} {_REFUSALS} Success and duplicate candidates return the card "
+            "view with the card and detail budgets; call task_get for the full state."
+        )
+    )
     def task_create(
         project: UUID | str,
         name: str,
@@ -611,14 +736,6 @@ def build_server() -> Any:
         next_actions: list[str] | None = None,
         force: bool = False,
     ) -> dict[str, Any]:
-        """Create a task; likely duplicates are returned unless `force` is true.
-
-        `goal` (80 chars) names the outcome and `status_text` (120 chars) says where the
-        task stands; both ride on every bootstrap card, so details go in approach or next_actions.
-        Success and duplicate candidates return the card view (goal, status_text, detail
-        counts) with the card and detail budgets; call task_get for the full state. A card
-        over its limit is refused with `over_by` and a per-component `breakdown`.
-        """
         try:
             with db.transaction() as cur:
                 answer = tasks.task_create(
@@ -690,7 +807,16 @@ def build_server() -> Any:
         except MashuError as error:
             return _failure(error)
 
-    @server.tool()
+    @server.tool(
+        description=(
+            'Replace the state fields given; omitted fields keep their value, "" or [] '
+            "clears.\n\nPass the read state's `updated_at` as `expect_updated_at`. `name` "
+            "renames the task unless it reads like another open one. `goal` names the outcome "
+            "and `status_text` says where the task stands; both ride on every bootstrap card, "
+            f"so details go in approach or next_actions. {state_contract} {_REFUSALS} Success "
+            "returns the card view with the card and detail budgets."
+        )
+    )
     def task_update(
         task_id: UUID,
         expect_updated_at: datetime,
@@ -702,15 +828,6 @@ def build_server() -> Any:
         blockers: list[str] | None = None,
         next_actions: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Replace the state fields given; omitted fields keep their value, "" or [] clears.
-
-        Pass the read state's `updated_at` as `expect_updated_at`. `name` renames the task
-        unless it reads like another open one; omitted, the name stays.
-        `goal` (80 chars) names the outcome and `status_text` (120 chars) says where the
-        task stands; both ride on every bootstrap card, so details go in approach or next_actions.
-        Success returns the card view with the card and detail budgets; a card over its
-        limit is refused with `over_by` and a per-component `breakdown`.
-        """
         try:
             with db.transaction() as cur:
                 answer = tasks.task_update(
@@ -730,7 +847,19 @@ def build_server() -> Any:
         except MashuError as error:
             return _failure(error, task_write="task_update", task_id=task_id)
 
-    @server.tool()
+    @server.tool(
+        description=(
+            "Replace the state fields given and record a checkpoint with its history.\n\n"
+            'Omitted fields keep their value; "" or [] clears one. Pass the read state\'s '
+            "`updated_at` as `expect_updated_at`. `goal` names the outcome and `status_text` "
+            "says where the task stands; both ride on every bootstrap card, so what was done "
+            "goes in `what_changed`. Optional history, all written with the checkpoint or not "
+            "at all: `attempts` for failed tries, `decisions` for reasons costly to re-derive, "
+            "and `artifacts` for external sources, which join `evidence`. "
+            f"{state_contract} {_history_contract()} {_REFUSALS} Success returns the card "
+            "view with the card and detail budgets."
+        )
+    )
     def task_checkpoint(
         task_id: UUID,
         what_changed: str,
@@ -742,25 +871,10 @@ def build_server() -> Any:
         blockers: list[str] | None = None,
         next_actions: list[str] | None = None,
         evidence: list[UUID] | None = None,
-        attempts: list[dict[str, Any]] | None = None,
-        decisions: list[dict[str, Any]] | None = None,
-        artifacts: list[dict[str, Any]] | None = None,
+        attempts: AttemptList | None = None,
+        decisions: DecisionList | None = None,
+        artifacts: ArtifactList | None = None,
     ) -> dict[str, Any]:
-        """Replace the state fields given and record a checkpoint with its history.
-
-        Omitted fields keep their value; "" or [] clears one. Pass the read state's
-        `updated_at` as `expect_updated_at`. `goal` (80 chars) names the outcome and
-        `status_text` (120 chars) says where the task stands; both ride on every
-        bootstrap card, so what was done goes in `what_changed`. Optional history, all
-        written with the checkpoint or not at all:
-        `attempts` items `{attempt, result?, reason?, next?}` for failed tries,
-        `decisions` items `{decision, reason?, supersedes_id?}` for reasons costly to
-        re-derive, and `artifacts` items `{kind, locator, label?}` for external sources.
-        Artifact kinds: git_commit, git_branch, file, document, obsidian, issue, dataset,
-        log, url, other. Artifacts linked here join `evidence` automatically.
-        Success returns the card view with the card and detail budgets; a card over its
-        limit is refused with `over_by` and a per-component `breakdown`.
-        """
         try:
             with db.transaction() as cur:
                 answer = task_history.checkpoint(
@@ -789,16 +903,20 @@ def build_server() -> Any:
         except MashuError as error:
             return _failure(error, task_write="task_checkpoint", task_id=task_id)
 
-    @server.tool()
+    @server.tool(
+        description=(
+            "Record a proposed outcome and reason without closing the task; the user decides "
+            "with `mashu task close`.\n\n`outcome` is "
+            + ", ".join(f"`{name}` ({tasks.OUTCOME_MEANINGS[name]})" for name in tasks.OUTCOMES)
+            + f". `reason` (required, at most {tasks.PROPOSAL_REASON_MAX} chars) gives the "
+            "grounds, such as the merged commit or the task that took over."
+        )
+    )
     def task_propose_close(
         task_id: UUID,
-        outcome: str,
+        outcome: tasks.Outcome,
         reason: str,
     ) -> dict[str, Any]:
-        """Record a proposed outcome and reason without closing the task.
-
-        A user decides with `mashu task close`.
-        """
         try:
             with db.transaction() as cur:
                 answer = tasks.propose_close(

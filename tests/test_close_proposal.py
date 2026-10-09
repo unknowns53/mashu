@@ -4,7 +4,7 @@ import pytest
 
 from conftest import expire, new_project, new_task, update_task
 from mashu import task_actions, tasks
-from mashu.errors import ClosedTaskError, MashuError, OverLimitError, RefusedError
+from mashu.errors import ClosedTaskError, MalformedRequestError, MashuError, RefusedError
 
 MERGED = "deleted before the merge d178ecb7, nothing on main references it"
 
@@ -74,7 +74,7 @@ def test_a_new_proposal_replaces_the_standing_one_and_withdrawing_leaves_it_open
     [
         ({"reason": "   "}, MashuError),
         ({"outcome": "done"}, MashuError),
-        ({"reason": "x" * 501}, OverLimitError),
+        ({"reason": "x" * 501}, MalformedRequestError),
         ({"reason": "merged as SECRETMARKER42"}, RefusedError),
     ],
 )

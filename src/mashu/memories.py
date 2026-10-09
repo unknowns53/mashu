@@ -53,9 +53,7 @@ def remember(
     if delivery == "topic":
         scope_id = topic_home(cur, delivery, topic_id)
 
-    verdict = redact.check(content)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    verdict = redact.gate({"content": content})
 
     cur.execute(
         "SELECT pg_advisory_xact_lock(%s, %s)",
@@ -281,9 +279,7 @@ def retire(
             raise MashuError(f"no temporary context {relocated_to_id}")
     elif relocated_to_kind is not None or relocated_to_id is not None:
         raise MashuError("relocation destination is only valid for relocated retirement")
-    verdict = redact.check(reason)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    verdict = redact.gate({"retire_reason": reason})
     cur.execute(
         """
         UPDATE memory
@@ -367,9 +363,7 @@ def revise(
 ) -> dict[str, Any]:
     """Rewrite the body, keeping the old one in the revision history."""
     current = _require_active(cur, memory_id)
-    verdict = redact.check(content)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    redact.gate({"content": content})
     admission = capacity.check_admission(
         cur,
         content=content,
@@ -413,12 +407,7 @@ def restore(
     )
     if not reason or not reason.strip():
         raise MashuError("restore needs the reason for reversing its retirement")
-    verdict = redact.check(current["content"])
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
-    reason_verdict = redact.check(reason)
-    if not reason_verdict.allowed:
-        raise RefusedError(reason_verdict.reason())
+    verdict = redact.gate({"restored content": current["content"], "restore_reason": reason})
 
     conflicts = [
         row

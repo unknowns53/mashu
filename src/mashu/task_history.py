@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import datetime as dt
-from typing import Any
+from typing import Any, Literal, get_args
 from uuid import UUID
 
 import psycopg
 
 from mashu import events, redact, tasks
-from mashu.errors import MashuError, OverLimitError
+from mashu.errors import MalformedRequestError, MashuError, OverLimit
 
-ARTIFACT_KINDS = (
+ArtifactKind = Literal[
     "git_commit",
     "git_branch",
     "file",
@@ -22,9 +22,10 @@ ARTIFACT_KINDS = (
     "log",
     "url",
     "other",
-)
+]
+ARTIFACT_KINDS: tuple[str, ...] = get_args(ArtifactKind)
 
-_HISTORY_LIMITS = {
+HISTORY_LIMITS = {
     "what_changed": 500,
     "attempt": 300,
     "result": 500,
@@ -36,15 +37,13 @@ _HISTORY_LIMITS = {
 }
 
 
-def _check_text_limit(field: str, value: str | None) -> None:
-    limit = _HISTORY_LIMITS[field]
-    if value is not None and len(value) > limit:
-        raise OverLimitError(field, limit, len(value))
-
-
-def _require_text(field: str, value: str | None) -> None:
-    if not value or not value.strip():
-        raise MashuError(f"{field} is required: history needs a short account of the work")
+def _what_changed_problems(what_changed: str | None) -> list[str | OverLimit]:
+    if not what_changed or not what_changed.strip():
+        return ["what_changed is required: history needs a short account of the work"]
+    limit = HISTORY_LIMITS["what_changed"]
+    if len(what_changed) > limit:
+        return [OverLimit("what_changed", limit, len(what_changed))]
+    return []
 
 
 def _gate_report(verdict: Any) -> dict[str, Any]:
@@ -129,11 +128,12 @@ def _freeze_current(
     tasks._lock(cur)
     tasks._require_open(cur, task_id)
     current = tasks.task_get(cur, task_id)
-    _require_text("what_changed", what_changed)
-    _check_text_limit("what_changed", what_changed)
+    problems = _what_changed_problems(what_changed)
+    if problems:
+        raise MalformedRequestError(problems)
     evidence_ids = list(evidence or [])
     _validate_evidence(cur, task_id, evidence_ids)
-    tasks._gate(what_changed, *tasks._texts(current["state"]))
+    tasks._gate({"what_changed": what_changed, **tasks._texts(current["state"])})
     return _insert_checkpoint(
         cur,
         task_id,
@@ -145,42 +145,90 @@ def _freeze_current(
 
 
 #: Keys each checkpoint history item takes, required first.
-_ITEM_KEYS = {
+ITEM_KEYS = {
     "attempts": (("attempt",), ("result", "reason", "next")),
     "decisions": (("decision",), ("reason", "supersedes_id")),
     "artifacts": (("kind", "locator"), ("label",)),
 }
 
 
-def _items(name: str, items: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
-    """Refuse a malformed history item before anything is checked or written."""
-    required, optional = _ITEM_KEYS[name]
+def _item(name: str, where: str, item: Any) -> tuple[dict[str, Any], list[str | OverLimit]]:
+    """One history item with its keys filled in, and every problem with it.
+
+    `where` labels the item's keys in the problems, such as `attempts[0]`; empty, each key
+    is named alone.
+    """
+    required, optional = ITEM_KEYS[name]
     allowed = (*required, *optional)
-    rows = []
+    if not isinstance(item, dict):
+        return {}, [f"{where or name} must be an object with keys {', '.join(allowed)}"]
+    problems: list[str | OverLimit] = []
+    unknown = sorted(set(item) - set(allowed))
+    if unknown:
+        problems.append(
+            f"{where or name} has unknown key(s) {', '.join(unknown)}; "
+            f"allowed: {', '.join(allowed)}"
+        )
+    missing = [
+        key
+        for key in required
+        if item.get(key) is None or (isinstance(item[key], str) and not item[key].strip())
+    ]
+    if missing:
+        problems.append(f"{where or name} is missing required key(s) {', '.join(missing)}")
+    row = {key: item.get(key) for key in allowed}
+    for key, value in row.items():
+        label = f"{where}.{key}" if where else key
+        if value is None or key in missing:
+            continue
+        if key == "supersedes_id":
+            try:
+                row[key] = value if isinstance(value, UUID) else UUID(str(value))
+            except ValueError:
+                problems.append(f"{label} must be a UUID")
+        elif not isinstance(value, str):
+            problems.append(f"{label} must be text")
+        elif key == "kind":
+            if value not in ARTIFACT_KINDS:
+                problems.append(
+                    f"{label} must be one of {', '.join(ARTIFACT_KINDS)} (got '{value}')"
+                )
+        elif len(value) > HISTORY_LIMITS[key]:
+            problems.append(OverLimit(label, HISTORY_LIMITS[key], len(value)))
+    return row, problems
+
+
+def _items(
+    name: str, items: list[Any] | None
+) -> tuple[list[dict[str, Any]], list[str | OverLimit]]:
+    rows, problems = [], []
     for index, item in enumerate(items or []):
-        where = f"{name}[{index}]"
-        if not isinstance(item, dict):
-            raise MashuError(f"{where} must be an object with keys {', '.join(allowed)}")
-        unknown = sorted(set(item) - set(allowed))
-        if unknown:
-            raise MashuError(
-                f"{where} has unknown key(s) {', '.join(unknown)}; allowed: {', '.join(allowed)}"
-            )
-        missing = [key for key in required if key not in item]
-        if missing:
-            raise MashuError(f"{where} is missing required key(s) {', '.join(missing)}")
-        row = {key: item.get(key) for key in allowed}
-        for key, value in row.items():
-            if key == "supersedes_id":
-                if value is not None and not isinstance(value, UUID):
-                    try:
-                        row[key] = UUID(str(value))
-                    except ValueError as error:
-                        raise MashuError(f"{where}.supersedes_id must be a UUID") from error
-            elif value is not None and not isinstance(value, str):
-                raise MashuError(f"{where}.{key} must be text")
+        row, found = _item(name, f"{name}[{index}]", item)
         rows.append(row)
-    return rows
+        problems += found
+    return rows, problems
+
+
+def _gate_item(where: str, row: dict[str, Any]) -> redact.Verdict:
+    """The entrance check on an item's free text; kind and supersedes_id are not text."""
+    return tasks._gate(
+        {
+            f"{where}.{key}" if where else key: value
+            for key, value in row.items()
+            if key not in ("kind", "supersedes_id")
+        }
+    )
+
+
+def _check_supersedes(cur: psycopg.Cursor, task_id: UUID, supersedes_id: UUID | None) -> None:
+    if supersedes_id is None:
+        return
+    cur.execute("SELECT task_id FROM decision WHERE decision_id = %s", (supersedes_id,))
+    prior = cur.fetchone()
+    if prior is None:
+        raise MashuError(f"no decision {supersedes_id} to supersede")
+    if prior["task_id"] != task_id:
+        raise MashuError(f"decision {supersedes_id} belongs to another task")
 
 
 def checkpoint(
@@ -197,41 +245,55 @@ def checkpoint(
     blockers: list[str] | None = None,
     next_actions: list[str] | None = None,
     evidence: list[UUID] | None = None,
-    attempts: list[dict[str, Any]] | None = None,
-    decisions: list[dict[str, Any]] | None = None,
-    artifacts: list[dict[str, Any]] | None = None,
+    attempts: list[Any] | None = None,
+    decisions: list[Any] | None = None,
+    artifacts: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Replace the given state fields, append the history they rest on, and freeze it all.
 
     Every item is checked before the first write, so a refused item leaves the state and
-    history as they were. Artifacts linked here become evidence of the checkpoint.
+    history as they were. Malformed items and fields over their own ceilings are refused
+    together; the card and detail budgets, which depend on the whole state, come after.
+    Artifacts linked here become evidence of the checkpoint.
     """
-    attempt_items = _items("attempts", attempts)
-    decision_items = _items("decisions", decisions)
-    artifact_items = _items("artifacts", artifacts)
-    _require_text("what_changed", what_changed)
-    _check_text_limit("what_changed", what_changed)
+    given = {
+        "goal": goal,
+        "approach": approach,
+        "status_text": status_text,
+        "open_questions": open_questions,
+        "blockers": blockers,
+        "next_actions": next_actions,
+    }
+    attempt_items, attempt_problems = _items("attempts", attempts)
+    decision_items, decision_problems = _items("decisions", decisions)
+    artifact_items, artifact_problems = _items("artifacts", artifacts)
     evidence_ids = list(evidence or [])
 
     tasks._lock(cur)
     tasks._require_open(cur, task_id)
+    current = tasks.task_get(cur, task_id)["state"]
+    problems = [
+        *_what_changed_problems(what_changed),
+        *tasks.limit_problems(tasks.replaced_state(current, **given), current),
+        *attempt_problems,
+        *decision_problems,
+        *artifact_problems,
+    ]
+    if problems:
+        raise MalformedRequestError(problems)
     _validate_evidence(cur, task_id, evidence_ids)
-    verdicts = [tasks._gate(what_changed)]
-    verdicts += [_check_attempt(**item) for item in attempt_items]
-    verdicts += [_check_decision(cur, task_id, **item) for item in decision_items]
-    verdicts += [_check_artifact(**item) for item in artifact_items]
+    verdicts = [tasks._gate({"what_changed": what_changed})]
+    for name, rows in (
+        ("attempts", attempt_items),
+        ("decisions", decision_items),
+        ("artifacts", artifact_items),
+    ):
+        verdicts += [_gate_item(f"{name}[{index}]", row) for index, row in enumerate(rows)]
+    for row in decision_items:
+        _check_supersedes(cur, task_id, row["supersedes_id"])
 
     updated = tasks.task_update(
-        cur,
-        task_id,
-        actor=actor,
-        expect_updated_at=expect_updated_at,
-        goal=goal,
-        approach=approach,
-        status_text=status_text,
-        open_questions=open_questions,
-        blockers=blockers,
-        next_actions=next_actions,
+        cur, task_id, actor=actor, expect_updated_at=expect_updated_at, **given
     )
     recorded_attempts = [
         _insert_attempt(cur, task_id, actor=actor, **item) for item in attempt_items
@@ -265,24 +327,6 @@ def checkpoint(
     return result
 
 
-def _check_attempt(
-    *,
-    attempt: str,
-    result: str | None = None,
-    reason: str | None = None,
-    next: str | None = None,
-) -> redact.Verdict:
-    _require_text("attempt", attempt)
-    for field, value in (
-        ("attempt", attempt),
-        ("result", result),
-        ("reason", reason),
-        ("next", next),
-    ):
-        _check_text_limit(field, value)
-    return tasks._gate(attempt, result, reason, next)
-
-
 def _insert_attempt(
     cur: psycopg.Cursor,
     task_id: UUID,
@@ -310,48 +354,6 @@ def _insert_attempt(
         detail={"task_id": str(task_id), "attempt_id": str(row["attempt_id"])},
     )
     return row
-
-
-def attempt_record(
-    cur: psycopg.Cursor,
-    task_id: UUID,
-    *,
-    actor: str,
-    attempt: str,
-    result: str | None = None,
-    reason: str | None = None,
-    next: str | None = None,
-) -> dict[str, Any]:
-    """Append what was tried, what came of it, and what should happen next."""
-    tasks._lock(cur)
-    tasks._require_open(cur, task_id)
-    fields = {"attempt": attempt, "result": result, "reason": reason, "next": next}
-    verdict = _check_attempt(**fields)
-    row = _insert_attempt(cur, task_id, actor=actor, **fields)
-    return {**row, **_gate_report(verdict)}
-
-
-def _check_decision(
-    cur: psycopg.Cursor,
-    task_id: UUID,
-    *,
-    decision: str,
-    reason: str | None = None,
-    supersedes_id: UUID | None = None,
-) -> redact.Verdict:
-    _require_text("decision", decision)
-    _check_text_limit("decision", decision)
-    _check_text_limit("reason", reason)
-    verdict = tasks._gate(decision, reason)
-
-    if supersedes_id is not None:
-        cur.execute("SELECT task_id FROM decision WHERE decision_id = %s", (supersedes_id,))
-        prior = cur.fetchone()
-        if prior is None:
-            raise MashuError(f"no decision {supersedes_id} to supersede")
-        if prior["task_id"] != task_id:
-            raise MashuError(f"decision {supersedes_id} belongs to another task")
-    return verdict
 
 
 def _insert_decision(
@@ -388,35 +390,6 @@ def _insert_decision(
     return row
 
 
-def decision_record(
-    cur: psycopg.Cursor,
-    task_id: UUID,
-    *,
-    actor: str,
-    decision: str,
-    reason: str | None = None,
-    supersedes_id: UUID | None = None,
-) -> dict[str, Any]:
-    """Append a decision, optionally superseding one from this same task."""
-    tasks._lock(cur)
-    tasks._require_open(cur, task_id)
-    fields = {"decision": decision, "reason": reason, "supersedes_id": supersedes_id}
-    verdict = _check_decision(cur, task_id, **fields)
-    row = _insert_decision(cur, task_id, actor=actor, **fields)
-    return {**row, **_gate_report(verdict)}
-
-
-def _check_artifact(*, kind: str, locator: str, label: str | None = None) -> redact.Verdict:
-    if kind not in ARTIFACT_KINDS:
-        raise MashuError(
-            f"unknown artifact kind '{kind}' (expected one of {', '.join(ARTIFACT_KINDS)})"
-        )
-    _require_text("locator", locator)
-    _check_text_limit("locator", locator)
-    _check_text_limit("label", label)
-    return tasks._gate(locator, label)
-
-
 def _insert_artifact(
     cur: psycopg.Cursor,
     task_id: UUID,
@@ -443,24 +416,6 @@ def _insert_artifact(
         detail={"task_id": str(task_id), "reference_id": str(row["reference_id"])},
     )
     return row
-
-
-def artifact_link(
-    cur: psycopg.Cursor,
-    task_id: UUID,
-    *,
-    actor: str,
-    kind: str,
-    locator: str,
-    label: str | None = None,
-) -> dict[str, Any]:
-    """Append a reference to the external place where the artifact lives."""
-    tasks._lock(cur)
-    tasks._require_open(cur, task_id)
-    fields = {"kind": kind, "locator": locator, "label": label}
-    verdict = _check_artifact(**fields)
-    row = _insert_artifact(cur, task_id, actor=actor, **fields)
-    return {**row, **_gate_report(verdict)}
 
 
 def attempt_list(cur: psycopg.Cursor, task_id: UUID) -> list[dict[str, Any]]:

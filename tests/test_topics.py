@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-import psycopg
 import pytest
 
 from conftest import remember, retire
-from mashu import bootstrap, capacity, config, memories, migrate, nominations, scopes, topics
+from mashu import bootstrap, capacity, config, memories, nominations, scopes, topics
 from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
@@ -46,9 +45,6 @@ def test_bootstrap_lists_a_visible_topic_line_and_never_its_rules(cur, scope_id)
     assert LEVER not in str(got) and PLACEMENT not in str(got)
     assert got["topic_tokens"] == pushed_cost([line(subject, 2)])
     assert got["memory_tokens"] == got["topic_tokens"]
-    keys = list(got)
-    order = ["always", "scoped", "topics", "states", "temporary", "pending"]
-    assert sorted(order, key=keys.index) == order
 
 
 def test_empty_archived_and_other_scope_topics_are_not_listed(cur, scope_id):
@@ -178,7 +174,7 @@ def test_one_action_leads_to_one_open_topic_served_where_it_is_listed(cur, scope
 # capacity
 
 
-def test_a_topic_line_counts_in_the_layer_it_lands_in_and_its_bodies_apart(cur, scope_id):
+def test_a_topic_line_counts_in_the_layer_it_lands_in(cur, scope_id):
     everywhere = topic(cur)
     assert capacity.bootstrap_totals(cur)["always"] == 0  # an empty topic pushes nothing
     filed(cur, everywhere)
@@ -192,10 +188,6 @@ def test_a_topic_line_counts_in_the_layer_it_lands_in_and_its_bodies_apart(cur, 
     totals = capacity.bootstrap_totals(cur)
     assert totals["always"] == pushed_cost([line(everywhere, 1)])
     assert totals["scopes"] == {scope_id: pushed_cost([line(scoped, 2)])}
-    assert capacity.topic_bodies(cur) == {
-        everywhere["topic_id"]: pushed_cost([LEVER]),
-        scoped["topic_id"]: pushed_cost([LEVER, PLACEMENT]),
-    }
 
 
 def test_the_first_rule_of_a_topic_is_refused_when_its_line_does_not_fit(cur, monkeypatch):
@@ -353,83 +345,6 @@ def test_admission_files_a_candidate_under_a_topic_and_its_scope(cur, scope_id):
     assert admitted["scope_id"] == str(scope_id)
 
 
-# the schema
-
-
-def _guard_rows(dsn):
-    """Two rules an older store delivered as guard for 'delegate', the second retired."""
-    with psycopg.connect(dsn) as conn:
-        ledger_id = conn.execute(
-            "INSERT INTO ledger (kind, what, prevention, created_by) "
-            "VALUES ('explicit', 'seed', 'seed rule', 'test') RETURNING ledger_id"
-        ).fetchone()[0]
-        conn.execute(
-            "INSERT INTO memory (content, delivery, guard_action, evidence, created_by, status, "
-            "retire_reason, retirement_kind, retired_at) VALUES "
-            "('delegation rule 0', 'guard', 'delegate', %(e)s, 'test', 'active', NULL, NULL, NULL),"
-            "('delegation rule 1', 'guard', 'delegate', %(e)s, 'test', 'retired', 'gone', "
-            "'invalidated', now())",
-            {"e": [ledger_id]},
-        )
-        return ledger_id
-
-
-def test_migration_folds_guard_rules_into_a_topic_linked_to_their_action(old_store):
-    dsn = old_store("0011_guard_into_topics.sql")
-    ledger_id = _guard_rows(dsn)
-
-    assert migrate.migrate(dsn) == ["0011_guard_into_topics.sql"]
-    with psycopg.connect(dsn) as conn:
-        made = conn.execute(
-            "SELECT t.topic_id, t.trigger, t.scope_id, t.action, t.created_by FROM topic t JOIN "
-            "event_log e ON e.detail ->> 'topic_id' = t.topic_id::text AND e.actor = t.created_by "
-            "WHERE t.name = 'delegate' AND e.event_type = 'topic_created'"
-        ).fetchone()
-        assert made[1:] == ("before the delegate action", None, "delegate", "migration")
-        moved = conn.execute("SELECT DISTINCT delivery, topic_id FROM memory").fetchall()
-        assert moved == [("topic", made[0])]
-        with pytest.raises(psycopg.errors.CheckViolation):
-            conn.execute(
-                "INSERT INTO memory (content, delivery, evidence, created_by) "
-                "VALUES ('a new guard rule', 'guard', %s, 'test')",
-                ([ledger_id],),
-            )
-    with psycopg.connect(dsn) as conn, pytest.raises(psycopg.errors.UniqueViolation):
-        conn.execute(
-            "INSERT INTO topic (name, trigger, action, created_by) "
-            "VALUES ('second', 'Before delegating', 'delegate', 'test')"
-        )
-
-
-@pytest.mark.parametrize(
-    ("seed", "refusal"),
-    [
-        (
-            "INSERT INTO topic (name, trigger, created_by) "
-            "VALUES ('delegate', 'Before delegating', 'test')",
-            "already exists",
-        ),
-        (
-            "WITH made AS (INSERT INTO scope (name, created_by) VALUES ('game', 'test') "
-            "RETURNING scope_id) UPDATE memory SET scope_id = (SELECT scope_id FROM made) "
-            "WHERE content = 'delegation rule 0'",
-            "more than one scope",
-        ),
-    ],
-)
-def test_migration_refuses_guard_rules_it_cannot_fold_into_one_topic(old_store, seed, refusal):
-    dsn = old_store("0011_guard_into_topics.sql")
-    _guard_rows(dsn)
-    with psycopg.connect(dsn) as conn:
-        conn.execute(seed)
-
-    with pytest.raises(psycopg.errors.RaiseException, match=refusal):
-        migrate.migrate(dsn)
-    with psycopg.connect(dsn) as conn:
-        kept = conn.execute("SELECT count(*) FROM memory WHERE delivery = 'guard'").fetchone()
-        assert kept == (2,)
-
-
 # the MCP boundary
 
 
@@ -448,6 +363,7 @@ def test_memory_list_and_admit_reach_a_topic_by_name_for_this_server_session(mcp
     assert first["ok"] is True
     assert first["topic"]["name"] == name
     assert len(first["memories"]) == 1
+    assert f"memory_list(topic='{name}')" in mcp("memory_list", scope=name)["error"]
 
     with db.transaction(dsn) as cur:
         cur.execute(

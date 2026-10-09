@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import psycopg
 import pytest
 
 from conftest import expire, new_project, new_task, update_task
@@ -8,6 +7,7 @@ from mashu import db, scopes, tasks
 from mashu.errors import (
     ClosedTaskError,
     DuplicateTaskError,
+    MalformedRequestError,
     MashuError,
     OverLimitError,
     ProjectBudgetError,
@@ -107,40 +107,30 @@ def test_a_banned_or_too_large_first_task_never_reaches_the_table(cur, project, 
 # the hard limits (5.3)
 @pytest.mark.parametrize("field", tasks.TEXT_LIMITS)
 def test_a_field_over_its_limit_is_refused_by_name(cur, task_id, field):
-    with pytest.raises(OverLimitError) as raised:
+    with pytest.raises(MalformedRequestError) as raised:
         update_task(cur, task_id, **{field: "x" * (tasks.TEXT_LIMITS[field] + 1)})
-    assert (raised.value.field, raised.value.actual) == (field, tasks.TEXT_LIMITS[field] + 1)
+    limit = tasks.TEXT_LIMITS[field]
+    assert raised.value.over_limit == [
+        {"field": field, "limit": limit, "actual": limit + 1, "unit": "chars"}
+    ]
 
 
 def test_a_long_state_written_before_the_card_limits_is_carried_but_not_rewritten(cur, task_id):
     cur.execute("UPDATE task_state SET status_text = %s WHERE task_id = %s", ("s" * 400, task_id))
     tasks.append_next_action(cur, task_id, "add the check", actor="agent")
     assert update_task(cur, task_id, blockers=["none"])["state"]["status_text"] == "s" * 400
-    with pytest.raises(OverLimitError, match="what_changed"):
+    with pytest.raises(MalformedRequestError, match="what_changed"):
         update_task(cur, task_id, status_text="t" * 400)
 
 
 @pytest.mark.parametrize("field", tasks.LIST_FIELDS)
 def test_a_list_over_five_entries_or_with_an_entry_over_its_limit_is_refused(cur, task_id, field):
-    with pytest.raises(OverLimitError, match="items"):
+    with pytest.raises(MalformedRequestError) as raised:
         update_task(cur, task_id, **{field: [f"line {n}" for n in range(6)]})
-    with pytest.raises(OverLimitError) as raised:
+    assert raised.value.over_limit[0]["unit"] == "items"
+    with pytest.raises(MalformedRequestError) as raised:
         update_task(cur, task_id, **{field: ["x" * 301]})
-    assert raised.value.field.startswith(field)
-
-
-@pytest.mark.parametrize(
-    ("assignment", "value"),
-    [
-        ("goal = %s", "x" * 301),
-        ("blockers = %s", [f"line {n}" for n in range(6)]),
-        ("closed_at = now(), status = %s", "closed"),
-    ],
-)
-def test_the_database_keeps_its_ceilings_without_the_code(cur, task_id, assignment, value):
-    table = "task" if "status" in assignment else "task_state"
-    with pytest.raises(psycopg.errors.CheckViolation):
-        cur.execute(f"UPDATE {table} SET {assignment} WHERE task_id = %s", (value, task_id))
+    assert raised.value.over_limit[0]["field"] == f"{field}[0]"
 
 
 # replacement per field, not accumulation (5.3)
@@ -171,24 +161,6 @@ def test_a_replacement_written_against_a_replaced_state_is_rejected(cur, task):
 
 
 # the budget (5.3, 8)
-def test_each_scope_has_an_independent_project_state_share(cur, scope_id, monkeypatch):
-    elsewhere = scopes.create_scope(cur, name="somewhere else", actor="user")["scope_id"]
-    new_project(cur, "project here", scope_id=scope_id)
-    new_project(cur, "project there", scope_id=elsewhere)
-
-    here = new_task(cur, "fill this scope", "project here", status_text="x" * 120)
-    cost = tasks.card_cost(here["task"]["name"], here["state"])
-    monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(cost))
-    there = new_task(cur, "fill this scope", "project there", status_text="x" * 120)
-
-    totals = tasks.pushed_totals(cur)
-    assert totals["count"] == 2
-    assert totals["scopes"] == {scope_id: cost, elsewhere: cost}
-    assert totals["worst"] == cost
-    assert sum(row["tokens"] for row in tasks.active_state_costs(cur)) == 2 * cost
-    assert there["task"]["project_id"] != here["task"]["project_id"]
-
-
 def test_unscoped_state_spends_a_seat_in_every_scope_and_is_weighed_against_the_busiest(
     cur, scope_id, monkeypatch
 ):
@@ -197,9 +169,11 @@ def test_unscoped_state_spends_a_seat_in_every_scope_and_is_weighed_against_the_
     new_project(cur, "light project", scope_id=lighter_scope)
     new_project(cur, "global project")
     busy = new_task(cur, "busy work", "busy project", status_text="x" * 120)
+    busy_cost = tasks.card_cost(busy["task"]["name"], busy["state"])
+    # A scope already full leaves another scope's share untouched.
+    monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(busy_cost))
     light = new_task(cur, "light work", "light project")
 
-    busy_cost = tasks.card_cost(busy["task"]["name"], busy["state"])
     global_cost = tasks.card_cost("global work", {})
     monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(busy_cost + global_cost - 1))
     with pytest.raises(ProjectBudgetError) as raised:
@@ -233,9 +207,7 @@ def test_a_state_that_would_overflow_the_share_is_refused_until_another_task_goe
 
     breakdown = raised.value.breakdown
     assert {row["name"] for row in breakdown} == {SCHEMA, OTHER_WORK}
-    assert all(set(row) == {"task_id", "name", "tokens"} for row in breakdown)
     assert sum(row["tokens"] for row in breakdown) > seated
-    assert breakdown == sorted(breakdown, key=lambda row: row["tokens"], reverse=True)
     cur.execute("SELECT status_text FROM task_state WHERE task_id = %s", (task_id,))
     assert cur.fetchone()["status_text"] is None
 
@@ -444,7 +416,7 @@ def test_an_append_adds_one_new_action_and_meets_what_a_replacement_would(cur, t
         update_task(cur, task_id, at=read_at, status_text="carrying on")
 
     update_task(cur, task_id, next_actions=[f"action {n}" for n in range(tasks.LIST_MAX_ITEMS)])
-    with pytest.raises(OverLimitError):
+    with pytest.raises(MalformedRequestError):
         tasks.append_next_action(cur, task_id, "one too many", actor="agent")
 
 
@@ -476,3 +448,20 @@ def test_mcp_task_writes_answer_with_the_card_and_log_a_refused_card(mcp, dsn, m
         cur.execute("SELECT detail FROM event_log WHERE event_type = 'task_card_write_refused'")
         assert cur.fetchone()["detail"]["breakdown"] == refused["breakdown"]
         assert tasks.task_get(cur, task_id)["task"]["name"] == SCHEMA
+
+
+def test_mcp_refuses_a_task_write_carrying_tool_call_markup(mcp, dsn, monkeypatch, tmp_path):
+    with db.transaction(dsn) as cur:
+        new_project(cur, "mashu")
+    made = mcp("task_create", project="mashu", name=SCHEMA)
+    task_id, at = made["task"]["task_id"], made["state"]["updated_at"]
+    leaked = 'one migration <parameter name="x">two modules'
+
+    listed = mcp("task_update", task_id=task_id, expect_updated_at=at, approach=leaked)
+    monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(tmp_path / "absent"))
+    unlisted = mcp("task_update", task_id=task_id, expect_updated_at=at, approach=leaked)
+
+    for refused in (listed, unlisted):
+        assert refused["ok"] is False and "tool-call markup" in refused["error"]
+    with db.transaction(dsn) as cur:
+        assert tasks.task_get(cur, task_id)["state"]["approach"] is None

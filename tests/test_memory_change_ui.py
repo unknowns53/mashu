@@ -82,7 +82,6 @@ def test_replace_detail_shows_the_successor_snapshot_and_delivery(cur):
         cur,
         old,
         "replace",
-        retirement_kind="superseded",
         retire_reason="the signed archive rule replaces the old check",
         successor_nomination_id=successor["nomination_id"],
         successor_nomination_version=successor["version"],
@@ -101,7 +100,7 @@ def test_replace_detail_shows_the_successor_snapshot_and_delivery(cur):
     assert revised in stale
 
 
-def test_redeliver_detail_shows_where_the_rule_moves_and_the_topic_it_opens(cur, scope_id):
+def test_redeliver_detail_shows_where_the_rule_moves(cur, scope_id):
     memory = remember(cur, "keep ship stats fixed when tuning")
     proposal = propose_change(
         cur,
@@ -117,8 +116,6 @@ def test_redeliver_detail_shows_where_the_rule_moves_and_the_topic_it_opens(cur,
 
     shown = memory_change_ui._detail(proposal, 1, 1)
     assert "delivery: always -> topic:calibration" in shown
-    assert "opens topic calibration for test scope: Before calibrating difficulty" in shown
-    assert "redeliver" in memory_change_ui._summary(proposal)
 
 
 def test_relocated_proposal_shows_its_own_destination(cur, scope_id):

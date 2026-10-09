@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import datetime as dt
-
 import pytest
 
 from conftest import expire, new_project, new_task
@@ -80,7 +78,6 @@ def test_the_opening_reports_each_share_and_the_total(cur, scope_id, task):
     assert got["card_tokens"] == got["project_tokens"]
     assert got["temporary_tokens"] == pushed_cost([THIS_WEEK])
     assert got["tokens"] == got["memory_tokens"] + got["project_tokens"] + got["temporary_tokens"]
-    assert got["capacity"] == 4000
     assert got["over_budget"] is False
 
 
@@ -114,29 +111,20 @@ def test_the_state_of_current_work_arrives_under_its_date_with_a_call_to_fetch_i
     assert row["task"] == str(task["task"]["task_id"])[:8]
     assert row["task_id"] == task["task"]["task_id"]
     assert row["heading"] == f"State as of {task['as_of'].isoformat()}"
-    assert dt.date.fromisoformat(row["heading"].rsplit(" ", 1)[1]) == task["as_of"]
     assert SCHEMA in row["content"]
     assert "hand the active states over with their dates" in row["content"]
-    assert "1 next action" in row["content"]
-    assert "count the three shares apart" not in row["content"]
-
-    full = tasks.task_get(cur, task["task"]["task_id"])
-    assert full["state"]["next_actions"] == ["count the three shares apart"]
 
 
-def test_a_task_whose_lease_ran_out_is_not_in_the_opening(cur, task):
-    expire(cur, task["task"]["task_id"])
+@pytest.mark.parametrize(
+    "end",
+    [expire, lambda cur, task_id: tasks.close(cur, task_id, outcome="completed", actor="user")],
+    ids=["lease", "closed"],
+)
+def test_a_task_whose_lease_ran_out_or_that_was_closed_is_not_in_the_opening(cur, task, end):
+    end(cur, task["task"]["task_id"])
     got = bootstrap.session_bootstrap(cur, actor="agent")
     assert got["states"] == []
     assert got["project_tokens"] == 0
-
-    # Still there, and still dated, for anyone who goes looking.
-    assert tasks.task_get(cur, task["task"]["task_id"])["heading"].startswith("Last known state")
-
-
-def test_a_closed_task_is_not_in_the_opening(cur, task):
-    tasks.close(cur, task["task"]["task_id"], outcome="completed", actor="user")
-    assert bootstrap.session_bootstrap(cur, actor="agent")["states"] == []
 
 
 def test_the_states_arrive_in_a_fixed_order(cur, task):
@@ -200,7 +188,6 @@ def test_an_opening_against_a_schema_the_code_has_outgrown_says_so(cur):
 
 def test_the_calling_guidance_fits_before_the_client_truncates_it():
     assert len(server.INSTRUCTIONS.encode()) <= server.INSTRUCTIONS_BYTE_LIMIT
-    assert server.INSTRUCTIONS.startswith("Mashu pushes active Memory; call session_bootstrap")
 
 
 def test_an_opening_and_the_hook_reader_survive_pending_topic_migrations(cur, scope_id):

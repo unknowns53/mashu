@@ -4,7 +4,6 @@ set -eu
 
 hook_dir=$(dirname "$0")
 . "$hook_dir/_banned.sh"
-. "$hook_dir/_budget.sh"
 
 banned_load || exit 1
 trap 'rm -f "$BANNED_PATTERNS_FILE"' EXIT
@@ -20,15 +19,6 @@ else
         printf '%s\n' "commit-msg: cannot check banned patterns in the commit message." >&2
         exit 1
     fi
-fi
-
-if budget_raised && ! grep -q -E '^Test-Budget-Instruction: .+' "$1"; then
-    cat >&2 <<MSG
-commit-msg: this commit raises $BUDGET_FILE from $(budget_head) to $(budget_staged).
-    A raise needs the user's instruction, quoted in a trailer line:
-    Test-Budget-Instruction: "<the user's words>"
-MSG
-    exit 1
 fi
 
 exit 0

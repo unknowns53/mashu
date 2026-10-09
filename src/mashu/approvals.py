@@ -7,7 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from mashu import redact
-from mashu.errors import MashuError, RefusedError
+from mashu.errors import MashuError
 
 
 def json_value(value: Any) -> Any:
@@ -35,9 +35,7 @@ def validate(
     if kind == "policy":
         raise MashuError("no server-side Memory change condition is registered for policy approval")
 
-    verdict = redact.check(*_snapshot_strings(json_value(approval)))
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    verdict = redact.gate(_snapshot_strings(json_value(approval)))
     if gate is not None:
         if verdict.unchecked:
             gate["unchecked"] = True
@@ -82,18 +80,35 @@ def validate(
     return source
 
 
-def _snapshot_strings(value: Any) -> list[str]:
+#: The keys an approval is sent with. Any other key is labelled by position, because its own
+#: text may be what the gate refuses.
+_APPROVAL_KEYS = frozenset(
+    {
+        "kind",
+        "instruction",
+        "conversation_ref",
+        "conflict_ids",
+        "conflict_instruction",
+        "reversal_instruction",
+    }
+)
+
+
+def _snapshot_strings(value: Any, path: str | None = None) -> dict[str, str]:
+    """Every string in the snapshot, labelled by where it sits in the approval."""
+    base = path or "approval"
     if isinstance(value, str):
-        return [value]
+        return {base: value}
+    out: dict[str, str] = {}
     if isinstance(value, dict):
-        return [
-            text
-            for key, item in value.items()
-            for text in (*_snapshot_strings(key), *_snapshot_strings(item))
-        ]
-    if isinstance(value, list):
-        return [text for item in value for text in _snapshot_strings(item)]
-    return []
+        for index, (key, item) in enumerate(value.items()):
+            out.update(_snapshot_strings(key, f"{base} key #{index}"))
+            known = path is None and key in _APPROVAL_KEYS
+            out.update(_snapshot_strings(item, key if known else f"{base}.#{index}"))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            out.update(_snapshot_strings(item, f"{base}[{index}]"))
+    return out
 
 
 def acknowledges_conflicts(approval: dict[str, Any], required_conflicts: list[UUID]) -> bool:
@@ -132,7 +147,5 @@ def _safe_text(value: Any, label: str, *, required: bool = False) -> str | None:
         return None
     if len(text) > 1000:
         raise MashuError(f"{label} is too long (maximum 1000 characters)")
-    verdict = redact.check(text)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    redact.gate({label: text})
     return text

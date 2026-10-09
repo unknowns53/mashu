@@ -144,6 +144,8 @@ goal と status は Scope の全セッションへ card として push される
 
 **上限までの距離を書き手に返す。**上限は拒否されて初めて知るものにしない。`task_get` と MCP の `task_create` / `task_update` / `task_checkpoint` の成功応答は `card_tokens`・`card_limit`・`card_remaining`・`detail_tokens`・`detail_limit` を含む。card 上限を超えた書き込みは、`field`・`limit`・`actual`・`unit`・`over_by` と、card の token を Task 名・goal・status_text・詳細件数・行 overhead に割り振った `breakdown` を構造化して返す。内訳の合計は card の token 数に一致するので、Agent はどの欄を何 token 削れば通るかを試行せずに知れる。MCP の write がこの理由で拒否されたときは、本文を保存せず、拒否された書き込みの transaction とは別に `task_card_write_refused` を event_log に記録し、応答の `refusal_recorded` で記録できたかを示す。
 
+欄ごとの上限（文字数と件数）は、書き込みの前に全欄へかけ、超えた欄すべてを一度の拒否で `problems` と `over_limit`（`field`・`limit`・`actual`・`unit`）に並べて返す。一欄ずつ拒否すると、Agent は超えた欄の数だけ往復する。上限の値は MCP の Tool 説明にもコードの定数から載せる。
+
 MCP で全文の state を返すのは `task_get` だけである。検索結果、重複候補、楽観チェックで返す現在の state、write の成功応答は card view、つまり goal・status_text・詳細の有無と件数・`updated_at`・`updated_by` だけを返す。全文を write の応答で返すと、読んだつもりのない state が文脈に積もり、card と full detail を分けた意味が薄れる。checkpoint の応答も凍結した state の本文を除く。
 
 **追記は一箇所だけ許す。**`append_next_action` は next_actions に 1 件足すだけで他の欄に触れない。呼び出すのは痛みの記録（9 節の `work`）であって、state を読み終えたセッションではない。痛みは痛かった当人がその場で書くものである。置換は next_actions を丸ごと置き換え、読み取り時の `updated_at` も要求するので、置換で書かせれば、報告は既存の next actions を消すか、state を読みに行く往復のせいで行われないかのどちらかになる。上限・入口拒否・予算判定は置換とまったく同じものを通すので、追記で書ける state は置換でも書けた state に限られる。追記も `updated_at` を動かすため、追記前に読んだ置換は楽観チェックで拒否される。
@@ -186,7 +188,7 @@ kind は `git_commit` / `git_branch` / `file` / `document` / `obsidian` / `issue
 
 まとまった作業の区切りで Agent が打つ。`task_checkpoint` は **Current State の置換と、履歴行の凍結を一度に行う**。すなわち checkpoint は task_update の上位互換であり、Agent が覚える動詞を増やさない。
 
-区切りまでに生じた Attempt・Decision・Artifact Reference も同じ呼び出しの `attempts` / `decisions` / `artifacts` で渡す。state の置換、それらの追記、checkpoint の凍結は一つの transaction で行い、文字上限・入口拒否・kind・supersedes の検査は書き込みの前にすべての行へかける。一行でも拒否されれば何も書かない。記録の粒度を checkpoint に揃えることで、履歴を書くための動詞を別に覚えさせずに済む。
+区切りまでに生じた Attempt・Decision・Artifact Reference も同じ呼び出しの `attempts` / `decisions` / `artifacts` で渡す。state の置換、それらの追記、checkpoint の凍結は一つの transaction で行い、文字上限・入口拒否・kind・supersedes の検査は書き込みの前にすべての行へかけ、形の誤りと上限の超過は行と欄をまたいで一度の拒否にまとめて返す。一行でも拒否されれば何も書かない。記録の粒度を checkpoint に揃えることで、履歴を書くための動詞を別に覚えさせずに済む。
 
 ```text
 what_changed / 凍結時点の Current State / evidence (artifact 参照。同じ呼び出しで作った参照を含む) / created_at / created_by

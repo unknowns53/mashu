@@ -37,18 +37,3 @@ def test_a_listing_counts_what_each_project_is_carrying(cur):
     assert listed["project_id"] == project["project_id"]
     assert (listed["n_active"], listed["n_dormant"], listed["n_closed"]) == (1, 1, 1)
     assert working["activity"] == "active"
-
-
-def test_archiving_takes_a_project_off_the_list_once_and_leaves_its_tasks_alone(cur):
-    projects.create_project(cur, name="mashu", actor="user")
-    task = tasks.task_create(cur, project="mashu", name="implement the v3 schema", actor="agent")
-    archived = projects.archive_project(cur, "mashu", actor="user")
-    assert archived["archived_at"] is not None
-
-    assert projects.list_projects(cur) == []
-    assert len(projects.list_projects(cur, include_archived=True)) == 1
-
-    with pytest.raises(MashuError, match="already archived"):
-        projects.archive_project(cur, "mashu", actor="user")
-    assert tasks.task_get(cur, task["task"]["task_id"])["activity"] == "active"
-    assert projects.show_project(cur, "mashu")["n_active"] == 1

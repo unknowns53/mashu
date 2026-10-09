@@ -9,7 +9,7 @@ import psycopg
 
 from mashu import config, events, match, nominations, redact, tasks, topics, traces
 from mashu.capacity import LOCK_NAMESPACE, LOCK_PAIN
-from mashu.errors import MashuError, RefusedError
+from mashu.errors import MashuError
 
 REPORTABLE_KINDS = ("incident", "friction")
 
@@ -51,9 +51,7 @@ def report_pain(
             "a task is where work is filed; a prevention that is a rule is filed by review, "
             "so pass prevention_kind='work' or leave the task out"
         )
-    verdict = redact.check(what, prevention)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    verdict = redact.gate({"what": what, "prevention": prevention})
 
     # Before the insert and before any matching.
     cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (LOCK_NAMESPACE, LOCK_PAIN))

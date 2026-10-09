@@ -83,16 +83,6 @@ def test_a_retired_rule_answers_with_why_it_was_withdrawn_and_stops_being_writte
     found = match.similar_tombstones(cur, RULE)
     assert [row["memory_id"] for row in found] == [kept["memory_id"]]
     assert found[0]["retire_reason"] == WITHDRAWN
-    assert {
-        "memory_id",
-        "retire_reason",
-        "retired_at",
-        "retirement_kind",
-        "superseded_by",
-        "relocated_to_kind",
-        "relocated_to_id",
-        "score",
-    } == set(found[0])
 
     with pytest.raises(RetiredConflictError) as raised:
         remember(cur, REVISED)

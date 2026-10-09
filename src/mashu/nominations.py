@@ -174,9 +174,7 @@ def nominate_user_explicit(
     cur: psycopg.Cursor, *, content: str, actor: str, scope_id: UUID | None = None
 ) -> dict[str, Any]:
     """Carry an instruction an agent says it was given, as far as the queue."""
-    verdict = redact.check(content)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    verdict = redact.gate({"content": content})
 
     cur.execute(
         "SELECT pg_advisory_xact_lock(%s, %s)", (capacity.LOCK_NAMESPACE, capacity.LOCK_PAIN)
@@ -356,9 +354,7 @@ def revise(
     content = (content or "").strip()
     if not content:
         raise MashuError("a candidate cannot be empty")
-    verdict = redact.check(content)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    redact.gate({"content": content})
     conflict_ids = current_conflict_ids(cur, content)
     snapshot = _conflict_snapshot(cur, conflict_ids)
     cur.execute(
@@ -465,9 +461,7 @@ def admit(
     if delivery == "topic":
         home = memories.topic_home(cur, delivery, topic_id)
 
-    verdict = redact.check(final)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    verdict = redact.gate({"content": final})
     if verdict.unchecked:
         gate["unchecked"] = True
     if verdict.malformed:
@@ -610,7 +604,7 @@ def remember_explicit(
             expected_version=replay["admit_request"]["expected_version"],
             **settings,
         )
-        verdict = redact.check(content)
+        verdict = redact.check({"content": content})
         gate = {"unchecked": verdict.unchecked}
         if verdict.malformed:
             gate["malformed"] = verdict.malformed
@@ -657,9 +651,7 @@ def decline(cur: psycopg.Cursor, nomination_id: UUID, *, actor: str, reason: str
     _require_pending(cur, nomination_id)
     if not reason or not reason.strip():
         raise MashuError("declining needs a reason: the next report of this pain will read it")
-    verdict = redact.check(reason)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    verdict = redact.gate({"reason": reason})
     cur.execute(
         """
         UPDATE nomination
@@ -690,9 +682,7 @@ def defer(cur: psycopg.Cursor, nomination_id: UUID, *, actor: str, reason: str) 
     _require_pending(cur, nomination_id)
     if not reason or not reason.strip():
         raise MashuError("putting a candidate off needs a reason: it is all the next reader gets")
-    verdict = redact.check(reason)
-    if not verdict.allowed:
-        raise RefusedError(verdict.reason())
+    verdict = redact.gate({"reason": reason})
     cur.execute(
         """
         UPDATE nomination
