@@ -124,6 +124,8 @@ incident / friction から自動生成した候補と、Agent 自身の追加・
 
 本文を渡された `memory_admit` は、Agent がまだ読んでいないものがあれば採用せずに止まる。一つは候補が照合によって既存の pending 候補に合流した場合で、Agent はその候補の本文と evidence を見ていない。もう一つは候補が invalidated / legacy の conflict を持ち、その conflict ID と conflict に触れた指示が承認根拠に無い場合である。止まったときは作った台帳行と候補だけを確定し、候補の `version` と conflict を返す。Agent はそれを読み、`nomination_id` と読み取った version を渡して `memory_admit` を呼び直す。この経路では本文・scope・kind・evidence・conflict が読み取り後に変わっていれば適用を拒否する。admission の request ID には初回応答全体を保存し、後から Memory が編集・退役されても再送には同じ応答を返す。
 
+`memory_admit` で `delivery='topic'` にまだ無い topic を指定するときは、発動条件の一文（`topic_trigger`）と、見出しを載せる Scope（省略すると全セッション）を添える。topic は記憶の採用に進む直前に同じ transaction で作り、採用せずに止まった場合も、定員などで拒否された場合も作らない。空の topic を残さないためである。作成の event には採用と同じ承認出所を記録する。発動条件が無いときは、何を渡せばよいかを示して拒否する。既にある topic に発動条件を渡せるのは、その topic と同じ発動条件・Scope のとき（同じ request の再送）だけである。
+
 直接操作では User が delivery を選ぶ。会話中の明示指示から Agent が採用する場合は、nomination の Scope と既定 delivery を使い、必要な指定は提案に含める。
 
 **重複の防止は照合が担い、lock は同時到着だけを担う。**候補の生成前に pending の候補と照合し、閾値以上なら新規候補を作らず今回の台帳行を既存候補の evidence に追加する。同じ規則が待ち行列に二行並ぶと、人は二度決めて一つしか席を渡せず、しかも重複は読むまで見えない。ただし二度目・三度目の痛みを捨ててよいわけではない。**何回起きたかは、席を渡すかどうかの判断のほとんどを占める。**保留中（`deferred_at`）の候補に evidence が付いた場合は保留を解いて一覧へ戻す。保留は「今は決めない」という当時の状況についての判断であり、その後さらに痛んだなら状況が変わっている。保留の理由（`defer_reason`）は残し、次の読み手が自分の以前の言葉を新しい痛みの隣で読めるようにする。
@@ -154,6 +156,8 @@ bootstrap で push される合計に硬い天井（当初 2000 token）を置�
 **行数で数える代理指標は使わない。**v1 からの再入場では「always 上限 10 行 × 約 60 token」として運用したが、実測は 1 行 43 token で、10 行は意図した枠の半分強しか使わなかった。規則の長さは一定でないので、件数は枠の代理にならない。
 
 always 層で拒否されたものには、scope 規則には無い出口が一つある。一箇所でしか効かない規則なら、どこで効くかを言えばよい（`mashu deliver <id> scope --scope <name>`）。
+
+拒否の文面は、書き込み前の空きを示す。always への追加が拒否されたときは、代わりに topic へ置いた場合に always 層が払う量も添える。Scope を持たない既存 topic ごとの見出しの増分（規則を持つ topic なら規則数の表記が変わる分だけ、空の topic なら行全体）と、新しい topic なら見出し一行ぶんの見積もり方である。topic への追加が見出しの行で拒否されたときは、その行の全文と token 数を示す。空の topic は見出しを出さないので、最初の規則で行全体が席に載るからである。出口は書き込んだ経路の言葉で示す。CLI からは `mashu` のコマンド、MCP からは `memory_change_propose`（retire）や `memory_redeliver` の tool 名である。
 
 **topic（6 節）の見出しの行も、push される量として数える。**Scope を持たない topic の行は全セッションに届くので always 層に、Scope を持つ topic の行はその Scope に数える。行を数えるのは、その topic に active な規則が 1 件以上あるあいだだけである。topic の本文は bootstrap に載らないので席を使わない。ただし読んだときに一度に届く量なので、topic ごとに上限（当初 800 token、`MASHU_TOPIC_CAPACITY`）を置く。特定の作業でしか効かない規則は、scope でも always でも topic へ移すことで席を空けられる（`mashu deliver <id> topic --topic <name>`）。
 
@@ -260,9 +264,10 @@ Memories TUI の `c` は、active な always / scope Memory と Temporary Contex
 | `memory_list` | 指定 Scope の active な記憶を列挙する。`topic` を渡すと、その topic の発動条件と規則の本文を返し、読んだことをセッション単位で event_log に残す |
 | `memory_get` | 指定した Memory の本文、revision、evidence、退役情報を返す。退役本文は明示取得でのみ読む |
 | `memory_nominate` | 新規 Memory の pending 候補を作るだけで採用しない。replace の後継候補に使う |
-| `memory_admit` | 承認根拠を必須にして採用する。本文を渡すと候補の作成と採用を 1 回で行い、合流した既存候補や未対応の invalidated / legacy conflict があれば採用せず候補を返す。候補 ID で採用するときは読み取った nomination version を必須にする。実行者 Agent と `user_instruction` の出所を別に保存し、request replay には初回応答を返す |
+| `memory_admit` | 承認根拠を必須にして採用する。本文を渡すと候補の作成と採用を 1 回で行い、合流した既存候補や未対応の invalidated / legacy conflict があれば採用せず候補を返す。候補 ID で採用するときは読み取った nomination version を必須にする。まだ無い topic は発動条件つきで指定すると記憶とともに作る。実行者 Agent と `user_instruction` の出所を別に保存し、request replay には初回応答を返す |
 | `memory_change_propose` | retire / replace / restore / redeliver 案を作成・更新する。redeliver は本文を変えずに配信条件だけを変え、まだ無い topic を名前と発動条件つきで指定すると適用時にその topic を作る。replace は後継 nomination version と配信条件を固定する |
 | `memory_change_apply` | proposal version、対象 revision、conflict、承認根拠、request ID を照合して一度だけ適用する |
+| `memory_redeliver` | User が指示した配信条件の変更を、redeliver 案の作成と適用まで一つの transaction で行う。指示の引用と会話参照を evidence にし、request replay には初回応答を返す |
 | `memory_change_withdraw` | 不要になった pending Memory change を理由つきで取り下げる |
 
 他の Project State 系 Tool は `docs/mashu-v3.md` 13.1 節に記す。`session_bootstrap` の返却内容は 6.1 節にある。
@@ -309,7 +314,7 @@ route             cwd から scope への対応表
 ledger            痛みの記録。append-only
 trace             痕跡。自動失効
 memory            記憶。active / retired と退役種別・後継・移動先
-topic             作業の種類ごとの規則束。名前・Scope・発動条件。User のみ作成
+topic             作業の種類ごとの規則束。名前・Scope・発動条件。User が作る。Agent は明示指示つきの採用・配信変更に伴ってだけ作る
 memory_revision   本文の改訂履歴。append-only
 nomination        昇格候補。pending / admitted / declined
 memory_change     既存 Memory の retire / replace / restore / redeliver proposal
@@ -326,6 +331,8 @@ pgvector は使わない。拡張は pg_trgm のみ。埋め込みモデルへ�
 提案の形の誤りは、DB を読む前にまとめて調べ、一度の拒否で全部を返す（MCP では `problems` の一覧）。operation ごとに要る欄の欠落、その operation に当てはまらない欄、evidence の各項目の不備がこれに当たる。一度に一つずつ返すと、Agent は規則を一つ知るたびに呼び直すことになる。evidence の各項目は、kind が `ledger` か `trace` なら `id`、`artifact` なら `ref` で出所を指し、`observation` に何が分かったかを書く。出所を指さない observation だけの項目は受け付けない。会話の中のユーザーの発言は台帳行も trace も持たないので、`artifact` として `ref` に会話を指す参照を書き、`observation` に発言を引用する。
 
 redeliver 提案は、active な Memory の配信条件だけを `successor_settings` として持ち、本文と ID は変えない。理由は根拠の observation が運ぶので、退役理由の欄は使わない。まだ無い topic を指定するときは、名前と発動条件（`topic_trigger`）と Scope を提案に保存し、適用する transaction の中で topic を作る。適用時に同じ名前の topic が別の発動条件か Scope で作られていれば拒否し、再読と提案更新を要求する。Agent はこの経路で配信の振り分けを提案し、User は review で 1 件ずつ `y` を押すか、明示指示で適用させる。`event_log` には退役種別・理由・移動先・actor と別の承認出所を判断時点の記録として保存する。承認出所は認証情報ではない。
+
+User が配信条件の変更だけを明示に指示したときは、`memory_redeliver` が一回の呼び出しで済ませる。対象の現在の revision を読み、指示の引用と会話参照を artifact の evidence にした redeliver 案を作り、同じ transaction で適用する。残る proposal・承認出所・event は案の作成と適用を別々に呼んだ場合と同じである。Scope を省くと、always と scope は Memory の Scope を引き継ぎ、既にある topic はその topic の Scope を取り、新しい topic は全セッションに見出しを載せる。request ID の再送は初回の結果を返し、同じ request ID を別の変更や `memory_change_apply` に使うことはできない。
 
 書き込みは直列化する。複数の MCP プロセスと CLI が同じ知識状態に同時に書くので、定員の判定と候補の生成は advisory lock を取ってから行う。取らなければ、残り 1 席に二人が同時に座れてしまう。
 

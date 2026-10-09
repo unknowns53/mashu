@@ -8,7 +8,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Jsonb
 
-from mashu import approvals, capacity, config, events, match, redact
+from mashu import approvals, capacity, config, events, match, redact, topics
 from mashu.errors import MashuError, RefusedError
 
 KINDS = ("incident", "rederivation", "user_explicit")
@@ -569,13 +569,17 @@ def remember_explicit(
     scope_id: UUID | None = None,
     delivery: str | None = None,
     topic_id: UUID | None = None,
+    new_topic: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Nominate an instruction the agent carries and admit it at once when nothing needs reading.
 
     A stop keeps the ledger row and nomination, as memory_nominate would, so the agent can
     continue with an admission by id. Any other refusal propagates and writes nothing.
+    `new_topic` (name, trigger, scope_id) is opened only on the way to admitting, so a stop
+    or a refusal leaves no empty topic behind.
     """
-    chosen_delivery = delivery or ("topic" if topic_id else "scope" if scope_id else "always")
+    filed = topic_id or new_topic
+    chosen_delivery = delivery or ("topic" if filed else "scope" if scope_id else "always")
     settings = {
         "actor": actor,
         "delivery": chosen_delivery,
@@ -614,6 +618,10 @@ def remember_explicit(
     if not approvals.acknowledges_conflicts(approval, blocking):
         return {"admitted": False, "stopped": _STOP_CONFLICT, **nominated}
 
+    if new_topic is not None:
+        settings["topic_id"] = topics.open_instructed(
+            cur, new_topic, approval=approval, actor=actor
+        )
     memory = admit(
         cur, nomination["nomination_id"], expected_version=nomination["version"], **settings
     )

@@ -201,6 +201,8 @@ def test_the_first_rule_of_a_topic_is_refused_when_its_line_does_not_fit(cur, mo
     assert str(projected) in str(refused.value)
     assert str(pushed_cost([line(subject, 1)])) in str(refused.value)
     assert "this topic's index line" in str(refused.value)
+    assert f"'{line(subject, 1)}'" in str(refused.value)
+    assert "has 3 tokens free" in str(refused.value)
 
 
 def test_a_scoped_topic_line_is_refused_against_its_scope_seat(cur, scope_id, monkeypatch):
@@ -384,3 +386,49 @@ def test_memory_list_and_admit_reach_a_topic_by_name_for_this_server_session(mcp
     )
     assert answer["ok"] is True
     assert answer["memory"]["delivery"] == "topic"
+
+
+def test_memory_admit_opens_a_new_topic_only_with_its_trigger_and_only_if_the_rule_lands(
+    mcp, dsn, monkeypatch
+):
+    from mashu import db
+
+    trigger = "Before branching a release"
+    base = {
+        "approval_kind": "user_instruction",
+        "instruction": "remember this for release branches",
+        "delivery": "topic",
+        "topic": "release",
+    }
+    missing = mcp("memory_admit", request_id=str(uuid4()), content=LEVER, **base)
+    assert missing["ok"] is False
+    assert "topic_trigger" in missing["error"] and "scope" in missing["error"]
+
+    monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", "5")
+    refused = mcp(
+        "memory_admit", request_id=str(uuid4()), content=LEVER, topic_trigger=trigger, **base
+    )
+    assert f"'release (1 rule): {trigger}'" in refused["error"]
+    assert "has 5 tokens free" in refused["error"]
+    assert "memory_redeliver" in refused["error"] and "mashu " not in refused["error"]
+    monkeypatch.delenv("MASHU_ALWAYS_CAPACITY")
+    assert mcp("memory_nominate", content=PLACEMENT)["ok"] is True
+    stopped = mcp(
+        "memory_admit", request_id=str(uuid4()), content=PLACEMENT, topic_trigger=trigger, **base
+    )
+    assert stopped["admitted"] is False
+    with db.transaction(dsn) as cur:
+        assert topics.get_topic(cur, "release") is None
+        scope = scopes.create_scope(cur, name="enrai", actor="user")
+
+    request = {"request_id": str(uuid4()), "content": LEVER, "topic_trigger": trigger, **base}
+    made = mcp("memory_admit", scope="enrai", **request)
+    assert made["ok"] is True
+    assert mcp("memory_admit", scope="enrai", **request) == made
+    with db.transaction(dsn) as cur:
+        opened = topics.get_topic(cur, "release")
+        cur.execute("SELECT detail FROM event_log WHERE event_type = 'topic_created'")
+        created = cur.fetchone()["detail"]
+    assert (opened["trigger"], opened["scope_id"]) == (trigger, scope["scope_id"])
+    assert made["memory"]["topic_id"] == str(opened["topic_id"])
+    assert created["approval_source"]["instruction"] == base["instruction"]
