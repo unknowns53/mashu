@@ -65,7 +65,8 @@ def test_a_malformed_proposal_reports_every_shape_problem_at_once(cur):
         "replace needs retire_reason",
         "replace needs successor_nomination_id",
         "replace needs successor_nomination_version, the successor version just read",
-        f"evidence[0] needs {memory_changes.EVIDENCE_SHAPE} (missing: kind, id or ref)",
+        f"evidence[0] needs {memory_changes.EVIDENCE_SHAPE} (missing: kind, id or ref); "
+        f"{memory_changes.CONVERSATION_EVIDENCE}",
     ]
 
 

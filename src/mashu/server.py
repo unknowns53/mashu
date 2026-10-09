@@ -493,7 +493,9 @@ def build_server() -> Any:
         - restore (retired Memory): `restore_reason`.
         - redeliver (active Memory): `successor_settings`; the evidence says why.
         Every `evidence` item cites a ledger row or trace by `id`, or an artifact by `ref`,
-        and says what it shows in `observation`; an observation alone is refused. All shape
+        and says what it shows in `observation`; an observation alone is refused. Cite the
+        user's words in this conversation as an artifact whose `ref` names the conversation,
+        quoting them in `observation`. All shape
         problems come back together in `problems`.
 
         Replace keeps the old delivery settings unless `successor_settings` gives both

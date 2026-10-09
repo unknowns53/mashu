@@ -34,6 +34,11 @@ EVIDENCE_KINDS: tuple[str, ...] = get_args(EvidenceKind)
 BLOCKING_KINDS = ("invalidated", "legacy")
 OBSERVATION_LIMIT = 2000
 EVIDENCE_SHAPE = "kind 'ledger' or 'trace' with id, or kind 'artifact' with ref, plus observation"
+#: A user's words have no ledger row or trace of their own, so they are cited as an artifact.
+CONVERSATION_EVIDENCE = (
+    "cite what the user said in this conversation as kind 'artifact' with ref naming the "
+    "conversation, and quote their words in observation"
+)
 
 #: The optional fields each operation takes; any other one given is a mistake to report.
 _TAKES = {
@@ -292,7 +297,10 @@ def _evidence_problems(evidence: Any) -> list[str]:
                 f"the limit is {OBSERVATION_LIMIT}"
             )
         if missing:
-            problems.append(f"{where} needs {EVIDENCE_SHAPE} (missing: {', '.join(missing)})")
+            problem = f"{where} needs {EVIDENCE_SHAPE} (missing: {', '.join(missing)})"
+            if "id or ref" in missing:
+                problem += f"; {CONVERSATION_EVIDENCE}"
+            problems.append(problem)
     return problems
 
 
