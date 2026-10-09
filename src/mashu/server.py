@@ -117,7 +117,7 @@ class _ItemSchema:
         return schema
 
 
-EvidenceList = Annotated[list[dict[str, Any]], _ItemSchema(EvidenceItem, min_items=1)]
+EvidenceList = Annotated[list[Any], _ItemSchema(EvidenceItem, min_items=1)]
 AttemptList = Annotated[list[Any], _ItemSchema(AttemptItem)]
 DecisionList = Annotated[list[Any], _ItemSchema(DecisionItem)]
 ArtifactList = Annotated[list[Any], _ItemSchema(ArtifactItem)]

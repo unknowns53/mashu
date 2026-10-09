@@ -24,6 +24,10 @@ class RefusedError(MashuError):
         self.span = span
 
 
+#: What to do with a text that will not fit, instead of cutting what it says.
+LONG_FORM_ADVICE = "put the long form where its original lives and reference it instead"
+
+
 @dataclass(frozen=True)
 class OverLimit:
     """One field longer than its own ceiling, reported among the request's other problems."""
@@ -44,7 +48,10 @@ class MalformedRequestError(MashuError):
 
     def __init__(self, problems: Sequence[str | OverLimit]):
         texts = [str(problem) for problem in problems]
-        super().__init__("; ".join(texts))
+        message = "; ".join(texts)
+        if any(isinstance(p, OverLimit) and p.advice is None for p in problems):
+            message += f". For a field over its limit, {LONG_FORM_ADVICE}"
+        super().__init__(message)
         self.problems = texts
         #: The problems that are a field over its ceiling, as field, limit, actual, and unit.
         self.over_limit = [
@@ -76,7 +83,7 @@ class OverLimitError(RefusedError):
         advice: str | None = None,
         breakdown: dict[str, int] | None = None,
     ):
-        advice = advice or "put the long form where its original lives and reference it instead"
+        advice = advice or LONG_FORM_ADVICE
         over_by = max(0, actual - limit)
         if breakdown is None:
             reason = f"{field} is {actual} {unit} and the limit is {limit}; {advice}"
