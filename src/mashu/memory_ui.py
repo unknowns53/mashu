@@ -49,44 +49,10 @@ def _row_id(row: dict[str, Any], view: str) -> UUID:
 def _memory_record(dsn: str | None, memory_id: UUID) -> dict[str, Any]:
     """Read a memory together with the evidence and wording history behind it."""
     with db.transaction(dsn) as cur:
-        cur.execute(
-            """
-            SELECT m.*, s.name AS scope_name,
-                   t.name AS topic_name, t.trigger AS topic_trigger
-            FROM memory m
-            LEFT JOIN scope s ON s.scope_id = m.scope_id
-            LEFT JOIN topic t ON t.topic_id = m.topic_id
-            WHERE m.memory_id = %s
-            """,
-            (memory_id,),
-        )
-        row = cur.fetchone()
-        if row is None:
-            raise MashuError(f"no memory {memory_id}")
-
-        evidence_ids = list(row.get("evidence") or [])
-        evidence: list[dict[str, Any]] = []
-        if evidence_ids:
-            cur.execute(
-                """
-                SELECT ledger_id, kind, what, prevention, created_at, created_by
-                FROM ledger WHERE ledger_id = ANY(%s)
-                """,
-                (evidence_ids,),
-            )
-            by_id = {item["ledger_id"]: item for item in cur.fetchall()}
-            evidence = [by_id[item] for item in evidence_ids if item in by_id]
-
-        cur.execute(
-            """
-            SELECT content, note, actor, created_at
-            FROM memory_revision
-            WHERE memory_id = %s
-            ORDER BY created_at, revision_id
-            """,
-            (memory_id,),
-        )
-        return {**row, "evidence_rows": evidence, "revision_rows": cur.fetchall()}
+        row = memories.memory_details(cur, memory_id)
+    if row is None:
+        raise MashuError(f"no memory {memory_id}")
+    return row
 
 
 def _delivery(row: dict[str, Any]) -> str:
@@ -194,7 +160,7 @@ def _full_detail(row: dict[str, Any]) -> str:
     lines.extend([screen.bold("  content"), screen.wrap(row["content"], indent="    "), ""])
 
     lines.append(screen.accent("  evidence"))
-    evidence = row.get("evidence_rows") or []
+    evidence = row.get("basis") or []
     if not evidence:
         lines.append(screen.dim("    (none)"))
     for item in evidence:
@@ -206,7 +172,7 @@ def _full_detail(row: dict[str, Any]) -> str:
         lines.append(screen.wrap(f"prevention: {item.get('prevention') or '-'}", indent="      "))
 
     lines.extend(["", screen.accent("  revisions")])
-    revisions = row.get("revision_rows") or []
+    revisions = row.get("revisions") or []
     if not revisions:
         lines.append(screen.dim("    (none)"))
     for revision in revisions:
