@@ -81,6 +81,7 @@ def _insert_checkpoint(
     what_changed: str,
     state: dict[str, Any],
     evidence: list[UUID],
+    session: UUID | None = None,
 ) -> dict[str, Any]:
     cur.execute(
         """
@@ -111,6 +112,7 @@ def _insert_checkpoint(
             "task_id": str(task_id),
             "checkpoint_id": str(row["checkpoint_id"]),
             "evidence": [str(reference_id) for reference_id in evidence],
+            "session": str(session) if session else None,
         },
     )
     return row
@@ -248,13 +250,15 @@ def checkpoint(
     attempts: list[Any] | None = None,
     decisions: list[Any] | None = None,
     artifacts: list[Any] | None = None,
+    session: UUID | None = None,
 ) -> dict[str, Any]:
     """Replace the given state fields, append the history they rest on, and freeze it all.
 
     Every item is checked before the first write, so a refused item leaves the state and
     history as they were. Malformed items and fields over their own ceilings are refused
     together; the card and detail budgets, which depend on the whole state, come after.
-    Artifacts linked here become evidence of the checkpoint.
+    Artifacts linked here become evidence of the checkpoint. `session` is passed on as
+    task_update takes it.
     """
     given = {
         "goal": goal,
@@ -293,7 +297,7 @@ def checkpoint(
         _check_supersedes(cur, task_id, row["supersedes_id"])
 
     updated = tasks.task_update(
-        cur, task_id, actor=actor, expect_updated_at=expect_updated_at, **given
+        cur, task_id, actor=actor, expect_updated_at=expect_updated_at, session=session, **given
     )
     recorded_attempts = [
         _insert_attempt(cur, task_id, actor=actor, **item) for item in attempt_items
@@ -311,6 +315,7 @@ def checkpoint(
         what_changed=what_changed,
         state=updated["state"],
         evidence=evidence_ids + [row["reference_id"] for row in recorded_artifacts],
+        session=session,
     )
     result = {
         **updated,

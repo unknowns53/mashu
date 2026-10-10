@@ -418,10 +418,10 @@ Agent が守る基本の動詞は次のとおり。
 User が「覚えて」と言った → memory_admit（content）
 User が既存 Memory の変更を指示 → memory_get → memory_change_propose → memory_change_apply
 User が配信先の変更を指示 → memory_redeliver
-作業の区切り            → task_checkpoint（attempts / decisions / artifacts を添える）
+次のセッションへ引き継ぐ → task_checkpoint（attempts / decisions / artifacts を添える）
 ~~~
 
-task_checkpoint の `attempts` には失敗した試行の結末、`decisions` には理由を失うと再導出コストが高い判断、`artifacts` には外部成果物の原典を入れる。一つでも拒否されれば checkpoint 全体が書かれない。Agent が独自に考えた Memory 変更は提案に留め、明示指示があった場合だけ MCP から適用する。ユーザーの会話指示の出所は記録されるが、認証されるわけではない。Temporary Context の登録、直接 Memory 操作、proposal review、Task の close / reopen は User の CLI / TUI 操作だ。終わったと思ったら status_text にそう書くのではなく task_propose_close を使う。前者は User に読み直しと打ち直しをさせ、後者は 1 打鍵で決まる。
+task_checkpoint は、作業を止めるとき、中断するとき、compaction の前、approach や next actions が変わったときに打ち、commit ごとには打たない。進捗は git log が持っている。同じセッションが 30 分以内に同じ Task の state を書き直すと、書き込みは通ったうえで成功応答に `cadence` が付き、いつ書くかを知らせる。status_text は Task がいまどこにいるかが変わったときだけ書き換える。task_checkpoint の `attempts` には失敗した試行の結末、`decisions` には理由を失うと再導出コストが高い判断、`artifacts` には外部成果物の原典を入れる。一つでも拒否されれば checkpoint 全体が書かれない。Agent が独自に考えた Memory 変更は提案に留め、明示指示があった場合だけ MCP から適用する。ユーザーの会話指示の出所は記録されるが、認証されるわけではない。Temporary Context の登録、直接 Memory 操作、proposal review、Task の close / reopen は User の CLI / TUI 操作だ。終わったと思ったら status_text にそう書くのではなく task_propose_close を使う。前者は User に読み直しと打ち直しをさせ、後者は 1 打鍵で決まる。
 
 ### PreToolUse hook で action つきの topic を示す
 
