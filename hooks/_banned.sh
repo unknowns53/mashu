@@ -2,8 +2,9 @@
 # Shared helper: materialise the active banned-pattern list into $BANNED_PATTERNS_FILE.
 
 banned_load() {
-    repo_root=$(git rev-parse --show-toplevel) || return 1
-    src="$repo_root/.git-banned-patterns"
+    # Linked worktrees have no copy of the gitignored list, so read the main checkout's.
+    common_dir=$(git rev-parse --path-format=absolute --git-common-dir) || return 1
+    src="$(dirname "$common_dir")/.git-banned-patterns"
 
     if [ ! -f "$src" ]; then
         printf '%s\n' "hook: .git-banned-patterns is missing." >&2

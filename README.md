@@ -87,7 +87,7 @@ createdb mashu
 uv run mashu admin migrate
 ~~~
 
-Git の pre-commit / commit-msg hook も使う場合は、次を実行する。これは hook の有効化と、ローカル専用の禁止パターンファイルの雛形作成を行う。
+Git の pre-commit / commit-msg hook も使う場合は、次を実行する。これは hook の有効化と、ローカル専用の禁止パターンファイルの雛形作成を行う。禁止パターンファイルは本体の checkout に一つだけ置き、git worktree で切った作業ツリーの hook もそれを読む。
 
 ~~~bash
 ./hooks/install.sh

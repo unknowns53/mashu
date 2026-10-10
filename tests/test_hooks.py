@@ -55,6 +55,16 @@ def test_staged_filename_is_decoded_before_path_and_blob_checks(hook_repo, patte
     assert "banned pattern" in result.stderr
 
 
+def test_linked_worktree_reads_main_checkout_patterns(hook_repo):
+    git(hook_repo, "commit", "-q", "--allow-empty", "--no-verify", "-m", "root")
+    worktree = hook_repo / "linked"
+    git(hook_repo, "worktree", "add", "-q", str(worktree))
+    (worktree / "message").write_text("SECRET\n")
+    result = hook(worktree, "commit-msg", "message")
+    assert result.returncode != 0
+    assert "banned pattern" in result.stderr
+
+
 def test_pretooluse_uses_local_mashu_and_separates_option_like_action(monkeypatch, tmp_path):
     event = {"tool_name": "External", "session_id": "test"}
     monkeypatch.setattr(pretooluse_guard, "rules", lambda: [("tool", "External", "-guard")])

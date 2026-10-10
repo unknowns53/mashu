@@ -2,8 +2,9 @@
 # Set up Git hooks and create the local pattern file if needed.
 set -eu
 
-repo_root=$(git rev-parse --show-toplevel)
-cd "$repo_root"
+# The hooks read the list from the main checkout, also when run from a linked worktree.
+common_dir=$(git rev-parse --path-format=absolute --git-common-dir)
+cd "$(dirname "$common_dir")"
 
 git config core.hooksPath hooks
 printf '%s\n' "installed: core.hooksPath = hooks"
