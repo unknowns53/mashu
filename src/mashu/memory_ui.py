@@ -6,7 +6,7 @@ import datetime as dt
 from typing import Any
 from uuid import UUID
 
-from mashu import db, memories, references, scopes, screen, temporary, topics
+from mashu import application, db, memories, references, scopes, screen, temporary, topics
 from mashu.errors import MashuError, RetiredConflictError
 
 ACTOR = "user"
@@ -44,34 +44,6 @@ def _date(value: Any) -> str:
 
 def _row_id(row: dict[str, Any], view: str) -> UUID:
     return row["context_id" if view == "temporary" else "memory_id"]
-
-
-def _rows(dsn: str | None, view: str) -> list[dict[str, Any]]:
-    """Read one complete view, including the scope names people recognize."""
-    with db.transaction(dsn) as cur:
-        if view == "temporary":
-            cur.execute(
-                """
-                SELECT t.*, s.name AS scope_name
-                FROM temporary_context t LEFT JOIN scope s ON s.scope_id = t.scope_id
-                WHERE t.expires_at > now()
-                ORDER BY t.expires_at, t.context_id
-                """
-            )
-        else:
-            cur.execute(
-                """
-                SELECT m.*, s.name AS scope_name,
-                       t.name AS topic_name, t.trigger AS topic_trigger
-                FROM memory m
-                LEFT JOIN scope s ON s.scope_id = m.scope_id
-                LEFT JOIN topic t ON t.topic_id = m.topic_id
-                WHERE m.status = %s
-                ORDER BY m.delivery, s.name NULLS FIRST, t.name, m.created_at, m.memory_id
-                """,
-                (view,),
-            )
-        return cur.fetchall()
 
 
 def _memory_record(dsn: str | None, memory_id: UUID) -> dict[str, Any]:
@@ -743,7 +715,8 @@ def run(dsn: str | None = None) -> int:
 
     while True:
         try:
-            all_rows = _rows(dsn, view)
+            with db.transaction(dsn) as cur:
+                all_rows = application.memory_view(cur, view)
         except MashuError as error:
             print(error)
             return 1

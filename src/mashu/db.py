@@ -28,3 +28,11 @@ def transaction(conninfo: str | None = None) -> Iterator[psycopg.Cursor]:
     """Yield a cursor inside one transaction, committing on a clean exit."""
     with connect(conninfo) as conn, conn.transaction(), conn.cursor() as cur:
         yield cur
+
+
+@contextmanager
+def read_only(conninfo: str | None = None) -> Iterator[psycopg.Cursor]:
+    """Yield a cursor inside one transaction that PostgreSQL refuses to write in."""
+    with connect(conninfo) as conn, conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET TRANSACTION READ ONLY")
+        yield cur
