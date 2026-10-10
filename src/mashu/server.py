@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Annotated, Any, NotRequired
 from uuid import UUID, uuid4
 
@@ -52,8 +52,10 @@ INSTRUCTIONS = (
     "When the work at hand matches a bootstrap topic's trigger, call memory_list with that "
     "topic before starting it. "
     "Before continuing a task from a bootstrap card, call task_get with its full id and "
-    "verify old state against the repository and artifacts. Use task_checkpoint at work "
-    "breaks; put failed tries in its attempts, costly-to-rederive reasons in decisions, "
+    "verify old state against the repository and artifacts. Use task_checkpoint to hand "
+    "off to the next session: before stopping, pausing, or compaction, and when the "
+    "approach or next actions change, not after each commit, since git log carries "
+    "progress. Put failed tries in its attempts, costly-to-rederive reasons in decisions, "
     "and external sources in artifacts. Task completion remains the user's decision. "
     "If work looks done, use task_propose_close with outcome and reason; it changes no "
     "task state. "
@@ -154,6 +156,23 @@ def _body_contract() -> str:
         f"measurements, dates, and history in `why` (at most {memories.WHY_LIMIT} chars): it "
         "is kept on the evidence ledger row that memory_get returns and is never pushed. An "
         "over-limit field is refused with `problems` and `over_limit`."
+    )
+
+
+#: When a task state write is due, said the same way by both tools that write one.
+_WRITE_TRIGGER = (
+    "Write state to hand off to the next session: before stopping, pausing, or compaction "
+    "and when the approach or next actions change, not after each commit, since git log "
+    "carries progress."
+)
+
+
+def _write_success() -> str:
+    """How a successful state write answers, including the note on writing too soon."""
+    minutes = tasks.STATE_WRITE_SPACING // timedelta(minutes=1)
+    return (
+        "Success returns the card view with the card and detail budgets, plus `cadence` "
+        f"when this session wrote the task's state less than {minutes} minutes earlier."
     )
 
 
@@ -842,11 +861,11 @@ def build_server() -> Any:
     @server.tool(
         description=(
             'Replace the state fields given; omitted fields keep their value, "" or [] '
-            "clears.\n\nPass the read state's `updated_at` as `expect_updated_at`. `name` "
-            "renames the task unless it reads like another open one. `goal` names the outcome "
-            "and `status_text` says where the task stands; both ride on every bootstrap card, "
-            f"so details go in approach or next_actions. {state_contract} {_REFUSALS} Success "
-            "returns the card view with the card and detail budgets."
+            f"clears.\n\n{_WRITE_TRIGGER} Pass the read state's `updated_at` as "
+            "`expect_updated_at`. `name` renames the task unless it reads like another open "
+            "one. `goal` names the outcome and `status_text` says where the task stands, so "
+            "it changes only when that does; both ride on every bootstrap card, so details go "
+            f"in approach or next_actions. {state_contract} {_REFUSALS} {_write_success()}"
         )
     )
     def task_update(
@@ -874,6 +893,7 @@ def build_server() -> Any:
                     blockers=blockers,
                     next_actions=next_actions,
                     name=name,
+                    session=session,
                 )
                 return _plain({"ok": True, **_task_card_view(answer)})
         except MashuError as error:
@@ -882,14 +902,15 @@ def build_server() -> Any:
     @server.tool(
         description=(
             "Replace the state fields given and record a checkpoint with its history.\n\n"
+            f"{_WRITE_TRIGGER} "
             'Omitted fields keep their value; "" or [] clears one. Pass the read state\'s '
             "`updated_at` as `expect_updated_at`. `goal` names the outcome and `status_text` "
-            "says where the task stands; both ride on every bootstrap card, so what was done "
-            "goes in `what_changed`. Optional history, all written with the checkpoint or not "
-            "at all: `attempts` for failed tries, `decisions` for reasons costly to re-derive, "
-            "and `artifacts` for external sources, which join `evidence`. "
-            f"{state_contract} {_history_contract()} {_REFUSALS} Success returns the card "
-            "view with the card and detail budgets."
+            "says where the task stands, so it changes only when that does; both ride on every "
+            "bootstrap card, so what was done goes in `what_changed`. Optional history, all "
+            "written with the checkpoint or not at all: `attempts` for failed tries, "
+            "`decisions` for reasons costly to re-derive, and `artifacts` for external "
+            f"sources, which join `evidence`. {state_contract} {_history_contract()} "
+            f"{_REFUSALS} {_write_success()}"
         )
     )
     def task_checkpoint(
@@ -925,6 +946,7 @@ def build_server() -> Any:
                     attempts=attempts,
                     decisions=decisions,
                     artifacts=artifacts,
+                    session=session,
                 )
                 answer["checkpoint"] = {
                     key: value
