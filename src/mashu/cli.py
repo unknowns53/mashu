@@ -310,11 +310,12 @@ def cmd_remember(args: argparse.Namespace) -> int:
             args.scope is not None
             or args.delivery is not None
             or args.topic is not None
+            or args.why is not None
             or args.force
         ):
             raise MashuError(
-                "--until cannot be combined with --scope, --delivery, --topic, or --force; "
-                "omit those options when recording a temporary condition"
+                "--until cannot be combined with --scope, --delivery, --topic, --why, or "
+                "--force; omit those options when recording a temporary condition"
             )
         days = _parse_days(args.until)
         with db.transaction(args.dsn) as cur:
@@ -329,6 +330,8 @@ def cmd_remember(args: argparse.Namespace) -> int:
             "omit --scope and --delivery"
         )
     delivery = args.delivery or ("topic" if args.topic else "scope" if args.scope else "always")
+    # memories.remember holds the same ceiling; checked here so the refusal names the flag.
+    memories.check_body(args.body, why=args.why, rest="--why")
     acknowledged: list[UUID] | None = None
     while True:
         try:
@@ -342,6 +345,7 @@ def cmd_remember(args: argparse.Namespace) -> int:
                     delivery=delivery,
                     topic_id=_topic(cur, args.topic),
                     acknowledged_conflicts=acknowledged,
+                    why=args.why,
                 )
             break
         except RetiredConflictError as conflict:
@@ -1640,9 +1644,20 @@ def build_parser() -> argparse.ArgumentParser:
             'mashu remember "Run migrations before restarting the service"',
             'mashu remember "The staging host is down" --until 2d',
             'mashu remember "Keep the win rate between 40 and 60 percent" --topic difficulty',
+            'mashu remember "Run migrations before restarting" --why "a restart broke the API"',
         ),
     )
-    remember.add_argument("body", help="the rule, written as a short sentence")
+    remember.add_argument(
+        "body",
+        help=f"the rule alone, at most {memories.CONTENT_LIMIT} chars; it reaches every session",
+    )
+    remember.add_argument(
+        "--why",
+        help=(
+            f"the reason, measurements, dates, and history (at most {memories.WHY_LIMIT} "
+            "chars), kept on its evidence and never pushed"
+        ),
+    )
     remember.add_argument("--scope", help="deliver it to this scope only")
     remember.add_argument(
         "--delivery",

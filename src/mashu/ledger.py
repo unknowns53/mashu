@@ -7,7 +7,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import config, events, match, nominations, redact, tasks, topics, traces
+from mashu import config, events, match, memories, nominations, redact, tasks, topics, traces
 from mashu.capacity import LOCK_NAMESPACE, LOCK_PAIN
 from mashu.errors import MashuError
 
@@ -51,6 +51,9 @@ def report_pain(
             "a task is where work is filed; a prevention that is a rule is filed by review, "
             "so pass prevention_kind='work' or leave the task out"
         )
+    if prevention_kind == "rule":
+        # A rule's prevention becomes a candidate's body, and the pain's own account is `what`.
+        memories.check_body(prevention, field="prevention", rest="what")
     verdict = redact.gate({"what": what, "prevention": prevention})
 
     # Before the insert and before any matching.

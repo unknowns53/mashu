@@ -154,8 +154,11 @@ GUI は読むだけで、採用・却下・編集・close などの操作は TUI
 
 User が CLI の `mashu remember` または dashboard の Memories から直接登録した内容は、review を待たずに active Memory になる。会話中に「覚えて」と明示された内容は、Agent が `memory_admit` に本文を渡して 1 回で登録できる。
 
+本文は該当するすべてのセッションに push されるので、規則だけを 120 字以内で書く。理由・測定値・日付・経緯は `--why`（MCP では `why`、500 字まで）に渡すと、evidence の台帳行に残り、`mashu show` や `memory_get` で読めるが push はされない。120 字を超える本文は、どこに書けばよいかを示して拒否される。上限が掛かるのは新しく書く本文だけで、上限より前に書かれた本文は、採用・復帰・配信の変更でそのまま引き継げる。
+
 ~~~bash
 mashu remember "Run migrations before restarting the service"
+mashu remember "Run migrations before restarting" --why "a restart against an old schema broke the API"
 mashu remember "Use the deployment scope" --scope deployment
 mashu remember "Keep the win rate between 40 and 60 percent" --topic difficulty
 ~~~
@@ -176,7 +179,7 @@ pain は、忘れたことによって起きたことと、その再発を防ぐ
 
 - incident: 知識が無かったため、誤った作業を実際に行った
 - friction: 同じ情報をもう一度調べた
-- prevention-kind rule: 毎回覚えておく必要があるルール。既定値で、candidate の対象になる
+- prevention-kind rule: 毎回覚えておく必要があるルール。既定値で、candidate の対象になる。prevention がそのまま candidate の本文になるので 120 字までとし、理由や経緯は --what に書く
 - prevention-kind work: 一度だけ行う変更。candidate にはせず、指定した Task の next_actions に入れる
 
 ~~~bash
@@ -390,13 +393,13 @@ MCP tool は 20 個ある。
 | 分類 | Tool | 役割 |
 |---|---|---|
 | Knowledge | session_bootstrap | セッション開始時に一度呼び、Memory・active Task card・Temporary Context を受け取る |
-| Knowledge | pain_report | 事故または再調査を Ledger に記録する |
+| Knowledge | pain_report | 事故または再調査を Ledger に記録する。`rule` の `prevention` は 120 字までで、理由や経緯は `what` に書く |
 | Knowledge | trace_put | 調べて分かったことを日付つき Trace に残す |
 | Knowledge | trace_search | Trace だけを検索する |
 | Knowledge | memory_list | 指定 Scope の active Memory を一覧する。`topic` を渡すと、その topic の本文を読み、読んだことを記録する |
 | Knowledge | memory_get | 指定 Memory の本文、revision、evidence、退役種別・理由・後継を読む |
-| Knowledge | memory_nominate | 新規 Memory の pending candidate を作る。replace の後継に使う |
-| Knowledge | memory_admit | 承認根拠を必須にして採用する。`content` を渡せば候補の作成と採用を 1 回で行い、読むべき候補や conflict があれば止まる。止まった候補は `nomination_id` と読み取った version で採用する。まだ無い topic は `topic_trigger` を添えると記憶とともに作る。request replay は初回応答を返す |
+| Knowledge | memory_nominate | 新規 Memory の pending candidate を作る。replace の後継に使う。`content` は 120 字までで、理由は `why` に渡す |
+| Knowledge | memory_admit | 承認根拠を必須にして採用する。`content` を渡せば候補の作成と採用を 1 回で行い（`content` は 120 字まで、理由・測定値・経緯は `why` に渡すと evidence に残る）、読むべき候補や conflict があれば止まる。止まった候補は `nomination_id` と読み取った version で採用する。まだ無い topic は `topic_trigger` を添えると記憶とともに作る。request replay は初回応答を返す |
 | Knowledge | memory_change_propose | retire / replace / restore / redeliver を作成または更新する。redeliver は本文を変えずに配信条件だけを移し、新しい topic も作れる。replace は後継の内容・version と配信条件を固定し、retirement_kind を省略すると superseded になる。形の誤りは一度の拒否で `problems` にまとめて返る |
 | Knowledge | memory_change_apply | proposal の version と対象・conflict・承認根拠を照合して適用する |
 | Knowledge | memory_redeliver | User が指示した配信先の変更を、redeliver 提案の作成と適用まで 1 回で行う。指示の引用と会話参照が evidence になり、request replay は初回応答を返す |

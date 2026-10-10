@@ -36,6 +36,7 @@ def memory_rows(dsn: str) -> list[dict]:
         return cur.fetchall()
 
 
+@pytest.mark.usefixtures("legacy_bodies")
 def test_stale_candidate_shows_new_short_wording_from_the_first_page(dsn, monkeypatch, capsys):
     nomination = a_candidate(dsn, "\n".join(f"old wording {n}" for n in range(30)))
     row = review_ui._queue(dsn, False)[0][0]
@@ -58,6 +59,7 @@ def test_stale_candidate_shows_new_short_wording_from_the_first_page(dsn, monkey
     assert nomination_row(dsn, nomination["nomination_id"])["status"] == "pending"
 
 
+@pytest.mark.usefixtures("legacy_bodies")
 def test_admission_acknowledges_conflict_only_after_its_reason_is_shown(dsn, monkeypatch):
     body = "\n".join(f"check archive index step {n}" for n in range(30))
     with db.transaction(dsn) as cur:

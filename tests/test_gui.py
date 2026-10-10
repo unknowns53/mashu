@@ -71,7 +71,9 @@ def test_stored_markup_is_shown_as_text_and_never_as_markup(dsn, fetch):
         assert "&lt;script&gt;alert(1)&lt;/script&gt; &amp; means it" in page
 
 
-def test_stored_rows_appear_in_full_on_their_pages_and_filters_narrow_them(dsn, fetch):
+def test_stored_rows_appear_in_full_on_their_pages_and_filters_narrow_them(
+    dsn, fetch, legacy_bodies
+):
     long_rule = "keep the release notes beside the tag they describe, " * 12
     with db.transaction(dsn) as cur:
         kept = remember(cur, long_rule.strip())

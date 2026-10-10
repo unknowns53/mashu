@@ -161,6 +161,7 @@ def test_stale_proposal_shows_new_short_target_from_the_first_page(dsn, monkeypa
     assert "new short target" in capsys.readouterr().out
 
 
+@pytest.mark.usefixtures("legacy_bodies")
 def test_restore_acknowledges_conflict_only_after_its_reason_is_shown(dsn, monkeypatch):
     body = "\n".join(f"check archive index step {n}" for n in range(30))
     with db.transaction(dsn) as cur:

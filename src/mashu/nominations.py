@@ -171,10 +171,23 @@ def refresh_conflicts(
 
 
 def nominate_user_explicit(
-    cur: psycopg.Cursor, *, content: str, actor: str, scope_id: UUID | None = None
+    cur: psycopg.Cursor,
+    *,
+    content: str,
+    actor: str,
+    scope_id: UUID | None = None,
+    why: str | None = None,
 ) -> dict[str, Any]:
-    """Carry an instruction an agent says it was given, as far as the queue."""
-    verdict = redact.gate({"content": content})
+    """Carry an instruction an agent says it was given, as far as the queue.
+
+    `why` becomes the ledger row's account in place of the constant one, so the reason stays
+    with the evidence instead of riding in the pushed body.
+    """
+    from mashu import memories
+
+    why = (why or "").strip() or None
+    memories.check_body(content, why=why)
+    verdict = redact.gate({"content": content, "why": why})
 
     cur.execute(
         "SELECT pg_advisory_xact_lock(%s, %s)", (capacity.LOCK_NAMESPACE, capacity.LOCK_PAIN)
@@ -189,7 +202,7 @@ def nominate_user_explicit(
         VALUES ('claimed', %s, %s, %s, %s)
         RETURNING ledger_id
         """,
-        (CLAIMED_WHAT, content, scope_id, actor),
+        (why or CLAIMED_WHAT, content, scope_id, actor),
     )
     ledger_id = cur.fetchone()["ledger_id"]
     events.record(cur, "pain_recorded", actor, ledger_id=ledger_id, detail={"kind": "claimed"})
@@ -350,10 +363,14 @@ def revise(
     actor: str,
 ) -> dict[str, Any]:
     """Replace a pending candidate's wording without deciding it."""
+    from mashu import memories
+
     nomination = _require_pending(cur, nomination_id)
     content = (content or "").strip()
     if not content:
         raise MashuError("a candidate cannot be empty")
+    if content != nomination["content"]:
+        memories.check_body(content, rest=None)
     redact.gate({"content": content})
     conflict_ids = current_conflict_ids(cur, content)
     snapshot = _conflict_snapshot(cur, conflict_ids)
@@ -427,7 +444,11 @@ def admit(
         raise MashuError(
             "nomination version changed; read the current candidate before admitting it"
         )
+    from mashu import memories
+
     final = nomination["content"] if content is None else content
+    if final != nomination["content"]:
+        memories.check_body(final, rest=None)
     home = scope_id if scope_override else nomination["scope_id"] if scope_id is None else scope_id
 
     cur.execute(
@@ -454,8 +475,6 @@ def admit(
     approval_source = approvals.validate(
         approval, required_conflicts=blocking_conflicts(current_conflicts), gate=gate
     )
-
-    from mashu import memories
 
     memories.check_delivery(delivery, home, topic_id)
     if delivery == "topic":
@@ -570,6 +589,7 @@ def remember_explicit(
     delivery: str | None = None,
     topic_id: UUID | None = None,
     new_topic: dict[str, Any] | None = None,
+    why: str | None = None,
 ) -> dict[str, Any]:
     """Nominate an instruction the agent carries and admit it at once when nothing needs reading.
 
@@ -610,7 +630,9 @@ def remember_explicit(
             gate["malformed"] = verdict.malformed
         return _remembered(memory, replay, replay["evidence"][0], gate)
 
-    nominated = nominate_user_explicit(cur, content=content, actor=actor, scope_id=scope_id)
+    nominated = nominate_user_explicit(
+        cur, content=content, actor=actor, scope_id=scope_id, why=why
+    )
     nomination = nominated["nomination"]
     if nominated["nomination_existing"]:
         return {"admitted": False, "stopped": _STOP_EXISTING, **nominated}

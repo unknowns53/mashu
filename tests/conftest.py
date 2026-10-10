@@ -143,6 +143,12 @@ def getkeys(monkeypatch: pytest.MonkeyPatch, *pressed: str) -> None:
     monkeypatch.setattr(screen, "getkey", lambda: next(values))
 
 
+@pytest.fixture
+def legacy_bodies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let a test seed bodies over the per-entry ceiling, as stores written before it hold."""
+    monkeypatch.setattr(memories, "CONTENT_LIMIT", 10_000)
+
+
 def remember(cur: psycopg.Cursor, content: str, **kwargs):
     return memories.remember(cur, content=content, actor="user", **kwargs)
 

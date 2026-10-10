@@ -146,6 +146,17 @@ def _history_contract() -> str:
     return f"History char limits: {'; '.join(parts)}."
 
 
+def _body_contract() -> str:
+    """The ceilings on a new Memory body and its reason, from the code that enforces them."""
+    return (
+        f"`content` is pushed to every matching session, so it is held to "
+        f"{memories.CONTENT_LIMIT} chars and states the rule alone. Put the reason, "
+        f"measurements, dates, and history in `why` (at most {memories.WHY_LIMIT} chars): it "
+        "is kept on the evidence ledger row that memory_get returns and is never pushed. An "
+        "over-limit field is refused with `problems` and `over_limit`."
+    )
+
+
 #: How a refused task write answers.
 _REFUSALS = (
     "Every problem found before writing comes back together in `problems`; a field over its "
@@ -298,7 +309,15 @@ def build_server() -> Any:
         except MashuError as error:
             return _failure(error)
 
-    @server.tool()
+    @server.tool(
+        description=(
+            "Record a pain and show related evidence.\n\n"
+            "Use `rule` for reusable guidance or `work` with `task_id` for a one-time fix; this "
+            "never admits knowledge directly. A `rule` prevention becomes a candidate Memory "
+            f"body, so it is held to {memories.CONTENT_LIMIT} chars and states the rule alone; "
+            "put the reason, measurements, dates, and history in `what`."
+        )
+    )
     def pain_report(
         kind: str,
         what: str,
@@ -307,11 +326,6 @@ def build_server() -> Any:
         prevention_kind: str = "rule",
         task_id: UUID | None = None,
     ) -> dict[str, Any]:
-        """Record a pain and show related evidence.
-
-        Use `rule` for reusable guidance or `work` with `task_id` for a one-time
-        fix; this never admits knowledge directly.
-        """
         try:
             with db.transaction() as cur:
                 scope_id, _, _ = _scope(cur, scope)
@@ -398,14 +412,20 @@ def build_server() -> Any:
         except MashuError as error:
             return _failure(error)
 
-    @server.tool()
-    def memory_nominate(content: str, scope: str | None = None) -> dict[str, Any]:
-        """Create or update a pending candidate for a new durable Memory without admitting it.
+    body_contract = _body_contract()
 
-        Use it for the successor of a memory_change_propose replace, or to read the current
-        candidate again when memory_admit stopped at the queue. A plain explicit request to
-        remember goes to memory_admit with `content` instead.
-        """
+    @server.tool(
+        description=(
+            "Create or update a pending candidate for a new durable Memory without admitting "
+            "it.\n\n"
+            "Use it for the successor of a memory_change_propose replace, or to read the "
+            "current candidate again when memory_admit stopped at the queue. A plain explicit "
+            f"request to remember goes to memory_admit with `content` instead. {body_contract}"
+        )
+    )
+    def memory_nominate(
+        content: str, scope: str | None = None, why: str | None = None
+    ) -> dict[str, Any]:
         try:
             with db.transaction() as cur:
                 scope_id, _, _ = _scope(cur, scope)
@@ -414,6 +434,7 @@ def build_server() -> Any:
                     content=content,
                     actor=actor(),
                     scope_id=scope_id,
+                    why=why,
                 )
                 return _plain({"ok": True, **answer})
         except MashuError as error:
@@ -431,7 +452,25 @@ def build_server() -> Any:
         except MashuError as error:
             return _failure(error)
 
-    @server.tool()
+    @server.tool(
+        description=(
+            "Admit a new Memory with explicit instruction provenance.\n\n"
+            "For a plain request to remember, pass `content` (and optional `scope`): the "
+            "nomination and admission happen in one call. If it joins an already pending "
+            "candidate or repeats invalidated or legacy retired Memory, it stops with "
+            "`admitted: false` and returns the nomination to read; then pass that "
+            "`nomination_id` and its `version` as `nomination_version`. Always pass "
+            "`approval_kind='user_instruction'`, a short exact quote of the user's instruction, "
+            "any available `conversation_ref`, and a new `request_id`. The Agent executes it; "
+            "this provenance is not authentication. Invalidated or legacy conflicts need "
+            "`conflict_ids` and a `conflict_instruction` in which the user addresses them. "
+            "For a rule the user wants read only during one kind of work, pass "
+            "`delivery='topic'` and a `topic` name. A topic that does not exist yet is opened "
+            "with the rule, never without it, and needs `topic_trigger` (one sentence saying "
+            "when to read it); `scope` names where it is listed, or omit it for every session."
+            f"\n\n{body_contract} `why` goes with `content`, not with `nomination_id`."
+        )
+    )
     def memory_admit(
         request_id: UUID,
         approval_kind: str,
@@ -446,23 +485,8 @@ def build_server() -> Any:
         scope: str | None = None,
         topic: str | None = None,
         topic_trigger: str | None = None,
+        why: str | None = None,
     ) -> dict[str, Any]:
-        """Admit a new Memory with explicit instruction provenance.
-
-        For a plain request to remember, pass `content` (and optional `scope`): the
-        nomination and admission happen in one call. If it joins an already pending
-        candidate or repeats invalidated or legacy retired Memory, it stops with
-        `admitted: false` and returns the nomination to read; then pass that
-        `nomination_id` and its `version` as `nomination_version`. Always pass
-        `approval_kind='user_instruction'`, a short exact quote of the user's instruction,
-        any available `conversation_ref`, and a new `request_id`. The Agent executes it;
-        this provenance is not authentication. Invalidated or legacy conflicts need
-        `conflict_ids` and a `conflict_instruction` in which the user addresses them.
-        For a rule the user wants read only during one kind of work, pass
-        `delivery='topic'` and a `topic` name. A topic that does not exist yet is opened
-        with the rule, never without it, and needs `topic_trigger` (one sentence saying
-        when to read it); `scope` names where it is listed, or omit it for every session.
-        """
         if approval_kind != "user_instruction":
             return _failure(MashuError("MCP admission requires approval_kind='user_instruction'"))
         if topic_trigger is not None and topic is None:
@@ -476,6 +500,13 @@ def build_server() -> Any:
         if content is not None and nomination_version is not None:
             return _failure(
                 MashuError("nomination_version belongs with nomination_id, not with content")
+            )
+        if why is not None and content is None:
+            return _failure(
+                MashuError(
+                    "why belongs with content; a pending nomination already carries its "
+                    "evidence, so admit it by nomination_id without why"
+                )
             )
         approval = {
             "kind": approval_kind,
@@ -502,6 +533,7 @@ def build_server() -> Any:
                         delivery=delivery,
                         topic_id=topic_id,
                         new_topic=new_topic,
+                        why=why,
                     )
                     return _plain({"ok": answer["admitted"], **answer})
                 if new_topic is not None:
