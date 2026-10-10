@@ -137,6 +137,19 @@ mashu
 
 Agent が使うサブコマンドと MCP は変わらない。引数を付けたコマンドは従来どおり非対話で動作する。人は TUI から現行の本文・設定・Current State を訂正できる。Ledger、Memory revision、Task の checkpoint / attempt / decision / artifact、event_log は履歴なので編集しない。
 
+### ブラウザで一覧を見渡す
+
+`mashu gui` は、Memory、Temporary Context、Task、review を待つ candidate と Memory change proposal の一覧ページを 127.0.0.1 で開く。端末の幅では見渡せない一覧を、本文を省略せず折り返したまま一画面に並べるための経路で、既定ではブラウザも開く。
+
+~~~bash
+mashu gui
+mashu gui --port 8700 --no-open
+~~~
+
+Memories は status、delivery、Scope、topic と本文の部分一致で、Tasks は open / active / dormant / closed と Project で絞り込める。Memory と Task の詳細ページには revision や checkpoint などの履歴も載る。
+
+GUI は読むだけで、採用・却下・編集・close などの操作は TUI と CLI で行う。GET と HEAD 以外の要求は 405 で拒否し、ページを作る DB の transaction は PostgreSQL 側で READ ONLY にする。localhost の HTTP から書き込めると、shell を持つ Agent が curl で User として承認できてしまうためだ。
+
 ### 恒久ルールを直接登録する
 
 User が CLI の `mashu remember` または dashboard の Memories から直接登録した内容は、review を待たずに active Memory になる。会話中に「覚えて」と明示された内容は、Agent が `memory_admit` に本文を渡して 1 回で登録できる。
@@ -235,6 +248,7 @@ TUI の操作は次のとおり。
 |---|---|
 | mashu status | schema、容量、pending 件数、最近の ledger、配信失敗の疑いとその経路別の内訳を表示 |
 | mashu bootstrap | 現在のディレクトリのセッションへ配信される内容と token 数を表示 |
+| mashu gui | Memory、Temporary Context、Task、review 待ちを読み取り専用のページとしてブラウザに表示 |
 | mashu show REF | Memory、candidate、Ledger、Memory change proposal の 1 件を根拠・履歴つきで表示 |
 | mashu memories | active Memory の一覧を表示 |
 | mashu memories --retired | 退役済み Memory と退役理由を表示 |

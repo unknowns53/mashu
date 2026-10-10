@@ -353,6 +353,7 @@ Memory 関連 Tool は `docs/mashu-v2.md` 8.1 節に記す。`session_bootstrap`
 
 ```text
 mashu                           人向け dashboard。Attention / Memories / Work / Settings を開く
+mashu gui                       Task を含む一覧の読み取り専用ブラウザ表示（v2 8.2 節）
 mashu project list / create / show <id>
 mashu task list [--dormant] [--closed]
 mashu task show <id>            state・履歴・artifacts を全文

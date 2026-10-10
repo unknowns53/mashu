@@ -1508,6 +1508,12 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gui(args: argparse.Namespace) -> int:
+    from mashu import gui
+
+    return gui.serve(args.dsn, port=args.port, open_browser=not args.no_open)
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     if args.dsn is not None:
         os.environ[db.DSN_ENV_VAR] = args.dsn
@@ -1528,6 +1534,7 @@ Mashu keeps durable rules, evidence of costly forgetting, and current project wo
 
 Start here:
   mashu                     Open the human dashboard.
+  mashu gui                 Browse every list read-only in a web browser.
   mashu status              Summarize the store and pending review work.
   mashu bootstrap           Show what a session in this directory receives.
   mashu memories            List active durable rules.
@@ -2174,6 +2181,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     task_reopen.add_argument("ref", help=_REF_HELP)
     task_reopen.set_defaults(func=cmd_task_reopen)
+
+    gui = _command(
+        sub,
+        "gui",
+        "browse Memories, tasks, and review queues read-only in a web browser",
+        description=(
+            "Serve read-only pages on 127.0.0.1 for surveying Memories, Temporary Context, "
+            "tasks, and pending review at once. Nothing can be changed from the browser; "
+            "decisions stay in the terminal UI."
+        ),
+        examples=("mashu gui", "mashu gui --port 8700 --no-open"),
+    )
+    gui.add_argument(
+        "--port",
+        type=int,
+        help="the local port to serve on; a fixed one by default, so the address can be bookmarked",
+    )
+    gui.add_argument("--no-open", action="store_true", help="do not open a browser window")
+    gui.set_defaults(func=cmd_gui)
 
     serve = _command(
         sub,

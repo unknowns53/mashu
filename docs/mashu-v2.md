@@ -279,6 +279,7 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 | コマンド | 内容 |
 |---|---|
 | `mashu` | 人向け dashboard。Attention / Memories / Work / Settings & health を開く |
+| `mashu gui` | 読み取り専用の一覧ページを 127.0.0.1 で配信する。書き込みの経路を持たない |
 | `mashu status` | 在庫と定員の使用量（always 層と、最も重い開き方の二つ）、pending 件数、台帳の直近、配信失敗の疑い件数とその経路別の内訳（push された規則、読まれなかった topic、読まれた topic、guard、不明） |
 | `mashu review` / `mashu review --changes` | nomination または Memory change proposal を読み、編集・適用・却下・取り下げ |
 | `mashu remember <body>` | User 明示。CLI で即時 active にする経路。invalidated / legacy conflict は理由を表示して個別 ID を確認する |
@@ -301,6 +302,8 @@ Review UI は nomination と Memory change proposal の一覧・個別画面を�
 まとめて承認するキーは無い。席は 1 件ずつ、その根拠を見て渡す。決めずに退ける保留（`s`、理由必須）だけは別で、status は pending のまま `deferred_at` と理由を持ち、既定の一覧から外れる。決定ではないので pending の件数も短縮 ID での直接操作も変わらず、`mashu review --all` で一覧に戻る。
 
 dashboard の Memories では active / retired Memory と未失効の Temporary Context を閲覧・検索する。Memory の詳細には evidence、revision history、退役種別、後継または移動先を含める。User は direct remember、Memory と Temporary Context の編集、Temporary Context の登録、kind を選んだ retire、delivery / topic の変更を 1 件ずつ実行できる。delivery を選ぶ画面は三つの経路をそれぞれ一行の説明つきで並べ、topic は番号つきの一覧から選ぶか、名前・Scope・発動条件を入力してその場で作る。提案 review は Attention と `mashu review --changes` から開ける。
+
+`mashu gui` は同じ在庫をブラウザで見渡す読み取り専用の経路である。Memory、Temporary Context、Task、pending の nomination と Memory change を本文を省略せずに一覧し、Memory と Task には履歴つきの詳細ページがある。書き込みの経路は持たず、GET と HEAD 以外の要求は 405 で拒否し、各ページの transaction は `SET TRANSACTION READ ONLY` で始める。localhost に書き込み口があれば、shell を持つ Agent が User として承認でき、Agent の提案と User の承認の区別（5 節）が崩れるからである。待ち受けは 127.0.0.1 に限り、Host header が loopback の名前でない要求も拒否する。
 
 id を取る引数は、表示される短縮 ID（先頭 8 文字）の前方一致で解決する。一覧が短縮 ID しか出さない以上、完全 UUID しか受け付けない引数は、人に画面外の値を打たせることになる。4 文字未満の前置きと、複数行に当たる前置きは、候補を挙げて拒否する。
 
