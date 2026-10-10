@@ -3,11 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import os
-import shlex
-import subprocess
-import tempfile
-from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -347,35 +342,6 @@ def _optional(prompt: str) -> str | None:
         return None
 
 
-def _editor_text(content: str, *, title: str = "Edit memory") -> str:
-    """Edit text only through an explicitly configured editor."""
-    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
-    if not editor:
-        replacement = screen.edit_text(title, content)
-        if isinstance(replacement, screen.Cancelled) or not replacement.text:
-            raise MashuError("revision cancelled")
-        return replacement.text
-    command = shlex.split(editor)
-    if not command:
-        raise MashuError("editor command is empty")
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8"
-    ) as handle:
-        path = Path(handle.name)
-        handle.write(content)
-    try:
-        try:
-            subprocess.run([*command, str(path)], check=True)
-        except (OSError, subprocess.CalledProcessError) as error:
-            raise MashuError("editor could not be run") from error
-        revised = path.read_text(encoding="utf-8").strip()
-        if not revised:
-            raise MashuError("revision cannot be empty")
-        return revised
-    finally:
-        path.unlink(missing_ok=True)
-
-
 def _scope_id(cur: Any, name: str | None) -> UUID | None:
     return scopes.require_scope(cur, name)["scope_id"] if name else None
 
@@ -510,14 +476,14 @@ def _delivery_answers(
 
 
 def _revise(dsn: str | None, row: dict[str, Any]) -> str:
-    content = _editor_text(row["content"])
+    content = screen.edit_long_text("Edit memory", row["content"])
     with db.transaction(dsn) as cur:
         memories.revise(cur, row["memory_id"], content=content, actor=ACTOR)
     return screen.success(f"  ✓ revised {_short(row['memory_id'])}")
 
 
 def _revise_temporary(dsn: str | None, row: dict[str, Any]) -> str:
-    content = _editor_text(row["content"], title="Edit temporary context")
+    content = screen.edit_long_text("Edit temporary context", row["content"])
     current_scope = row.get("scope_name")
     scope_prompt = (
         f"  scope name [enter={current_scope}; '-' means every scope]: "
