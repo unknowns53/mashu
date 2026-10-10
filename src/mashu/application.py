@@ -49,6 +49,33 @@ class StatusSnapshot:
     tasks_closed: int
 
 
+def memory_view(cur: psycopg.Cursor, view: str) -> list[dict[str, Any]]:
+    """Read one complete view, including the scope names people recognize."""
+    if view == "temporary":
+        cur.execute(
+            """
+            SELECT t.*, s.name AS scope_name
+            FROM temporary_context t LEFT JOIN scope s ON s.scope_id = t.scope_id
+            WHERE t.expires_at > now()
+            ORDER BY t.expires_at, t.context_id
+            """
+        )
+    else:
+        cur.execute(
+            """
+            SELECT m.*, s.name AS scope_name,
+                   t.name AS topic_name, t.trigger AS topic_trigger
+            FROM memory m
+            LEFT JOIN scope s ON s.scope_id = m.scope_id
+            LEFT JOIN topic t ON t.topic_id = m.topic_id
+            WHERE m.status = %s
+            ORDER BY m.delivery, s.name NULLS FIRST, t.name, m.created_at, m.memory_id
+            """,
+            (view,),
+        )
+    return cur.fetchall()
+
+
 def routed_scope(cur: psycopg.Cursor, cwd: str | None) -> tuple[UUID | None, str | None, bool]:
     """Resolve a directory route to the scope identity and name shown to a person."""
     scope_id, routed = routing.resolve(cur, cwd)
