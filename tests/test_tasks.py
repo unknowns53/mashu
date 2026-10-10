@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from conftest import expire, new_project, new_task, update_task
-from mashu import db, scopes, tasks
+from mashu import db, scopes, server, tasks
 from mashu.errors import (
     ClosedTaskError,
     DuplicateTaskError,
@@ -465,3 +467,58 @@ def test_mcp_refuses_a_task_write_carrying_tool_call_markup(mcp, dsn, monkeypatc
         assert refused["ok"] is False and "tool-call markup" in refused["error"]
     with db.transaction(dsn) as cur:
         assert tasks.task_get(cur, task_id)["state"]["approach"] is None
+
+
+@pytest.mark.parametrize(
+    ("tool", "earlier", "minutes_ago", "noted"),
+    [
+        ("task_update", "same session", 0, True),
+        ("task_checkpoint", "same session", 20, True),
+        ("task_checkpoint", "other session", 0, False),
+        ("task_update", "same session", 31, False),
+        ("task_update", "work pain", 0, False),
+        ("task_checkpoint", None, 0, False),
+    ],
+)
+def test_a_session_writing_state_again_within_the_spacing_is_told_when_to_write(
+    mcp, dsn, tool, earlier, minutes_ago, noted
+):
+    with db.transaction(dsn) as cur:
+        new_project(cur, "mashu")
+    made = mcp("task_create", project="mashu", name=SCHEMA, goal=GOAL)
+    task_id = made["task"]["task_id"]
+    other = server.build_server()
+    writers = {
+        "same session": mcp,
+        "other session": lambda tool, **arguments: (
+            asyncio.run(other.call_tool(tool, arguments)).structured_content
+        ),
+    }
+    wrote = {"ok": True}
+    if earlier == "work pain":
+        wrote = mcp(
+            "pain_report",
+            kind="incident",
+            what="broke",
+            prevention=OTHER_WORK,
+            prevention_kind="work",
+            task_id=task_id,
+        )
+    elif earlier:
+        at = made["state"]["updated_at"]
+        wrote = writers[earlier]("task_update", task_id=task_id, expect_updated_at=at, approach="a")
+    assert wrote["ok"] is True
+    with db.transaction(dsn) as cur:
+        cur.execute("ALTER TABLE event_log DISABLE TRIGGER event_log_append_only")
+        cur.execute(
+            "UPDATE event_log SET created_at = created_at - make_interval(mins => %s)",
+            (minutes_ago,),
+        )
+        cur.execute("ALTER TABLE event_log ENABLE TRIGGER event_log_append_only")
+        at = tasks.task_get(cur, task_id)["state"]["updated_at"].isoformat()
+
+    history = {"what_changed": "wrote it"} if tool == "task_checkpoint" else {}
+    answer = mcp(tool, task_id=task_id, expect_updated_at=at, status_text="written", **history)
+    assert answer["ok"] is True and answer["state"]["status_text"] == "written"
+    expected = {"minutes_since_last": minutes_ago, "note": tasks.STATE_WRITE_NOTE}
+    assert answer.get("cadence") == (expected if noted else None)

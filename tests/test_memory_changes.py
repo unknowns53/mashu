@@ -210,8 +210,8 @@ def test_restore_refuses_a_duplicate_active_memory(cur):
 
 
 def test_replace_seats_against_the_final_active_set_and_refusal_rolls_back(cur, monkeypatch):
-    old_content = "oldrule " + "amber brass cedar cobalt copper " * 18
-    new_content = "newrule " + "apricot birch daisy emerald fig " * 9
+    old_content = "oldrule " + "amber brass cedar cobalt copper " * 3
+    new_content = "newrule apricot birch"
     old_cost = pushed_cost([old_content])
     assert pushed_cost([new_content]) < old_cost
     monkeypatch.setenv("MASHU_CAPACITY", str(old_cost))
@@ -223,7 +223,7 @@ def test_replace_seats_against_the_final_active_set_and_refusal_rolls_back(cur, 
     assert result["retired"]["status"] == "retired"
 
     second_old = remember(cur, "older rule for a separate export format")
-    too_large = "too_large " + "violet walnut xylophone zephyr quartz " * 18
+    too_large = "too_large " + "violet walnut xylophone zephyr quartz " * 2
     second_successor = _successor(cur, too_large, "incident")
     second_proposal = _replace(cur, second_old, second_successor)
     monkeypatch.setenv("MASHU_CAPACITY", str(pushed_cost([too_large]) - 1))

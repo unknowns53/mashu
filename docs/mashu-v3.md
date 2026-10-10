@@ -186,15 +186,17 @@ kind は `git_commit` / `git_branch` / `file` / `document` / `obsidian` / `issue
 
 ### 5.6 Checkpoint
 
-まとまった作業の区切りで Agent が打つ。`task_checkpoint` は **Current State の置換と、履歴行の凍結を一度に行う**。すなわち checkpoint は task_update の上位互換であり、Agent が覚える動詞を増やさない。
+Agent が次のセッションへ作業を引き継ぐために打つ。打つのは、作業を止めるとき、中断するとき、compaction の前、approach や next actions が変わったとき、失敗した試行や判断を残すときである。commit ごとには打たない。進捗は git log が持っている。`task_checkpoint` は **Current State の置換と、履歴行の凍結を一度に行う**。すなわち checkpoint は task_update の上位互換であり、Agent が覚える動詞を増やさない。
 
-区切りまでに生じた Attempt・Decision・Artifact Reference も同じ呼び出しの `attempts` / `decisions` / `artifacts` で渡す。state の置換、それらの追記、checkpoint の凍結は一つの transaction で行い、文字上限・入口拒否・kind・supersedes の検査は書き込みの前にすべての行へかけ、形の誤りと上限の超過は行と欄をまたいで一度の拒否にまとめて返す。一行でも拒否されれば何も書かない。記録の粒度を checkpoint に揃えることで、履歴を書くための動詞を別に覚えさせずに済む。
+前の checkpoint から生じた Attempt・Decision・Artifact Reference も同じ呼び出しの `attempts` / `decisions` / `artifacts` で渡す。state の置換、それらの追記、checkpoint の凍結は一つの transaction で行い、文字上限・入口拒否・kind・supersedes の検査は書き込みの前にすべての行へかけ、形の誤りと上限の超過は行と欄をまたいで一度の拒否にまとめて返す。一行でも拒否されれば何も書かない。記録の粒度を checkpoint に揃えることで、履歴を書くための動詞を別に覚えさせずに済む。
 
 ```text
 what_changed / 凍結時点の Current State / evidence (artifact 参照。同じ呼び出しで作った参照を含む) / created_at / created_by
 ```
 
 Checkpoint は append-only の履歴であり、bootstrap には載らない。そして **Checkpoint は Task の終了ではない**。
+
+**書きすぎは書いたその場で知らせる。**「作業の区切りで打つ」という指示は commit の区切りと読まれ、Agent は commit のたびに checkpoint を打った。what_changed は commit log の言い直しになり、checkpoint の 45% は同じ Task の前回から 30 分以内に打たれていた。そこで MCP の `task_update` と `task_checkpoint` は、同じセッションが同じ Task の state を 30 分以内に書いていれば、成功応答に `cadence` を添える。`cadence` は前回からの分数と、state は次のセッションへの引き継ぎであり commit ごとの進捗は git log にある、という注意を持つ。セッションは MCP server のプロセスごとの id で見分け、`task_state_replaced` と `task_checkpointed` の event に残す。書き込みは拒否しない。compaction の直前に書こうとした state を拒否すれば、文脈とともに失われるからである。セッションを持たない CLI の書き込みには添えず、痛みの記録による `append_next_action` は state の書き込みとして数えない。
 
 ### 5.7 要約を永続化しない
 
@@ -285,7 +287,7 @@ Agent の書き分けは次の四行に収まるように設計する。これ�
 調べて分かった            → trace_put
 痛かった                  → pain_report
 User が覚えてと言った     → memory_admit
-作業の区切り              → task_checkpoint
+次のセッションへ引き継ぐ  → task_checkpoint
 ```
 
 task_checkpoint の `attempts` と `decisions` は「失敗した試行の結末」「後から理由を失うと高くつく判断」に限って埋める欄であり、毎回の checkpoint で書くものではない。独立した動詞にはしないので、上の四行は増えない。

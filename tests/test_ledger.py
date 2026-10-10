@@ -6,7 +6,7 @@ import pytest
 
 from conftest import new_project, new_task, remember, retire, update_task
 from mashu import application, ledger, memories, nominations, tasks, topics
-from mashu.errors import MashuError, RefusedError
+from mashu.errors import MalformedRequestError, MashuError, RefusedError
 
 # Trigram fixtures use near-identical and unrelated text.
 HOLE = "always run the migration before starting the local server"
@@ -185,6 +185,18 @@ def test_work_never_asks_for_a_seat_and_lands_on_the_task_that_will_make_it(cur,
     next_actions = tasks.task_get(cur, task_id)["state"]["next_actions"]
     assert next_actions == ["apply the migrations", FIX]
     assert ledger.ledger_entries(cur)[0]["filed_task"] == task_id
+
+
+def test_a_rule_prevention_over_the_body_ceiling_is_refused_and_work_is_not(cur, task_id):
+    long_fix = FIX + ", each with the date it was written and the session that wrote it"
+    assert len(long_fix) > memories.CONTENT_LIMIT
+
+    with pytest.raises(MalformedRequestError, match="prevention is .* put .* in what"):
+        report(cur, "incident", long_fix)
+    assert count(cur, "ledger") == 0
+
+    got = report(cur, "incident", long_fix, prevention_kind="work", task_id=task_id)
+    assert got["filed_task"] == task_id
 
 
 @pytest.mark.parametrize(

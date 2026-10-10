@@ -87,18 +87,21 @@ def test_search_is_case_insensitive_zero_results_can_be_researched_and_left_clea
     assert out.count("active memories  2") >= 2
 
 
-def test_new_durable_memory_can_choose_a_scope_delivery(dsn, monkeypatch):
-    keys(monkeypatch, "n", RULE, "scope", "deployments", "q")
+def test_new_durable_memory_can_choose_a_scope_delivery_and_keep_its_reason(dsn, monkeypatch):
+    why = "a deploy once started against an unmigrated schema"
+    keys(monkeypatch, "n", RULE, why, "scope", "deployments", "q")
 
     assert memory_ui.run(dsn) == 0
     with db.transaction(dsn) as cur:
         cur.execute("SELECT * FROM memory")
         row = cur.fetchone()
         scope = scopes.require_scope(cur, "deployments")
+        basis = memories.memory_details(cur, row["memory_id"])["basis"]
     assert row["content"] == RULE
     assert row["delivery"] == "scope"
     assert row["scope_id"] == scope["scope_id"]
     assert row["created_by"] == "user"
+    assert [entry["what"] for entry in basis] == [why]
 
 
 def test_retirement_selects_a_kind_and_applies_after_entering_its_reason(dsn, monkeypatch):
@@ -202,7 +205,7 @@ def test_retired_conflict_shows_the_reason_and_overrides_only_after_explicit_yes
     memory = remember(dsn)
     with db.transaction(dsn) as cur:
         retire(cur, memory, "the service now enforces this")
-    keys(monkeypatch, "n", RULE, "", answer, "q")
+    keys(monkeypatch, "n", RULE, "", "", answer, "q")
 
     assert memory_ui.run(dsn) == 0
     assert "the service now enforces this" in capsys.readouterr().out
@@ -212,7 +215,18 @@ def test_retired_conflict_shows_the_reason_and_overrides_only_after_explicit_yes
 
 
 def test_a_new_rule_can_open_a_new_topic_without_typing_an_id(dsn, monkeypatch):
-    keys(monkeypatch, "n", RULE, "topic", "n", "run reports", "deployments", "Before a report", "q")
+    keys(
+        monkeypatch,
+        "n",
+        RULE,
+        "",
+        "topic",
+        "n",
+        "run reports",
+        "deployments",
+        "Before a report",
+        "q",
+    )
 
     assert memory_ui.run(dsn) == 0
     with db.transaction(dsn) as cur:

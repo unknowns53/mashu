@@ -95,7 +95,7 @@ v1 の投機的捕捉との関係。セッションから安く残すという�
 
 | フィールド | 内容 |
 |---|---|
-| content | push される全文。短い規則文の形で書く |
+| content | push される全文。規則だけを一文で書き、新しく書く本文は 1 件 120 字まで |
 | scope_id | 所属 Scope。無指定は全域を意味する（delivery = `always` の規則と、Scope を持たない topic の規則がこれに当たる） |
 | delivery | `always` / `scope` / `topic:<name>` |
 | evidence | 根拠となる台帳エントリへの参照（1 件以上、必須）。参照先が実在する台帳エントリであることは DB のトリガが検証する。台帳は append-only なので、書き込み時に実在した参照は失われない |
@@ -107,6 +107,7 @@ v1 の投機的捕捉との関係。セッションから安く残すという�
 - v1 の汎用 Entity / Version / Proposal の三層は持たない。本文の revision 表と、既存 Memory の retire / replace / restore / redeliver だけを扱う `memory_change` を使う
 - **evidence の無い active な記憶は存在できない**（User 明示の場合は明示の記録そのものが evidence になる）
 - content の改訂は User のみが行い、revision に旧本文が残る
+- **content には 1 件ごとに 120 字（`char_length`）の上限を置く。**規則の理由・測定値・日付・経緯は `why`（500 字まで）に書き、evidence の台帳行の `what` として残す。`why` を渡さなければ `what` は定型文になる。台帳行は `memory_get` で読めるが push されない。定員（5.2 節）が縛るのは在庫の総量で、1 件の長さではない。運用では本文の月平均が 53 字から 181 字、200 字へ伸び、規則に理由や測定値が混ざって、規則そのものが読み取りにくくなった。上限を掛けるのは呼び出し側が新しく書く本文だけで、`mashu remember` / TUI の登録、`memory_admit` と `memory_nominate` の本文、候補と Memory の本文の編集、採用時の書き換え、`pain_report` の `rule` の `prevention`（候補の本文になる）が当たる。Temporary Context からの変換も、新しい Memory の本文を作るので当たる。書き換えずに引き継ぐ本文、つまり本文を変えない候補の採用、復帰、配信の変更、退役には掛けない。上限より前に書かれた本文を、ほかの操作のたびに書き直させないためである。超えた書き込みは欄・上限・実際の長さを添えて拒否し、残りの置き場所（MCP では `why`、CLI では `--why`、`pain_report` では `what`）を文面で示す
 - 個人識別情報（本名、所属、学籍番号、ホームディレクトリを含む絶対パス）を含む書き込みは入口で拒否する。パターン一覧はリポジトリ外の既存ファイル（commit hook と共用）を読む。一覧が見つからない、または読めないときは「合格」ではなく「検査できなかった」と報告して書き込みを通す
 - 拒否には、当たった引数の名前（リストの項目なら `artifacts[0].locator` のように位置まで）と、その本文の中の文字位置とパターンの番号を添える。どこを直せばよいかが分からない拒否は、Agent に関係のない欄を書き直させるだけだからである。当たった文字列とパターンそのものは拒否理由にもログにも載せない。一覧は非公開で、拒否は記録に残るからである
 
@@ -116,7 +117,7 @@ v1 の投機的捕捉との関係。セッションから安く残すという�
 
 1. 台帳の二度目照合（自動生成）
 2. `pain_report` の incident（自動生成）
-3. Agent が会話中の User の記録指示を運ぶ場合（`memory_admit` に本文を渡す。指示は kind = `claimed` の台帳エントリとして残り、それが evidence になる。候補の作成と採用は同じ transaction で行い、1 回の呼び出しで完了する。実行者は Agent のまま記録し、承認根拠に短い原文と取得可能な会話参照を別に記録する）
+3. Agent が会話中の User の記録指示を運ぶ場合（`memory_admit` に本文を渡す。指示は kind = `claimed` の台帳エントリとして残り、それが evidence になる。`why` を添えると、その台帳エントリの `what` に理由が残る。候補の作成と採用は同じ transaction で行い、1 回の呼び出しで完了する。実行者は Agent のまま記録し、承認根拠に短い原文と取得可能な会話参照を別に記録する）
 
 incident / friction から自動生成した候補と、Agent 自身の追加・変更案は pending のまま残る。**明示指示を受けて Agent が実行する新規採用や変更には、別画面での再承認を要求しない。** 出所には `user_instruction` と指示の短い原文、会話参照を記録し、actor は Agent として残す。これは認証ではなく監査用の出所記録であり、サーバーは会話中に本当にその指示があったか検証できない。Agent 自身の有用性判断、confidence、反対が無かったことは承認ではない。MCP instructions と運用上の信頼でこの境界を守る。
 
@@ -258,13 +259,13 @@ Memories TUI の `c` は、active な always / scope Memory と Temporary Contex
 | Tool | 役割 |
 |---|---|
 | `session_bootstrap` | 6.1 節の内容を返す。セッション開始時に一度 |
-| `pain_report` | 痛みを台帳へ記録し、類似の台帳エントリ・痕跡・tombstone・active な記憶を返す。二度目・incident なら候補を生成 |
+| `pain_report` | 痛みを台帳へ記録し、類似の台帳エントリ・痕跡・tombstone・active な記憶を返す。二度目・incident なら候補を生成。`rule` の `prevention` は候補の本文になるので 120 字までとし、理由や経緯は `what` に書く |
 | `trace_put` | 調べて分かったことを一行残す（4.2 節） |
 | `trace_search` | 痕跡の検索。日付と未検証の印を付けて返す |
 | `memory_list` | 指定 Scope の active な記憶を列挙する。`topic` を渡すと、その topic の発動条件と規則の本文を返し、読んだことをセッション単位で event_log に残す |
 | `memory_get` | 指定した Memory の本文、revision、evidence、退役情報を返す。退役本文は明示取得でのみ読む |
-| `memory_nominate` | 新規 Memory の pending 候補を作るだけで採用しない。replace の後継候補に使う |
-| `memory_admit` | 承認根拠を必須にして採用する。本文を渡すと候補の作成と採用を 1 回で行い、合流した既存候補や未対応の invalidated / legacy conflict があれば採用せず候補を返す。候補 ID で採用するときは読み取った nomination version を必須にする。まだ無い topic は発動条件つきで指定すると記憶とともに作る。実行者 Agent と `user_instruction` の出所を別に保存し、request replay には初回応答を返す |
+| `memory_nominate` | 新規 Memory の pending 候補を作るだけで採用しない。replace の後継候補に使う。本文は 120 字までで、理由は `why` に渡す |
+| `memory_admit` | 承認根拠を必須にして採用する。本文を渡すと候補の作成と採用を 1 回で行い（本文は 120 字まで、理由は `why`）、合流した既存候補や未対応の invalidated / legacy conflict があれば採用せず候補を返す。候補 ID で採用するときは読み取った nomination version を必須にする。まだ無い topic は発動条件つきで指定すると記憶とともに作る。実行者 Agent と `user_instruction` の出所を別に保存し、request replay には初回応答を返す |
 | `memory_change_propose` | retire / replace / restore / redeliver 案を作成・更新する。redeliver は本文を変えずに配信条件だけを変え、まだ無い topic を名前と発動条件つきで指定すると適用時にその topic を作る。replace は後継 nomination version と配信条件を固定する |
 | `memory_change_apply` | proposal version、対象 revision、conflict、承認根拠、request ID を照合して一度だけ適用する |
 | `memory_redeliver` | User が指示した配信条件の変更を、redeliver 案の作成と適用まで一つの transaction で行う。指示の引用と会話参照を evidence にし、request replay には初回応答を返す |
@@ -282,7 +283,7 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 | `mashu gui` | 読み取り専用の一覧ページを 127.0.0.1 で配信する。書き込みの経路を持たない |
 | `mashu status` | 在庫と定員の使用量（always 層と、最も重い開き方の二つ）、pending 件数、台帳の直近、配信失敗の疑い件数とその経路別の内訳（push された規則、読まれなかった topic、読まれた topic、guard、不明） |
 | `mashu review` / `mashu review --changes` | nomination または Memory change proposal を読み、編集・適用・却下・取り下げ |
-| `mashu remember <body>` | User 明示。CLI で即時 active にする経路。invalidated / legacy conflict は理由を表示して個別 ID を確認する |
+| `mashu remember <body>` | User 明示。CLI で即時 active にする経路。本文は 120 字までで、理由は `--why` で evidence に残す。invalidated / legacy conflict は理由を表示して個別 ID を確認する |
 | `mashu retire <id> --kind K --reason <r>` | 退役。kind と理由が必須。`legacy` は既存データと移行用 |
 | `mashu revise <id>` | 本文の改訂（User のみ） |
 | `mashu show <id>` | 記憶・候補・台帳・Memory change proposal を 1 件、根拠と履歴つきで表示 |
@@ -355,7 +356,7 @@ User が配信条件の変更だけを明示に指示したときは、`memory_r
 | 点検期日 / stale 掃き出し / 類似対の検出 | 定員内の在庫は人が目視できる |
 | Entity / Version / Proposal の三層スキーマ | memory + revision + nomination に縮退 |
 | Scratch（セッション限りの作業状態） | 痕跡（4.2 節）が後継。知識候補の入力から、実証の検出器の部品へ身分が変わる |
-| directive / delivery の admission control | content 自体を短く書く。定員（5.2 節）が代替 |
+| directive / delivery の admission control | 定員（5.2 節）が代替する。ただし 1 件の長さは定員では縛れず、本文に理由や測定値が混ざって伸びたので、本文には 1 件 120 字の上限を置き、理由は evidence の `what` へ分けた（5 節） |
 | Current State（type = state） | 作業状態は Mashu の対象外。プロジェクト側の文書が持つ（v3 で身分を分けたうえで Project State として戻した。理由は `docs/mashu-v3.md` 1 節） |
 | type 体系（8 種） | 実証で入るものに分類は要らない。必要になったら足す |
 

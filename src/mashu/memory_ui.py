@@ -546,6 +546,9 @@ def _remember(dsn: str | None) -> tuple[str, UUID | None]:
     content = _required("  memory [empty cancels]: ")
     if content is None:
         return screen.warning("  ! nothing remembered"), None
+    why = _optional("  why [optional: reason, measurements, dates, history]: ")
+    # Refused before the delivery questions, so an over-long body costs no further answers.
+    memories.check_body(content, why=why)
     answers = _delivery_answers(dsn=dsn)
     if answers is None:
         return screen.warning("  ! nothing remembered"), None
@@ -562,6 +565,7 @@ def _remember(dsn: str | None) -> tuple[str, UUID | None]:
                     delivery=delivery,
                     topic_id=topic_id_for(cur, topic),
                     acknowledged_conflicts=acknowledged,
+                    why=why,
                 )
             message = screen.success(f"  ✓ remembered {_short(row['memory_id'])}")
             for warning in row.get("retirement_warnings", []):

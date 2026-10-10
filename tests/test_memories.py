@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 from uuid import uuid4
 
 import pytest
 
 from conftest import remember, retire
-from mashu import match, memories, temporary, topics
-from mashu.errors import MashuError, RefusedError, RetiredConflictError
+from mashu import cli, db, match, memories, nominations, server, temporary, topics
+from mashu.errors import MalformedRequestError, MashuError, RefusedError, RetiredConflictError
 
 RULE = "never report a run as finished without the output that proves it"
 REVISED = "never report a run as finished without pasting the output that proves it"
 WITHDRAWN = "the tool now refuses on its own"
 PINNED = "delegation goes to the reviewer, not to another writer"
+#: A rule wrapped in the story of how it was learned, past the per-entry ceiling.
+STORIED = ("keep the rule alone and leave its story out " * 3).strip()
 
 
 def test_a_rule_recorded_by_hand_is_active_at_once_and_its_revisions_keep_what_it_said(cur):
@@ -230,3 +233,203 @@ def test_a_refused_conversion_keeps_its_source_active(cur, monkeypatch):
     with pytest.raises(RefusedError, match="seats 1 tokens"):
         temporary.convert_to_memory(cur, context["context_id"], actor="user")
     assert [row["context_id"] for row in temporary.active_temporary(cur)] == [context["context_id"]]
+
+
+def test_a_new_body_over_its_ceiling_is_refused_on_every_write_path(dsn, mcp, capsys):
+    with db.transaction(dsn) as cur:
+        memory = remember(cur, RULE)
+        nomination = nominations.nominate_user_explicit(cur, content=PINNED, actor="agent")[
+            "nomination"
+        ]
+
+    def direct(write):
+        def refused():
+            with pytest.raises(MalformedRequestError) as caught, db.transaction(dsn) as cur:
+                write(cur)
+            return str(caught.value), caught.value.over_limit
+
+        return refused
+
+    def over_mcp(tool, **arguments):
+        def refused():
+            answer = mcp(tool, **arguments)
+            assert answer["ok"] is False
+            return answer["error"], answer["over_limit"]
+
+        return refused
+
+    def over_cli(*argv):
+        def refused():
+            assert cli.main(["--dsn", dsn, *argv]) == 1
+            return capsys.readouterr().err, None
+
+        return refused
+
+    def instructed(**arguments):
+        return over_mcp(
+            "memory_admit",
+            request_id=str(uuid4()),
+            approval_kind="user_instruction",
+            instruction="Remember this rule",
+            **arguments,
+        )
+
+    body, why = memories.CONTENT_LIMIT, memories.WHY_LIMIT
+    cases = [
+        ("memory_admit", instructed(content=STORIED), "content", body, "in why"),
+        ("memory_admit why", instructed(content=REVISED, why="w" * 501), "why", why, "reference"),
+        (
+            "memory_nominate",
+            over_mcp("memory_nominate", content=STORIED),
+            "content",
+            body,
+            "in why",
+        ),
+        ("mashu remember", over_cli("remember", STORIED), "content", body, "in --why"),
+        (
+            "remember, as the TUI and a temporary conversion call it",
+            direct(lambda cur: memories.remember(cur, content=STORIED, actor="user")),
+            "content",
+            body,
+            "in why",
+        ),
+        (
+            "memory revise",
+            direct(
+                lambda cur: memories.revise(cur, memory["memory_id"], content=STORIED, actor="user")
+            ),
+            "content",
+            body,
+            "out of it",
+        ),
+        (
+            "candidate revise",
+            direct(
+                lambda cur: nominations.revise(
+                    cur, nomination["nomination_id"], content=STORIED, actor="user"
+                )
+            ),
+            "content",
+            body,
+            "out of it",
+        ),
+        (
+            "admission with new wording",
+            direct(
+                lambda cur: nominations.admit(
+                    cur,
+                    nomination["nomination_id"],
+                    actor="user",
+                    delivery="always",
+                    expected_version=nomination["version"],
+                    content=STORIED,
+                    approval={"kind": "user_direct", "conflict_ids": []},
+                    request_id=uuid4(),
+                )
+            ),
+            "content",
+            body,
+            "out of it",
+        ),
+    ]
+    for path, refused, field, limit, where in cases:
+        text, over = refused()
+        actual = 501 if field == "why" else len(STORIED)
+        assert f"{field} is {actual} chars and the limit is {limit}" in text, path
+        assert where in text, path
+        if over is not None:
+            assert over == [{"field": field, "limit": limit, "actual": actual, "unit": "chars"}]
+
+    with db.transaction(dsn) as cur:
+        cur.execute("SELECT content FROM memory UNION ALL SELECT content FROM nomination")
+        assert sorted(row["content"] for row in cur.fetchall()) == sorted([RULE, PINNED])
+
+
+def test_a_long_body_carried_over_unchanged_still_passes(cur, scope_id, monkeypatch):
+    def written_before_the_ceiling(write):
+        with monkeypatch.context() as before:
+            before.setattr(memories, "CONTENT_LIMIT", 10_000)
+            return write()
+
+    def admitted_unread(body):
+        nomination = written_before_the_ceiling(
+            lambda: nominations.nominate_user_explicit(cur, content=body, actor="agent")
+        )["nomination"]
+        return nominations.admit(
+            cur,
+            nomination["nomination_id"],
+            actor="user",
+            delivery="always",
+            expected_version=nomination["version"],
+            approval={"kind": "user_direct", "conflict_ids": []},
+            request_id=uuid4(),
+        )
+
+    def revised_unchanged(body):
+        memory = written_before_the_ceiling(lambda: remember(cur, body))
+        return memories.revise(cur, memory["memory_id"], content=body, actor="user")
+
+    def restored(body):
+        memory = written_before_the_ceiling(lambda: remember(cur, body))
+        retire(cur, memory, "the project paused", kind="out_of_scope")
+        return memories.restore(
+            cur,
+            memory["memory_id"],
+            reason="the project resumed",
+            actor="user",
+            approval_source={"kind": "user_direct"},
+        )
+
+    def redelivered(body):
+        memory = written_before_the_ceiling(lambda: remember(cur, body))
+        return memories.set_delivery(
+            cur, memory["memory_id"], delivery="scope", scope_id=scope_id, actor="user"
+        )
+
+    cases = [
+        ("amber", admitted_unread),
+        ("cobalt", revised_unchanged),
+        ("violet", restored),
+        ("walnut", redelivered),
+    ]
+    for word, carry in cases:
+        body = f"{word} " * 30
+        assert len(body) > memories.CONTENT_LIMIT
+        row = carry(body)
+        assert (row["content"], row["status"]) == (body, "active"), carry.__name__
+
+
+def test_why_is_kept_on_the_evidence_that_memory_get_returns(mcp):
+    why = "a body averaging 200 chars hid the rule under the measurement that taught it"
+    answer = mcp(
+        "memory_admit",
+        request_id=str(uuid4()),
+        approval_kind="user_instruction",
+        instruction="Remember this rule",
+        content=RULE,
+        why=why,
+    )
+    assert answer["ok"] is True
+
+    got = mcp("memory_get", memory_id=answer["memory"]["memory_id"])["memory"]
+    assert got["content"] == RULE
+    assert [row["what"] for row in got["basis"]] == [why]
+
+
+def test_a_banned_pattern_in_why_is_refused_under_its_own_name(mcp):
+    answer = mcp("memory_nominate", content=RULE, why="first seen at SECRETMARKER7")
+    assert answer["ok"] is False
+    assert answer["field"] == "why"
+
+
+def test_the_tools_that_take_a_body_publish_its_ceiling(monkeypatch):
+    pytest.importorskip("mcp.server")
+    monkeypatch.setenv("MASHU_DATABASE_URL", "dbname=mashu_test_never_created")
+    tools = {tool.name: tool for tool in asyncio.run(server.build_server().list_tools())}
+    for name, rest in (
+        ("memory_admit", "`why`"),
+        ("memory_nominate", "`why`"),
+        ("pain_report", "`what`"),
+    ):
+        assert f"{memories.CONTENT_LIMIT} chars" in tools[name].description, name
+        assert rest in tools[name].description, name

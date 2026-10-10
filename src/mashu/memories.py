@@ -8,11 +8,53 @@ from uuid import UUID
 import psycopg
 
 from mashu import capacity, config, events, match, nominations, redact, topics
-from mashu.errors import MashuError, RefusedError, RetiredConflictError
+from mashu.errors import (
+    MalformedRequestError,
+    MashuError,
+    OverLimit,
+    RefusedError,
+    RetiredConflictError,
+)
 
 DELIVERIES = ("always", "scope", "topic")
 
 _EXPLICIT_WHAT = "recorded by the user's own hand"
+
+#: The longest body a caller may write, in characters. Every matching session is handed the
+#: body whole, and capacity bounds what the bodies cost together, not what one of them costs.
+CONTENT_LIMIT = 120
+
+#: The longest reason one write leaves on its evidence row, which is read but never pushed.
+WHY_LIMIT = 500
+
+
+def check_body(
+    content: str,
+    *,
+    why: str | None = None,
+    field: str = "content",
+    rest: str | None = "why",
+) -> None:
+    """Refuse a new body over its ceiling, naming `rest` as where its reason goes.
+
+    Only text a caller writes is held to it. A body carried over unchanged was admitted under
+    the ceiling of its day.
+    """
+    problems = []
+    if len(content) > CONTENT_LIMIT:
+        where = (
+            f"put its reason, measurements, dates, and history in {rest}"
+            if rest
+            else "leave its reason, measurements, dates, and history out of it"
+        )
+        advice = (
+            f"a Memory body is pushed to every matching session, so keep the rule alone and {where}"
+        )
+        problems.append(OverLimit(field, CONTENT_LIMIT, len(content), advice=advice))
+    if why is not None and len(why) > WHY_LIMIT:
+        problems.append(OverLimit("why", WHY_LIMIT, len(why)))
+    if problems:
+        raise MalformedRequestError(problems)
 
 
 def check_delivery(
@@ -47,13 +89,19 @@ def remember(
     delivery: str = "always",
     topic_id: UUID | None = None,
     acknowledged_conflicts: list[UUID] | None = None,
+    why: str | None = None,
 ) -> dict[str, Any]:
-    """Write a rule straight into the active set, with the writing as its evidence."""
+    """Write a rule straight into the active set, with the writing as its evidence.
+
+    `why` becomes the evidence row's account, where the reason is kept without being pushed.
+    """
+    why = (why or "").strip() or None
+    check_body(content, why=why)
     check_delivery(delivery, scope_id, topic_id)
     if delivery == "topic":
         scope_id = topic_home(cur, delivery, topic_id)
 
-    verdict = redact.gate({"content": content})
+    verdict = redact.gate({"content": content, "why": why})
 
     cur.execute(
         "SELECT pg_advisory_xact_lock(%s, %s)",
@@ -94,7 +142,7 @@ def remember(
         VALUES ('explicit', %s, %s, %s, %s)
         RETURNING ledger_id
         """,
-        (_EXPLICIT_WHAT, content, scope_id, actor),
+        (why or _EXPLICIT_WHAT, content, scope_id, actor),
     )
     ledger_id = cur.fetchone()["ledger_id"]
     events.record(cur, "pain_recorded", actor, ledger_id=ledger_id, detail={"kind": "explicit"})
@@ -363,6 +411,8 @@ def revise(
 ) -> dict[str, Any]:
     """Rewrite the body, keeping the old one in the revision history."""
     current = _require_active(cur, memory_id)
+    if content != current["content"]:
+        check_body(content, rest=None)
     redact.gate({"content": content})
     admission = capacity.check_admission(
         cur,

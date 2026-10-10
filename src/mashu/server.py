@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Annotated, Any, NotRequired
 from uuid import UUID, uuid4
 
@@ -52,8 +52,10 @@ INSTRUCTIONS = (
     "When the work at hand matches a bootstrap topic's trigger, call memory_list with that "
     "topic before starting it. "
     "Before continuing a task from a bootstrap card, call task_get with its full id and "
-    "verify old state against the repository and artifacts. Use task_checkpoint at work "
-    "breaks; put failed tries in its attempts, costly-to-rederive reasons in decisions, "
+    "verify old state against the repository and artifacts. Use task_checkpoint to hand "
+    "off to the next session: before stopping, pausing, or compaction, and when the "
+    "approach or next actions change, not after each commit, since git log carries "
+    "progress. Put failed tries in its attempts, costly-to-rederive reasons in decisions, "
     "and external sources in artifacts. Task completion remains the user's decision. "
     "If work looks done, use task_propose_close with outcome and reason; it changes no "
     "task state. "
@@ -144,6 +146,34 @@ def _history_contract() -> str:
         keys = [key for key in (*required, *optional) if key in limits]
         parts.append(f"{name} {{{', '.join(f'{key} {limits[key]}' for key in keys)}}}")
     return f"History char limits: {'; '.join(parts)}."
+
+
+def _body_contract() -> str:
+    """The ceilings on a new Memory body and its reason, from the code that enforces them."""
+    return (
+        f"`content` is pushed to every matching session, so it is held to "
+        f"{memories.CONTENT_LIMIT} chars and states the rule alone. Put the reason, "
+        f"measurements, dates, and history in `why` (at most {memories.WHY_LIMIT} chars): it "
+        "is kept on the evidence ledger row that memory_get returns and is never pushed. An "
+        "over-limit field is refused with `problems` and `over_limit`."
+    )
+
+
+#: When a task state write is due, said the same way by both tools that write one.
+_WRITE_TRIGGER = (
+    "Write state to hand off to the next session: before stopping, pausing, or compaction "
+    "and when the approach or next actions change, not after each commit, since git log "
+    "carries progress."
+)
+
+
+def _write_success() -> str:
+    """How a successful state write answers, including the note on writing too soon."""
+    minutes = tasks.STATE_WRITE_SPACING // timedelta(minutes=1)
+    return (
+        "Success returns the card view with the card and detail budgets, plus `cadence` "
+        f"when this session wrote the task's state less than {minutes} minutes earlier."
+    )
 
 
 #: How a refused task write answers.
@@ -298,7 +328,15 @@ def build_server() -> Any:
         except MashuError as error:
             return _failure(error)
 
-    @server.tool()
+    @server.tool(
+        description=(
+            "Record a pain and show related evidence.\n\n"
+            "Use `rule` for reusable guidance or `work` with `task_id` for a one-time fix; this "
+            "never admits knowledge directly. A `rule` prevention becomes a candidate Memory "
+            f"body, so it is held to {memories.CONTENT_LIMIT} chars and states the rule alone; "
+            "put the reason, measurements, dates, and history in `what`."
+        )
+    )
     def pain_report(
         kind: str,
         what: str,
@@ -307,11 +345,6 @@ def build_server() -> Any:
         prevention_kind: str = "rule",
         task_id: UUID | None = None,
     ) -> dict[str, Any]:
-        """Record a pain and show related evidence.
-
-        Use `rule` for reusable guidance or `work` with `task_id` for a one-time
-        fix; this never admits knowledge directly.
-        """
         try:
             with db.transaction() as cur:
                 scope_id, _, _ = _scope(cur, scope)
@@ -398,14 +431,20 @@ def build_server() -> Any:
         except MashuError as error:
             return _failure(error)
 
-    @server.tool()
-    def memory_nominate(content: str, scope: str | None = None) -> dict[str, Any]:
-        """Create or update a pending candidate for a new durable Memory without admitting it.
+    body_contract = _body_contract()
 
-        Use it for the successor of a memory_change_propose replace, or to read the current
-        candidate again when memory_admit stopped at the queue. A plain explicit request to
-        remember goes to memory_admit with `content` instead.
-        """
+    @server.tool(
+        description=(
+            "Create or update a pending candidate for a new durable Memory without admitting "
+            "it.\n\n"
+            "Use it for the successor of a memory_change_propose replace, or to read the "
+            "current candidate again when memory_admit stopped at the queue. A plain explicit "
+            f"request to remember goes to memory_admit with `content` instead. {body_contract}"
+        )
+    )
+    def memory_nominate(
+        content: str, scope: str | None = None, why: str | None = None
+    ) -> dict[str, Any]:
         try:
             with db.transaction() as cur:
                 scope_id, _, _ = _scope(cur, scope)
@@ -414,6 +453,7 @@ def build_server() -> Any:
                     content=content,
                     actor=actor(),
                     scope_id=scope_id,
+                    why=why,
                 )
                 return _plain({"ok": True, **answer})
         except MashuError as error:
@@ -431,7 +471,25 @@ def build_server() -> Any:
         except MashuError as error:
             return _failure(error)
 
-    @server.tool()
+    @server.tool(
+        description=(
+            "Admit a new Memory with explicit instruction provenance.\n\n"
+            "For a plain request to remember, pass `content` (and optional `scope`): the "
+            "nomination and admission happen in one call. If it joins an already pending "
+            "candidate or repeats invalidated or legacy retired Memory, it stops with "
+            "`admitted: false` and returns the nomination to read; then pass that "
+            "`nomination_id` and its `version` as `nomination_version`. Always pass "
+            "`approval_kind='user_instruction'`, a short exact quote of the user's instruction, "
+            "any available `conversation_ref`, and a new `request_id`. The Agent executes it; "
+            "this provenance is not authentication. Invalidated or legacy conflicts need "
+            "`conflict_ids` and a `conflict_instruction` in which the user addresses them. "
+            "For a rule the user wants read only during one kind of work, pass "
+            "`delivery='topic'` and a `topic` name. A topic that does not exist yet is opened "
+            "with the rule, never without it, and needs `topic_trigger` (one sentence saying "
+            "when to read it); `scope` names where it is listed, or omit it for every session."
+            f"\n\n{body_contract} `why` goes with `content`, not with `nomination_id`."
+        )
+    )
     def memory_admit(
         request_id: UUID,
         approval_kind: str,
@@ -446,23 +504,8 @@ def build_server() -> Any:
         scope: str | None = None,
         topic: str | None = None,
         topic_trigger: str | None = None,
+        why: str | None = None,
     ) -> dict[str, Any]:
-        """Admit a new Memory with explicit instruction provenance.
-
-        For a plain request to remember, pass `content` (and optional `scope`): the
-        nomination and admission happen in one call. If it joins an already pending
-        candidate or repeats invalidated or legacy retired Memory, it stops with
-        `admitted: false` and returns the nomination to read; then pass that
-        `nomination_id` and its `version` as `nomination_version`. Always pass
-        `approval_kind='user_instruction'`, a short exact quote of the user's instruction,
-        any available `conversation_ref`, and a new `request_id`. The Agent executes it;
-        this provenance is not authentication. Invalidated or legacy conflicts need
-        `conflict_ids` and a `conflict_instruction` in which the user addresses them.
-        For a rule the user wants read only during one kind of work, pass
-        `delivery='topic'` and a `topic` name. A topic that does not exist yet is opened
-        with the rule, never without it, and needs `topic_trigger` (one sentence saying
-        when to read it); `scope` names where it is listed, or omit it for every session.
-        """
         if approval_kind != "user_instruction":
             return _failure(MashuError("MCP admission requires approval_kind='user_instruction'"))
         if topic_trigger is not None and topic is None:
@@ -476,6 +519,13 @@ def build_server() -> Any:
         if content is not None and nomination_version is not None:
             return _failure(
                 MashuError("nomination_version belongs with nomination_id, not with content")
+            )
+        if why is not None and content is None:
+            return _failure(
+                MashuError(
+                    "why belongs with content; a pending nomination already carries its "
+                    "evidence, so admit it by nomination_id without why"
+                )
             )
         approval = {
             "kind": approval_kind,
@@ -502,6 +552,7 @@ def build_server() -> Any:
                         delivery=delivery,
                         topic_id=topic_id,
                         new_topic=new_topic,
+                        why=why,
                     )
                     return _plain({"ok": answer["admitted"], **answer})
                 if new_topic is not None:
@@ -810,11 +861,11 @@ def build_server() -> Any:
     @server.tool(
         description=(
             'Replace the state fields given; omitted fields keep their value, "" or [] '
-            "clears.\n\nPass the read state's `updated_at` as `expect_updated_at`. `name` "
-            "renames the task unless it reads like another open one. `goal` names the outcome "
-            "and `status_text` says where the task stands; both ride on every bootstrap card, "
-            f"so details go in approach or next_actions. {state_contract} {_REFUSALS} Success "
-            "returns the card view with the card and detail budgets."
+            f"clears.\n\n{_WRITE_TRIGGER} Pass the read state's `updated_at` as "
+            "`expect_updated_at`. `name` renames the task unless it reads like another open "
+            "one. `goal` names the outcome and `status_text` says where the task stands, so "
+            "it changes only when that does; both ride on every bootstrap card, so details go "
+            f"in approach or next_actions. {state_contract} {_REFUSALS} {_write_success()}"
         )
     )
     def task_update(
@@ -842,6 +893,7 @@ def build_server() -> Any:
                     blockers=blockers,
                     next_actions=next_actions,
                     name=name,
+                    session=session,
                 )
                 return _plain({"ok": True, **_task_card_view(answer)})
         except MashuError as error:
@@ -850,14 +902,15 @@ def build_server() -> Any:
     @server.tool(
         description=(
             "Replace the state fields given and record a checkpoint with its history.\n\n"
+            f"{_WRITE_TRIGGER} "
             'Omitted fields keep their value; "" or [] clears one. Pass the read state\'s '
             "`updated_at` as `expect_updated_at`. `goal` names the outcome and `status_text` "
-            "says where the task stands; both ride on every bootstrap card, so what was done "
-            "goes in `what_changed`. Optional history, all written with the checkpoint or not "
-            "at all: `attempts` for failed tries, `decisions` for reasons costly to re-derive, "
-            "and `artifacts` for external sources, which join `evidence`. "
-            f"{state_contract} {_history_contract()} {_REFUSALS} Success returns the card "
-            "view with the card and detail budgets."
+            "says where the task stands, so it changes only when that does; both ride on every "
+            "bootstrap card, so what was done goes in `what_changed`. Optional history, all "
+            "written with the checkpoint or not at all: `attempts` for failed tries, "
+            "`decisions` for reasons costly to re-derive, and `artifacts` for external "
+            f"sources, which join `evidence`. {state_contract} {_history_contract()} "
+            f"{_REFUSALS} {_write_success()}"
         )
     )
     def task_checkpoint(
@@ -893,6 +946,7 @@ def build_server() -> Any:
                     attempts=attempts,
                     decisions=decisions,
                     artifacts=artifacts,
+                    session=session,
                 )
                 answer["checkpoint"] = {
                     key: value
