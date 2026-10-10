@@ -271,7 +271,7 @@ def _evidence_rows(cur: psycopg.Cursor, evidence: list[UUID]) -> list[dict[str, 
         return []
     cur.execute(
         """
-        SELECT ledger_id, kind, what, prevention, created_at
+        SELECT ledger_id, kind, what, prevention, created_at, created_by
         FROM ledger WHERE ledger_id = ANY(%s)
         """,
         (list(evidence),),
