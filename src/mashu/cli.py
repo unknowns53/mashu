@@ -6,14 +6,10 @@ import argparse
 import json
 import os
 import re
-import shlex
-import subprocess
 import sys
-import tempfile
 import textwrap
 import unicodedata
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -191,28 +187,6 @@ def _width() -> int | None:
     if not sys.stdout.isatty():
         return None
     return screen.terminal_width()
-
-
-def _editor_text(content: str) -> str:
-    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
-    command = shlex.split(editor)
-    if not command:
-        command = ["vi"]
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8"
-    ) as handle:
-        path = Path(handle.name)
-        handle.write(content)
-    try:
-        try:
-            subprocess.run([*command, str(path)], check=True)
-        except (OSError, subprocess.CalledProcessError) as error:
-            raise MashuError(
-                f"editor could not be run with {shlex.join(command)}: {error}"
-            ) from error
-        return path.read_text(encoding="utf-8")
-    finally:
-        path.unlink(missing_ok=True)
 
 
 def _parse_days(value: str) -> float:
@@ -484,7 +458,7 @@ def cmd_revise(args: argparse.Namespace) -> int:
     if current is None:
         raise MashuError(f"memory '{memory_id}' not found")
     if content is None:
-        content = _editor_text(current["content"])
+        content = screen.edit_long_text("Edit memory", current["content"])
     with db.transaction(args.dsn) as cur:
         row = memories.revise(cur, memory_id, content=content, actor=ACTOR)
     print(f"revised  {row['memory_id']}")

@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
+import subprocess
 import sys
+import tempfile
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import wraps
+from pathlib import Path
+
+from mashu.errors import MashuError
 
 try:
     import select
@@ -247,6 +253,43 @@ def edit_text(title: str, current: str) -> InputResult:
         )
     )
     return editline("  > ", current)
+
+
+def edit_long_text(title: str, current: str) -> str:
+    """Edit one body of text, in an outside editor only when the person configured one."""
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if editor:
+        revised = _run_editor(editor, current)
+    else:
+        result = edit_text(title, current)
+        if isinstance(result, Cancelled):
+            raise MashuError("edit cancelled")
+        revised = result.text
+    revised = revised.strip()
+    if not revised:
+        raise MashuError("the text cannot be empty")
+    return revised
+
+
+def _run_editor(editor: str, current: str) -> str:
+    command = shlex.split(editor)
+    if not command:
+        raise MashuError("editor command is empty")
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+    ) as handle:
+        path = Path(handle.name)
+        handle.write(current)
+    try:
+        try:
+            subprocess.run([*command, str(path)], check=True)
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise MashuError(
+                f"editor could not be run with {shlex.join(command)}: {error}"
+            ) from error
+        return path.read_text(encoding="utf-8")
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def paint(text: str) -> None:

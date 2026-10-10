@@ -2,12 +2,7 @@
 
 from __future__ import annotations
 
-import os
-import shlex
-import subprocess
-import tempfile
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -201,31 +196,6 @@ def _item_text(row: dict[str, Any], place: int, total: int) -> str:
 
 
 # carrying one decision into the store
-def _editor_text(content: str) -> str:
-    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
-    if not editor:
-        revised = screen.edit_text("Edit pending candidate", content)
-        if isinstance(revised, screen.Cancelled):
-            raise MashuError("edit cancelled")
-        if not revised.text:
-            raise MashuError("a candidate cannot be empty")
-        return revised.text
-    command = shlex.split(editor)
-    if not command:
-        raise MashuError("editor command is empty")
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8"
-    ) as handle:
-        path = Path(handle.name)
-        handle.write(content)
-    try:
-        try:
-            subprocess.run([*command, str(path)], check=True)
-        except (OSError, subprocess.CalledProcessError) as error:
-            raise MashuError("editor could not be run") from error
-        return path.read_text(encoding="utf-8")
-    finally:
-        path.unlink(missing_ok=True)
 
 
 def _delivery(
@@ -329,7 +299,7 @@ def _admit(dsn: str | None, row: dict[str, Any]) -> str:
 def _revise(dsn: str | None, row: dict[str, Any]) -> str:
     """Persist revised wording while leaving the candidate pending."""
     try:
-        content = _editor_text(row["content"])
+        content = screen.edit_long_text("Edit pending candidate", row["content"])
         with db.transaction(dsn) as cur:
             nominations.revise(
                 cur,
