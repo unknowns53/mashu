@@ -59,6 +59,8 @@ INSTRUCTIONS = (
     "and external sources in artifacts. Task completion remains the user's decision. "
     "If work looks done, use task_propose_close with outcome and reason; it changes no "
     "task state. "
+    "Writes naming people or home paths are refused, so call the user 'the user' and write "
+    "paths from ~ or the repository. "
     "Record lookups or derivations with trace_put. Use pain_report only when missing or "
     "stale knowledge caused an incident or repeated lookup; incidents nominate once, "
     "friction on the second occurrence. Use prevention_kind='work' and task_id for "

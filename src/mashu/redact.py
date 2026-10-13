@@ -37,6 +37,8 @@ class Verdict:
     field: str | None = None
     #: Where the match sits in that text, as a slice (start inclusive, end exclusive).
     span: tuple[int, int] | None = None
+    #: True when the match lies inside the home directory as written in a path.
+    in_home: bool = False
 
     def reason(self) -> str:
         where = f" at characters {self.span[0]}-{self.span[1]}" if self.span else ""
@@ -50,9 +52,16 @@ class Verdict:
             return "the banned-pattern list was unavailable, so nothing was checked"
         if self.allowed:
             return "no banned pattern"
+        # The list is private, so the hint says how to rewrite without naming what matched.
+        if self.in_home:
+            hint = (
+                "the match is the home directory inside a path, so write the path from ~ or "
+                "from its repository, and name a scratch file without its directory"
+            )
+        else:
+            hint = "refer to people by role, such as the user, instead of by name or affiliation"
         return (
-            f"{subject}matches banned pattern #{self.pattern_index}{where}; "
-            "rewrite that part and resend"
+            f"{subject}matches banned pattern #{self.pattern_index}{where}; {hint}, then resend"
         )
 
     def refusal(self) -> RefusedError:
@@ -96,6 +105,21 @@ def load() -> tuple[list[re.Pattern[str]], int] | None:
     return out, malformed
 
 
+def home_spans(text: str) -> list[tuple[int, int]]:
+    """Where the home directory appears, as a path or as a path flattened with dashes."""
+    home = str(pathlib.Path.home()).lower()
+    # Claude Code names its project and scratch directories by replacing each / with -.
+    forms = {home, home.replace("/", "-")}
+    lowered = text.lower()
+    out = []
+    for form in forms:
+        start = lowered.find(form)
+        while start != -1:
+            out.append((start, start + len(form)))
+            start = lowered.find(form, start + 1)
+    return out
+
+
 def items(name: str, texts: Iterable[str | None] | None) -> dict[str, str | None]:
     """Label each text of a list argument by its index, as `name[0]`, `name[1]`, ..."""
     return {f"{name}[{index}]": text for index, text in enumerate(texts or [])}
@@ -116,12 +140,16 @@ def check(fields: Mapping[str, str | None]) -> Verdict:
         for index, pattern in enumerate(compiled):
             hit = pattern.search(text)
             if hit:
+                in_home = any(
+                    start <= hit.start() and hit.end() <= end for start, end in home_spans(text)
+                )
                 return Verdict(
                     allowed=False,
                     pattern_index=index,
                     malformed=malformed,
                     field=label,
                     span=hit.span(),
+                    in_home=in_home,
                 )
     return Verdict(allowed=True, malformed=malformed)
 

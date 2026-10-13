@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 
 from conftest import expire, new_project, new_task, update_task
-from mashu import db, server, task_history, tasks
+from mashu import db, redact, server, task_history, tasks
 from mashu.errors import (
     ClosedTaskError,
     MalformedRequestError,
@@ -168,6 +168,21 @@ def test_artifact_locator_is_checked_and_named_without_echoing_it(cur, task, mon
     assert (answer["field"], answer["span"]) == ("artifacts[0].locator", [3, 3 + len(home)])
     assert str(refused.value).startswith("artifacts[0].locator matches banned pattern #0 at ")
     assert home not in str(refused.value)
+    assert "write the path from ~" in str(refused.value)
+
+
+def test_refusal_says_how_to_rewrite_by_where_the_match_sits(monkeypatch, tmp_path):
+    user = Path.home().name
+    (tmp_path / "patterns").write_text(re.escape(user) + "\n", encoding="utf-8")
+    monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(tmp_path / "patterns"))
+    scratch = f"/private/tmp/claude-501/{str(Path.home()).replace('/', '-')}-MyApp/notes.md"
+
+    named = redact.check({"next_actions[0]": f"show it to {user} first"})
+    in_scratch = redact.check({"artifacts[0].locator": scratch})
+
+    assert not named.in_home and "refer to people by role" in named.reason()
+    assert in_scratch.in_home and "write the path from ~" in in_scratch.reason()
+    assert user not in named.reason() + in_scratch.reason()
 
 
 def test_checkpoint_writes_attempts_decisions_and_artifacts_with_the_state(cur, task, task_id):
