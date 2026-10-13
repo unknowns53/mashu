@@ -9,6 +9,20 @@ from uuid import UUID
 from mashu import redact
 from mashu.errors import MashuError
 
+#: The longest instruction quote or conversation reference an approval keeps, in characters.
+TEXT_LIMIT = 1000
+
+
+def home_relative(text: str) -> str:
+    """The text with the home directory written as ~, the form a write may keep.
+
+    A transcript path names the home directory, which the banned patterns refuse; written
+    from ~ it still finds the conversation.
+    """
+    for start, end in sorted(redact.home_spans(text), reverse=True):
+        text = text[:start] + "~" + text[end:]
+    return text
+
 
 def json_value(value: Any) -> Any:
     """Make identifiers and timestamps safe for durable JSON request snapshots."""
@@ -145,7 +159,7 @@ def _safe_text(value: Any, label: str, *, required: bool = False) -> str | None:
         if required:
             raise MashuError(f"{label} is required")
         return None
-    if len(text) > 1000:
-        raise MashuError(f"{label} is too long (maximum 1000 characters)")
+    if len(text) > TEXT_LIMIT:
+        raise MashuError(f"{label} is too long (maximum {TEXT_LIMIT} characters)")
     redact.gate({label: text})
     return text

@@ -455,7 +455,7 @@ def test_memory_admit_takes_one_of_a_nomination_at_its_version_or_content(
 
     # Argument checks answer before any connection; a missing database proves it.
     monkeypatch.setenv("MASHU_DATABASE_URL", "dbname=mashu_test_never_created")
-    base = {"request_id": str(uuid4()), "approval_kind": "user_instruction", "instruction": "r"}
+    base = {"request_id": str(uuid4()), "instruction": "r"}
     result = asyncio.run(server.build_server().call_tool("memory_admit", {**base, **arguments}))
     assert result.structured_content["ok"] is False
     assert message in result.structured_content["error"]

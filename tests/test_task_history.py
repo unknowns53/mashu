@@ -288,6 +288,7 @@ def test_mcp_writes_history_only_through_task_checkpoint_and_publishes_write_con
     outcome = tools["task_propose_close"].input_schema["properties"]["outcome"]
     assert outcome["enum"] == list(tasks.OUTCOMES)
     history = tools["task_checkpoint"].input_schema["properties"]
+    assert "evidence" not in history
     items = {name: history[name]["anyOf"][0]["items"] for name in task_history.ITEM_KEYS}
     for name, (required, optional) in task_history.ITEM_KEYS.items():
         assert items[name]["required"] == list(required)

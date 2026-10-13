@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from uuid import uuid4
 
 import pytest
@@ -14,7 +15,7 @@ from mashu import (
     server,
     topics,
 )
-from mashu.errors import MalformedRequestError, MashuError, RefusedError
+from mashu.errors import MalformedRequestError, MashuError, RefusedError, RetiredConflictError
 from mashu.tokens import pushed_cost
 
 RULE = "the storage adapter trusts the signed manifest before selecting a mirror"
@@ -382,31 +383,31 @@ def test_redeliver_refuses_a_topic_opened_differently_or_a_target_changed_after_
         apply_change(cur, proposal, "Scope it")
 
 
-@pytest.mark.parametrize("kind", ["user_direct", "policy"])
-def test_mcp_admits_and_applies_only_on_a_user_instruction(mcp, dsn, kind):
+def test_mcp_records_a_user_instruction_without_being_told_its_kind(mcp, dsn):
+    tools = {tool.name: tool for tool in asyncio.run(server.build_server().list_tools())}
+    for name in ("memory_admit", "memory_change_apply", "memory_redeliver"):
+        assert "approval_kind" not in tools[name].input_schema["properties"], name
     with db.transaction(dsn) as cur:
         memory = remember(cur, RULE)
         proposal = propose_change(
             cur, memory, "retire", retirement_kind="invalidated", retire_reason="now verified"
         )
-    approval = {"request_id": str(uuid4()), "approval_kind": kind, "instruction": "do it"}
 
-    admitted = mcp("memory_admit", content=SUCCESSOR, **approval)
+    admitted = mcp("memory_admit", request_id=str(uuid4()), instruction="do it", content=SUCCESSOR)
     applied = mcp(
         "memory_change_apply",
         change_id=str(proposal["change_id"]),
         version=proposal["version"],
-        **approval,
+        request_id=str(uuid4()),
+        instruction="do it",
     )
 
-    assert admitted["ok"] is False and "user_instruction" in admitted["error"]
-    assert applied["ok"] is False and "user_instruction" in applied["error"]
+    assert admitted["ok"] is True and applied["ok"] is True
     with db.transaction(dsn) as cur:
-        cur.execute("SELECT content, status FROM memory")
-        assert cur.fetchall() == [{"content": RULE, "status": "active"}]
-        cur.execute("SELECT count(*) AS n FROM nomination")
-        assert cur.fetchone()["n"] == 0
-        assert memory_changes.get(cur, proposal["change_id"])["status"] == "pending"
+        change = memory_changes.get(cur, proposal["change_id"])
+        cur.execute("SELECT approval_source FROM nomination")
+        nominated = cur.fetchone()["approval_source"]
+    assert change["approval_source"]["kind"] == nominated["kind"] == "user_instruction"
 
 
 def test_memory_redeliver_proposes_and_applies_an_instructed_move_in_one_call(
@@ -417,7 +418,6 @@ def test_memory_redeliver_proposes_and_applies_an_instructed_move_in_one_call(
     call = {
         "memory_id": str(memory["memory_id"]),
         "request_id": str(uuid4()),
-        "approval_kind": "user_instruction",
         "instruction": "Move it into a calibration topic",
         "conversation_ref": "conversation:turn-7",
         "delivery": "topic",
@@ -448,3 +448,205 @@ def test_memory_redeliver_proposes_and_applies_an_instructed_move_in_one_call(
     assert change["approval_source"]["conversation_ref"] == "conversation:turn-7"
     assert {"memory_change_proposed", "delivery_changed", "memory_change_applied"} <= logged
     assert change["target"]["topic_id"] == topic["topic_id"]
+
+
+#: What both ways of making a change leave differently: their own ids and times, and the
+#: one-call request stored for its replay.
+_PER_CALL = {
+    "change_id",
+    "target_memory_id",
+    "target_revision_id",
+    "target_updated_at",
+    "proposed_at",
+    "decided_at",
+    "apply_request_id",
+    "apply_request",
+    "applied_result",
+    "successor_nomination_id",
+    "successor_snapshot",
+    "superseded_by",
+}
+REF = "conversation:turn-9"
+
+
+def _approval(instruction, **acknowledgments):
+    return {
+        "kind": "user_instruction",
+        "instruction": instruction,
+        "conversation_ref": REF,
+        "conflict_ids": [],
+        "conflict_instruction": None,
+        "reversal_instruction": None,
+        **acknowledgments,
+    }
+
+
+def _instructed(cur, memory, operation, approval, request_id=None, **fields):
+    return memory_changes.change_instructed(
+        cur,
+        memory["memory_id"],
+        operation=operation,
+        request_id=request_id or uuid4(),
+        approval=approval,
+        actor="agent",
+        **fields,
+    )
+
+
+@pytest.mark.parametrize("operation", ["retire", "replace", "restore"])
+def test_an_instructed_change_leaves_what_proposing_and_applying_it_leaves(cur, operation):
+    instruction = f"Please {operation} that rule"
+    approval = _approval(instruction)
+    evidence = [
+        {
+            "kind": "artifact",
+            "ref": REF,
+            "observation": f"the user instructed this {operation}: {instruction}",
+        }
+    ]
+    targets = (RULE, "run the schema migration dry run before every deploy")
+    successors = (SUCCESSOR, "pin the compiler version in every nightly build image")
+    rows, logs = [], []
+    for one_call, target, successor in zip((False, True), targets, successors, strict=True):
+        memory = remember(cur, target)
+        if operation == "restore":
+            retire(cur, memory, "the adapter no longer exists", "out_of_scope")
+        fields = {
+            "retire": {"retirement_kind": "invalidated", "retire_reason": "it is wrong"},
+            "replace": {"content": successor, "retire_reason": "the user rewrote it"},
+            "restore": {"restore_reason": "the adapter is back"},
+        }[operation]
+        cur.execute("SELECT coalesce(max(event_id), 0) AS n FROM event_log")
+        before = cur.fetchone()["n"]
+        if one_call:
+            change_id = _instructed(cur, memory, operation, approval, **fields)["change_id"]
+        else:
+            if operation == "replace":
+                nominated = nominations.nominate_user_explicit(
+                    cur, content=fields.pop("content"), actor="agent"
+                )["nomination"]
+                fields.update(
+                    successor_nomination_id=nominated["nomination_id"],
+                    successor_nomination_version=nominated["version"],
+                )
+            change = propose_change(cur, memory, operation, evidence=evidence, **fields)
+            memory_changes.apply(
+                cur,
+                change["change_id"],
+                version=change["version"],
+                request_id=uuid4(),
+                approval=approval,
+                actor="agent",
+            )
+            change_id = change["change_id"]
+        cur.execute("SELECT * FROM memory_change WHERE change_id = %s", (change_id,))
+        rows.append({k: v for k, v in cur.fetchone().items() if k not in _PER_CALL})
+        cur.execute(
+            "SELECT event_type, actor, detail FROM event_log WHERE event_id > %s ORDER BY event_id",
+            (before,),
+        )
+        logs.append([(e["event_type"], e["actor"], sorted(e["detail"] or {})) for e in cur])
+
+    assert rows[0] == rows[1]
+    assert rows[1]["status"] == "applied" and rows[1]["evidence"] == evidence
+    assert logs[0] == logs[1]
+
+
+def test_an_instructed_replace_stops_on_an_unaddressed_conflict_and_answers_a_resend_alike(cur):
+    old = remember(cur, RULE)
+    invalidated = remember(cur, SUCCESSOR)
+    retire(cur, invalidated, INVALIDATED)
+    approval = _approval("Replace it with the checksum rule")
+
+    with pytest.raises(RetiredConflictError) as stopped, cur.connection.transaction():
+        _instructed(cur, old, "replace", approval, content=SUCCESSOR)
+    assert server._failure(stopped.value)["conflicts"] == [
+        {
+            "memory_id": str(invalidated["memory_id"]),
+            "retirement_kind": "invalidated",
+            "retire_reason": INVALIDATED,
+            "superseded_by": None,
+            "relocated_to_kind": None,
+            "relocated_to_id": None,
+        }
+    ]
+    cur.execute("SELECT count(*) AS n FROM nomination")
+    assert cur.fetchone()["n"] == 0
+
+    addressed = {
+        **approval,
+        "conflict_ids": [invalidated["memory_id"]],
+        "conflict_instruction": "Use it even though the old checksum advice was invalidated",
+    }
+    request_id = uuid4()
+    first = _instructed(cur, old, "replace", addressed, request_id, content=SUCCESSOR)
+    assert _instructed(cur, old, "replace", addressed, request_id, content=SUCCESSOR) == first
+    assert first["retired"]["superseded_by"] == first["memory"]["memory_id"]
+    assert first["retired"]["retire_reason"] == (
+        "replaced on the user's instruction: Replace it with the checksum rule"
+    )
+    with pytest.raises(MashuError, match="different memory change request"):
+        _instructed(cur, old, "replace", addressed, request_id, content=UPDATED)
+
+
+def test_an_instructed_restore_needs_the_reversal_and_conflicts_its_retirement_calls_for(cur):
+    memory = remember(cur, RULE)
+    retire(cur, memory, "the adapter was expected to reject unsigned manifests")
+    similar = remember(cur, UPDATED, acknowledged_conflicts=[memory["memory_id"]])
+    retire(cur, similar, INVALIDATED)
+    approval = _approval("Bring the manifest rule back")
+    restore = {"restore_reason": "unsigned manifests are accepted again"}
+
+    with pytest.raises(RetiredConflictError) as stopped, cur.connection.transaction():
+        _instructed(cur, memory, "restore", approval, **restore)
+    assert [row["memory_id"] for row in stopped.value.tombstones] == [str(similar["memory_id"])]
+    addressed = {
+        **approval,
+        "conflict_ids": [similar["memory_id"]],
+        "conflict_instruction": "Restore it even though the revised rule was withdrawn",
+    }
+    with pytest.raises(MashuError, match="reversal_instruction"), cur.connection.transaction():
+        _instructed(cur, memory, "restore", addressed, **restore)
+
+    reversed_ = {**addressed, **REVERSAL}
+    restored = _instructed(cur, memory, "restore", reversed_, **restore)
+    assert restored["memory"]["status"] == "active"
+    assert (
+        memory_changes.get(cur, restored["change_id"])["approval_source"]["reversal_instruction"]
+        == REVERSAL["reversal_instruction"]
+    )
+
+
+def test_memory_change_instructed_takes_the_users_words_in_one_call(mcp, dsn, monkeypatch):
+    monkeypatch.setenv("HOME", "/Users/SECRETMARKER1")
+    transcript = "/Users/SECRETMARKER1/.claude/projects/-Users-SECRETMARKER1-adapter/a.jsonl"
+    with db.transaction(dsn) as cur:
+        memory = remember(cur, RULE)
+    call = {
+        "memory_id": str(memory["memory_id"]),
+        "operation": "retire",
+        "instruction": "Retire the manifest rule, it is wrong",
+        "conversation_ref": transcript,
+        "request_id": str(uuid4()),
+    }
+
+    malformed = mcp("memory_change_instructed", **call, retirement_kind="relocated", content="x")
+    assert malformed["problems"] == [
+        "retire does not take content",
+        "retire needs retire_reason",
+        "a relocated retirement names its Temporary Context, so propose it with "
+        "memory_change_propose",
+    ]
+    retirement = {"retirement_kind": "invalidated", "retire_reason": "the adapter verifies it"}
+    banned = {**call, "conversation_ref": "conversation:SECRETMARKER2"}
+    assert mcp("memory_change_instructed", **banned, **retirement)["field"] == "conversation_ref"
+
+    retired = mcp("memory_change_instructed", **call, **retirement)
+    assert retired["ok"] is True and retired["memory"]["status"] == "retired"
+    assert mcp("memory_change_instructed", **call, **retirement) == retired
+    with db.transaction(dsn) as cur:
+        change = memory_changes.get(cur, retired["change_id"])
+        cur.execute("SELECT count(*) AS n FROM memory_change")
+        assert cur.fetchone()["n"] == 1
+    cited = "~/.claude/projects/~-adapter/a.jsonl"
+    assert change["evidence"][0]["ref"] == change["approval_source"]["conversation_ref"] == cited

@@ -47,6 +47,9 @@ Agent が既存 Memory の変更を考えた（退役・置換・復帰・配信
     └─ memory_get → memory_change_propose → pending proposal
          └─ User の明示指示があれば memory_change_apply
 
+User が会話中に既存 Memory の退役・置換・復帰を指示した
+    └─ memory_change_instructed → 提案と適用を 1 回の呼び出しで完了
+
 User が会話中に既存 Memory の配信先の変更を指示した
     └─ memory_redeliver → 提案と適用を 1 回の呼び出しで完了
 
@@ -57,13 +60,15 @@ pending candidate
     └─ mashu review → active Memory → bootstrap / topic
 ~~~
 
-incident / friction から自動生成された candidate と Agent 独自の提案は pending に留まる。ユーザーが会話中に明示した記録・変更指示は `memory_admit` / `memory_change_apply` に渡し、同じセッションで実行できる。実行者は Agent のまま記録し、指示の原文と会話参照を別に保存する。これは監査用で、サーバーが会話の真正性を認証するものではない。Agent の有用性判断・confidence・ユーザーの沈黙は承認として扱わない。Project State は別扱いで、Agent が更新した active Task の card は次のセッションへ届く。Current State 全文は常時注入せず、card の完全な task_id から `task_get` で明示取得する。
+incident / friction から自動生成された candidate と Agent 独自の提案は pending に留まる。ユーザーが会話中に明示した記録・変更指示は `memory_admit` / `memory_change_instructed` / `memory_redeliver`（既にある proposal なら `memory_change_apply`）に渡し、同じセッションで実行できる。実行者は Agent のまま記録し、指示の原文と会話参照を別に保存する。MCP の Tool は承認の種類を引数に取らず、サーバーが `user_instruction` と記録する。これは監査用で、サーバーが会話の真正性を認証するものではない。Agent の有用性判断・confidence・ユーザーの沈黙は承認として扱わない。Project State は別扱いで、Agent が更新した active Task の card は次のセッションへ届く。Current State 全文は常時注入せず、card の完全な task_id から `task_get` で明示取得する。
 
 `memory_admit` に `content` を渡すと、候補の作成と採用を一つの transaction で行う。候補が既存の pending candidate に合流した場合と、invalidated / legacy の退役 Memory と衝突し、その conflict に触れた指示が無い場合は採用せずに止まり、作った候補と台帳行だけを残して nomination を返す。Agent はその本文と conflict を読み、`nomination_id` と nomination `version` を `nomination_version` として `memory_admit` に渡して続ける。この経路では本文・scope・根拠・conflict が読み取り後に変わっていれば拒否する。同じ request ID の再送は、どちらの経路でも、Memory が後から編集・退役されていても初回の採用応答を返す。replace は後継 nomination の内容と旧 Memory の配信条件を提案に固定し、配信条件を変える場合は `successor_settings` に `delivery` と `scope_id`（topic なら `topic` も）をまとめて proposal に含める。
 
 `memory_admit` の `delivery='topic'` にまだ無い topic 名を渡すときは、いつ読むかの一文を `topic_trigger` に、見出しを載せる Scope を `scope` に添える（省略すると全セッション）。topic は記憶を採用する直前に同じ transaction で作られるので、採用せずに止まった場合や容量で拒否された場合は作られず、空の topic は残らない。`topic_trigger` が無いときは、何を渡せばよいかを示して拒否する。
 
 User が配信先（always / scope / topic）の変更だけを指示したときは、`memory_redeliver` に対象の `memory_id`、新しい `delivery`（必要なら `scope`・`topic`・`topic_trigger`）、`request_id`、指示の引用、`conversation_ref` を渡す。サーバーが現在の revision を読み、指示の引用と会話参照を evidence にした redeliver 提案を作り、同じ transaction で適用する。残る proposal・承認出所・event は `memory_change_propose` と `memory_change_apply` を別々に呼んだ場合と同じで、同じ request ID の再送は初回の結果を返す。
+
+User が既存 Memory の退役・置換・復帰を指示したときは、`memory_change_instructed` に対象の `memory_id`、`operation`（retire / replace / restore）、`request_id`、指示の引用、`conversation_ref` と、operation ごとの欄を渡す。retire は `retire_reason` と `retirement_kind`（invalidated か out_of_scope。Temporary Context への移動は `memory_change_propose` に残す）、replace は後継の `content` と任意の `why`（`retire_reason` を省くと指示の引用から作る）、restore は `restore_reason` を取る。サーバーが対象の現在の revision と更新時刻を読み、replace なら後継の候補もその場で作り、指示の引用と会話参照を evidence にした提案を作って同じ transaction で適用する。残る候補・proposal・承認出所・event は、候補の作成、`memory_change_propose`、`memory_change_apply` を別々に呼んだ場合と同じで、同じ request ID の再送は初回の結果を返す。後継や復帰する本文が invalidated / legacy の退役 Memory と衝突し、`conflict_ids` と `conflict_instruction` で触れられていなければ、何も書かずに `conflicts` を返す。invalidated / legacy として退役した Memory の復帰には `reversal_instruction` も要る。形の誤りは一度の拒否で `problems` にまとめて返る。
 
 一度直せば以後は覚えなくてよい変更は、Memory ではなく Task の next_actions に記録する。pain の prevention-kind を work にするとこの扱いになる。
 
@@ -389,7 +394,7 @@ claude mcp add mashu \
 
 Agent 名は serve の --agent、または MASHU_AGENT で指定する。別の MCP client を使う場合も、同じく mashu serve を stdio server として登録する。
 
-MCP tool は 20 個ある。
+MCP tool は 21 個ある。
 
 | 分類 | Tool | 役割 |
 |---|---|---|
@@ -397,13 +402,14 @@ MCP tool は 20 個ある。
 | Knowledge | pain_report | 事故または再調査を Ledger に記録する。`rule` の `prevention` は 120 字までで、理由や経緯は `what` に書く |
 | Knowledge | trace_put | 調べて分かったことを日付つき Trace に残す |
 | Knowledge | trace_search | Trace だけを検索する |
-| Knowledge | memory_list | 指定 Scope の active Memory を一覧する。`topic` を渡すと、その topic の本文を読み、読んだことを記録する |
+| Knowledge | memory_list | 指定 Scope の active Memory を一覧する。`scope='always'`（または `global`）は全セッションへ push される Memory を返す。`topic` を渡すと、その topic の本文を読み、読んだことを記録する |
 | Knowledge | memory_get | 指定 Memory の本文、revision、evidence、退役種別・理由・後継を読む |
 | Knowledge | memory_nominate | 新規 Memory の pending candidate を作る。replace の後継に使う。`content` は 120 字までで、理由は `why` に渡す |
 | Knowledge | memory_admit | 承認根拠を必須にして採用する。`content` を渡せば候補の作成と採用を 1 回で行い（`content` は 120 字まで、理由・測定値・経緯は `why` に渡すと evidence に残る）、読むべき候補や conflict があれば止まる。止まった候補は `nomination_id` と読み取った version で採用する。まだ無い topic は `topic_trigger` を添えると記憶とともに作る。request replay は初回応答を返す |
-| Knowledge | memory_change_propose | retire / replace / restore / redeliver を作成または更新する。redeliver は本文を変えずに配信条件だけを移し、新しい topic も作れる。replace は後継の内容・version と配信条件を固定し、retirement_kind を省略すると superseded になる。形の誤りは一度の拒否で `problems` にまとめて返る |
-| Knowledge | memory_change_apply | proposal の version と対象・conflict・承認根拠を照合して適用する |
+| Knowledge | memory_change_propose | Agent 自身の変更案として retire / replace / restore / redeliver を作成または更新する。redeliver は本文を変えずに配信条件だけを移し、新しい topic も作れる。replace は後継の内容・version と配信条件を固定し、retirement_kind を省略すると superseded になる。形の誤りは一度の拒否で `problems` にまとめて返る |
+| Knowledge | memory_change_apply | 既にある proposal の version と対象・conflict・承認根拠を照合して適用する |
 | Knowledge | memory_redeliver | User が指示した配信先の変更を、redeliver 提案の作成と適用まで 1 回で行う。指示の引用と会話参照が evidence になり、request replay は初回応答を返す |
+| Knowledge | memory_change_instructed | User が指示した退役・置換・復帰を、提案の作成と適用まで 1 回で行う。replace の後継候補もその場で作る。指示の引用と会話参照が evidence になり、request replay は初回応答を返す |
 | Knowledge | memory_change_withdraw | 不要になった pending proposal を取り下げる |
 | Project State | project_list | Project と Task 件数を一覧する |
 | Project State | task_create | 類似する open Task を確認して Task を作る |
@@ -420,7 +426,7 @@ Agent が守る基本の動詞は次のとおり。
 調べて分かった          → trace_put
 実際に困った            → pain_report
 User が「覚えて」と言った → memory_admit（content）
-User が既存 Memory の変更を指示 → memory_get → memory_change_propose → memory_change_apply
+User が既存 Memory の退役・置換・復帰を指示 → memory_change_instructed
 User が配信先の変更を指示 → memory_redeliver
 次のセッションへ引き継ぐ → task_checkpoint（attempts / decisions / artifacts を添える）
 ~~~
@@ -509,7 +515,7 @@ topic の本文、approach、open questions、blockers、next actions の本文�
 
 ## 書き込みの安全規則
 
-- 本名、所属、学籍番号、ホームディレクトリを含む絶対パスなど、個人識別情報を含む書き込みは入口で拒否される
+- 本名、所属、学籍番号、ホームディレクトリを含む絶対パスなど、個人識別情報を含む書き込みは入口で拒否される。ただし MCP の `conversation_ref` は、ホームディレクトリを `~` に書き換えてから検査し、保存する
 - 禁止パターンはリポジトリ外の .git-banned-patterns に置く。MASHU_BANNED_PATTERNS で場所を変更できる
 - 禁止パターンの一覧が見つからない場合は、検査を通すのではなく「検査できない」として扱う
 - エージェントのツール呼び出しの記法（`<parameter name=...>` など）を含む書き込みも入口で拒否される。ある引数の本文に次の引数が入り込んだ状態で保存されるのを防ぐためで、禁止パターンの一覧が無くても検査される

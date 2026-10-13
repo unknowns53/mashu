@@ -378,7 +378,6 @@ def test_memory_list_and_admit_reach_a_topic_by_name_for_this_server_session(mcp
     answer = mcp(
         "memory_admit",
         request_id=str(uuid4()),
-        approval_kind="user_instruction",
         instruction="remember this for release branches",
         content=f"tag the release commit before branching {uuid4().hex}",
         delivery="topic",
@@ -395,7 +394,6 @@ def test_memory_admit_opens_a_new_topic_only_with_its_trigger_and_only_if_the_ru
 
     trigger = "Before branching a release"
     base = {
-        "approval_kind": "user_instruction",
         "instruction": "remember this for release branches",
         "delivery": "topic",
         "topic": "release",

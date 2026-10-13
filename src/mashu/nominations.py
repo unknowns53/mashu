@@ -177,11 +177,13 @@ def nominate_user_explicit(
     actor: str,
     scope_id: UUID | None = None,
     why: str | None = None,
+    join_pending: bool = True,
 ) -> dict[str, Any]:
     """Carry an instruction an agent says it was given, as far as the queue.
 
     `why` becomes the ledger row's account in place of the constant one, so the reason stays
-    with the evidence instead of riding in the pushed body.
+    with the evidence instead of riding in the pushed body. Without `join_pending` a similar
+    pending candidate is left alone, for a caller that admits this exact content at once.
     """
     from mashu import memories
 
@@ -225,7 +227,7 @@ def nominate_user_explicit(
         result["matches"] = {"tombstones": tombstones}
         result["note"] = _TOMBSTONE_NOTE
 
-    waiting = match.similar_pending_nominations(cur, content, limit=1)
+    waiting = match.similar_pending_nominations(cur, content, limit=1) if join_pending else []
     if waiting and waiting[0]["score"] >= threshold:
         existing = add_evidence(
             cur, waiting[0]["nomination_id"], ledger_id, actor=actor, conflicts=conflicts

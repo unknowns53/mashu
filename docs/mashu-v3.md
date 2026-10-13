@@ -339,7 +339,7 @@ v2 の Memory 信頼境界と Tool は `docs/mashu-v2.md` を正本として更�
 
 ## 13. インターフェース追加
 
-### 13.1 MCP Tool（Memory 関連 11 + Project State 関連 8）
+### 13.1 MCP Tool（Memory 関連 13 + Project State 関連 8）
 
 Memory 関連 Tool は `docs/mashu-v2.md` 8.1 節に記す。`session_bootstrap` は返却内容が広がり、`pain_report` は 9 節の二つの形を受けるため `prevention_kind`（`rule` 既定 / `work`）と `task_id` を取る。Project State 関連の追加は
 

@@ -119,7 +119,7 @@ v1 の投機的捕捉との関係。セッションから安く残すという�
 2. `pain_report` の incident（自動生成）
 3. Agent が会話中の User の記録指示を運ぶ場合（`memory_admit` に本文を渡す。指示は kind = `claimed` の台帳エントリとして残り、それが evidence になる。`why` を添えると、その台帳エントリの `what` に理由が残る。候補の作成と採用は同じ transaction で行い、1 回の呼び出しで完了する。実行者は Agent のまま記録し、承認根拠に短い原文と取得可能な会話参照を別に記録する）
 
-incident / friction から自動生成した候補と、Agent 自身の追加・変更案は pending のまま残る。**明示指示を受けて Agent が実行する新規採用や変更には、別画面での再承認を要求しない。** 出所には `user_instruction` と指示の短い原文、会話参照を記録し、actor は Agent として残す。これは認証ではなく監査用の出所記録であり、サーバーは会話中に本当にその指示があったか検証できない。Agent 自身の有用性判断、confidence、反対が無かったことは承認ではない。MCP instructions と運用上の信頼でこの境界を守る。
+incident / friction から自動生成した候補と、Agent 自身の追加・変更案は pending のまま残る。**明示指示を受けて Agent が実行する新規採用や変更には、別画面での再承認を要求しない。** 出所には `user_instruction` と指示の短い原文、会話参照を記録し、actor は Agent として残す。MCP の Tool は承認の種類を引数に取らず、サーバーが `user_instruction` を記録する。Agent が実行できる承認はそれしか無いので、引数にしても誤りの元にしかならない。これは認証ではなく監査用の出所記録であり、サーバーは会話中に本当にその指示があったか検証できない。Agent 自身の有用性判断、confidence、反対が無かったことは承認ではない。MCP instructions と運用上の信頼でこの境界を守る。
 
 新規採用は常に明示指示の根拠を伴う `memory_admit` を通る。`memory_nominate` は候補を作るだけで採用せず、replace の後継候補を作るときに使う。MCP 側に会話の真正性を検証する仕組みはない。**Agent が独自に判断した採用・退役・置換・復帰は提案にとどめ、明示指示かサーバーに実装済みの条件が無ければ適用しない。**直接 CLI / TUI 操作は `user_direct` として Agent の実行とは区別する。
 
@@ -263,13 +263,14 @@ Memories TUI の `c` は、active な always / scope Memory と Temporary Contex
 | `pain_report` | 痛みを台帳へ記録し、類似の台帳エントリ・痕跡・tombstone・active な記憶を返す。二度目・incident なら候補を生成。`rule` の `prevention` は候補の本文になるので 120 字までとし、理由や経緯は `what` に書く |
 | `trace_put` | 調べて分かったことを一行残す（4.2 節） |
 | `trace_search` | 痕跡の検索。日付と未検証の印を付けて返す |
-| `memory_list` | 指定 Scope の active な記憶を列挙する。`topic` を渡すと、その topic の発動条件と規則の本文を返し、読んだことをセッション単位で event_log に残す |
+| `memory_list` | 指定 Scope の active な記憶を列挙する。`always`（または `global`）は全セッションへ push される記憶を返す。`topic` を渡すと、その topic の発動条件と規則の本文を返し、読んだことをセッション単位で event_log に残す |
 | `memory_get` | 指定した Memory の本文、revision、evidence、退役情報を返す。退役本文は明示取得でのみ読む |
 | `memory_nominate` | 新規 Memory の pending 候補を作るだけで採用しない。replace の後継候補に使う。本文は 120 字までで、理由は `why` に渡す |
 | `memory_admit` | 承認根拠を必須にして採用する。本文を渡すと候補の作成と採用を 1 回で行い（本文は 120 字まで、理由は `why`）、合流した既存候補や未対応の invalidated / legacy conflict があれば採用せず候補を返す。候補 ID で採用するときは読み取った nomination version を必須にする。まだ無い topic は発動条件つきで指定すると記憶とともに作る。実行者 Agent と `user_instruction` の出所を別に保存し、request replay には初回応答を返す |
-| `memory_change_propose` | retire / replace / restore / redeliver 案を作成・更新する。redeliver は本文を変えずに配信条件だけを変え、まだ無い topic を名前と発動条件つきで指定すると適用時にその topic を作る。replace は後継 nomination version と配信条件を固定する |
+| `memory_change_propose` | Agent 自身の retire / replace / restore / redeliver 案を作成・更新する。redeliver は本文を変えずに配信条件だけを変え、まだ無い topic を名前と発動条件つきで指定すると適用時にその topic を作る。replace は後継 nomination version と配信条件を固定する |
 | `memory_change_apply` | proposal version、対象 revision、conflict、承認根拠、request ID を照合して一度だけ適用する |
 | `memory_redeliver` | User が指示した配信条件の変更を、redeliver 案の作成と適用まで一つの transaction で行う。指示の引用と会話参照を evidence にし、request replay には初回応答を返す |
+| `memory_change_instructed` | User が指示した retire / replace / restore を、案の作成と適用まで一つの transaction で行う。replace の後継候補もその場で作る。指示の引用と会話参照を evidence にし、request replay には初回応答を返す |
 | `memory_change_withdraw` | 不要になった pending Memory change を理由つきで取り下げる |
 
 他の Project State 系 Tool は `docs/mashu-v3.md` 13.1 節に記す。`session_bootstrap` の返却内容は 6.1 節にある。
@@ -338,6 +339,8 @@ pgvector は使わない。拡張は pg_trgm のみ。埋め込みモデルへ�
 redeliver 提案は、active な Memory の配信条件だけを `successor_settings` として持ち、本文と ID は変えない。理由は根拠の observation が運ぶので、退役理由の欄は使わない。まだ無い topic を指定するときは、名前と発動条件（`topic_trigger`）と Scope を提案に保存し、適用する transaction の中で topic を作る。適用時に同じ名前の topic が別の発動条件か Scope で作られていれば拒否し、再読と提案更新を要求する。Agent はこの経路で配信の振り分けを提案し、User は review で 1 件ずつ `y` を押すか、明示指示で適用させる。`event_log` には退役種別・理由・移動先・actor と別の承認出所を判断時点の記録として保存する。承認出所は認証情報ではない。
 
 User が配信条件の変更だけを明示に指示したときは、`memory_redeliver` が一回の呼び出しで済ませる。対象の現在の revision を読み、指示の引用と会話参照を artifact の evidence にした redeliver 案を作り、同じ transaction で適用する。残る proposal・承認出所・event は案の作成と適用を別々に呼んだ場合と同じである。Scope を省くと、always と scope は Memory の Scope を引き継ぎ、既にある topic はその topic の Scope を取り、新しい topic は全セッションに見出しを載せる。request ID の再送は初回の結果を返し、同じ request ID を別の変更や `memory_change_apply` に使うことはできない。
+
+User が retire / replace / restore を明示に指示したときも、`memory_change_instructed` が一回の呼び出しで済ませる。運用では、MCP 経由の Memory change はすべて明示指示の実行で、提案から数秒で適用されていた。それを二回の呼び出しに分けると、Agent は対象の revision と更新時刻を写し、指示を evidence の形に組み直すことになり、提案の拒否の多くがこの形の誤りだった。サーバーが対象の現在の revision と更新時刻を読み、replace なら後継の本文（120 字まで）と `why` から候補を作り、指示の引用と会話参照を artifact の evidence にした案を作って同じ transaction で適用する。残る候補・proposal・承認出所・event は、候補の作成、案の作成、適用を別々に呼んだ場合と同じである。replace の後継は似た pending 候補に合流させない。合流すると User が指示していない本文を採用することになるからである。retire が取る退役種別は invalidated と out_of_scope で、移動先の Temporary Context を指す relocated は案の経路に残す。後継や復帰する本文が invalidated / legacy の退役 Memory と衝突し、その conflict に触れた指示が無ければ、何も書かずに conflict を返す。invalidated / legacy として退役した Memory の復帰には、その退役に触れた `reversal_instruction` も要る。会話参照に含まれるホームディレクトリは `~` に書き換えてから検査する。それ以外の禁止パターンは欄の名前を示して拒否する。Agent 自身の変更案は従来どおり `memory_change_propose` で pending に置く。
 
 書き込みは直列化する。複数の MCP プロセスと CLI が同じ知識状態に同時に書くので、定員の判定と候補の生成は advisory lock を取ってから行う。取らなければ、残り 1 席に二人が同時に座れてしまう。
 

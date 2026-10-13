@@ -15,6 +15,7 @@ else:
     from typing_extensions import TypedDict
 
 from mashu import (
+    approvals,
     bootstrap,
     capacity,
     config,
@@ -38,6 +39,7 @@ from mashu.errors import (
     OverLimitError,
     ProjectBudgetError,
     RefusedError,
+    RetiredConflictError,
     StaleStateError,
 )
 
@@ -66,12 +68,13 @@ INSTRUCTIONS = (
     "friction on the second occurrence. Use prevention_kind='work' and task_id for "
     "one-time fixes. Temporary Context handles expiry. "
     "Durable Memory changes need an explicit user instruction. For a request to remember, "
-    "call memory_admit with the content. For an existing Memory, call memory_get, "
-    "memory_change_propose, then memory_change_apply; a delivery move the user asked for "
-    "takes one memory_redeliver call. Follow each tool's description for "
-    "the required fields. Your own suggestion, confidence, and user silence are not "
-    "approval; your independent change idea stays pending. After success, briefly report "
-    "the target and reason; if it remains pending, say that review is needed."
+    "call memory_admit with the content. For an existing Memory, a retire, replace, or "
+    "restore the user asked for takes one memory_change_instructed call and a delivery move "
+    "one memory_redeliver call; your own change idea goes to memory_change_propose. Follow "
+    "each tool's description for the required fields. Your own suggestion, confidence, and "
+    "user silence are not approval; your independent change idea stays pending. After "
+    "success, briefly report the target and reason; if it remains pending, say that review "
+    "is needed."
 )
 
 
@@ -121,6 +124,20 @@ class _ItemSchema:
         if self.min_items:
             schema["minItems"] = self.min_items
         return schema
+
+
+class _Choice:
+    """Show a text argument's values in the tool schema while it still takes any text.
+
+    A value outside them then reaches the code's own shape pass, as an item does through
+    `_ItemSchema`.
+    """
+
+    def __init__(self, values: tuple[str, ...]):
+        self.values = values
+
+    def __get_pydantic_json_schema__(self, core_schema: Any, handler: Any) -> dict[str, Any]:
+        return {"type": "string", "enum": list(self.values)}
 
 
 EvidenceList = Annotated[list[Any], _ItemSchema(EvidenceItem, min_items=1)]
@@ -186,9 +203,39 @@ _REFUSALS = (
 )
 
 
+#: Names memory_list takes for the layer pushed to every session. Agents guess `global`
+#: for it as often as `always`.
+ALWAYS_LAYER = ("always", "global")
+
+#: How the tools that execute a user's instruction take its provenance.
+_PROVENANCE = (
+    "Pass a short exact quote of the user's words as `instruction`, the `conversation_ref` "
+    "it came from (a path under the home directory is stored from ~), and a new "
+    "`request_id`; a resent request_id returns the first answer. The Agent executes it; "
+    "this provenance is not authentication."
+)
+
+
 def actor() -> str:
     """Return the identity configured for this MCP process."""
     return os.environ.get(ACTOR_ENV_VAR) or DEFAULT_ACTOR
+
+
+def _instructed(
+    instruction: str, conversation_ref: str | None, **acknowledgments: Any
+) -> dict[str, Any]:
+    """The approval an MCP write carries.
+
+    An agent only ever executes what the user said, so the kind is not the caller's to pass.
+    """
+    return {
+        "kind": "user_instruction",
+        "instruction": instruction,
+        "conversation_ref": approvals.home_relative(conversation_ref)
+        if conversation_ref
+        else conversation_ref,
+        **acknowledgments,
+    }
 
 
 def _plain(value: Any) -> Any:
@@ -252,6 +299,8 @@ def _failure(
         answer["problems"] = error.problems
         if error.over_limit:
             answer["over_limit"] = error.over_limit
+    elif isinstance(error, RetiredConflictError):
+        answer["conflicts"] = error.tombstones
     return _plain(answer)
 
 
@@ -312,8 +361,9 @@ def build_server() -> Any:
                 note = (
                     "Knowledge is pushed, not searched. Call trace_put for a "
                     "later re-derivation and pain_report when forgetting caused pain; "
-                    "only an explicit user instruction can authorize memory_admit or "
-                    "memory_change_apply in the same session. The Agent executes it, and "
+                    "only an explicit user instruction can authorize memory_admit, "
+                    "memory_change_instructed, memory_redeliver, or memory_change_apply in the "
+                    "same session. The Agent executes it, and "
                     "the stored instruction quote is provenance rather than authentication. "
                     + bootstrap.TASK_DETAIL_INSTRUCTION
                 )
@@ -417,8 +467,9 @@ def build_server() -> Any:
     def memory_list(scope: str | None = None, topic: str | None = None) -> dict[str, Any]:
         """List active knowledge for one named scope, or read one topic's rules.
 
-        Pass exactly one. With `topic`, read the rules before starting the work its
-        trigger names; bootstrap lists topics but never their rules.
+        Pass exactly one. `scope='always'` (or `global`) lists the Memories pushed to every
+        session. With `topic`, read the rules before starting the work its trigger names;
+        bootstrap lists topics but never their rules.
         """
         if (scope is None) == (topic is None):
             return _failure(MashuError("pass exactly one of scope or topic"))
@@ -427,7 +478,11 @@ def build_server() -> Any:
                 if topic is not None:
                     answer = topics.read_for_session(cur, topic, actor=actor(), session=session)
                     return _plain({"ok": True, **answer})
-                row = scopes.require_scope(cur, scope)
+                row = scopes.get_scope(cur, scope)
+                if row is None and scope in ALWAYS_LAYER:
+                    found = memories.always_memories(cur)
+                    return _plain({"ok": True, "scope": "always", "memories": found})
+                row = row or scopes.require_scope(cur, scope, also=ALWAYS_LAYER[:1])
                 found = memories.active_memories(cur, scope_id=row["scope_id"])
                 return _plain({"ok": True, "scope": row["name"], "memories": found})
         except MashuError as error:
@@ -480,11 +535,9 @@ def build_server() -> Any:
             "nomination and admission happen in one call. If it joins an already pending "
             "candidate or repeats invalidated or legacy retired Memory, it stops with "
             "`admitted: false` and returns the nomination to read; then pass that "
-            "`nomination_id` and its `version` as `nomination_version`. Always pass "
-            "`approval_kind='user_instruction'`, a short exact quote of the user's instruction, "
-            "any available `conversation_ref`, and a new `request_id`. The Agent executes it; "
-            "this provenance is not authentication. Invalidated or legacy conflicts need "
-            "`conflict_ids` and a `conflict_instruction` in which the user addresses them. "
+            f"`nomination_id` and its `version` as `nomination_version`. {_PROVENANCE} "
+            "Invalidated or legacy conflicts need `conflict_ids` and a `conflict_instruction` "
+            "in which the user addresses them. "
             "For a rule the user wants read only during one kind of work, pass "
             "`delivery='topic'` and a `topic` name. A topic that does not exist yet is opened "
             "with the rule, never without it, and needs `topic_trigger` (one sentence saying "
@@ -494,7 +547,6 @@ def build_server() -> Any:
     )
     def memory_admit(
         request_id: UUID,
-        approval_kind: str,
         instruction: str,
         nomination_id: UUID | None = None,
         nomination_version: int | None = None,
@@ -508,8 +560,6 @@ def build_server() -> Any:
         topic_trigger: str | None = None,
         why: str | None = None,
     ) -> dict[str, Any]:
-        if approval_kind != "user_instruction":
-            return _failure(MashuError("MCP admission requires approval_kind='user_instruction'"))
         if topic_trigger is not None and topic is None:
             return _failure(MashuError("topic_trigger opens the topic named by topic; pass both"))
         if (nomination_id is None) == (content is None):
@@ -529,13 +579,12 @@ def build_server() -> Any:
                     "evidence, so admit it by nomination_id without why"
                 )
             )
-        approval = {
-            "kind": approval_kind,
-            "instruction": instruction,
-            "conversation_ref": conversation_ref,
-            "conflict_ids": conflict_ids or [],
-            "conflict_instruction": conflict_instruction,
-        }
+        approval = _instructed(
+            instruction,
+            conversation_ref,
+            conflict_ids=conflict_ids or [],
+            conflict_instruction=conflict_instruction,
+        )
         try:
             with capacity.doors("mcp"), db.transaction() as cur:
                 topic_id, new_topic = None, None
@@ -608,8 +657,11 @@ def build_server() -> Any:
     ) -> dict[str, Any]:
         """Create or refresh (with `change_id`) a retire, replace, restore, or redeliver proposal.
 
-        Call memory_get first; pass its memory_id, current_revision_id, and updated_at as
-        the target fields. Each operation takes only its own fields:
+        For a change of your own, which stays pending for review. A retire, replace, or
+        restore the user instructed takes one memory_change_instructed call instead, and a
+        delivery move one memory_redeliver call. Call memory_get first; pass its memory_id,
+        current_revision_id, and updated_at as the target fields. Each operation takes only
+        its own fields:
         - retire (active Memory): `retire_reason` and `retirement_kind`, one of
           `invalidated` (the content is wrong), `out_of_scope` (the conditions it served
           ended), or `relocated` (moved to Temporary Context; also pass
@@ -623,8 +675,7 @@ def build_server() -> Any:
         Every `evidence` item cites a ledger row or trace by `id`, or an artifact by `ref`,
         and says what it shows in `observation`; an observation alone is refused. Cite the
         user's words in this conversation as an artifact whose `ref` names the conversation,
-        quoting them in `observation`. All shape
-        problems come back together in `problems`.
+        quoting them in `observation`. All shape problems come back together in `problems`.
 
         Replace keeps the old delivery settings unless `successor_settings` gives both
         `delivery` and `scope_id`. For `delivery='topic'` add `topic`: an existing topic
@@ -656,28 +707,27 @@ def build_server() -> Any:
         except MashuError as error:
             return _failure(error)
 
-    @server.tool()
+    @server.tool(
+        description=(
+            "Apply one exact pending proposal version once the user explicitly asked for it.\n\n"
+            "For a proposal already standing; a change the user asks for with no proposal "
+            "takes one memory_change_instructed call instead. If the successor changed and no "
+            "longer matches that instruction, get a new instruction first. Invalidated or "
+            "legacy conflicts need `conflict_ids` and a `conflict_instruction` addressing them, "
+            "and restoring a Memory retired as invalidated or legacy needs a "
+            f"`reversal_instruction`. {_PROVENANCE}"
+        )
+    )
     def memory_change_apply(
         change_id: UUID,
         version: int,
         request_id: UUID,
-        approval_kind: str,
         instruction: str,
         conversation_ref: str | None = None,
         conflict_ids: list[UUID] | None = None,
         conflict_instruction: str | None = None,
         reversal_instruction: str | None = None,
     ) -> dict[str, Any]:
-        """Apply one exact proposal version with explicit user instruction provenance.
-
-        Apply only the exact change the user explicitly requested, with
-        `approval_kind='user_instruction'`, a short exact quote of the instruction, and
-        `request_id`. If the successor changed and no longer matches that instruction, get
-        a new instruction first. Invalidated or legacy conflicts need an instruction
-        addressing those conflicts. This provenance is not authentication.
-        """
-        if approval_kind != "user_instruction":
-            return _failure(MashuError("MCP apply requires approval_kind='user_instruction'"))
         try:
             with capacity.doors("mcp"), db.transaction() as cur:
                 result = memory_changes.apply(
@@ -685,45 +735,41 @@ def build_server() -> Any:
                     change_id,
                     version=version,
                     request_id=request_id,
-                    approval={
-                        "kind": approval_kind,
-                        "instruction": instruction,
-                        "conversation_ref": conversation_ref,
-                        "conflict_ids": conflict_ids or [],
-                        "conflict_instruction": conflict_instruction,
-                        "reversal_instruction": reversal_instruction,
-                    },
+                    approval=_instructed(
+                        instruction,
+                        conversation_ref,
+                        conflict_ids=conflict_ids or [],
+                        conflict_instruction=conflict_instruction,
+                        reversal_instruction=reversal_instruction,
+                    ),
                     actor=actor(),
                 )
                 return _plain({"ok": True, **result})
         except MashuError as error:
             return _failure(error)
 
-    @server.tool()
+    @server.tool(
+        description=(
+            "Move one Memory to the delivery the user instructed, proposed and applied in one "
+            "call.\n\n"
+            "Use it only for a move the user asked for; your own idea goes to "
+            f"memory_change_propose and stays pending. {_PROVENANCE} `delivery` is always, "
+            "scope with `scope` (default: the Memory's current scope), or topic with `topic`: an "
+            "existing topic keeps its own scope, and a new one also needs `topic_trigger` (one "
+            "sentence saying when to read it) with `scope` naming where it is listed, or omit it "
+            "for every session. It is recorded as an applied redeliver proposal."
+        )
+    )
     def memory_redeliver(
         memory_id: UUID,
         delivery: str,
         request_id: UUID,
-        approval_kind: str,
         instruction: str,
         conversation_ref: str,
         scope: str | None = None,
         topic: str | None = None,
         topic_trigger: str | None = None,
     ) -> dict[str, Any]:
-        """Move one Memory to the delivery the user instructed, proposed and applied in one call.
-
-        Use it only for a move the user asked for; your own idea goes to
-        memory_change_propose and stays pending. Pass `approval_kind='user_instruction'`, a
-        short exact quote as `instruction`, the `conversation_ref` it came from, and a new
-        `request_id`; a resent request_id returns the first answer. `delivery` is always,
-        scope with `scope` (default: the Memory's current scope), or topic with `topic`: an
-        existing topic keeps its own scope, and a new one also needs `topic_trigger` (one
-        sentence saying when to read it) with `scope` naming where it is listed, or omit it
-        for every session. It is recorded as an applied redeliver proposal.
-        """
-        if approval_kind != "user_instruction":
-            return _failure(MashuError("MCP redeliver requires approval_kind='user_instruction'"))
         try:
             with capacity.doors("mcp"), db.transaction() as cur:
                 result = memory_changes.redeliver_instructed(
@@ -734,12 +780,72 @@ def build_server() -> Any:
                     topic=topic,
                     topic_trigger=topic_trigger,
                     request_id=request_id,
-                    approval={
-                        "kind": approval_kind,
-                        "instruction": instruction,
-                        "conversation_ref": conversation_ref,
-                    },
+                    approval=_instructed(instruction, conversation_ref),
                     actor=actor(),
+                )
+                return _plain({"ok": True, **result})
+        except MashuError as error:
+            return _failure(error)
+
+    @server.tool(
+        description=(
+            "Retire, replace, or restore one Memory as the user instructed, proposed and applied "
+            "in one call.\n\n"
+            "Use it only for a change the user asked for; your own idea goes to "
+            "memory_change_propose and stays pending. The server reads the Memory's current "
+            f"revision itself. {_PROVENANCE} Each `operation` takes only its own fields:\n"
+            "- retire (active Memory): `retire_reason` and `retirement_kind`, `invalidated` "
+            "(the content is wrong) or `out_of_scope` (the conditions it served ended). A move "
+            "to Temporary Context goes through memory_change_propose.\n"
+            "- replace (active Memory): `content`, the successor rule, and optional `why`; the "
+            "successor keeps the old delivery, and `retire_reason` defaults to the instruction. "
+            f"{body_contract}\n"
+            "- restore (retired Memory): `restore_reason`; a Memory retired as invalidated or "
+            "legacy also needs `reversal_instruction`, the user's words addressing that "
+            "retirement.\n"
+            "When the new or restored content repeats Memory retired as invalidated or legacy, "
+            "nothing is written and the refusal returns `conflicts`; show them to the user and, "
+            "if they address them, resend with their ids as `conflict_ids` and their words as "
+            "`conflict_instruction`. All shape problems come back together in `problems`. It is "
+            "recorded as an applied proposal with the quote and `conversation_ref` as evidence."
+        )
+    )
+    def memory_change_instructed(
+        memory_id: UUID,
+        operation: Annotated[str, _Choice(memory_changes.INSTRUCTED_OPERATIONS)],
+        instruction: str,
+        conversation_ref: str,
+        request_id: UUID,
+        retirement_kind: Annotated[str, _Choice(memory_changes.INSTRUCTED_RETIREMENT_KINDS)]
+        | None = None,
+        retire_reason: str | None = None,
+        content: str | None = None,
+        why: str | None = None,
+        restore_reason: str | None = None,
+        reversal_instruction: str | None = None,
+        conflict_ids: list[UUID] | None = None,
+        conflict_instruction: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            with capacity.doors("mcp"), db.transaction() as cur:
+                result = memory_changes.change_instructed(
+                    cur,
+                    memory_id,
+                    operation=operation,
+                    request_id=request_id,
+                    approval=_instructed(
+                        instruction,
+                        conversation_ref,
+                        conflict_ids=conflict_ids or [],
+                        conflict_instruction=conflict_instruction,
+                        reversal_instruction=reversal_instruction,
+                    ),
+                    actor=actor(),
+                    retirement_kind=retirement_kind,
+                    retire_reason=retire_reason,
+                    content=content,
+                    why=why,
+                    restore_reason=restore_reason,
                 )
                 return _plain({"ok": True, **result})
         except MashuError as error:
@@ -911,8 +1017,8 @@ def build_server() -> Any:
             "bootstrap card, so what was done goes in `what_changed`. Optional history, all "
             "written with the checkpoint or not at all: `attempts` for failed tries, "
             "`decisions` for reasons costly to re-derive, and `artifacts` for external "
-            f"sources, which join `evidence`. {state_contract} {_history_contract()} "
-            f"{_REFUSALS} {_write_success()}"
+            "sources, which become the checkpoint's evidence. "
+            f"{state_contract} {_history_contract()} {_REFUSALS} {_write_success()}"
         )
     )
     def task_checkpoint(
@@ -925,7 +1031,6 @@ def build_server() -> Any:
         open_questions: list[str] | None = None,
         blockers: list[str] | None = None,
         next_actions: list[str] | None = None,
-        evidence: list[UUID] | None = None,
         attempts: AttemptList | None = None,
         decisions: DecisionList | None = None,
         artifacts: ArtifactList | None = None,
@@ -944,7 +1049,6 @@ def build_server() -> Any:
                     open_questions=open_questions,
                     blockers=blockers,
                     next_actions=next_actions,
-                    evidence=evidence,
                     attempts=attempts,
                     decisions=decisions,
                     artifacts=artifacts,
