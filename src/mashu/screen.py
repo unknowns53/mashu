@@ -67,13 +67,31 @@ def terminal_session():
                 _ALTERNATE_ACTIVE = False
 
 
+class Quit(Exception):
+    """Raised by q on any screen, so every nested screen closes at once."""
+
+
+# Counted apart from _SESSION_DEPTH, which stays 0 when stdout is not a terminal.
+_ENTRY_DEPTH = 0
+
+
 def fullscreen(function):
     """Run a TUI entry point in the shared, re-entrant terminal session."""
 
     @wraps(function)
     def wrapped(*args, **kwargs):
-        with terminal_session():
-            return function(*args, **kwargs)
+        global _ENTRY_DEPTH
+        _ENTRY_DEPTH += 1
+        try:
+            with terminal_session():
+                return function(*args, **kwargs)
+        except Quit:
+            # Only the outermost entry point ends the run; a nested one passes q upward.
+            if _ENTRY_DEPTH > 1:
+                raise
+            return 0
+        finally:
+            _ENTRY_DEPTH -= 1
 
     return wrapped
 
