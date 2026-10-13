@@ -513,6 +513,7 @@ topic の本文、approach、open questions、blockers、next actions の本文�
 - 禁止パターンの一覧が見つからない場合は、検査を通すのではなく「検査できない」として扱う
 - エージェントのツール呼び出しの記法（`<parameter name=...>` など）を含む書き込みも入口で拒否される。ある引数の本文に次の引数が入り込んだ状態で保存されるのを防ぐためで、禁止パターンの一覧が無くても検査される
 - 拒否の応答は、当たった引数を `artifacts[0].locator` のように位置まで含めて `field` に、その本文の何文字目から何文字目かを `span` に返す。当たった文字列とパターンそのものは応答にもログにも出さない
+- 拒否の理由は書き直し方も示す。当たった位置がホームディレクトリのパスの中（Claude Code が `/` を `-` に置き換えたディレクトリ名を含む）なら、パスを `~` かリポジトリから書くよう示し、それ以外なら人を名前でなく役割で呼ぶよう示す
 - commit hook は staged path と blob、commit message を検査し、禁止パターンの構文エラーや staged blob の取得失敗でも commit を拒否する
 - Ledger、Memory の revision history、event_log は append-only で、DB の trigger が書き換えを拒否する
 - bootstrap と類似照合結果は退役した Memory の本文を返さない。明示的な `memory_get` / `mashu show` では管理判断のため全文・revision・evidence と退役種別・理由・後継または移動先を返す。invalidated / legacy conflict を採用するには理由を踏まえた明示指示が要る
