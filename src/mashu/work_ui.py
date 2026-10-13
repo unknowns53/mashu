@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import os
-import shutil
 from typing import Any
 from uuid import UUID
 
@@ -316,38 +315,11 @@ def _detail(row: dict[str, Any], view: str) -> str:
     return _project_detail(row) if view == "projects" else _task_detail(row)
 
 
-def _preview(row: dict[str, Any], view: str, limit: int) -> str:
-    if limit <= 0:
-        return ""
-    lines = _detail(row, view).splitlines()
-    shown = screen.fill(lines, limit)
-    if len(shown) == len(lines):
-        return "\n".join(lines)
-    shown = screen.fill(lines, limit - 1)
-    marker = screen.dim(f"  … {len(lines) - len(shown)} more line(s); ⏎ reads all")
-    return "\n".join([*shown, marker])
-
-
-def _preview_limit(head: str, keys: str, note: str, rows: int) -> int:
-    """The lines left for the preview once the list has its share.
-
-    The list keeps every row up to two thirds of the free lines, and never fewer than
-    eight, so a 24-line terminal still shows a usable list.
-    """
-    height = shutil.get_terminal_size((screen.WIDTH, 24)).lines
-    fixed = screen.height_of(head) + screen.height_of(keys)
-    # Two blank lines around the list, one above the keys, and the cursor's line.
-    free = height - fixed - (screen.height_of(note) if note else 0) - 4
-    listed = max(1, min(rows, max(8, free * 2 // 3)))
-    preview = free - listed
-    return preview if preview >= 2 else 0
-
-
 def _screen_text(
     rows: list[dict[str, Any]],
     at: int,
     view: str,
-    under: str,
+    note: str = "",
     *,
     total: int,
     query: str,
@@ -360,7 +332,8 @@ def _screen_text(
         listed[at] = screen.selected(listed[at])
     else:
         listed = [screen.dim("  no matches; / searches again, ← clears the search")]
-    return screen.list_screen(head, listed, at, under)
+    preview = _detail(rows[at], view) if rows else ""
+    return screen.list_with_preview(head, listed, at, preview, _keys(view), note)
 
 
 def _search(current: str) -> str | None:
@@ -388,8 +361,9 @@ def _confirm(question: str) -> bool:
 def _show_detail(row: dict[str, Any], view: str) -> None:
     body, offset = _detail(row, view), 0
     while True:
-        page, more = screen.paged(body, offset, _DETAIL_KEYS)
-        screen.paint(page + "\n\n" + _DETAIL_KEYS)
+        under = f"\n{_DETAIL_KEYS}"
+        page, more = screen.paged(body, offset, under)
+        screen.paint(page + "\n" + under)
         key = screen.getkey()
         if key == "q":
             raise screen.Quit()
@@ -578,8 +552,8 @@ def _reopen(dsn: str | None, row: dict[str, Any]) -> str:
     return screen.success(f"  ✓ reopened  {_short(task_id)}")
 
 
-def _page_size(head: str, under: str) -> int:
-    return max(1, screen.room_under(f"{head}\n\n\n{under}"))
+def _keys(view: str) -> str:
+    return _PROJECT_KEYS if view == "projects" else _TASK_KEYS
 
 
 @screen.fullscreen
@@ -606,12 +580,8 @@ def run(dsn: str | None = None, *, initial_view: str = "active") -> int:
         else:
             at = 0
 
-        keys = _PROJECT_KEYS if view == "projects" else _TASK_KEYS
         head = _heading(view, len(rows), len(all_rows), query)
-        limit = _preview_limit(head, keys, note, len(rows))
-        preview = _preview(rows[at], view, limit) if rows else ""
-        under = screen.trailer(f"{preview}\n" if preview else "", keys, note)
-        screen.paint(_screen_text(rows, at, view, under, total=len(all_rows), query=query))
+        screen.paint(_screen_text(rows, at, view, note, total=len(all_rows), query=query))
         key = screen.getkey()
         note = ""
 
@@ -652,7 +622,7 @@ def run(dsn: str | None = None, *, initial_view: str = "active") -> int:
             continue
 
         row = rows[at]
-        step = _page_size(head, under)
+        step = max(1, screen.list_room(head, _keys(view), len(rows)))
         if key in ("up", "k"):
             at = max(0, at - 1)
         elif key in ("down", "j"):

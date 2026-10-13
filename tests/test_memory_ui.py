@@ -4,8 +4,8 @@ import datetime as dt
 
 import pytest
 
-from conftest import keys, retire
-from mashu import db, memories, memory_ui, scopes, screen, temporary, topics
+from conftest import assert_steady_layout, keys, retire
+from mashu import application, db, memories, memory_ui, scopes, screen, temporary, topics
 
 RULE = "never report a run as finished without the output that proves it"
 REVISED = "never report a run as finished without pasting the output that proves it"
@@ -317,3 +317,20 @@ def test_columns_fit_the_values_listed_so_the_content_gets_the_rest():
         "scope_name": "a-very-long-scope-name",
     }
     assert memory_ui._columns([long], 79) == (13, 11)
+
+
+@pytest.mark.usefixtures("legacy_bodies")
+def test_moving_the_cursor_moves_neither_the_list_nor_the_keys(dsn, monkeypatch):
+    names = ["alpha", "bravo", "charlie", "delta", "echo"]
+    lengths = [1, 40, 5, 70, 15]
+    for name, words in zip(names, lengths, strict=True):
+        remember(dsn, f"{name} " + "check the output before reporting " * (words // 5))
+    monkeypatch.setenv("COLUMNS", "80")
+    monkeypatch.setenv("LINES", "24")
+    with db.transaction(dsn) as cur:
+        rows = application.memory_view(cur, "active")
+    frames = [
+        memory_ui._screen_text(rows, at, "active", "", total=len(rows), query="")
+        for at in range(len(rows))
+    ]
+    assert_steady_layout(frames, names, memory_ui._KEYS)

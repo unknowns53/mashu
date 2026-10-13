@@ -325,12 +325,10 @@ def _scopes_page(dsn: str | None) -> None:
             )
             lines.append(screen.selected(line) if index == at else line)
         detail = _scope_detail(rows[at]) if rows else "  No scopes yet. Press n to create one."
-        keys = screen.trailer(
-            detail,
-            "  n new scope   e edit   " + _LIST_KEYS.strip(),
-            note,
+        keys = "  n new scope   e edit   " + _LIST_KEYS.strip()
+        screen.paint(
+            screen.list_with_preview(_title("Scopes"), lines, at, detail, keys, note, more="")
         )
-        screen.paint(screen.list_screen(_title("Scopes"), lines, at, keys))
         key = screen.getkey()
         note = ""
         if key == "q":
@@ -452,12 +450,10 @@ def _topics_page(dsn: str | None) -> None:
             )
             lines.append(screen.selected(line) if index == at else line)
         detail = _topic_detail(rows[at]) if rows else "  No topics yet. Press n to create one."
-        keys = screen.trailer(
-            detail,
-            "  n new topic   e edit   x remove   " + _LIST_KEYS.strip(),
-            note,
+        keys = "  n new topic   e edit   x remove   " + _LIST_KEYS.strip()
+        screen.paint(
+            screen.list_with_preview(_title("Topics"), lines, at, detail, keys, note, more="")
         )
-        screen.paint(screen.list_screen(_title("Topics"), lines, at, keys))
         key = screen.getkey()
         note = ""
         if key == "q":
@@ -589,12 +585,10 @@ def _routes_page(dsn: str | None) -> None:
             detail = f"  ── {rows[at]['path_prefix']}\n  {destination}"
         else:
             detail = "  No routes yet. Add a scoped route with n or an ignored path with i."
-        keys = screen.trailer(
-            detail,
-            "  n scoped route   i ignore path   e edit   x remove   " + _LIST_KEYS.strip(),
-            note,
+        keys = "  n scoped route   i ignore path   e edit   x remove   " + _LIST_KEYS.strip()
+        screen.paint(
+            screen.list_with_preview(_title("Routes"), lines, at, detail, keys, note, more="")
         )
-        screen.paint(screen.list_screen(_title("Routes"), lines, at, keys))
         key = screen.getkey()
         note = ""
         if key == "q":
@@ -739,8 +733,7 @@ def _top_text(at: int, note: str = "") -> str:
     for index, (label, detail) in enumerate(_TOP_ITEMS):
         line = screen.clip(f"    {screen.pad(label, 23)} {detail}", screen.terminal_width())
         rows.append(screen.selected(line) if index == at else line)
-    keys = screen.trailer(_TOP_KEYS, note)
-    return screen.list_screen(_title("Settings & health"), rows, at, keys)
+    return screen.list_screen(_title("Settings & health"), rows, at, _TOP_KEYS, note)
 
 
 def _health_page(dsn: str | None) -> None:

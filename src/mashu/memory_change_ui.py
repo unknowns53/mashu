@@ -382,7 +382,8 @@ def run(dsn: str | None = None) -> int:
                     f"{_title()}\n{screen.bold(f'{len(rows)} pending Memory change(s)')}",
                     [_summary(row) for row in rows],
                     at,
-                    screen.trailer(_KEYS, note),
+                    _KEYS,
+                    note,
                 )
             )
         key = screen.getkey()

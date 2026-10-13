@@ -110,8 +110,8 @@ def _field(label: str, value: Any) -> str:
     return f"{screen.bold(prefix)}{screen.clip(text, max(1, screen.terminal_width() - 12))}"
 
 
-def _detail(row: dict[str, Any], view: str, limit: int = 8) -> str:
-    """The selected row's complete decision fields, bounded below the list."""
+def _detail(row: dict[str, Any], view: str) -> str:
+    """The selected row's complete decision fields, cut to the room below the list."""
     if view == "temporary":
         lines = [
             screen.bold(f"  ── temporary {_short(row['context_id'])}"),
@@ -148,13 +148,7 @@ def _detail(row: dict[str, Any], view: str, limit: int = 8) -> str:
             ]
         )
 
-    physical: list[str] = []
-    for line in lines:
-        physical.extend(line.splitlines() or [""])
-    if len(physical) > limit:
-        hidden = len(physical) - limit + 1
-        physical = physical[: limit - 1] + [screen.dim(f"  … {hidden} more detail line(s)")]
-    return "\n".join(physical)
+    return "\n".join(lines)
 
 
 def _full_detail(row: dict[str, Any]) -> str:
@@ -275,7 +269,7 @@ def _screen_text(
     if not rows:
         rendered.append(screen.dim("  no rows match; / searches again, ← clears the search"))
     detail = _detail(rows[at], view) if rows else ""
-    return screen.list_screen(head, rendered, at, screen.trailer(detail, _KEYS, note))
+    return screen.list_with_preview(head, rendered, at, detail, _KEYS, note)
 
 
 def _matches(row: dict[str, Any], view: str, query: str) -> bool:
@@ -844,9 +838,7 @@ def run(dsn: str | None = None) -> int:
             scroll, back = 0, []
             continue
         head = _heading(view, len(rows), len(all_rows), query)
-        under = screen.trailer(_detail(row, view), _KEYS, note)
-        page = screen.room_under(head, under)
-        moved = _move(at[view], len(rows), key, page)
+        moved = _move(at[view], len(rows), key, screen.list_room(head, _KEYS, len(rows)))
         if moved != at[view] or key in {
             "up",
             "down",

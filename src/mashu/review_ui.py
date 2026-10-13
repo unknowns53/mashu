@@ -125,11 +125,28 @@ def _queue_preview(row: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _queue_head(
+    rows: list[dict[str, Any]], hidden: int, *, query: str = "", total: int | None = None
+) -> str:
+    total = len(rows) if total is None else total
+    if query:
+        shown_query = " ".join(query.split())
+        head = f"{len(rows)} of {total} waiting for review  ·  search: {shown_query}"
+    else:
+        head = f"{len(rows)} waiting for review"
+    if hidden:
+        head += f"  ·  {hidden} deferred, d includes them"
+    elif any(row.get("deferred_at") for row in rows):
+        head += "  ·  deferred included, d hides them"
+    return f"{_title()}\n{screen.bold(head)}"
+
+
 def _queue_screen(
     rows: list[dict[str, Any]],
     at: int,
     hidden: int,
     keys: str,
+    note: str = "",
     *,
     query: str = "",
     total: int | None = None,
@@ -146,21 +163,9 @@ def _queue_screen(
             width - 1,
         )
         lines.append(screen.selected(line) if number == at else line)
-
-    total = len(rows) if total is None else total
-    if query:
-        shown_query = " ".join(query.split())
-        head = f"{len(rows)} of {total} waiting for review  ·  search: {shown_query}"
-    else:
-        head = f"{len(rows)} waiting for review"
-    if hidden:
-        head += f"  ·  {hidden} deferred, d includes them"
-    elif any(row.get("deferred_at") for row in rows):
-        head += "  ·  deferred included, d hides them"
+    head = _queue_head(rows, hidden, query=query, total=total)
     preview = _queue_preview(rows[at]) if rows else screen.warning("  no candidates match")
-    return screen.list_screen(
-        f"{_title()}\n{screen.bold(head)}", lines, at, screen.trailer(preview, keys)
-    )
+    return screen.list_with_preview(head, lines, at, preview, keys, note)
 
 
 def _item_text(row: dict[str, Any], place: int, total: int) -> str:
@@ -391,11 +396,14 @@ def _search(current: str) -> str | None:
         return None
 
 
-def _move(at: int, total: int, key: str) -> int:
-    """Move through candidates the same way from the queue and item views."""
+def _move(at: int, total: int, key: str, page: int) -> int:
+    """Move through candidates the same way from the queue and item views.
+
+    A page is the queue's list room in both, so PgDn lands where the queue would show it.
+    """
     if total <= 0:
         return 0
-    page = max(1, screen.room_under(_QUEUE_KEYS) - 7)
+    page = max(1, page)
     if key in ("down", "j"):
         return min(total - 1, at + 1)
     if key in ("up", "k"):
@@ -465,7 +473,8 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
                     rows,
                     at,
                     hidden,
-                    screen.trailer(_queue_keys(show_deferred), note),
+                    _queue_keys(show_deferred),
+                    note,
                     query=query,
                     total=len(all_rows),
                 )
@@ -537,7 +546,9 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
             scroll = back.pop() if back else 0
             continue
 
-        moved = _move(at, len(rows), key)
+        head = _queue_head(rows, hidden, query=query, total=len(all_rows))
+        page = screen.list_room(head, _queue_keys(show_deferred), len(rows))
+        moved = _move(at, len(rows), key, page)
         if moved != at or key in (
             "down",
             "j",

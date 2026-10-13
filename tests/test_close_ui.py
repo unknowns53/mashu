@@ -5,7 +5,15 @@ from uuid import uuid4
 
 import pytest
 
-from conftest import committed_task, expire, keys, new_project, task_row, update_task
+from conftest import (
+    assert_steady_layout,
+    committed_task,
+    expire,
+    keys,
+    new_project,
+    task_row,
+    update_task,
+)
 from mashu import close_ui, db
 
 MERGED = "deleted before the merge d178ecb7, nothing on main references it"
@@ -17,6 +25,8 @@ DETAIL = {
     "blockers": ["await the load certificate"],
     "next_actions": ["run the loaded trial"],
 }
+
+STEPS = [f"step {n} of the loaded trial and its checks" for n in range(5)]
 
 pytestmark = pytest.mark.usefixtures("known_screen")
 
@@ -175,12 +185,27 @@ def test_the_project_column_fits_the_longest_name_and_activity_is_spelled_out():
             "task": {"task_id": uuid4(), "project_name": name, "name": "a task"},
             "activity": activity,
             "age_days": 3,
+            "heading": "",
+            "state": {},
         }
         for name, activity in (("mythogenesis", "active"), ("output-style", "dormant"))
     ]
 
-    text = close_ui._screen_text(rows, 0, close_ui._KEYS)
+    text = close_ui._screen_text(rows, 0)
 
     assert text.startswith("Close tasks\n")
     assert "mythogenesis  active" in text and "output-style  dormant" in text
     assert "…" not in text
+
+
+def test_moving_the_cursor_moves_neither_the_list_nor_the_keys(dsn, monkeypatch):
+    names = ["alpha rail", "bravo hatch", "charlie mount", "delta keel"]
+    a_task(dsn, names[0])
+    a_task(dsn, names[1], propose="completed", **DETAIL)
+    a_task(dsn, names[2], goal="fit the mount")
+    a_task(dsn, names[3], propose="abandoned", next_actions=STEPS)
+    monkeypatch.setenv("COLUMNS", "80")
+    monkeypatch.setenv("LINES", "24")
+    rows = close_ui._open_tasks(dsn, None)
+    frames = [close_ui._screen_text(rows, at, total=len(rows)) for at in range(len(rows))]
+    assert_steady_layout(frames, names, close_ui._KEYS)

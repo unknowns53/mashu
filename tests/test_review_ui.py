@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from conftest import candidate, keys, read_through, remember, retire
+from conftest import assert_steady_layout, candidate, keys, read_through, remember, retire
 from mashu import db, nominations, review_ui, screen, topics
 
 RULE = "run the migration before starting the local server, every time"
@@ -158,7 +158,7 @@ def test_zero_result_search_can_be_researched_and_empty_search_restores_the_queu
     ],
 )
 def test_candidate_navigation_is_shared_by_queue_and_item(start, key, expected):
-    assert review_ui._move(start, 5, key) == expected
+    assert review_ui._move(start, 5, key, 8) == expected
 
 
 @pytest.mark.parametrize(
@@ -300,3 +300,16 @@ def test_the_queue_is_named_and_d_includes_deferred_candidates_from_inside(
     assert "Review\n1 waiting for review  ·  1 deferred, d includes them" in out
     assert "Review\n2 waiting for review  ·  deferred included, d hides them" in out
     assert "--all" not in out
+
+
+def test_moving_the_cursor_moves_neither_the_list_nor_the_keys(dsn, monkeypatch):
+    names = ["alpha migration", "bravo timezone", "charlie standby"]
+    made = [a_candidate(dsn, f"{name} rule") for name in names]
+    with db.transaction(dsn) as cur:
+        nominations.defer(cur, made[1]["nomination_id"], actor="user", reason="after the release")
+    monkeypatch.setenv("COLUMNS", "80")
+    monkeypatch.setenv("LINES", "24")
+    rows, hidden = review_ui._queue(dsn, True)
+    keys = review_ui._queue_keys(True)
+    frames = [review_ui._queue_screen(rows, at, hidden, keys) for at in range(len(rows))]
+    assert_steady_layout(frames, names, keys)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import shutil
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -139,8 +138,8 @@ def _field(label: str, value: Any, label_width: int, *, value_style=None) -> str
     return f"  {screen.bold(shown_label)}{shown}"
 
 
-def _detail(row: dict[str, Any], limit: int | None = None) -> str:
-    """The selected task's decision context, kept inside the terminal height."""
+def _detail(row: dict[str, Any]) -> str:
+    """The selected task's decision context, cut to the room below the list."""
     task = row["task"]
     title_prefix = f"  ── {_short(task['task_id'])}  "
     title = screen.clip(task["name"], max(1, screen.terminal_width() - screen.cells(title_prefix)))
@@ -192,10 +191,6 @@ def _detail(row: dict[str, Any], limit: int | None = None) -> str:
     if len(lines) == 2 and not proposal:
         lines.append(screen.dim("  (no state written)"))
 
-    if limit is not None and len(lines) > limit:
-        hidden = len(lines) - max(1, limit - 1)
-        lines = lines[: max(1, limit - 1)]
-        lines.append(screen.dim(f"  … {hidden} more detail line(s)"))
     return "\n".join(lines)
 
 
@@ -215,7 +210,12 @@ def _heading(rows: list[dict[str, Any]], total: int, query: str) -> str:
 
 
 def _screen_text(
-    rows: list[dict[str, Any]], at: int, under: str, *, total: int | None = None, query: str = ""
+    rows: list[dict[str, Any]],
+    at: int,
+    note: str = "",
+    *,
+    total: int | None = None,
+    query: str = "",
 ) -> str:
     """The whole screen: how many are open, the list, the cursor's task, the keys."""
     width = screen.terminal_width()
@@ -227,7 +227,8 @@ def _screen_text(
         lines.append(screen.selected(line) if number == at else line)
     if not rows:
         lines.append(screen.dim("  no tasks match; / searches again, ← clears the search"))
-    return screen.list_screen(head, lines, at, under)
+    detail = _detail(rows[at]) if rows else ""
+    return screen.list_with_preview(head, lines, at, detail, _KEYS, note)
 
 
 def _matches(row: dict[str, Any], query: str) -> bool:
@@ -274,18 +275,6 @@ def _find(rows: list[dict[str, Any]], task_id: UUID | None) -> int | None:
     if task_id is None:
         return None
     return next((number for number, row in enumerate(rows) if _task_id(row) == task_id), None)
-
-
-def _detail_limit(head: str, note: str) -> int:
-    """Leave room for a list row, blank separators, keys, and optional feedback."""
-    terminal_lines = shutil.get_terminal_size((screen.WIDTH, 24)).lines
-    fixed = screen.height_of(head) + screen.height_of(_KEYS) + screen.height_of(note) + 6
-    return max(2, min(12, terminal_lines - fixed))
-
-
-def _page_size(head: str, under: str) -> int:
-    """The number of one-line tasks that fit on the current list page."""
-    return max(1, screen.room_under(f"{head}\n\n\n{under}"))
 
 
 def _help() -> None:
@@ -404,9 +393,7 @@ def run(
             at = 0
 
         head = _heading(rows, len(all_rows), query)
-        detail = _detail(rows[at], _detail_limit(head, note)) if rows else ""
-        under = screen.trailer(f"{detail}\n" if detail else "", _KEYS, note)
-        screen.paint(_screen_text(rows, at, under, total=len(all_rows), query=query))
+        screen.paint(_screen_text(rows, at, note, total=len(all_rows), query=query))
         key = screen.getkey()
         note = ""  # it has been read now; the next screen starts clean
 
@@ -433,7 +420,7 @@ def run(
             continue
 
         row = rows[at]
-        step = _page_size(head, under)
+        step = max(1, screen.list_room(head, _KEYS, len(rows)))
         if key in ("up", "k"):
             at = max(0, at - 1)
             selected_id = _task_id(rows[at])

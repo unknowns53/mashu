@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import committed_task, expire, keys, new_project, task_row, update_task
+from conftest import (
+    assert_steady_layout,
+    committed_task,
+    expire,
+    keys,
+    new_project,
+    task_row,
+    update_task,
+)
 from mashu import db, projects, routing, scopes, screen, task_history, tasks, work_ui
 
 STATE = {
@@ -13,6 +21,8 @@ STATE = {
     "blockers": ["await load certificate"],
     "next_actions": ["run the loaded trial"],
 }
+
+STEPS = [f"step {n} of the loaded trial and its checks" for n in range(5)]
 
 pytestmark = pytest.mark.usefixtures("known_screen")
 
@@ -283,3 +293,30 @@ def test_history_fields_sit_under_their_entry_and_wrap_under_the_value(monkeypat
     assert lines[1].startswith("    -  agent")
     assert lines[2].startswith("      changed   word")
     assert all(line.startswith(" " * 16) and line[16] != " " for line in lines[3:])
+
+
+def test_moving_the_cursor_moves_neither_the_list_nor_the_keys(dsn, monkeypatch):
+    names = ["alpha hull", "bravo rail", "charlie hatch"]
+    states = [{}, STATE, {**STATE, "next_actions": STEPS}]
+    for name, state in zip(names, states, strict=True):
+        task_id = make_task(dsn, name)
+        if state:
+            with db.transaction(dsn) as cur:
+                update_task(cur, task_id, **state)
+    monkeypatch.setenv("COLUMNS", "80")
+    monkeypatch.setenv("LINES", "24")
+    rows = work_ui._load(dsn, "active")
+    frames = [
+        work_ui._screen_text(rows, at, "active", total=len(rows), query="")
+        for at in range(len(rows))
+    ]
+    assert_steady_layout(frames, names, work_ui._TASK_KEYS)
+
+
+def test_the_last_page_of_a_detail_is_as_tall_as_the_first(monkeypatch):
+    monkeypatch.setenv("LINES", "24")
+    text = "title\n\n\n" + "\n".join(f"line {n}" for n in range(30))
+    first, more = screen.paged(text, 0, work_ui._DETAIL_KEYS)
+    last, end = screen.paged(text, more, work_ui._DETAIL_KEYS)
+    assert more and not end
+    assert len(last.split("\n")) == len(first.split("\n"))

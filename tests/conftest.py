@@ -137,6 +137,26 @@ def read_through(monkeypatch: pytest.MonkeyPatch, text: str, under: str, *after:
     keys(monkeypatch, "", *spaces, *after)
 
 
+def assert_steady_layout(frames: list[str], names: list[str], keys: str) -> None:
+    """The list's first and last rows and the keys keep their lines in every frame.
+
+    Each name is the text of one list row; its first occurrence is its row, since the
+    preview always sits under the list. The keys end every frame, which fills the
+    terminal but for the cursor's line under it.
+    """
+    height = shutil.get_terminal_size().lines
+    places = set()
+    for frame in frames:
+        lines = frame.splitlines()
+        rows = [next(n for n, line in enumerate(lines) if name in line) for name in names]
+        assert lines[-len(keys.splitlines()) :] == keys.splitlines()
+        assert len(lines) == height - 1
+        places.add((min(rows), max(rows)))
+    assert len(places) == 1
+    # Otherwise nothing was tested: the previews must differ in length.
+    assert len({sum(1 for line in frame.splitlines() if line.strip()) for frame in frames}) > 1
+
+
 def getkeys(monkeypatch: pytest.MonkeyPatch, *pressed: str) -> None:
     """Hand a raw-key screen its keys, one per read."""
     values = iter(pressed)
