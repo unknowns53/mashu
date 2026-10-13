@@ -14,7 +14,8 @@ from conftest import (
     task_row,
     update_task,
 )
-from mashu import close_ui, db
+from mashu import close_ui, db, screen, task_actions
+from mashu.errors import MashuError
 
 MERGED = "deleted before the merge d178ecb7, nothing on main references it"
 DETAIL = {
@@ -209,3 +210,79 @@ def test_moving_the_cursor_moves_neither_the_list_nor_the_keys(dsn, monkeypatch)
     rows = close_ui._open_tasks(dsn, None)
     frames = [close_ui._screen_text(rows, at, total=len(rows)) for at in range(len(rows))]
     assert_steady_layout(frames, names, close_ui._KEYS)
+
+
+def test_y_takes_only_standing_proposals_on_their_outcome_and_grounds(dsn, monkeypatch, capsys):
+    done = a_task(dsn, "fit the rail", propose="completed")
+    dropped = a_task(dsn, "drop the hatch", propose="abandoned")
+    stale = a_task(dsn, "move the keel", propose="completed", goal="one more check")
+    bare = a_task(dsn, "paint the hull")
+    keys(monkeypatch, "y", "y", "q")
+
+    assert close_ui.run(dsn) == 0
+
+    for task_id, outcome in ((done, "completed"), (dropped, "abandoned")):
+        closed = task_row(dsn, task_id)["task"]
+        assert (closed["status"], closed["outcome"], closed["close_reason"]) == (
+            "closed",
+            outcome,
+            MERGED,
+        )
+    assert task_row(dsn, stale)["proposal"]["stale"]
+    assert (status(dsn, stale), status(dsn, bare)) == ("open", "open")
+    out = capsys.readouterr().out
+    assert "close 2 task(s)" in out and "move the keel" not in out.split("close 2 task(s)")[1][:200]
+    assert "closed 2 task(s)" in out and "1 stale proposal(s) left for review" in out
+
+
+def test_anything_but_y_at_the_confirmation_closes_nothing(dsn, monkeypatch):
+    task_ids = [a_task(dsn, name, propose="completed") for name in ("fit the rail", "drop it")]
+    keys(monkeypatch, "y", "n", "q")
+
+    assert close_ui.run(dsn) == 0
+    for task_id in task_ids:
+        row = task_row(dsn, task_id)
+        assert row["task"]["status"] == "open" and row["proposal"]["reason"] == MERGED
+
+
+def test_a_failed_close_stops_y_and_keeps_the_ones_already_closed(dsn, monkeypatch, capsys):
+    task_ids = [a_task(dsn, f"task {n}", propose="completed") for n in range(3)]
+    accept = task_actions.accept_close_proposal
+    calls = []
+
+    def second_fails(cur, task_id, **kw):
+        calls.append((task_id, kw["actor"]))
+        if len(calls) == 2:
+            raise MashuError("the task or close proposal changed")
+        return accept(cur, task_id, **kw)
+
+    monkeypatch.setattr(task_actions, "accept_close_proposal", second_fails)
+    keys(monkeypatch, "y", "y", "q")
+
+    assert close_ui.run(dsn) == 0
+    assert [actor for _, actor in calls] == ["user", "user"]
+    assert [status(dsn, task_id) for task_id, _ in calls] == ["closed", "open"]
+    assert sum(status(dsn, task_id) == "open" for task_id in task_ids) == 2
+    failed = str(calls[1][0])[:8]
+    assert f"{failed} not closed: the task or close proposal changed" in capsys.readouterr().out
+
+
+def test_the_keys_fit_80_columns_and_a_long_confirmation_fits_the_screen(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "80")
+    monkeypatch.setenv("LINES", "24")
+    for keys_text in (close_ui._KEYS, close_ui._ALL_KEYS):
+        assert all(screen.cells(line) <= 80 for line in keys_text.splitlines())
+    rows = [
+        {
+            "task": {"task_id": uuid4(), "name": f"task {n} " + "long name " * 9},
+            "proposal": {"outcome": "completed", "stale": False},
+        }
+        for n in range(30)
+    ]
+
+    text = close_ui._all_screen(rows, 2)
+
+    lines = text.splitlines()
+    assert len(lines) == 23 and all(screen.cells(line) <= 80 for line in lines)
+    assert lines[-1] == close_ui._ALL_KEYS
+    assert f"… and {30 - (23 - 7)} more" in text

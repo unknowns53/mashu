@@ -77,21 +77,24 @@ def get_scope(cur: psycopg.Cursor, name: str) -> dict[str, Any] | None:
     return cur.fetchone()
 
 
-def require_scope(cur: psycopg.Cursor, name: str) -> dict[str, Any]:
-    """The scope by that name, or an error that says which names exist."""
+def require_scope(cur: psycopg.Cursor, name: str, *, also: tuple[str, ...] = ()) -> dict[str, Any]:
+    """The scope by that name, or an error that says which names exist.
+
+    `also` names what the caller accepts beside scopes, listed first among the valid names.
+    """
     row = get_scope(cur, name)
     if row is not None:
         return row
     cur.execute("SELECT name FROM scope ORDER BY name")
-    known = [r["name"] for r in cur.fetchall()]
-    listed = ", ".join(known) if known else "none yet"
+    known = [*also, *(r["name"] for r in cur.fetchall())]
+    listed = f"{'valid names' if also else 'existing scopes'}: {', '.join(known) or 'none yet'}"
     cur.execute("SELECT 1 FROM topic WHERE name = %s AND archived_at IS NULL", (name,))
     if cur.fetchone() is not None:
         raise MashuError(
             f"'{name}' is a topic, not a scope; read its rules with memory_list(topic='{name}'), "
-            f"and pass a scope name or nothing as scope (existing scopes: {listed})"
+            f"and pass a scope name or nothing as scope ({listed})"
         )
-    raise MashuError(f"no scope named '{name}' (existing scopes: {listed})")
+    raise MashuError(f"no scope named '{name}' ({listed})")
 
 
 def list_scopes(cur: psycopg.Cursor) -> list[dict[str, Any]]:

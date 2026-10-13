@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 
 from conftest import remember, retire
-from mashu import bootstrap, capacity, config, memories, nominations, scopes, topics
+from mashu import bootstrap, capacity, config, memories, nominations, scopes, topics, vault
 from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
@@ -378,7 +378,6 @@ def test_memory_list_and_admit_reach_a_topic_by_name_for_this_server_session(mcp
     answer = mcp(
         "memory_admit",
         request_id=str(uuid4()),
-        approval_kind="user_instruction",
         instruction="remember this for release branches",
         content=f"tag the release commit before branching {uuid4().hex}",
         delivery="topic",
@@ -395,7 +394,6 @@ def test_memory_admit_opens_a_new_topic_only_with_its_trigger_and_only_if_the_ru
 
     trigger = "Before branching a release"
     base = {
-        "approval_kind": "user_instruction",
         "instruction": "remember this for release branches",
         "delivery": "topic",
         "topic": "release",
@@ -432,3 +430,144 @@ def test_memory_admit_opens_a_new_topic_only_with_its_trigger_and_only_if_the_ru
     assert (opened["trigger"], opened["scope_id"]) == (trigger, scope["scope_id"])
     assert made["memory"]["topic_id"] == str(opened["topic_id"])
     assert created["approval_source"]["instruction"] == base["instruction"]
+
+
+# a topic names where its long form lives, and a vault note is found without being read
+
+NOTE = "Projects/Game/Difficulty.md"
+
+
+@pytest.fixture
+def vault_root(tmp_path, monkeypatch):
+    """A vault holding one note, named the way MASHU_VAULT_ROOT names the real one."""
+    note = tmp_path / NOTE
+    note.parent.mkdir(parents=True)
+    note.write_text("the long form", encoding="utf-8")
+    monkeypatch.setenv("MASHU_VAULT_ROOT", str(tmp_path))
+    return tmp_path
+
+
+def test_the_resolver_lands_inside_the_vault_and_refuses_to_leave_it(tmp_path, monkeypatch):
+    monkeypatch.delenv("MASHU_VAULT_ROOT", raising=False)
+    assert vault.resolve(NOTE) is None
+    assert vault.note(NOTE) is None
+
+    (tmp_path / "Projects").mkdir()
+    (tmp_path / NOTE).parent.mkdir()
+    (tmp_path / NOTE).write_text("the long form", encoding="utf-8")
+    monkeypatch.setenv("MASHU_VAULT_ROOT", str(tmp_path))
+
+    found = vault.resolve(f"{NOTE}#Levers")
+    assert (found.path, found.fragment, found.exists) == (tmp_path / NOTE, "Levers", True)
+    assert vault.resolve("Projects/Game/Placement.md").exists is False
+    for escaping, reason in (
+        ("../outside.md", "climbs out"),
+        ("Projects/../../outside.md", "climbs out"),
+        ("/etc/hosts", "not a relative path"),
+        ("~/notes/x.md", "not a relative path"),
+        ("#Levers", "names no file"),
+    ):
+        with pytest.raises(MashuError, match=reason):
+            vault.resolve(escaping)
+        assert vault.note(escaping) is None
+
+    (tmp_path / "Projects" / "away").symlink_to(tmp_path.parent)
+    with pytest.raises(MashuError, match="leads out of the vault"):
+        vault.resolve("Projects/away/x.md")
+    # A repository path whose first folder the vault does not have is not taken for a note.
+    assert vault.note("docs/mashu-v2.md") is None
+    assert vault.note("Projects/Game/Placement.md").exists is False
+
+
+def test_a_topic_source_is_set_cleared_and_read_with_where_it_lands(cur, vault_root):
+    subject = topics.create_topic(
+        cur, name="difficulty", trigger=TRIGGER, source=f"{NOTE}#Levers", actor="user"
+    )
+    assert subject["source"] == f"{NOTE}#Levers"
+
+    read = topics.topic_rules(cur, "difficulty")["topic"]
+    assert read["source"] == f"{NOTE}#Levers"
+    assert (read["source_path"], read["source_exists"]) == (str(vault_root / NOTE), True)
+
+    topics.update_topic(cur, subject["topic_id"], actor="user", source="Projects/Game/Gone.md")
+    read = topics.topic_rules(cur, "difficulty")["topic"]
+    assert read["source_exists"] is False
+    assert topics.source_text(read["source"]).endswith("Gone.md (not found)")
+
+    topics.update_topic(cur, subject["topic_id"], actor="user", source="docs/mashu-v2.md#6")
+    read = topics.topic_rules(cur, "difficulty")["topic"]
+    assert read["source"] == "docs/mashu-v2.md#6" and "source_path" not in read
+
+    topics.update_topic(cur, subject["topic_id"], actor="user", clear_source=True)
+    assert topics.topic_rules(cur, "difficulty")["topic"]["source"] is None
+    cur.execute("SELECT detail FROM event_log WHERE event_type = 'topic_updated' ORDER BY event_id")
+    moves = [(row["detail"]["from"]["source"], row["detail"]["to"]["source"]) for row in cur]
+    assert moves[-1] == ("docs/mashu-v2.md#6", None)
+
+
+def test_a_topic_source_without_a_vault_is_read_as_written(cur, monkeypatch):
+    monkeypatch.delenv("MASHU_VAULT_ROOT", raising=False)
+    topics.create_topic(cur, name="difficulty", trigger=TRIGGER, source=NOTE, actor="user")
+
+    read = topics.topic_rules(cur, "difficulty")["topic"]
+    assert read["source"] == NOTE
+    assert "source_path" not in read and "source_exists" not in read
+
+
+@pytest.mark.parametrize(
+    ("source", "refusal"),
+    [
+        ("/Users/someone/vault/x.md", "not a relative path"),
+        ("../x.md", "climbs out"),
+        ("Projects/SECRETMARKER3.md", "banned pattern"),
+        ("Projects/a\nb.md", "one line"),
+        ("x" * (topics.SOURCE_LIMIT + 1), "at most"),
+    ],
+)
+def test_a_topic_source_that_is_not_a_relative_line_is_refused(cur, source, refusal):
+    with pytest.raises((MashuError, RefusedError), match=refusal):
+        topics.create_topic(cur, name="difficulty", trigger=TRIGGER, source=source, actor="user")
+    assert topics.get_topic(cur, "difficulty") is None
+
+
+def test_memory_admit_opens_a_topic_with_its_source_and_memory_list_follows_it(
+    mcp, dsn, vault_root
+):
+    from mashu import db
+
+    name = f"sourced {uuid4().hex[:8]}"
+    request = {
+        "request_id": str(uuid4()),
+        "instruction": "remember this for difficulty work",
+        "content": f"read the difficulty note before changing levers {uuid4().hex}",
+        "delivery": "topic",
+        "topic": name,
+        "topic_trigger": "Before changing difficulty",
+        "topic_source": f"{NOTE}#Levers",
+    }
+    assert mcp("memory_admit", **request)["ok"] is True
+
+    read = mcp("memory_list", topic=name)["topic"]
+    assert read["source"] == f"{NOTE}#Levers"
+    assert (read["source_path"], read["source_exists"]) == (str(vault_root / NOTE), True)
+    with db.transaction(dsn) as cur:
+        cur.execute(
+            "SELECT detail FROM event_log WHERE event_type = 'topic_created' "
+            "AND detail ->> 'name' = %s",
+            (name,),
+        )
+        assert cur.fetchone()["detail"]["source"] == f"{NOTE}#Levers"
+
+    other = mcp(
+        "memory_admit",
+        **{
+            **request,
+            "request_id": str(uuid4()),
+            "content": f"another rule {uuid4().hex}",
+            "topic_trigger": None,
+            "topic_source": "Projects/Other.md",
+        },
+    )
+    assert other["ok"] is False and "omit topic_source" in other["error"]
+    lone = mcp("memory_admit", **{**request, "topic": None, "topic_trigger": None})
+    assert lone["ok"] is False and "topic_source" in lone["error"]

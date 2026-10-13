@@ -57,13 +57,13 @@ def count(cur, rows):
 
 
 def two_pains(cur, scope_id=None):
-    """A rederivation candidate, standing on the two frictions that proved it."""
+    """A candidate from one incident, with a second incident landed under it."""
     first = ledger.report_pain(
-        cur, kind="friction", what="looked it up", prevention=HOLE, actor="agent", scope_id=scope_id
+        cur, kind="incident", what="looked it up", prevention=HOLE, actor="agent", scope_id=scope_id
     )
     second = ledger.report_pain(
         cur,
-        kind="friction",
+        kind="incident",
         what="looked it up again",
         prevention=SAME_HOLE,
         actor="agent",
@@ -188,7 +188,7 @@ def test_the_queue_hands_over_the_pains_and_not_their_ids(cur):
     assert [row["ledger_id"] for row in rows] == [first["ledger_id"], second["ledger_id"]]
     assert rows[0]["what"] == "looked it up"
     assert rows[1]["prevention"] == SAME_HOLE
-    assert all(row["kind"] == "friction" for row in rows)
+    assert all(row["kind"] == "incident" for row in rows)
 
 
 # an instruction an agent says it was given (5.1, path three)
@@ -323,7 +323,7 @@ def test_evidence_is_added_once_and_never_to_a_candidate_already_decided(cur):
 
     admit(cur, nomination_id)
     later = ledger.report_pain(
-        cur, kind="friction", what="looked it up", prevention=OTHER_HOLE, actor="agent"
+        cur, kind="incident", what="looked it up", prevention=OTHER_HOLE, actor="agent"
     )
     assert nominations.add_evidence(cur, nomination_id, later["ledger_id"], actor="agent") is None
 
@@ -455,7 +455,7 @@ def test_memory_admit_takes_one_of_a_nomination_at_its_version_or_content(
 
     # Argument checks answer before any connection; a missing database proves it.
     monkeypatch.setenv("MASHU_DATABASE_URL", "dbname=mashu_test_never_created")
-    base = {"request_id": str(uuid4()), "approval_kind": "user_instruction", "instruction": "r"}
+    base = {"request_id": str(uuid4()), "instruction": "r"}
     result = asyncio.run(server.build_server().call_tool("memory_admit", {**base, **arguments}))
     assert result.structured_content["ok"] is False
     assert message in result.structured_content["error"]

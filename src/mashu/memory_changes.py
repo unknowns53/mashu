@@ -20,7 +20,7 @@ from mashu import (
     redact,
     topics,
 )
-from mashu.errors import MalformedRequestError, MashuError
+from mashu.errors import MalformedRequestError, MashuError, OverLimit, RetiredConflictError
 
 Operation = Literal["retire", "replace", "restore", "redeliver"]
 #: The kinds a proposal may set. `legacy` marks rows retired before kinds existed, so only a
@@ -476,6 +476,12 @@ def propose(
     )
     if problems:
         raise MalformedRequestError(problems)
+    # A reference is a locator rather than a body, so its home directory is kept from ~
+    # instead of being refused.
+    evidence = [
+        {**row, "ref": approvals.home_relative(row["ref"])} if row.get("ref") else row
+        for row in evidence
+    ]
     _gate_texts(evidence, retire_reason, restore_reason)
     current = None
     if change_id is not None:
@@ -744,12 +750,12 @@ def apply(
     request_id: UUID,
     approval: dict[str, Any],
     actor: str,
-    redeliver: dict[str, Any] | None = None,
+    call: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply the exact displayed proposal once, atomically with its evidence and event.
 
-    `redeliver` is the one-call request a proposal was made for, stored with this request
-    so its request_id cannot be replayed as another change.
+    `call` is the one-call request a proposal was made for, keyed by the kind of call, stored
+    with this request so its request_id cannot be replayed as another change.
     """
     cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (str(request_id),))
     cur.execute("SELECT * FROM memory_change WHERE apply_request_id = %s", (request_id,))
@@ -757,8 +763,7 @@ def apply(
     request = approvals.json_value(
         {"change_id": str(change_id), "version": version, "approval": approval}
     )
-    if redeliver is not None:
-        request["redeliver"] = redeliver
+    request.update(call or {})
     if reused is not None:
         if reused["change_id"] != change_id or reused["apply_request"] != request:
             raise MashuError("request_id was already used for a different memory change request")
@@ -1020,7 +1025,210 @@ def redeliver_instructed(
         request_id=request_id,
         approval=approval,
         actor=actor,
-        redeliver=request,
+        call={"redeliver": request},
+    )
+    return {**result, "change_id": change["change_id"]}
+
+
+#: What an instructed change takes beside its target and provenance. A relocation names a
+#: Temporary Context only the user can register, so it stays on the proposal path.
+_INSTRUCTED_TAKES = {
+    "retire": {"retirement_kind", "retire_reason"},
+    "replace": {"content", "why", "retire_reason"},
+    "restore": {"restore_reason", "reversal_instruction"},
+}
+INSTRUCTED_OPERATIONS: tuple[str, ...] = tuple(_INSTRUCTED_TAKES)
+INSTRUCTED_RETIREMENT_KINDS = ("invalidated", "out_of_scope")
+
+
+def _instructed_problems(
+    operation: str, approval: dict[str, Any], fields: dict[str, Any]
+) -> list[str | OverLimit]:
+    """Every problem with an instructed change that can be seen without the database."""
+    problems: list[str | OverLimit] = []
+    for key, needs in (
+        ("instruction", "a short exact quote of the user's words"),
+        ("conversation_ref", "a reference to the conversation the instruction came from"),
+    ):
+        text = approval.get(key)
+        if _blank(text):
+            problems.append(f"{key} needs {needs}")
+        elif len(text.strip()) > approvals.TEXT_LIMIT:
+            problems.append(OverLimit(key, approvals.TEXT_LIMIT, len(text.strip())))
+    if operation not in _INSTRUCTED_TAKES:
+        problems.append(
+            f"operation must be one of {', '.join(INSTRUCTED_OPERATIONS)}; a delivery move "
+            "takes memory_redeliver"
+        )
+        return problems
+    given = {**fields, "reversal_instruction": approval.get("reversal_instruction")}
+    extra = [
+        name
+        for name, value in given.items()
+        if value is not None and name not in _INSTRUCTED_TAKES[operation]
+    ]
+    if extra:
+        problems.append(f"{operation} does not take {', '.join(extra)}")
+    if operation == "retire":
+        kind = fields["retirement_kind"]
+        if _blank(fields["retire_reason"]):
+            problems.append("retire needs retire_reason")
+        if kind == "relocated":
+            problems.append(
+                "a relocated retirement names its Temporary Context, so propose it with "
+                "memory_change_propose"
+            )
+        elif kind == "superseded":
+            problems.append("use operation replace with content to retire a memory as superseded")
+        elif kind not in INSTRUCTED_RETIREMENT_KINDS:
+            problems.append(
+                f"retire needs retirement_kind: {' or '.join(INSTRUCTED_RETIREMENT_KINDS)}"
+            )
+    elif operation == "replace":
+        if _blank(fields["content"]):
+            problems.append("replace needs content, the successor rule")
+        else:
+            problems += memories.body_problems(fields["content"], why=fields["why"])
+    elif _blank(fields["restore_reason"]):
+        problems.append("restore needs restore_reason")
+    return problems
+
+
+def _require_acknowledged(
+    cur: psycopg.Cursor, approval: dict[str, Any], conflict_ids: list[UUID], subject: str
+) -> None:
+    """Stop before writing when the invalidated or legacy conflicts go unaddressed.
+
+    Nothing of the call survives the refusal, so it carries the conflicts for the agent to
+    show the user instead of pointing at rows it could read.
+    """
+    rows = nominations.conflict_rows(cur, conflict_ids)
+    blocking = nominations.blocking_conflicts(rows)
+    if approvals.acknowledges_conflicts(approval, blocking):
+        return
+    if blocking:
+        reason = (
+            f"{subject} repeats Memory retired as invalidated or legacy, so nothing was written. "
+            "Show the user `conflicts`; if they address them, resend with their memory_id "
+            "values as conflict_ids and the user's words as conflict_instruction"
+        )
+    else:
+        reason = "conflict_ids name no current invalidated or legacy conflict; resend without them"
+    shown = [row for row in rows if row["memory_id"] in blocking]
+    raise RetiredConflictError(reason, _conflict_snapshot(shown))
+
+
+def change_instructed(
+    cur: psycopg.Cursor,
+    memory_id: UUID,
+    *,
+    operation: str,
+    request_id: UUID,
+    approval: dict[str, Any],
+    actor: str,
+    retirement_kind: str | None = None,
+    retire_reason: str | None = None,
+    content: str | None = None,
+    why: str | None = None,
+    restore_reason: str | None = None,
+) -> dict[str, Any]:
+    """Propose and apply one instructed retire, replace, or restore in a single transaction.
+
+    The target is read here, a replacement's successor is nominated here, and the quoted
+    instruction with its conversation reference becomes the evidence, so the change leaves
+    the same rows and events as nominating, proposing, and applying it. A resent request_id
+    answers with the first result.
+    """
+    fields = {
+        "retirement_kind": retirement_kind,
+        "retire_reason": retire_reason,
+        "content": content,
+        "why": why,
+        "restore_reason": restore_reason,
+    }
+    problems = _instructed_problems(operation, approval, fields)
+    if problems:
+        raise MalformedRequestError(problems)
+    redact.gate(
+        {
+            "instruction": approval["instruction"],
+            "conversation_ref": approval["conversation_ref"],
+            "conflict_instruction": approval.get("conflict_instruction"),
+            "reversal_instruction": approval.get("reversal_instruction"),
+            **{name: value for name, value in fields.items() if name != "retirement_kind"},
+        }
+    )
+    request = approvals.json_value({"memory_id": memory_id, "operation": operation, **fields})
+    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (str(request_id),))
+    cur.execute("SELECT * FROM memory_change WHERE apply_request_id = %s", (request_id,))
+    reused = cur.fetchone()
+    if reused is not None:
+        stored = reused["apply_request"]
+        if stored.get("instructed") != request or stored["approval"] != approvals.json_value(
+            approval
+        ):
+            raise MashuError("request_id was already used for a different memory change request")
+        return {**reused["applied_result"], "change_id": reused["change_id"]}
+
+    instruction = approval["instruction"].strip()
+    target = _current(cur, memory_id)
+    proposal: dict[str, Any] = {}
+    if operation == "retire":
+        proposal = {"retirement_kind": retirement_kind, "retire_reason": retire_reason}
+    elif operation == "replace":
+        successor = nominations.nominate_user_explicit(
+            cur,
+            content=content,
+            actor=actor,
+            scope_id=target["scope_id"],
+            why=why,
+            join_pending=False,
+        )["nomination"]
+        _require_acknowledged(cur, approval, successor["conflicts"] or [], "the new content")
+        proposal = {
+            "retire_reason": retire_reason or f"replaced on the user's instruction: {instruction}",
+            "successor_nomination_id": successor["nomination_id"],
+            "successor_nomination_version": successor["version"],
+        }
+    else:
+        if target["status"] == "retired":
+            conflicts = _current_conflicts(cur, target["content"], exclude_memory_id=memory_id)
+            _require_acknowledged(
+                cur, approval, [row["memory_id"] for row in conflicts], "the restored Memory"
+            )
+        if target["retirement_kind"] in BLOCKING_KINDS and _blank(
+            approval.get("reversal_instruction")
+        ):
+            raise MashuError(
+                f"memory {memory_id} was retired as {target['retirement_kind']} "
+                f"({target['retire_reason']}); restoring it also needs reversal_instruction, "
+                "the user's words addressing that retirement"
+            )
+        proposal = {"restore_reason": restore_reason}
+    change = propose(
+        cur,
+        target_memory_id=memory_id,
+        target_revision_id=target["revision_id"],
+        target_updated_at=target["updated_at"],
+        operation=operation,
+        evidence=[
+            {
+                "kind": "artifact",
+                "ref": approval["conversation_ref"].strip(),
+                "observation": f"the user instructed this {operation}: {instruction}",
+            }
+        ],
+        actor=actor,
+        **proposal,
+    )
+    result = apply(
+        cur,
+        change["change_id"],
+        version=change["version"],
+        request_id=request_id,
+        approval=approval,
+        actor=actor,
+        call={"instructed": request},
     )
     return {**result, "change_id": change["change_id"]}
 

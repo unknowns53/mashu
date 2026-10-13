@@ -40,6 +40,19 @@ def check_body(
     Only text a caller writes is held to it. A body carried over unchanged was admitted under
     the ceiling of its day.
     """
+    problems = body_problems(content, why=why, field=field, rest=rest)
+    if problems:
+        raise MalformedRequestError(problems)
+
+
+def body_problems(
+    content: str,
+    *,
+    why: str | None = None,
+    field: str = "content",
+    rest: str | None = "why",
+) -> list[OverLimit]:
+    """What check_body refuses, for a caller reporting it with the request's other problems."""
     problems = []
     if len(content) > CONTENT_LIMIT:
         where = (
@@ -53,8 +66,7 @@ def check_body(
         problems.append(OverLimit(field, CONTENT_LIMIT, len(content), advice=advice))
     if why is not None and len(why) > WHY_LIMIT:
         problems.append(OverLimit("why", WHY_LIMIT, len(why)))
-    if problems:
-        raise MalformedRequestError(problems)
+    return problems
 
 
 def check_delivery(

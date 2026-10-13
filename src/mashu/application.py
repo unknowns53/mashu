@@ -35,7 +35,6 @@ class StatusSnapshot:
     temporary_tokens: int
     pending_ready: int
     pending_deferred: int
-    traces: int
     ledger_30d: int
     delivery_failures_30d: int
     delivery_failures_by_route: dict[str, int]
@@ -115,8 +114,6 @@ def status_snapshot(cur: psycopg.Cursor) -> StatusSnapshot:
         "FROM nomination WHERE status = 'pending'"
     )
     pending = cur.fetchone()
-    cur.execute("SELECT count(*) AS n FROM trace WHERE expires_at > now()")
-    traces = cur.fetchone()["n"]
     cur.execute("SELECT count(*) AS n FROM ledger WHERE created_at >= now() - interval '30 days'")
     ledger_30d = cur.fetchone()["n"]
     # A topic rule that failed unread points at its trigger; one that failed after being
@@ -161,7 +158,6 @@ def status_snapshot(cur: psycopg.Cursor) -> StatusSnapshot:
         temporary_tokens=temporary_totals["worst"],
         pending_ready=pending["ready"],
         pending_deferred=pending["deferred"],
-        traces=traces,
         ledger_30d=ledger_30d,
         delivery_failures_30d=delivery_failures,
         delivery_failures_by_route=by_route,

@@ -109,11 +109,24 @@ def test_task_details_show_all_state_proposal_and_latest_history(dsn, monkeypatc
         "test the forward mount",
         "keep aft mountings",
         "document the alternate rail",
-        "recorded the fitted rail",
         "reports/rail-load.txt",
         "reports/rail-dimensions.txt",
     ):
         assert text in out
+    assert "Checkpoints" not in out
+
+
+def test_a_closed_task_shows_the_state_frozen_at_close_with_its_date(dsn, monkeypatch, capsys):
+    task_id = make_task(dsn, "retire the old hatch", activity="closed")
+    with db.transaction(dsn) as cur:
+        frozen = task_history.checkpoint_list(cur, task_id)
+    keys(monkeypatch, "3", "enter", "space", "q", "q")
+
+    assert work_ui.run(dsn) == 0
+    out = capsys.readouterr().out
+    assert "Checkpoints (1)" in out
+    assert "closed as completed: shipped" in out
+    assert f"{frozen[0]['created_at'].date().isoformat()}  user" in out
 
 
 def test_search_reads_state_proposal_and_history_case_insensitively(dsn, monkeypatch, capsys):

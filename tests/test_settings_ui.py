@@ -78,10 +78,6 @@ def test_health_collects_capacity_queues_evidence_and_task_activity(dsn):
         expire(cur, dormant)
         tasks.close(cur, closed, outcome="completed", actor="user", reason="finished")
         cur.execute(
-            "INSERT INTO trace (content, created_by, expires_at) "
-            "VALUES ('live health trace', 'agent', now() + interval '1 day')"
-        )
-        cur.execute(
             "INSERT INTO event_log (event_type, actor) "
             "VALUES ('delivery_failure_suspected', 'agent')"
         )
@@ -94,7 +90,7 @@ def test_health_collects_capacity_queues_evidence_and_task_activity(dsn):
     assert value.active_states == 1 and value.state_worst_tokens > 0
     assert value.temporary_count == 1 and value.temporary_tokens > 0
     assert (value.pending_ready, value.pending_deferred) == (1, 1)
-    assert value.traces == 1 and value.ledger_30d >= 4
+    assert value.ledger_30d >= 4
     assert value.delivery_failures_30d == 1 and value.scope_count == 1
     assert (value.tasks_active, value.tasks_dormant, value.tasks_closed) == (1, 1, 1)
 
@@ -235,6 +231,7 @@ def test_topic_page_creates_edits_and_removes_a_topic(dsn, monkeypatch):
         "Before changing win rates or placement",
         "-",
         "delegate",
+        "Projects/Game/Balance.md#Win rates",
         "y",
     )
 
@@ -252,3 +249,4 @@ def test_topic_page_creates_edits_and_removes_a_topic(dsn, monkeypatch):
     edited = events[1]["detail"]["to"]
     assert edited["trigger"] == "Before changing win rates or placement"
     assert (edited["scope_id"], edited["action"]) == (None, "delegate")
+    assert edited["source"] == "Projects/Game/Balance.md#Win rates"

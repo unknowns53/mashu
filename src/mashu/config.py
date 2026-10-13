@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import pathlib
 
 #: Overall limit for memory, project-state, and temporary-context payloads (v3 8).
 DEFAULT_TOTAL_CAPACITY = 4000
@@ -36,9 +37,6 @@ DEFAULT_MATCH_THRESHOLD = 0.45
 
 #: Similarity at which a row is worth showing to the reporter at all.
 SHOW_THRESHOLD = 0.25
-
-#: How long a trace lives (4.2).
-DEFAULT_TRACE_TTL_DAYS = 30
 
 #: Ceiling on a temporary context window (7).
 TEMPORARY_MAX_DAYS = 14
@@ -84,5 +82,10 @@ def match_threshold() -> float:
     return float(os.environ.get("MASHU_MATCH_THRESHOLD") or DEFAULT_MATCH_THRESHOLD)
 
 
-def trace_ttl_days() -> int:
-    return int(os.environ.get("MASHU_TRACE_TTL_DAYS") or DEFAULT_TRACE_TTL_DAYS)
+def vault_root() -> pathlib.Path | None:
+    """The Obsidian vault topic sources are relative to, or None when none is configured.
+
+    It comes only from the environment, because the absolute path names the user.
+    """
+    value = os.environ.get("MASHU_VAULT_ROOT")
+    return pathlib.Path(value).expanduser() if value else None

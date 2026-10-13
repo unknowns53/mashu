@@ -43,9 +43,8 @@ TEXT_LIMITS = {"goal": 80, "approach": 500, "status_text": 120}
 CARD_FIELD_ADVICE = {
     "goal": "goal names the outcome that ends the task; put requirements and method in approach",
     "status_text": (
-        "status says where the task stands in a sentence or two; put what was done in a "
-        "checkpoint's what_changed, commits and paths in artifacts, and remaining work in "
-        "next_actions"
+        "status says where the task stands in a sentence or two; what was done is in git "
+        "log, commits and paths go in artifacts, and remaining work in next_actions"
     ),
 }
 
@@ -60,16 +59,6 @@ LIST_MAX_CHARS = 300
 
 #: What each field is called wherever a state is delivered.
 EDITABLE_FIELDS = ("goal", "approach", "status_text", *LIST_FIELDS)
-
-#: A session writing one task's state again sooner than this is answered with when to
-#: write. Writes this close together retell the commit log rather than hand anything off.
-#: The write still lands: a refused write before compaction would be lost with the context.
-STATE_WRITE_SPACING = dt.timedelta(minutes=30)
-STATE_WRITE_NOTE = (
-    "State writes hand off to the next session: write when stopping, pausing, or before "
-    "compaction, when the approach or next actions change, or to record a failed try or a "
-    "decision. Progress per commit is already in git log."
-)
 
 STATE_LABELS = {
     "goal": "goal",
@@ -761,11 +750,13 @@ def task_update(
     name: str | None = None,
     project: UUID | str | None = None,
     session: UUID | None = None,
+    history: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Replace the fields given, keeping each omitted one; "" or [] clears a field.
 
     Optionally edits the task's label and project too. `session` names the MCP server
-    process writing, so a write soon after its own last one carries `cadence`.
+    process writing, and `history` is what task_checkpoint wrote with this state; both are
+    kept on the state-replaced event, since a write freezes no checkpoint row.
     """
     _lock(cur)
     task = _require_open(cur, task_id)
@@ -841,7 +832,6 @@ def task_update(
         {"task": task_id, "actor": actor, **state},
     )
     _renew(cur, task_id)
-    cadence = _cadence(cur, task_id, session)
     events.record(
         cur,
         "task_state_replaced",
@@ -859,33 +849,10 @@ def task_update(
             "to_project_id": (
                 str(home["project_id"]) if home["project_id"] != task["project_id"] else None
             ),
+            **(history or {}),
         },
     )
-    answer = {**task_get(cur, task_id), **_gate_report(verdict)}
-    if cadence:
-        answer["cadence"] = cadence
-    return answer
-
-
-def _cadence(cur: psycopg.Cursor, task_id: UUID, session: UUID | None) -> dict[str, Any] | None:
-    """How soon this session writes the task's state again, when sooner than a handoff needs.
-
-    Read before the current write logs its own events, so only earlier writes count.
-    """
-    if session is None:
-        return None
-    cur.execute(
-        """
-        SELECT now() - max(created_at) AS since FROM event_log
-        WHERE event_type IN ('task_state_replaced', 'task_checkpointed')
-          AND detail->>'task_id' = %s AND detail->>'session' = %s
-        """,
-        (str(task_id), str(session)),
-    )
-    since = cur.fetchone()["since"]
-    if since is None or since >= STATE_WRITE_SPACING:
-        return None
-    return {"minutes_since_last": since // dt.timedelta(minutes=1), "note": STATE_WRITE_NOTE}
+    return {**task_get(cur, task_id), **_gate_report(verdict)}
 
 
 def append_next_action(

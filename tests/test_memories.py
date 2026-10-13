@@ -269,7 +269,6 @@ def test_a_new_body_over_its_ceiling_is_refused_on_every_write_path(dsn, mcp, ca
         return over_mcp(
             "memory_admit",
             request_id=str(uuid4()),
-            approval_kind="user_instruction",
             instruction="Remember this rule",
             **arguments,
         )
@@ -404,7 +403,6 @@ def test_why_is_kept_on_the_evidence_that_memory_get_returns(mcp):
     answer = mcp(
         "memory_admit",
         request_id=str(uuid4()),
-        approval_kind="user_instruction",
         instruction="Remember this rule",
         content=RULE,
         why=why,
@@ -433,3 +431,18 @@ def test_the_tools_that_take_a_body_publish_its_ceiling(monkeypatch):
     ):
         assert f"{memories.CONTENT_LIMIT} chars" in tools[name].description, name
         assert rest in tools[name].description, name
+
+
+def test_memory_list_reads_the_always_layer_by_either_name_and_lists_it_when_lost(mcp, dsn):
+    from mashu import scopes
+
+    with db.transaction(dsn) as cur:
+        scope = scopes.create_scope(cur, name="adapter", actor="user")
+        always = remember(cur, RULE)
+        remember(cur, PINNED, delivery="scope", scope_id=scope["scope_id"])
+
+    for name in ("always", "global"):
+        answer = mcp("memory_list", scope=name)
+        assert answer["scope"] == "always"
+        assert [row["memory_id"] for row in answer["memories"]] == [str(always["memory_id"])]
+    assert "valid names: always, adapter" in mcp("memory_list", scope="everywhere")["error"]

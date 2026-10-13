@@ -7,11 +7,12 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import config, events, match, memories, nominations, redact, tasks, topics, traces
+from mashu import config, events, match, memories, nominations, redact, tasks, topics
 from mashu.capacity import LOCK_NAMESPACE, LOCK_PAIN
 from mashu.errors import MashuError
 
-REPORTABLE_KINDS = ("incident", "friction")
+#: `friction` rows stay in the ledger as history, but a pain is reported as an incident.
+REPORTABLE_KINDS = ("incident",)
 
 #: What shape the answer to a pain takes.
 PREVENTION_KINDS = ("rule", "work")
@@ -32,15 +33,23 @@ def report_pain(
     prevention_kind: str = "rule",
     task_id: UUID | None = None,
     session: UUID | None = None,
+    violated_memory_id: UUID | None = None,
 ) -> dict[str, Any]:
     """Record one pain, show what it resembles, and nominate when it is proven.
 
     `session` names the MCP server process reporting it, so a pain against a topic rule
-    can say whether that session had read the topic.
+    can say whether that session had read the topic. `violated_memory_id` names an active
+    rule the reporter says was delivered and not followed, which similarity cannot find
+    when the pain is worded differently from the rule.
     """
+    if kind == "friction":
+        raise MashuError(
+            "kind 'friction' is no longer reported: a repeated lookup is not a pain until it "
+            "causes wrong work, so report that as kind 'incident'"
+        )
     if kind not in REPORTABLE_KINDS:
         raise MashuError(
-            f"kind must be one of {', '.join(REPORTABLE_KINDS)}; 'explicit' and 'claimed' are "
+            f"kind must be {' or '.join(REPORTABLE_KINDS)}; 'explicit' and 'claimed' are "
             "reserved for a person's own statement, written by mashu remember and by "
             "memory_nominate or memory_admit respectively"
         )
@@ -55,6 +64,7 @@ def report_pain(
         # A rule's prevention becomes a candidate's body, and the pain's own account is `what`.
         memories.check_body(prevention, field="prevention", rest="what")
     verdict = redact.gate({"what": what, "prevention": prevention})
+    violated = _violated(cur, violated_memory_id) if violated_memory_id is not None else None
 
     # Before the insert and before any matching.
     cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (LOCK_NAMESPACE, LOCK_PAIN))
@@ -69,11 +79,21 @@ def report_pain(
     cur.execute(
         """
         INSERT INTO ledger (kind, what, prevention, scope_id, source, created_by,
-                            prevention_kind, filed_task)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            prevention_kind, filed_task, violated_memory_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING *
         """,
-        (kind, what, prevention, scope_id, source, actor, prevention_kind, filed_task),
+        (
+            kind,
+            what,
+            prevention,
+            scope_id,
+            source,
+            actor,
+            prevention_kind,
+            filed_task,
+            violated_memory_id,
+        ),
     )
     entry = cur.fetchone()
     ledger_id = entry["ledger_id"]
@@ -81,7 +101,6 @@ def report_pain(
 
     matches = {
         "ledger": match.similar_ledger(cur, prevention, exclude=ledger_id),
-        "traces": match.similar_traces(cur, prevention),
         "tombstones": match.similar_tombstones(cur, prevention),
         "memories": match.similar_active_memories(cur, prevention),
     }
@@ -102,11 +121,19 @@ def report_pain(
         "delivery_suspect": False,
         "prevention_kind": prevention_kind,
         "filed_task": filed_task,
+        "violated_memory_id": violated_memory_id,
     }
     if verdict.malformed:
         result["malformed"] = verdict.malformed
 
-    # Work leaves before the three branches below, all of which decide something about a nomination.
+    # The reporter's word names the rule whatever the prevention is, so this comes first.
+    if violated is not None:
+        result["delivery_suspect"] = True
+        _suspect_delivery(
+            cur, violated, ledger_id=ledger_id, actor=actor, session=session, found_by="reported"
+        )
+
+    # Work leaves before the branches below, all of which decide something about a nomination.
     if prevention_kind == "work":
         result["note"] = filing_note
         if filed_task is not None:
@@ -123,40 +150,35 @@ def report_pain(
 
     # Record a delivery failure when an active rule did not prevent the pain.
     delivered = matches["memories"][0] if matches["memories"] else None
-    if delivered and delivered["score"] >= threshold:
+    if violated is None and delivered and delivered["score"] >= threshold:
+        violated = delivered
         result["delivery_suspect"] = True
+        _suspect_delivery(
+            cur,
+            delivered,
+            ledger_id=ledger_id,
+            actor=actor,
+            session=session,
+            found_by="similarity",
+            score=float(delivered["score"]),
+        )
+    if violated is not None:
         result["note"] = (
             "this rule is already active and being delivered as "
-            f"'{delivered['delivery']}'. No nomination was created: a third "
-            "occurrence indicts the delivery, not the entrance standard. Ask "
+            f"'{violated['delivery']}'. No nomination was created: a pain under an active "
+            "rule indicts the delivery, not the entrance standard. Ask "
             "whether it should move to a topic read when the work it governs "
             "begins, or whether the wording is not recognisable at the moment it "
             "applies."
         )
-        detail: dict[str, Any] = {
-            "delivery": delivered["delivery"],
-            "score": float(delivered["score"]),
-        }
-        if delivered["delivery"] == "topic":
-            read = _topic_read(cur, delivered["topic_id"], session)
-            detail.update(
-                topic_id=str(delivered["topic_id"]),
-                topic_read=read,
-                topic_action=_topic_action(cur, delivered["topic_id"]),
+        if (
+            violated["delivery"] == "topic"
+            and _topic_read(cur, violated["topic_id"], session) is False
+        ):
+            result["note"] += (
+                " This session never read the topic, so first ask whether its trigger "
+                "names the work in words recognisable when it begins."
             )
-            if read is False:
-                result["note"] += (
-                    " This session never read the topic, so first ask whether its trigger "
-                    "names the work in words recognisable when it begins."
-                )
-        events.record(
-            cur,
-            "delivery_failure_suspected",
-            actor,
-            memory_id=delivered["memory_id"],
-            ledger_id=ledger_id,
-            detail=detail,
-        )
         return result
 
     # A candidate already waiting for this rule is not a second candidate.
@@ -176,30 +198,61 @@ def report_pain(
             result["nomination_existing"] = True
             return result
 
-    if kind == "incident":
-        result["nomination"] = nominations.create_nomination(
-            cur,
-            content=prevention,
-            kind="incident",
-            evidence=[ledger_id],
-            actor=actor,
-            scope_id=scope_id,
-            conflicts=conflict_ids,
-        )
-        return result
-
-    prior = _best_prior(cur, matches, threshold, actor=actor)
-    if prior is not None:
-        result["nomination"] = nominations.create_nomination(
-            cur,
-            content=prevention,
-            kind="rederivation",
-            evidence=[prior, ledger_id],
-            actor=actor,
-            scope_id=scope_id,
-            conflicts=conflict_ids,
-        )
+    result["nomination"] = nominations.create_nomination(
+        cur,
+        content=prevention,
+        kind="incident",
+        evidence=[ledger_id],
+        actor=actor,
+        scope_id=scope_id,
+        conflicts=conflict_ids,
+    )
     return result
+
+
+def _violated(cur: psycopg.Cursor, memory_id: UUID) -> dict[str, Any]:
+    """The rule a reporter names as not followed, refused unless it is in force."""
+    cur.execute("SELECT * FROM memory WHERE memory_id = %s", (memory_id,))
+    row = cur.fetchone()
+    if row is None:
+        raise MashuError(f"no memory {memory_id}")
+    if row["status"] != "active":
+        when = row["retired_at"].date().isoformat() if row["retired_at"] else "earlier"
+        raise MashuError(
+            f"memory {memory_id} was retired ({when}) and is not delivered, so it cannot have "
+            "been the rule not followed; leave violated_memory_id out"
+        )
+    return row
+
+
+def _suspect_delivery(
+    cur: psycopg.Cursor,
+    rule: dict[str, Any],
+    *,
+    ledger_id: UUID,
+    actor: str,
+    session: UUID | None,
+    found_by: str,
+    score: float | None = None,
+) -> None:
+    """Record that an active rule did not prevent this pain, and how the rule was found."""
+    detail: dict[str, Any] = {"delivery": rule["delivery"], "found_by": found_by}
+    if score is not None:
+        detail["score"] = score
+    if rule["delivery"] == "topic":
+        detail.update(
+            topic_id=str(rule["topic_id"]),
+            topic_read=_topic_read(cur, rule["topic_id"], session),
+            topic_action=_topic_action(cur, rule["topic_id"]),
+        )
+    events.record(
+        cur,
+        "delivery_failure_suspected",
+        actor,
+        memory_id=rule["memory_id"],
+        ledger_id=ledger_id,
+        detail=detail,
+    )
 
 
 def _file_work(
@@ -213,7 +266,7 @@ def _file_work(
     if task_id is None:
         return None, unseated + (
             "It was filed nowhere, because no task was named — put it on one "
-            "(task_update / task_checkpoint) or it lives only in the ledger."
+            "(task_checkpoint) or it lives only in the ledger."
         )
     try:
         with cur.connection.transaction():
@@ -228,23 +281,6 @@ def _file_work(
         if appended["appended"]
         else "The task's next actions already carried it."
     )
-
-
-def _best_prior(
-    cur: psycopg.Cursor, matches: dict[str, list[dict[str, Any]]], threshold: float, *, actor: str
-) -> UUID | None:
-    """The ledger row a second friction can point back at, if there is one."""
-    frictions = [row for row in matches["ledger"] if row["kind"] == "friction"]
-    best_ledger = frictions[0] if frictions else None
-    best_trace = matches["traces"][0] if matches["traces"] else None
-
-    candidates = [c for c in (best_ledger, best_trace) if c and c["score"] >= threshold]
-    if not candidates:
-        return None
-    best = max(candidates, key=lambda row: row["score"])
-    if "trace_id" in best:
-        return traces.freeze_trace(cur, best, actor=actor)["ledger_id"]
-    return best["ledger_id"]
 
 
 def ledger_entries(

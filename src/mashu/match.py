@@ -24,16 +24,6 @@ ORDER BY score DESC, l.created_at DESC
 LIMIT %(limit)s
 """
 
-_TRACES = """
-SELECT t.*, similarity(t.content, %(text)s) AS score
-FROM trace t
-WHERE t.expires_at > now()
-  AND similarity(t.content, %(text)s) >= %(floor)s
-  AND (%(exclude)s::uuid IS NULL OR t.trace_id <> %(exclude)s::uuid)
-ORDER BY score DESC, t.created_at DESC
-LIMIT %(limit)s
-"""
-
 # Only four columns, and content is not among them.
 _TOMBSTONES = """
 SELECT m.memory_id, m.retire_reason, m.retired_at, m.retirement_kind,
@@ -74,14 +64,6 @@ def similar_ledger(
 ) -> list[dict[str, Any]]:
     """Past pains whose prevention reads like this one."""
     cur.execute(_LEDGER, {"text": text, "floor": _floor(), "exclude": exclude, "limit": limit})
-    return cur.fetchall()
-
-
-def similar_traces(
-    cur: psycopg.Cursor, text: str, *, exclude: UUID | None = None, limit: int = 5
-) -> list[dict[str, Any]]:
-    """Live traces that look like this. Expired rows make no claim and are skipped."""
-    cur.execute(_TRACES, {"text": text, "floor": _floor(), "exclude": exclude, "limit": limit})
     return cur.fetchall()
 
 

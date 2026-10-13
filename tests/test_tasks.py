@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from conftest import expire, new_project, new_task, update_task
-from mashu import db, scopes, server, tasks
+from mashu import db, scopes, tasks
 from mashu.errors import (
     ClosedTaskError,
     DuplicateTaskError,
@@ -121,7 +119,7 @@ def test_a_long_state_written_before_the_card_limits_is_carried_but_not_rewritte
     cur.execute("UPDATE task_state SET status_text = %s WHERE task_id = %s", ("s" * 400, task_id))
     tasks.append_next_action(cur, task_id, "add the check", actor="agent")
     assert update_task(cur, task_id, blockers=["none"])["state"]["status_text"] == "s" * 400
-    with pytest.raises(MalformedRequestError, match="what_changed"):
+    with pytest.raises(MalformedRequestError, match="git log"):
         update_task(cur, task_id, status_text="t" * 400)
 
 
@@ -443,7 +441,7 @@ def test_mcp_task_writes_answer_with_the_card_and_log_a_refused_card(mcp, dsn, m
 
     at, task_id = made["state"]["updated_at"], made["task"]["task_id"]
     monkeypatch.setenv("MASHU_TASK_CARD_CAPACITY", str(made["card_tokens"]))
-    refused = mcp("task_update", task_id=task_id, expect_updated_at=at, name=SAME_WORK)
+    refused = mcp("task_checkpoint", task_id=task_id, expect_updated_at=at, name=SAME_WORK)
     assert refused["over_by"] == refused["actual"] - refused["limit"] > 0
     assert refused["refusal_recorded"] is True
     with db.transaction(dsn) as cur:
@@ -459,9 +457,9 @@ def test_mcp_refuses_a_task_write_carrying_tool_call_markup(mcp, dsn, monkeypatc
     task_id, at = made["task"]["task_id"], made["state"]["updated_at"]
     leaked = 'one migration <parameter name="x">two modules'
 
-    listed = mcp("task_update", task_id=task_id, expect_updated_at=at, approach=leaked)
+    listed = mcp("task_checkpoint", task_id=task_id, expect_updated_at=at, approach=leaked)
     monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(tmp_path / "absent"))
-    unlisted = mcp("task_update", task_id=task_id, expect_updated_at=at, approach=leaked)
+    unlisted = mcp("task_checkpoint", task_id=task_id, expect_updated_at=at, approach=leaked)
 
     for refused in (listed, unlisted):
         assert refused["ok"] is False and "tool-call markup" in refused["error"]
@@ -469,56 +467,27 @@ def test_mcp_refuses_a_task_write_carrying_tool_call_markup(mcp, dsn, monkeypatc
         assert tasks.task_get(cur, task_id)["state"]["approach"] is None
 
 
-@pytest.mark.parametrize(
-    ("tool", "earlier", "minutes_ago", "noted"),
-    [
-        ("task_update", "same session", 0, True),
-        ("task_checkpoint", "same session", 20, True),
-        ("task_checkpoint", "other session", 0, False),
-        ("task_update", "same session", 31, False),
-        ("task_update", "work pain", 0, False),
-        ("task_checkpoint", None, 0, False),
-    ],
-)
-def test_a_session_writing_state_again_within_the_spacing_is_told_when_to_write(
-    mcp, dsn, tool, earlier, minutes_ago, noted
-):
+def test_a_session_writing_state_again_soon_is_answered_like_any_other_write(mcp, dsn):
     with db.transaction(dsn) as cur:
         new_project(cur, "mashu")
     made = mcp("task_create", project="mashu", name=SCHEMA, goal=GOAL)
-    task_id = made["task"]["task_id"]
-    other = server.build_server()
-    writers = {
-        "same session": mcp,
-        "other session": lambda tool, **arguments: (
-            asyncio.run(other.call_tool(tool, arguments)).structured_content
-        ),
-    }
-    wrote = {"ok": True}
-    if earlier == "work pain":
-        wrote = mcp(
-            "pain_report",
-            kind="incident",
-            what="broke",
-            prevention=OTHER_WORK,
-            prevention_kind="work",
-            task_id=task_id,
-        )
-    elif earlier:
-        at = made["state"]["updated_at"]
-        wrote = writers[earlier]("task_update", task_id=task_id, expect_updated_at=at, approach="a")
-    assert wrote["ok"] is True
+    task_id, at = made["task"]["task_id"], made["state"]["updated_at"]
+    first = mcp("task_checkpoint", task_id=task_id, expect_updated_at=at, approach="a")
+    again = mcp(
+        "task_checkpoint",
+        task_id=task_id,
+        expect_updated_at=first["state"]["updated_at"],
+        status_text="written",
+        what_changed="wrote it",
+    )
+    assert again["ok"] is True and again["state"]["status_text"] == "written"
+    assert "cadence" not in first and "cadence" not in again
     with db.transaction(dsn) as cur:
-        cur.execute("ALTER TABLE event_log DISABLE TRIGGER event_log_append_only")
         cur.execute(
-            "UPDATE event_log SET created_at = created_at - make_interval(mins => %s)",
-            (minutes_ago,),
+            "SELECT detail FROM event_log WHERE event_type = 'task_state_replaced' "
+            "ORDER BY created_at"
         )
-        cur.execute("ALTER TABLE event_log ENABLE TRIGGER event_log_append_only")
-        at = tasks.task_get(cur, task_id)["state"]["updated_at"].isoformat()
-
-    history = {"what_changed": "wrote it"} if tool == "task_checkpoint" else {}
-    answer = mcp(tool, task_id=task_id, expect_updated_at=at, status_text="written", **history)
-    assert answer["ok"] is True and answer["state"]["status_text"] == "written"
-    expected = {"minutes_since_last": minutes_ago, "note": tasks.STATE_WRITE_NOTE}
-    assert answer.get("cadence") == (expected if noted else None)
+        sessions = {row["detail"]["session"] for row in cur.fetchall()}
+        cur.execute("SELECT count(*) AS n FROM task_checkpoint")
+        assert cur.fetchone()["n"] == 0
+    assert len(sessions) == 1 and None not in sessions

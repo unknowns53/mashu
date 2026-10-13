@@ -268,7 +268,6 @@ def _overview(cur: psycopg.Cursor, query: dict[str, str]) -> str:
                 f"worst {status.state_worst_tokens}/{config.project_capacity()} tokens"
             ),
         ),
-        ("Traces (unexpired)", _e(status.traces)),
         ("Ledger (30 days)", _e(status.ledger_30d)),
         ("Delivery failures (30 days)", _e(f"{status.delivery_failures_30d}  ({failures})")),
         ("Scopes", _e(", ".join(row["name"] for row in status.scope_rows) or "none")),
