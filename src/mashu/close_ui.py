@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import shutil
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -24,13 +23,19 @@ ACTOR = "user"
 #: The three outcomes, on the letters they start with.
 _OUTCOME_KEYS = {"c": "completed", "a": "abandoned", "s": "superseded"}
 
-#: The lease, in the four cells the column has.
-_ACTIVITY = {"active": "act", "dormant": "dorm"}
+#: Wide enough for the longer of the two lease words, active and dormant.
+_ACTIVITY_WIDTH = 7
+
+#: The project column grows to the longest name shown, up to this share of the width,
+#: so the task name keeps most of the line.
+_PROJECT_SHARE = 5
 
 _KEYS = (
-    "  ↑↓/jk move   Home/End   PgUp/PgDn   / search   ⏎ take proposal\n"
-    "  c completed   a abandoned   s superseded   w drop   t renew   ? help   q leave"
+    "  ↑↓/jk move   Home/End   PgUp/PgDn   / search   ? help   ← back   q quit\n"
+    "  ⏎ take proposal   c completed   a abandoned   s superseded   w drop   t renew"
 )
+
+_EMPTY_KEYS = "  ← back   q quit"
 
 _HELP = """
   ↑/↓ or j/k move one task. Home and End jump to the first and last task;
@@ -38,7 +43,10 @@ _HELP = """
 
   /  search task id, name, project, activity, current state, or proposal grounds.
      Search is case-insensitive. Submit an empty search to show everything again.
-     ← or Esc clears an active search; with no search it leaves this screen.
+
+  ← or Esc clears an active search; with no search it goes back.
+
+  q  quit Mashu.
 
   ⏎  close the task on the proposal printed under the list: its outcome and
      its grounds, recorded as your decision. Only where one stands, and where
@@ -52,15 +60,17 @@ _HELP = """
      with its lease renewed, and the agent that proposed it will see that it
      no longer stands.
 
-  t  renew the lease without deciding anything. A dormant task comes back to
-     the opening; nothing is said about whether it is finished.
+  t  renew the lease without deciding anything. A dormant task becomes
+     active; nothing is said about whether it is finished.
 
-  There is no key that closes the rest. The transcription was the expensive
-  part of closing eighteen tasks and it is gone; the judgement was never the
-  part worth saving, and it is still asked for one task at a time.
+  ●  before a task: a close proposal stands for it.
+  ◌  before a task: a close proposal whose task state was written after it.
+     ⏎ asks once more before taking it.
+
+  There is no key that closes the rest; each task is decided on its own.
 """
 
-_HELP_KEYS = "  space read on   any other key goes back"
+_HELP_KEYS = "  space read on   q quit   any other key goes back"
 
 _NOTHING = "no open tasks"
 
@@ -94,43 +104,42 @@ def _mark(row: dict[str, Any]) -> str:
     return screen.warning("◌") if proposal["stale"] else screen.accent("●")
 
 
-def _line(row: dict[str, Any], width: int) -> str:
+def _project_width(rows: list[dict[str, Any]], width: int) -> int:
+    longest = max((screen.cells(row["task"]["project_name"]) for row in rows), default=0)
+    return max(4, min(longest + 1, width // _PROJECT_SHARE))
+
+
+def _line(row: dict[str, Any], width: int, project_width: int = 10) -> str:
     """One task, as much of it as the terminal is wide."""
     task = row["task"]
-    plain_fixed = (
-        f"   {_short(task['task_id'])}  {screen.pad(task['project_name'], 10)} "
-        f"{screen.pad(_ACTIVITY[row['activity']], 4)}"
-    )
+    project = screen.pad(task["project_name"], project_width)
+    activity = screen.pad(row["activity"], _ACTIVITY_WIDTH)
+    plain_fixed = f"   {_short(task['task_id'])}  {project} {activity}"
     styled_activity = (
-        screen.success(screen.pad(_ACTIVITY[row["activity"]], 4))
-        if row["activity"] == "active"
-        else screen.dim(screen.pad(_ACTIVITY[row["activity"]], 4))
+        screen.success(activity) if row["activity"] == "active" else screen.dim(activity)
     )
-    fixed = (
-        f" {_mark(row)} {_short(task['task_id'])}  {screen.pad(task['project_name'], 10)} "
-        f"{styled_activity}"
-    )
+    fixed = f" {_mark(row)} {_short(task['task_id'])}  {project} {styled_activity}"
     suffix = f" {row['age_days']:>3}d  {task['name']}"
     room = max(1, width - screen.cells(plain_fixed))
     return f"{fixed}{screen.clip(suffix, room)}"
 
 
-def _field(label: str, value: Any, *, value_style=None) -> str:
+def _field(label: str, value: Any, label_width: int, *, value_style=None) -> str:
     """One compact, readable state field which cannot wrap past the screen."""
     if isinstance(value, (list, tuple)):
         text = "  •  ".join(str(item) for item in value)
     else:
         text = " ".join(str(value).splitlines())
-    prefix = f"  {label:<13}"
-    available = max(1, screen.terminal_width() - screen.cells(prefix))
+    shown_label = screen.pad(label, label_width)
+    available = max(1, screen.terminal_width() - 2 - label_width)
     shown = screen.clip(text, available)
     if value_style is not None:
         shown = value_style(shown)
-    return f"  {screen.bold(f'{label:<13}')}{shown}"
+    return f"  {screen.bold(shown_label)}{shown}"
 
 
-def _detail(row: dict[str, Any], limit: int | None = None) -> str:
-    """The selected task's decision context, kept inside the terminal height."""
+def _detail(row: dict[str, Any]) -> str:
+    """The selected task's decision context, cut to the room below the list."""
     task = row["task"]
     title_prefix = f"  ── {_short(task['task_id'])}  "
     title = screen.clip(task["name"], max(1, screen.terminal_width() - screen.cells(title_prefix)))
@@ -145,64 +154,81 @@ def _detail(row: dict[str, Any], limit: int | None = None) -> str:
     ]
 
     proposal = row.get("proposal")
+    state = row["state"]
+    state_fields = [
+        (label, value)
+        for label, value in (
+            ("goal", state.get("goal")),
+            ("status", state.get("status_text")),
+            ("approach", state.get("approach")),
+            ("open questions", state.get("open_questions")),
+            ("blockers", state.get("blockers")),
+            ("next actions", state.get("next_actions")),
+        )
+        if value
+    ]
+    labels = [label for label, _ in state_fields]
+    if proposal:
+        labels.append("reason")
+        if proposal["stale"]:
+            labels.append("STALE")
+    # Two spaces always separate the longest label from its value.
+    label_width = max((screen.cells(label) for label in labels), default=0) + 2
+
     if proposal:
         said = (
             f"PROPOSAL  proposed {proposal['outcome']} by "
             f"{proposal['proposed_by']} on {proposal['on_date']}"
         )
         lines.append(screen.accent(f"  {said}"))
-        lines.append(_field("reason", proposal["reason"], value_style=screen.accent))
+        lines.append(_field("reason", proposal["reason"], label_width, value_style=screen.accent))
         if proposal["stale"]:
-            lines.append(
-                screen.warning(
-                    f"  STALE        state was written since the proposal, as of {row['as_of']}"
-                )
-            )
+            stale = f"state was written since the proposal, as of {row['as_of']}"
+            lines.append(screen.warning(f"  {screen.pad('STALE', label_width)}{stale}"))
 
-    state = row["state"]
-    state_fields = (
-        ("goal", state.get("goal")),
-        ("status", state.get("status_text")),
-        ("approach", state.get("approach")),
-        ("open questions", state.get("open_questions")),
-        ("blockers", state.get("blockers")),
-        ("next actions", state.get("next_actions")),
-    )
     for label, value in state_fields:
-        if value:
-            lines.append(_field(label, value))
+        lines.append(_field(label, value, label_width))
     if len(lines) == 2 and not proposal:
         lines.append(screen.dim("  (no state written)"))
 
-    if limit is not None and len(lines) > limit:
-        hidden = len(lines) - max(1, limit - 1)
-        lines = lines[: max(1, limit - 1)]
-        lines.append(screen.dim(f"  … {hidden} more detail line(s)"))
     return "\n".join(lines)
 
 
 def _heading(rows: list[dict[str, Any]], total: int, query: str) -> str:
+    """The screen's name, then the counts, which also say what the two marks mean."""
     standing = sum(1 for row in rows if row.get("proposal"))
+    stale = sum(1 for row in rows if row.get("proposal") and row["proposal"]["stale"])
     if query:
         head = f"  {len(rows)}/{total} open task(s)  ·  search {screen.accent(repr(query))}"
     else:
         head = f"  {total} open task(s)"
-    return head + (f", {standing} proposed closed" if standing else "")
+    if standing - stale:
+        head += f"  ·  {screen.accent('●')} {standing - stale} proposed closed"
+    if stale:
+        head += f"  ·  {screen.warning('◌')} {stale} stale proposal(s)"
+    return f"{screen.bold(screen.accent('Close tasks'))}\n{head}"
 
 
 def _screen_text(
-    rows: list[dict[str, Any]], at: int, under: str, *, total: int | None = None, query: str = ""
+    rows: list[dict[str, Any]],
+    at: int,
+    note: str = "",
+    *,
+    total: int | None = None,
+    query: str = "",
 ) -> str:
     """The whole screen: how many are open, the list, the cursor's task, the keys."""
     width = screen.terminal_width()
     head = _heading(rows, len(rows) if total is None else total, query)
+    project_width = _project_width(rows, width - 1)
     lines = []
     for number, row in enumerate(rows):
-        line = _line(row, width - 1)
+        line = _line(row, width - 1, project_width)
         lines.append(screen.selected(line) if number == at else line)
     if not rows:
         lines.append(screen.dim("  no tasks match; / searches again, ← clears the search"))
-    return screen.list_screen(head, lines, at, under)
+    detail = _detail(rows[at]) if rows else ""
+    return screen.list_with_preview(head, lines, at, detail, _KEYS, note)
 
 
 def _matches(row: dict[str, Any], query: str) -> bool:
@@ -251,18 +277,6 @@ def _find(rows: list[dict[str, Any]], task_id: UUID | None) -> int | None:
     return next((number for number, row in enumerate(rows) if _task_id(row) == task_id), None)
 
 
-def _detail_limit(head: str, note: str) -> int:
-    """Leave room for a list row, blank separators, keys, and optional feedback."""
-    terminal_lines = shutil.get_terminal_size((screen.WIDTH, 24)).lines
-    fixed = screen.height_of(head) + screen.height_of(_KEYS) + screen.height_of(note) + 6
-    return max(2, min(12, terminal_lines - fixed))
-
-
-def _page_size(head: str, under: str) -> int:
-    """The number of one-line tasks that fit on the current list page."""
-    return max(1, screen.room_under(f"{head}\n\n\n{under}"))
-
-
 def _help() -> None:
     """Paint the explanation and wait, so the screen itself can stay short."""
     offset = 0
@@ -270,9 +284,26 @@ def _help() -> None:
     while True:
         page, more = screen.paged(f"  what each key does\n\n\n{body}", offset, _HELP_KEYS)
         screen.paint(page + "\n" + _HELP_KEYS)
-        if screen.getkey() != "space" or not more:
+        key = screen.getkey()
+        if key == "q":
+            raise screen.Quit()
+        if key != "space" or not more:
             return
         offset = more
+
+
+def _finish(note: str) -> int:
+    """Say nothing is open where it can be read, and wait there if that is a screen."""
+    if not screen.in_alternate_screen():
+        if note:
+            print(note)
+        print(_NOTHING)
+        return 0
+    shown = screen.trailer(screen.bold(screen.accent("Close tasks")), f"  {_NOTHING}", note)
+    screen.paint(f"{shown}\n\n{_EMPTY_KEYS}")
+    if screen.getkey() == "q":
+        raise screen.Quit()
+    return 0
 
 
 def _reason(row: dict[str, Any], outcome: str) -> screen.InputResult:
@@ -350,10 +381,7 @@ def run(
         if not all_rows:
             if return_result:
                 return CloseScreenResult(0, note or _NOTHING)
-            if note:
-                print(note)
-            print(_NOTHING)
-            return 0
+            return _finish(note)
         rows = _filtered(all_rows, query)
         preserved = _find(rows, selected_id)
         if preserved is not None:
@@ -365,16 +393,12 @@ def run(
             at = 0
 
         head = _heading(rows, len(all_rows), query)
-        detail = _detail(rows[at], _detail_limit(head, note)) if rows else ""
-        under = screen.trailer(f"{detail}\n" if detail else "", _KEYS, note)
-        screen.paint(_screen_text(rows, at, under, total=len(all_rows), query=query))
+        screen.paint(_screen_text(rows, at, note, total=len(all_rows), query=query))
         key = screen.getkey()
         note = ""  # it has been read now; the next screen starts clean
 
         if key == "q":
-            if return_result:
-                return CloseScreenResult(0, screen.warning("  ! left open — close cancelled"))
-            return 0
+            raise screen.Quit()
         if key == "/":
             searched = _search(query)
             if searched is not None:
@@ -396,7 +420,7 @@ def run(
             continue
 
         row = rows[at]
-        step = _page_size(head, under)
+        step = max(1, screen.list_room(head, _KEYS, len(rows)))
         if key in ("up", "k"):
             at = max(0, at - 1)
             selected_id = _task_id(rows[at])

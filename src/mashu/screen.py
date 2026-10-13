@@ -67,13 +67,31 @@ def terminal_session():
                 _ALTERNATE_ACTIVE = False
 
 
+class Quit(Exception):
+    """Raised by q on any screen, so every nested screen closes at once."""
+
+
+# Counted apart from _SESSION_DEPTH, which stays 0 when stdout is not a terminal.
+_ENTRY_DEPTH = 0
+
+
 def fullscreen(function):
     """Run a TUI entry point in the shared, re-entrant terminal session."""
 
     @wraps(function)
     def wrapped(*args, **kwargs):
-        with terminal_session():
-            return function(*args, **kwargs)
+        global _ENTRY_DEPTH
+        _ENTRY_DEPTH += 1
+        try:
+            with terminal_session():
+                return function(*args, **kwargs)
+        except Quit:
+            # Only the outermost entry point ends the run; a nested one passes q upward.
+            if _ENTRY_DEPTH > 1:
+                raise
+            return 0
+        finally:
+            _ENTRY_DEPTH -= 1
 
     return wrapped
 
@@ -86,6 +104,11 @@ def _enter_alternate_screen() -> None:
         sys.stdout.write("\x1b[?1049h")
         sys.stdout.flush()
         _ALTERNATE_ACTIVE = True
+
+
+def in_alternate_screen() -> bool:
+    """Whether the alternate buffer is up, where a printed line is painted over or lost."""
+    return _ALTERNATE_ACTIVE
 
 
 def color_enabled() -> bool:
@@ -348,16 +371,21 @@ def pad(text: str, limit: int) -> str:
     return clipped + " " * max(0, limit - cells(clipped))
 
 
-def wrap(text: str, indent: str = "  ", width: int | None = None) -> str:
-    """Wrap for reading, keeping the line breaks whoever wrote it put in."""
+def wrap(text: str, indent: str = "  ", width: int | None = None, hang: str | None = None) -> str:
+    """Wrap for reading, keeping the line breaks whoever wrote it put in.
+
+    With hang, every row after the very first starts there, so text that follows a
+    label or an id stays in its own column.
+    """
     width = width or terminal_width()
-    out = []
+    rest = indent if hang is None else hang
+    out: list[str] = []
     for line in text.strip().splitlines():
         if not line.strip():
             out.append("")
             continue
-        hang = indent + "  " if line.lstrip().startswith(("-", "*", "•")) else indent
-        out.extend(_rows(line.strip(), width, indent, hang))
+        bullet = "  " if line.lstrip().startswith(("-", "*", "•")) else ""
+        out.extend(_rows(line.strip(), width, rest if out else indent, rest + bullet))
     return "\n".join(out)
 
 
@@ -418,39 +446,125 @@ def trailer(*parts: str) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def list_screen(head: str, rows: list[str], at: int, keys: str) -> str:
-    """A heading, as much of a list as fits under it, and the keys."""
-    around = f"{head}\n\n\n{keys}"
-    shown, above, below = fit(rows, at, room_under(around))
-    body = [line for line in (above, *shown, below) if line]
-    return f"{head}\n\n" + "\n".join(body) + f"\n\n{keys}"
+def list_screen(head: str, rows: list[str], at: int, keys: str, note: str = "") -> str:
+    """A heading, as much of a list as fits under it, and the keys on the last line."""
+    room = max(1, _free_lines(head, keys))
+    note, used = _note_block(note, 1 + max(0, room - len(rows)))
+    listed = _list_block(rows, at, room - (used - 1))
+    return "\n".join((head, "", *listed, "", note, keys))
+
+
+def list_with_preview(
+    head: str,
+    rows: list[str],
+    at: int,
+    preview: str,
+    keys: str,
+    note: str = "",
+    *,
+    more: str = "⏎ reads all",
+) -> str:
+    """A heading, a list, the selected row's preview, a note line, and the keys last.
+
+    Where each part sits depends on the terminal, the heading, the keys and the row
+    count, never on the preview, so moving the cursor moves nothing but the cursor.
+    """
+    listed = list_room(head, keys, len(rows))
+    room = max(0, _free_lines(head, keys) - listed)
+    note, used = _note_block(note, 1 + room)
+    room -= used - 1
+    shown = _preview_block(preview, room, more) if room >= 2 else [""] * room
+    return "\n".join((head, "", *_list_block(rows, at, listed), "", *shown, note, keys))
+
+
+def list_room(head: str, keys: str, count: int) -> int:
+    """The rows a list with a preview under it gets, which is also one page of movement.
+
+    The list keeps every row up to two thirds of the free lines, and never fewer than
+    eight, so a 24-line terminal still shows a usable list.
+    """
+    free = _free_lines(head, keys)
+    return max(0, min(count, max(8, free * 2 // 3), max(1, free)))
+
+
+def _free_lines(head: str, keys: str) -> int:
+    """Lines left between a heading and its keys.
+
+    The fixed parts are the blank under the heading, the blank under the list, the
+    line kept above the keys for a note, and the cursor's line under the keys, which
+    a typed prompt uses and printing onto would scroll the screen.
+    """
+    height = shutil.get_terminal_size((WIDTH, 24)).lines
+    return height - height_of(head) - height_of(keys) - 4
+
+
+def _list_block(rows: list[str], at: int, room: int) -> list[str]:
+    shown, above, below = fit(rows, at, room)
+    block = [*([above] if above else []), *shown, *([below] if below else [])]
+    return block + [""] * (room - len(block))
+
+
+def _preview_block(text: str, room: int, more: str) -> list[str]:
+    lines = text.splitlines()
+    shown = fill(lines, room)
+    if len(shown) < len(lines):
+        shown = fill(lines, room - 1)
+        hint = f"; {more}" if more else ""
+        shown.append(dim(f"  … {len(lines) - len(shown)} more line(s){hint}"))
+    across = terminal_width()
+    used = sum(height_of_line(line, across) for line in shown)
+    return shown + [""] * (room - used)
+
+
+def _note_block(note: str, most: int) -> tuple[str, int]:
+    """The note and the lines it takes, cut to one plain line when it needs more than most."""
+    if not note:
+        return "", 1
+    if height_of(note) <= most:
+        return note, height_of(note)
+    first = re.sub(r"\x1b\[[0-9;]*m", "", note).strip("\n").split("\n")[0]
+    return clip(first, terminal_width() - 1), 1
 
 
 def fit(rows: list[str], at: int, room: int) -> tuple[list[str], str, str]:
     """The part of a list that fits in the room given, kept around the cursor."""
     if len(rows) <= room:
         return rows, "", ""
-    room = max(1, room - 2)  # the two lines that say what is not being shown
-    top = max(0, min(at - room // 2, len(rows) - room))
-    above = f"  ↑ {top} more" if top else ""
-    below = f"  ↓ {len(rows) - top - room} more" if top + room < len(rows) else ""
-    return rows[top : top + room], above, below
+    if room < 3:
+        # No room for the lines that say what is not being shown.
+        top = max(0, min(at - room // 2, len(rows) - room))
+        return rows[top : top + room], "", ""
+    inner = room - 2
+    top = max(0, min(at - inner // 2, len(rows) - inner))
+    # At either end only one marker shows and the list takes its line, so the list
+    # always ends on the same line.
+    if top == 0:
+        return rows[: room - 1], "", f"  ↓ {len(rows) - room + 1} more"
+    if top + inner >= len(rows):
+        top = len(rows) - room + 1
+        return rows[top:], f"  ↑ {top} more", ""
+    return rows[top : top + inner], f"  ↑ {top} more", f"  ↓ {len(rows) - top - inner} more"
 
 
 def paged(text: str, offset: int, under: str = "") -> tuple[str, int]:
-    """As much of one item as fits, and where the next screenful starts."""
+    """As much of one item as fits, and where the next screenful starts.
+
+    Every page is padded to the same height, so what is printed under it stays put.
+    """
     lines = text.splitlines()
     head, body = lines[:3], lines[3:]
     space = room_under("\n".join(head), under)
+    across = terminal_width()
 
     shown = fill(body[offset:], space)
-    if offset + len(shown) >= len(body):
-        return "\n".join(head + shown), 0
-
-    shown = fill(body[offset:], space - 1)
-    left = len(body) - offset - len(shown)
-    marker = f"  … {left} more line(s), space to go on"
-    return "\n".join(head + shown + [marker]), offset + len(shown)
+    more = 0
+    if offset + len(shown) < len(body):
+        shown = fill(body[offset:], space - 1)
+        left = len(body) - offset - len(shown)
+        shown.append(f"  … {left} more line(s), space to go on")
+        more = offset + len(shown) - 1
+    used = sum(height_of_line(line, across) for line in shown)
+    return "\n".join(head + shown + [""] * (space - used)), more
 
 
 def fill(lines: list[str], room: int) -> list[str]:

@@ -899,7 +899,7 @@ def _pending_change_by_ref(cur: Any, value: str) -> dict[str, Any]:
 
 def _print_memory_changes(rows: list[dict[str, Any]]) -> None:
     if not rows:
-        print("nothing waiting for Memory change review")
+        print("no proposed Memory changes")
     for row in rows:
         print(
             f"{row['change_id']}  {row['operation']}  v{row['version']}  "

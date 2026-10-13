@@ -60,9 +60,7 @@ class Verdict:
             )
         else:
             hint = "refer to people by role, such as the user, instead of by name or affiliation"
-        return (
-            f"{subject}matches banned pattern #{self.pattern_index}{where}; {hint}, then resend"
-        )
+        return f"{subject}matches banned pattern #{self.pattern_index}{where}; {hint}, then resend"
 
     def refusal(self) -> RefusedError:
         return RefusedError(self.reason(), field=self.field, span=self.span)

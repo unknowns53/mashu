@@ -4,8 +4,8 @@ import datetime as dt
 
 import pytest
 
-from conftest import keys, retire
-from mashu import db, memories, memory_ui, scopes, screen, temporary, topics
+from conftest import assert_steady_layout, keys, retire
+from mashu import application, db, memories, memory_ui, scopes, screen, temporary, topics
 
 RULE = "never report a run as finished without the output that proves it"
 REVISED = "never report a run as finished without pasting the output that proves it"
@@ -281,3 +281,56 @@ def test_a_topic_rule_shows_its_trigger_and_is_not_converted(dsn, monkeypatch, c
     assert "topic:difficulty" in out
     assert "Before changing win rates" in out
     assert "topic memories cannot become temporary" in out
+
+
+def test_q_quits_from_the_list_and_from_a_read_memory(dsn, monkeypatch):
+    remember(dsn)
+    for pressed in (("q",), ("enter", "q")):
+        keys(monkeypatch, *pressed)
+        with pytest.raises(screen.Quit):
+            memory_ui.run.__wrapped__(dsn)
+
+
+def test_help_lists_the_keys_and_q_quits_from_it(dsn, monkeypatch, capsys):
+    keys(monkeypatch, "?", "x", "?", "q")
+    with pytest.raises(screen.Quit):
+        memory_ui.run.__wrapped__(dsn)
+    out = capsys.readouterr().out
+    assert out.count("Memories help") == 2
+    assert "retire the selected active memory" in out
+    assert out.startswith("Memories\n")
+
+
+def test_columns_fit_the_values_listed_so_the_content_gets_the_rest():
+    rows = [
+        {"memory_id": "0123456789", "delivery": "always", "scope_name": None, "content": "x " * 60},
+        {"memory_id": "abcdef0123", "delivery": "scope", "scope_name": "enrai", "content": "y"},
+    ]
+    columns = memory_ui._columns(rows, 79)
+    assert columns == (6, 5)
+    assert memory_ui._line(rows[0], "active", 79, columns).startswith(
+        "   01234567  always  -      x x"
+    )
+    long = {
+        "delivery": "topic",
+        "topic_name": "a-very-long-topic-name",
+        "scope_name": "a-very-long-scope-name",
+    }
+    assert memory_ui._columns([long], 79) == (13, 11)
+
+
+@pytest.mark.usefixtures("legacy_bodies")
+def test_moving_the_cursor_moves_neither_the_list_nor_the_keys(dsn, monkeypatch):
+    names = ["alpha", "bravo", "charlie", "delta", "echo"]
+    lengths = [1, 40, 5, 70, 15]
+    for name, words in zip(names, lengths, strict=True):
+        remember(dsn, f"{name} " + "check the output before reporting " * (words // 5))
+    monkeypatch.setenv("COLUMNS", "80")
+    monkeypatch.setenv("LINES", "24")
+    with db.transaction(dsn) as cur:
+        rows = application.memory_view(cur, "active")
+    frames = [
+        memory_ui._screen_text(rows, at, "active", "", total=len(rows), query="")
+        for at in range(len(rows))
+    ]
+    assert_steady_layout(frames, names, memory_ui._KEYS)

@@ -131,7 +131,7 @@ def test_dashboard_collects_review_task_memory_and_project_counts(dsn):
             [("memories", None), ("work", "active"), ("settings", None)],
         ),
         (
-            ("a", "down", "enter", "end", "enter", "q", "q"),
+            ("a", "down", "enter", "end", "enter", "q"),
             (1, 2, 3, 4, 1, 5, 6),
             [("review", True), ("work", "dormant")],
         ),
@@ -171,6 +171,44 @@ def test_home_keys_open_each_area_and_return_to_a_refreshed_dashboard(
     assert home_ui.run("home-dsn") == 0
     assert seen == opened
     assert set(reads) == {"home-dsn"} and len(reads) > len(opened)
+
+
+def test_q_in_a_nested_screen_quits_every_screen_at_once(dsn, monkeypatch):
+    with db.transaction(dsn) as cur:
+        candidate(cur, "quit from inside the review queue")
+    pressed = iter(("a", "r", "q"))
+    monkeypatch.setattr(screen, "paint", lambda text: None)
+    monkeypatch.setattr(screen, "getkey", lambda: next(pressed))
+
+    assert home_ui.run(dsn) == 0
+    assert next(pressed, None) is None
+
+
+def test_attention_has_help_and_left_goes_back_to_the_dashboard(monkeypatch):
+    painted: list[str] = []
+    pressed = iter(("a", "?", "x", "left", "left", "q"))
+    monkeypatch.setattr(home_ui, "_dashboard", lambda dsn: home_ui.Dashboard(*(0,) * 7))
+    monkeypatch.setattr(screen, "paint", painted.append)
+    monkeypatch.setattr(screen, "getkey", lambda: next(pressed))
+
+    assert home_ui.run() == 0
+    assert any(text.startswith("Attention help") for text in painted)
+    assert painted[-1].startswith("Mashu")
+
+
+def test_an_empty_queue_opened_from_home_is_shown_until_a_key(monkeypatch):
+    terminal = TtyBuffer()
+    monkeypatch.setattr("sys.stdout", terminal)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(home_ui, "_dashboard", lambda dsn: home_ui.Dashboard(*(0,) * 7))
+    monkeypatch.setattr(home_ui.memory_change_ui, "_queue", lambda dsn: [])
+    pressed = iter(("c", "left", "q"))
+    monkeypatch.setattr(screen, "getkey", lambda: next(pressed))
+
+    assert home_ui.run() == 0
+    frames = terminal.getvalue().split("\x1b[H\x1b[2J")
+    assert frames[2].startswith("Memory changes\nno proposed Memory changes")
+    assert frames[3].startswith("Mashu")
 
 
 def test_non_tty_dashboard_contains_no_ansi(monkeypatch):

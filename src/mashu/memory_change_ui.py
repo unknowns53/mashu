@@ -8,10 +8,31 @@ from uuid import uuid4
 from mashu import db, memories, memory_changes, nominations, screen
 from mashu.errors import MashuError
 
-_KEYS = "  j/↓ k/↑ move   ⏎ open   q leave"
+_KEYS = "  ↑↓/jk move   ⏎ open   ← back   q quit"
 _DETAIL_KEYS = (
-    "  y apply   e edit reason   d decline   w withdraw   ← list   space read on   q leave"
+    "  y apply   e edit reason   d decline   w withdraw   space read on\n  ← back   q quit"
 )
+_EMPTY_KEYS = "  ← back   q quit"
+
+_NOTHING = "no proposed Memory changes"
+
+
+def _title() -> str:
+    return screen.bold(screen.accent("Memory changes"))
+
+
+def _finish(note: str = "") -> int:
+    """Say the queue is empty where it can be read, and wait there if that is a screen."""
+    if not screen.in_alternate_screen():
+        if note:
+            print(note)
+        print(_NOTHING)
+        return 0
+    shown = screen.trailer(_title(), screen.bold(_NOTHING), note)
+    screen.paint(f"{shown}\n\n{_EMPTY_KEYS}")
+    if screen.getkey() == "q":
+        raise screen.Quit()
+    return 0
 
 
 def _short(value: Any) -> str:
@@ -342,8 +363,7 @@ def _move(at: int, total: int, key: str) -> int:
 def run(dsn: str | None = None) -> int:
     rows = _queue(dsn)
     if not rows:
-        print("nothing waiting for Memory change review")
-        return 0
+        return _finish()
     at, offset, more = 0, 0, 0
     reading = False
     conflicts_seen = False
@@ -359,15 +379,18 @@ def run(dsn: str | None = None) -> int:
         else:
             screen.paint(
                 screen.list_screen(
-                    screen.bold(f"{len(rows)} pending Memory change(s)"),
+                    f"{_title()}\n{screen.bold(f'{len(rows)} pending Memory change(s)')}",
                     [_summary(row) for row in rows],
                     at,
-                    screen.trailer(_KEYS, note),
+                    _KEYS,
+                    note,
                 )
             )
         key = screen.getkey()
         note = ""
         if key == "q":
+            raise screen.Quit()
+        if not reading and key in ("left", "h"):
             return 0
         if key in ("up", "down", "j", "k", "home", "end"):
             moved = _move(at, len(rows), key)
@@ -412,8 +435,7 @@ def run(dsn: str | None = None) -> int:
             if applied:
                 rows = _queue(dsn)
                 if not rows:
-                    print(note)
-                    return 0
+                    return _finish(note)
                 at = min(at, len(rows) - 1)
                 offset, conflicts_seen = 0, False
         elif key in ("d", "w"):
@@ -421,9 +443,7 @@ def run(dsn: str | None = None) -> int:
             if decided:
                 rows = _queue(dsn)
                 if not rows:
-                    print(note)
-                    return 0
+                    return _finish(note)
                 at = min(at, len(rows) - 1)
                 offset, conflicts_seen = 0, False
-    print(note or "nothing waiting for Memory change review")
-    return 0
+    return _finish(note)

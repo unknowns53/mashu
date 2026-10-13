@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import candidate, expire, getkeys, new_project, new_task, remember
-from mashu import db, nominations, routing, scopes, settings_ui, tasks, temporary, topics
+from mashu import db, nominations, routing, scopes, screen, settings_ui, tasks, temporary, topics
 from mashu.errors import RefusedError
 
 pytestmark = pytest.mark.usefixtures("known_screen")
@@ -22,7 +22,7 @@ def answers(monkeypatch, *typed: str) -> list[str]:
 
 
 def test_top_level_reaches_every_settings_page_and_leaves_cleanly(dsn, monkeypatch, capsys):
-    getkeys(monkeypatch, "enter", "q", *(("down", "enter", "q") * 5), "q")
+    getkeys(monkeypatch, "enter", "left", *(("down", "enter", "left") * 5), "q")
 
     assert settings_ui.run(dsn) == 0
 
@@ -37,6 +37,26 @@ def test_top_level_reaches_every_settings_page_and_leaves_cleanly(dsn, monkeypat
     ):
         assert heading in out
     assert "\x1b[" not in out
+
+
+def test_q_on_a_page_quits_settings_and_left_goes_back(dsn, monkeypatch, capsys):
+    getkeys(monkeypatch, "enter", "q")
+    with pytest.raises(screen.Quit):
+        settings_ui.run.__wrapped__(dsn)
+    capsys.readouterr()
+
+    getkeys(monkeypatch, "down", "down", "enter", "left", "q")
+    assert settings_ui.run(dsn) == 0
+    assert capsys.readouterr().out.count("Settings & health") == 4
+
+
+def test_bootstrap_memory_rows_hang_under_their_content(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "40")
+    rows = [{"memory_id": "0123456789abcdef", "content": "one two three four five six seven eight"}]
+    lines = settings_ui._memory_lines("Always memories", rows)[1].splitlines()
+    assert lines[0].startswith("    01234567  one")
+    assert len(lines) > 1
+    assert all(line.startswith(" " * 14) and line[14] != " " for line in lines[1:])
 
 
 def test_health_collects_capacity_queues_evidence_and_task_activity(dsn):
@@ -109,7 +129,7 @@ def test_bootstrap_preview_resolves_cwd_and_shows_every_payload_share(dsn, monke
 
 @pytest.mark.parametrize("summary", ["Release and rollback knowledge", ""])
 def test_scope_page_summary_is_optional_and_a_duplicate_refused(dsn, monkeypatch, capsys, summary):
-    getkeys(monkeypatch, "n", "n", "q")
+    getkeys(monkeypatch, "n", "n", "left")
     answers(monkeypatch, "deployment", summary, "deployment", "another summary")
 
     settings_ui._scopes_page(dsn)
@@ -121,7 +141,7 @@ def test_scope_page_summary_is_optional_and_a_duplicate_refused(dsn, monkeypatch
 
 
 def test_ctrl_c_at_an_optional_scope_summary_cancels_creation(dsn, monkeypatch):
-    getkeys(monkeypatch, "n", "q")
+    getkeys(monkeypatch, "n", "left")
 
     def answer(prompt: str) -> str:
         if prompt == "  scope name: ":
@@ -138,7 +158,7 @@ def test_ctrl_c_at_an_optional_scope_summary_cancels_creation(dsn, monkeypatch):
 def test_scope_name_and_summary_can_be_edited(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
         scope = scopes.create_scope(cur, name="old scope", summary="old summary", actor="user")
-    getkeys(monkeypatch, "e", "q")
+    getkeys(monkeypatch, "e", "left")
     answers(monkeypatch, "new scope", "new summary")
 
     settings_ui._scopes_page(dsn)
@@ -163,7 +183,7 @@ def test_routes_can_be_edited_added_ignored_and_removed(dsn, monkeypatch):
         route = routing.add_route(
             cur, path_prefix="/tmp/old", scope_id=scope["scope_id"], actor="user"
         )
-    getkeys(monkeypatch, "e", "n", "i", "x", "q")
+    getkeys(monkeypatch, "e", "n", "i", "x", "left")
     answers(monkeypatch, "/tmp/new", "-", "/tmp/scoped/a/long/path", "route scope", "/tmp/i", "y")
 
     settings_ui._routes_page(dsn)
@@ -176,7 +196,7 @@ def test_routes_can_be_edited_added_ignored_and_removed(dsn, monkeypatch):
 
 def test_schema_apply_is_confirmed_and_reports_a_noop(dsn, monkeypatch, capsys):
     called: list[str | None] = []
-    getkeys(monkeypatch, "m", "q")
+    getkeys(monkeypatch, "m", "left")
     prompts = answers(monkeypatch, "y")
     monkeypatch.setattr(
         settings_ui.migration, "migrate", lambda conninfo: called.append(conninfo) or []
@@ -191,7 +211,7 @@ def test_schema_apply_is_confirmed_and_reports_a_noop(dsn, monkeypatch, capsys):
 
 def test_long_pages_move_forward_and_back_without_losing_the_header(monkeypatch, capsys):
     monkeypatch.setenv("LINES", "10")
-    getkeys(monkeypatch, "space", "b", "q")
+    getkeys(monkeypatch, "space", "b", "left")
     body = "\n".join(f"  detail line {number}" for number in range(30))
 
     settings_ui._read_page("Long health page", body)
@@ -205,7 +225,7 @@ def test_long_pages_move_forward_and_back_without_losing_the_header(monkeypatch,
 def test_topic_page_creates_edits_and_removes_a_topic(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
         scopes.create_scope(cur, name="game", actor="user")
-    getkeys(monkeypatch, "n", "e", "x", "q")
+    getkeys(monkeypatch, "n", "e", "x", "left")
     answers(
         monkeypatch,
         "difficulty",

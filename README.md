@@ -131,7 +131,7 @@ mashu
 | Work | active / dormant / closed Task と Project の閲覧・検索、Task の履歴・artifact の確認、Task / Current State / Project の作成・編集、touch / close / reopen |
 | Settings & health | 容量と queue の状態、bootstrap preview、Scope と route の作成・編集・削除、Topic の作成・編集（action の結びつけを含む）・削除、migration の確認・適用 |
 
-各画面では矢印または j / k で移動し、Enter で開く。`/` のある一覧は部分検索できる。Esc または ← で一段戻り、q でその領域を閉じる。TUI は alternate screen 上で動くため、再描画した画面は terminal の履歴へ残らない。
+各画面では矢印または j / k で移動し、Enter で開く。`/` のある一覧は部分検索できる。Esc または ← で一段戻り、q はどの画面からでも Mashu を終える。? はどの画面でもその画面のキーの説明を出す。TUI は alternate screen 上で動くため、再描画した画面は terminal の履歴へ残らない。
 
 `e` で開く編集入力には現在値が最初から入る。全文を打ち直すのではなく、カーソル移動、Backspace、追記で既存の文章を直接直し、Enter で保存する。Vim などの外部エディタは既定では起動しない。自分で `VISUAL` または `EDITOR` を設定した場合だけ、そのエディタで既存本文を開く。
 
@@ -218,7 +218,7 @@ mashu review --changes --list
 mashu review --apply-change 1a2b3c4d --version 2
 ~~~
 
-既定では保留中の nomination を表示しない。--all を付けると保留分も一覧に戻る。変更 proposal は `mashu review --changes` で確認し、対象本文・revision・理由・根拠・後継・conflict を読み、入力済みの理由を編集して適用できる。TUI の `y` は直接操作の承認でもあるため、適用後に同じ確認を重ねない。Agent は明示指示なしに apply しない。
+既定では保留中の nomination を表示しない。--all を付けると保留分も一覧に戻る。TUI の一覧では d で保留分の表示を切り替える。変更 proposal は `mashu review --changes` で確認し、対象本文・revision・理由・根拠・後継・conflict を読み、入力済みの理由を編集して適用できる。TUI の `y` は直接操作の承認でもあるため、適用後に同じ確認を重ねない。Agent は明示指示なしに apply しない。
 
 非対話で採用・変更を適用する場合は、一覧や詳細で読んだ version を `--version` に指定する。候補が読み取り後に変わっていれば `--admit` は拒否され、pending のまま残る。出力された request ID を再送時に `--request-id` へ渡すと同じ結果が返る。
 
@@ -230,14 +230,15 @@ TUI の操作は次のとおり。
 | Home / End、PageUp / PageDown | 先頭・末尾または画面単位で移動 |
 | / | ID、kind、scope、本文、evidence を絞り込み。空入力で解除 |
 | Enter | 選択した候補を開く |
-| Esc / ← | 詳細から一覧へ戻る。絞り込み中は解除 |
+| Esc / ← | 詳細から一覧へ、一覧から前の画面へ戻る。絞り込み中は解除 |
+| d | 一覧で保留分の表示を切り替える |
 | y | 確定。delivery を選ぶ |
 | e | 現在の候補本文をその場で編集し、Enter で保存。確定はせず、続けて y で再試行できる |
 | r | 理由を入力して却下 |
 | s | 理由を入力して保留 |
 | Space | 本文をページ送り |
 | ? | キーの説明 |
-| q | 退出 |
+| q | Mashu を終える |
 
 `mashu review --changes` の TUI は提案を一件ずつ開き、`y` で適用、`e` で理由編集、`d` で却下、`w` で取り下げる。対象 Memory の revision や conflict が変わっていれば適用できず、最新情報を読み直して proposal を更新する。
 
