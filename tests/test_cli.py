@@ -17,7 +17,6 @@ from mashu import (
     task_history,
     tasks,
 )
-from mashu import traces as trace_domain
 
 # Keep test strings dissimilar to prevent cross-test trigram matches.
 RULE = "keep the deployment order in the runbook rather than in anyone's head"
@@ -27,6 +26,8 @@ EVIDENCED = "apply a migration on the standby first; the primary is not the rehe
 LISTED = "spell out the timezone in every scheduled job, even when it looks obvious"
 SCOPED = "reach for the vendored toolchain in this checkout, not whatever is on PATH"
 DEFERRED = "name the branch after the ticket, so a stale checkout tells on itself"
+SOURCED = "brief a subagent with the acceptance check before it writes a single line"
+BROKEN = "give the label printer its own spool queue apart from the office printers"
 CURRENT_WORK = "wire the project state into the opening"
 
 #: A UUID prefix cannot contain twelve consecutive hex digits; position nine is a dash.
@@ -129,6 +130,56 @@ def test_a_topic_linked_to_an_action_holds_its_calls_until_unlinked(run, committ
     assert code == 1 and "--edit" in err
     assert run("topic", "--edit", name, "--no-action")[0] == 0
     assert run("guard", action) == (0, "", "")
+
+
+def test_a_topic_source_is_set_shown_and_named_in_the_guard_denial(run, tmp_path, monkeypatch):
+    landed = tmp_path / "Projects" / "Delegation.md"
+    landed.parent.mkdir()
+    landed.write_text("never read", encoding="utf-8")
+    monkeypatch.setenv("MASHU_VAULT_ROOT", str(tmp_path))
+    name, action = f"sourced-{uuid4().hex[:8]}", f"act{uuid4().hex[:8]}"
+    source = "Projects/Delegation.md#Before handing off"
+    added = run("topic", "--add", name, "--trigger", "Before delegating", "--source", source)
+    assert added[0] == 0
+    memory_id = remembered_id(run("remember", SOURCED, "--topic", name)[1])
+    assert run("topic", "--edit", name, "--action", action)[0] == 0
+
+    _, out, _ = run("topic", "show", name)
+    assert "Projects/Delegation.md#Before" in out and "not found" not in out
+    code, out, _ = run("guard", action, "--json")
+    assert code == 2
+    assert json.loads(out) == [
+        {"memory_id": memory_id, "content": SOURCED, "topic": name},
+        {"memory_id": None, "content": f"Source: {source} -> {landed}", "topic": name},
+    ]
+
+    code, _, err = run("topic", "--edit", name, "--source", "../outside.md")
+    assert code == 1 and "climbs out" in err
+    assert run("topic", "--edit", name, "--source", "-")[0] == 0
+    _, out, _ = run("guard", action, "--json")
+    assert [row["content"] for row in json.loads(out)] == [SOURCED]
+    assert run("topic", "--edit", name, "--no-action")[0] == 0
+
+
+def test_a_pain_naming_the_rule_it_broke_is_counted_without_a_candidate(run):
+    _, out, _ = run("remember", BROKEN)
+    memory_id = remembered_id(out)
+
+    code, out, _ = run(
+        "pain",
+        "--what",
+        "a shipping run jammed behind a stack of office documents",
+        "--prevention",
+        "check the spool before sending the shipping batch",
+        "--violated",
+        memory_id[:8],
+    )
+
+    assert code == 0
+    assert f"violated  {memory_id[:8]}" in out
+    assert "nomination  withheld" in out
+    with pytest.raises(SystemExit):
+        run("pain", "--kind", "friction", "--what", "w", "--prevention", "p")
 
 
 def test_a_candidate_is_admitted_only_at_the_version_that_was_reviewed(run, committing_dsn):
@@ -336,37 +387,6 @@ def test_the_memories_listing_holds_the_active_set_and_can_be_narrowed(run):
     assert "it grew a timezone" in out
 
 
-#: Japanese without spaces exercises cell-width wrapping.
-TRACED = (
-    "混合溶媒中の凝集判定は動径分布関数の第一ピークだけでは決められず、"
-    "配位数の積分範囲を第一極小で切ったうえで両成分の温度依存を並べて初めて向きが読める。"
-    "積分範囲を固定値で切った比較は範囲の選び方そのものを結論に持ち込む。"
-)
-
-
-def test_a_trace_is_shown_dated_named_and_wrapped_on_a_terminal(run, committing_dsn, monkeypatch):
-    monkeypatch.setattr(cli, "_width", lambda: 60)
-    with db.transaction(committing_dsn) as cur:
-        left = trace_domain.put_trace(cur, content=TRACED, actor="agent")
-    code, out, _ = run("trace")
-    assert code == 0
-
-    lines = out.splitlines()
-    where = next(i for i, line in enumerate(lines) if line.startswith(str(left["trace_id"])[:8]))
-    assert "  until " in lines[where]
-    body = []
-    for line in lines[where + 1 :]:
-        if not line or not line.startswith("  "):
-            break
-        body.append(line)
-    assert len(body) >= 3
-
-    code, out, _ = run("trace", TRACED[:30])
-    assert code == 0
-    where = next(i for i, line in enumerate(out.splitlines()) if "match 0." in line)
-    assert out.splitlines()[where].startswith(str(left["trace_id"])[:8])
-
-
 #: Mixed Japanese and Latin text verifies wrapped spaces are preserved.
 MIXED = (
     "実装完了と報告したが盤の声の立ち絵が一枚も無く、この検査は器の側で通っていた。"
@@ -559,8 +579,12 @@ def test_the_history_and_the_artifact_locators_are_visible_on_one_task(run, comm
     assert ATTEMPT in out and "the count came out short" in out
     assert DECISION in out and "a half-run must not look whole" in out
     assert CHANGED in out
-    assert f"evidence  git_commit  {LOCATOR}" in out
     assert f"git_commit  {LOCATOR}  the manifest" in out
+
+    with db.transaction(committing_dsn) as cur:
+        tasks.close(cur, task_id, outcome="completed", reason="manifest merged", actor="user")
+    _, out, _ = run("task", "show", short)
+    assert "closed as completed: manifest merged" in out.split("checkpoints", 1)[1]
 
 
 def test_a_task_whose_lease_has_run_out_is_listed_only_when_it_is_asked_for(run, committing_dsn):

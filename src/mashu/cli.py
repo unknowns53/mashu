@@ -41,9 +41,6 @@ from mashu import (
 from mashu import (
     migrate as migration,
 )
-from mashu import (
-    traces as trace_domain,
-)
 from mashu.errors import DuplicateTaskError, MashuError, RefusedError, RetiredConflictError
 
 ACTOR = "user"
@@ -257,7 +254,6 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"topics  count={status.topic_count}{heaviest}")
     print(f"temporary  tokens={status.temporary_tokens}/{config.temporary_capacity()}")
     print(f"pending {status.pending_ready + status.pending_deferred}")
-    print(f"traces  unexpired={status.traces}")
     print(f"ledger  last_30_days={status.ledger_30d}")
     routes = "  ".join(
         f"{route}={status.delivery_failures_by_route.get(route, 0)}"
@@ -493,12 +489,15 @@ def cmd_pain(args: argparse.Namespace) -> int:
             scope_id=_scope(cur, args.scope),
             prevention_kind=args.prevention_kind,
             task_id=_task_ref(cur, args.task) if args.task else None,
+            violated_memory_id=_memory_ref(cur, args.violated) if args.violated else None,
         )
     _gate_warnings(row)
     matches = row.get("matches", {})
     print(f"pain  {_short(row['ledger_id'])}")
-    for name in ("ledger", "traces", "tombstones", "memories"):
+    for name in ("ledger", "tombstones", "memories"):
         print(f"{name}: {len(matches.get(name, []))}")
+    if row.get("violated_memory_id"):
+        print(f"violated  {_short(row['violated_memory_id'])}: suspected delivery failure recorded")
     if row.get("prevention_kind") == "work":
         filed = row.get("filed_task")
         print(
@@ -820,30 +819,6 @@ def cmd_memories(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_trace(args: argparse.Namespace) -> int:
-    with db.transaction(args.dsn) as cur:
-        rows = trace_domain.search_traces(
-            cur,
-            query=args.query,
-            scope_id=_scope(cur, args.scope),
-        )
-    if not rows:
-        print("nothing matches" if args.query else "no unexpired traces")
-        return 0
-    for number, row in enumerate(rows):
-        if number:
-            print()
-        head = (
-            f"{_short(row['trace_id'])}  {_date(row['created_at'])}  "
-            f"{row.get('scope_name') or '-'}  until {_date(row['expires_at'])}"
-        )
-        if row.get("score") is not None:
-            head += f"  match {row['score']:.2f}"
-        print(head)
-        print(_flow(row["content"]))
-    return 0
-
-
 def _pending_by_id(cur: Any, value: str) -> dict[str, Any]:
     wanted = _resolve(
         cur,
@@ -1139,6 +1114,11 @@ def cmd_guard(args: argparse.Namespace) -> int:
         {"memory_id": row["memory_id"], "content": row["content"], "topic": topic["name"]}
         for row in rules
     ]
+    source = topics.source_text(topic.get("source"))
+    if source:
+        # The hook prints each row's content as one line of its denial, so the source rides
+        # as a last row with no memory behind it.
+        pinned.append({"memory_id": None, "content": f"Source: {source}", "topic": topic["name"]})
     if args.json:
         print(json.dumps(_plain(pinned), ensure_ascii=False))
     else:
@@ -1189,12 +1169,20 @@ def cmd_topic(args: argparse.Namespace) -> int:
         _field("trigger", topic["trigger"])
         if topic["action"]:
             _field("before", topic["action"])
+        if topic["source"]:
+            _field("source", topics.source_text(topic["source"]))
         print("rules")
         for row in answer["memories"]:
             print(f"  {_short(row['memory_id'])}  {row['content']}")
         return 0
-    if args.add is None and args.edit is None and (args.trigger or args.scope or args.rename):
-        raise MashuError("--trigger and --scope go with --add or --edit; --rename with --edit")
+    if (
+        args.add is None
+        and args.edit is None
+        and (args.trigger or args.scope or args.rename or args.source)
+    ):
+        raise MashuError(
+            "--trigger, --scope, and --source go with --add or --edit; --rename with --edit"
+        )
     if args.edit is None and (args.rename is not None or args.action or args.no_action):
         raise MashuError("--rename, --action, and --no-action go with --edit")
     with db.transaction(args.dsn) as cur:
@@ -1206,11 +1194,14 @@ def cmd_topic(args: argparse.Namespace) -> int:
                 )
             if args.scope == "-":
                 raise MashuError("omit --scope to list the topic in every session")
+            if args.source == "-":
+                raise MashuError("omit --source to create the topic without one")
             row = topics.create_topic(
                 cur,
                 name=args.add,
                 trigger=args.trigger,
                 scope_id=_scope(cur, args.scope),
+                source=args.source,
                 actor=ACTOR,
             )
             print(f"created  {row['name']}")
@@ -1227,6 +1218,8 @@ def cmd_topic(args: argparse.Namespace) -> int:
                 clear_scope=args.scope == "-",
                 action=args.action,
                 clear_action=args.no_action,
+                source=args.source if args.source != "-" else None,
+                clear_source=args.source == "-",
             )
             print(f"edited  {row['name']}")
             return 0
@@ -1550,8 +1543,7 @@ Start here:
 
 Recording information:
   remember                  A User writes a rule or short-lived condition directly.
-  pain                      Record an incident or repeated lookup and its prevention.
-  trace                     Read dated, unreviewed observations (kept for 30 days).
+  pain                      Record an incident and its prevention.
 
 Managing durable rules:
   review                    A User decides pending candidates.
@@ -1784,24 +1776,30 @@ def build_parser() -> argparse.ArgumentParser:
         "pain",
         "record a pain in the ledger and see what it resembles",
         description=(
-            "Record what costly forgetting caused and the knowledge or one-time work that would "
-            "prevent it. Rules may become review candidates after repeated evidence; work is "
-            "filed into a task's next actions when --task is supplied."
+            "Record the incident costly forgetting caused and the knowledge or one-time work "
+            "that would prevent it. A rule becomes a review candidate; work is filed into a "
+            "task's next actions when --task is supplied. --violated names an active memory "
+            "that covered it and was not followed, which records a suspected delivery failure "
+            "instead of a candidate."
         ),
         examples=(
-            'mashu pain --kind incident --what "Deployed twice" '
-            '--prevention "Check the release ledger"',
-            'mashu pain --kind friction --what "Looked up the quota again" '
-            '--prevention "Quota resets at midnight"',
-            'mashu pain --kind incident --what "Bad export" '
+            'mashu pain --what "Deployed twice" --prevention "Check the release ledger"',
+            'mashu pain --what "Deployed twice" --prevention "Check the release ledger" '
+            "--violated 5e6f7a8b",
+            'mashu pain --what "Bad export" '
             '--prevention "Validate the manifest" --prevention-kind work --task 1a2b3c4d',
         ),
     )
     pain.add_argument(
         "--kind",
-        choices=("incident", "friction"),
-        required=True,
-        help="wrong work done (incident), or the same thing looked up again (friction)",
+        choices=ledger_domain.REPORTABLE_KINDS,
+        default="incident",
+        help="wrong work done (incident, the only kind)",
+    )
+    pain.add_argument(
+        "--violated",
+        metavar="MEMORY",
+        help="an active memory that covered this and was not followed",
     )
     pain.add_argument("--what", required=True, help="what went wrong")
     pain.add_argument(
@@ -1829,20 +1827,6 @@ def build_parser() -> argparse.ArgumentParser:
     ledger.add_argument("--limit", type=int, default=20, help="how many rows to show (default 20)")
     ledger.add_argument("--scope", help="only the pains recorded in this scope")
     ledger.set_defaults(func=cmd_ledger)
-
-    trace = _command(
-        sub,
-        "trace",
-        "read and search the traces (dated, unreviewed, 30 days)",
-        description=(
-            "Read recent observations. Traces are dated, unreviewed evidence and expire after "
-            "30 days; they are not durable rules."
-        ),
-        examples=("mashu trace", 'mashu trace "quota reset" --scope deployment'),
-    )
-    trace.add_argument("query", nargs="?", help="text to match; without it, the recent traces")
-    trace.add_argument("--scope", help="only the traces left in this scope")
-    trace.set_defaults(func=cmd_trace)
 
     review = _command(
         sub,
@@ -1991,7 +1975,9 @@ def build_parser() -> argparse.ArgumentParser:
             "deleted, one whose past rules name it is archived. --action with --edit links the "
             "topic to an action such as delegate (an Agent or Task tool call), so the "
             "PreToolUse hook shows its rules before that call; one action leads to one open "
-            "topic. These are User operations."
+            "topic. --source names where the topic's long form lives, as a path from the "
+            "vault (MASHU_VAULT_ROOT) or repository root with an optional #heading; '-' with "
+            "--edit clears it. These are User operations."
         ),
         examples=(
             "mashu topic",
@@ -2000,6 +1986,7 @@ def build_parser() -> argparse.ArgumentParser:
             'mashu topic --edit difficulty --trigger "Before changing win rates"',
             "mashu topic --edit difficulty --scope -",
             "mashu topic --edit delegation --action delegate",
+            'mashu topic --edit difficulty --source "Projects/Game/Difficulty.md#Levers"',
             "mashu topic --remove difficulty",
             "mashu topic show difficulty",
         ),
@@ -2015,6 +2002,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--scope", help="the Scope whose sessions list it; '-' with --edit means every session"
     )
     topic.add_argument("--rename", metavar="NEW", help="the new name, with --edit")
+    topic.add_argument(
+        "--source",
+        metavar="PATH",
+        help="the note or document it comes from; '-' with --edit clears it",
+    )
     topic_action = topic.add_mutually_exclusive_group()
     topic_action.add_argument(
         "--action", metavar="ACT", help="with --edit, the action whose tool calls it precedes"

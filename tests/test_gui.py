@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterator
 import pytest
 
 from conftest import candidate, new_project, new_task, propose_change, remember
-from mashu import application, db, gui, memories, task_history
+from mashu import application, db, gui, memories, task_history, tasks
 
 MARKUP = "never trust a body that says <script>alert(1)</script> & means it"
 
@@ -88,7 +88,6 @@ def test_stored_rows_appear_in_full_on_their_pages_and_filters_narrow_them(
             cur,
             task["task"]["task_id"],
             actor="agent",
-            what_changed="pages render",
             expect_updated_at=task["state"]["updated_at"],
             attempts=[{"attempt": "served it with a framework", "result": "too heavy"}],
         )
@@ -103,9 +102,18 @@ def test_stored_rows_appear_in_full_on_their_pages_and_filters_narrow_them(
 
     assert "survey every list at once" in fetch("/tasks?project=enrai")[1]
     task_page = fetch(f"/tasks/{task['task']['task_id']}")[1]
-    assert "pages render" in task_page and "served it with a framework" in task_page
+    assert "served it with a framework" in task_page and "no checkpoints" in task_page
 
     review = fetch("/review")[1]
     assert "check the vendored toolchain before building" in review
     assert "cron moved to UTC" in review
     assert fetch(f"/tasks/{kept['memory_id']}")[0] == 404
+
+    with db.transaction(dsn) as cur:
+        tasks.close(
+            cur, task["task"]["task_id"], outcome="completed", reason="views ship", actor="user"
+        )
+        frozen = task_history.checkpoint_list(cur, task["task"]["task_id"])[0]
+    closed_page = fetch(f"/tasks/{task['task']['task_id']}")[1]
+    assert "closed as completed: views ship" in closed_page
+    assert frozen["created_at"].astimezone().strftime("%Y-%m-%d %H:%M") in closed_page

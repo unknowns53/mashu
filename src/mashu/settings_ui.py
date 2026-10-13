@@ -63,7 +63,6 @@ class Health:
     temporary_tokens: int
     pending_ready: int
     pending_deferred: int
-    traces: int
     ledger_30d: int
     delivery_failures_30d: int
     delivery_failures_by_route: dict[str, int]
@@ -92,7 +91,6 @@ def _health(dsn: str | None) -> Health:
         temporary_tokens=snapshot.temporary_tokens,
         pending_ready=snapshot.pending_ready,
         pending_deferred=snapshot.pending_deferred,
-        traces=snapshot.traces,
         ledger_30d=snapshot.ledger_30d,
         delivery_failures_30d=snapshot.delivery_failures_30d,
         delivery_failures_by_route=snapshot.delivery_failures_by_route,
@@ -146,8 +144,7 @@ def _health_text(value: Health) -> str:
             "",
             f"  Review queue       {value.pending_ready} ready"
             f"  ·  {value.pending_deferred} deferred",
-            f"  Evidence           {value.traces} live traces"
-            f"  ·  {value.ledger_30d} ledger entries in 30 days",
+            f"  Evidence           {value.ledger_30d} ledger entries in 30 days",
             f"  Delivery health    {value.delivery_failures_30d} suspected failures in 30 days"
             + _routes(value.delivery_failures_by_route),
             f"  Scopes             {value.scope_count}",
@@ -413,6 +410,7 @@ def _topic_detail(row: dict[str, Any]) -> str:
         (
             f"  ── {row['name']}  ·  listed in {where}{before}",
             screen.wrap(f"trigger: {row['trigger']}", indent="  "),
+            screen.wrap(f"source: {topics.source_text(row.get('source')) or '-'}", indent="  "),
             f"  {_rules(row['rules'])} active  ·  body {row['body_tokens']}/"
             f"{config.topic_capacity()} tokens  ·  index line {row['line_tokens']} tokens",
         )
@@ -484,7 +482,11 @@ def _topics_page(dsn: str | None) -> None:
                 "(delegate = Agent / Task subagent calls)",
                 row.get("action"),
             )
-            answers = (name, trigger, scope_name, action)
+            source = _replacement(
+                "source, the note or document it comes from, from the vault or repository root",
+                row.get("source"),
+            )
+            answers = (name, trigger, scope_name, action, source)
             if any(isinstance(value, screen.Cancelled) for value in answers):
                 note = "  topic unchanged"
                 continue
@@ -503,6 +505,8 @@ def _topics_page(dsn: str | None) -> None:
                         clear_scope=scope_id is None,
                         action=action,
                         clear_action=action is None,
+                        source=source,
+                        clear_source=source is None,
                     )
                 note = f"  edited topic {name or row['name']}"
             except MashuError as error:

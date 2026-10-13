@@ -12,7 +12,7 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
-from mashu import db, ledger, memories, memory_changes, nominations, projects, screen, server, tasks
+from mashu import db, memories, memory_changes, nominations, projects, screen, server, tasks
 from mashu.migrate import migrate, migration_files
 
 TEST_DB = os.environ.get("MASHU_TEST_DB", "mashu_test")
@@ -186,12 +186,15 @@ def retire(cur: psycopg.Cursor, memory, reason: str = "withdrawn", kind: str = "
 
 
 def candidate(cur: psycopg.Cursor, content: str, *, kind: str = "rederivation", **kwargs):
-    """A pending candidate standing on one recorded friction."""
-    pain = ledger.report_pain(
-        cur, kind="friction", what="looked it up again", prevention=content, actor="agent"
+    """A pending candidate standing on one ledger row, written directly so no matching runs."""
+    cur.execute(
+        "INSERT INTO ledger (kind, what, prevention, created_by) "
+        "VALUES ('friction', 'looked it up again', %s, 'agent') RETURNING ledger_id",
+        (content,),
     )
+    ledger_id = cur.fetchone()["ledger_id"]
     return nominations.create_nomination(
-        cur, content=content, kind=kind, evidence=[pain["ledger_id"]], actor="agent", **kwargs
+        cur, content=content, kind=kind, evidence=[ledger_id], actor="agent", **kwargs
     )
 
 

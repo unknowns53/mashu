@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Annotated, Any, NotRequired
 from uuid import UUID, uuid4
 
@@ -30,7 +30,6 @@ from mashu import (
     task_history,
     tasks,
     topics,
-    traces,
 )
 from mashu.errors import (
     DuplicateTaskError,
@@ -54,19 +53,19 @@ INSTRUCTIONS = (
     "When the work at hand matches a bootstrap topic's trigger, call memory_list with that "
     "topic before starting it. "
     "Before continuing a task from a bootstrap card, call task_get with its full id and "
-    "verify old state against the repository and artifacts. Use task_checkpoint to hand "
-    "off to the next session: before stopping, pausing, or compaction, and when the "
-    "approach or next actions change, not after each commit, since git log carries "
+    "verify old state against the repository and artifacts. task_checkpoint is the one "
+    "task state write; use it to hand off before stopping, pausing, or compaction and when "
+    "the approach or next actions change, not after each commit, since git log carries "
     "progress. Put failed tries in its attempts, costly-to-rederive reasons in decisions, "
     "and external sources in artifacts. Task completion remains the user's decision. "
     "If work looks done, use task_propose_close with outcome and reason; it changes no "
     "task state. "
     "Writes naming people or home paths are refused, so call the user 'the user' and write "
     "paths from ~ or the repository. "
-    "Record lookups or derivations with trace_put. Use pain_report only when missing or "
-    "stale knowledge caused an incident or repeated lookup; incidents nominate once, "
-    "friction on the second occurrence. Use prevention_kind='work' and task_id for "
-    "one-time fixes. Temporary Context handles expiry. "
+    "Use pain_report only when missing or stale knowledge caused an incident; pass "
+    "violated_memory_id when a rule delivered to this session covered it and was not "
+    "followed. Use prevention_kind='work' and task_id for one-time fixes. Temporary Context "
+    "handles expiry. "
     "Durable Memory changes need an explicit user instruction. For a request to remember, "
     "call memory_admit with the content. For an existing Memory, a retire, replace, or "
     "restore the user asked for takes one memory_change_instructed call and a delivery move "
@@ -175,23 +174,6 @@ def _body_contract() -> str:
         f"measurements, dates, and history in `why` (at most {memories.WHY_LIMIT} chars): it "
         "is kept on the evidence ledger row that memory_get returns and is never pushed. An "
         "over-limit field is refused with `problems` and `over_limit`."
-    )
-
-
-#: When a task state write is due, said the same way by both tools that write one.
-_WRITE_TRIGGER = (
-    "Write state to hand off to the next session: before stopping, pausing, or compaction "
-    "and when the approach or next actions change, not after each commit, since git log "
-    "carries progress."
-)
-
-
-def _write_success() -> str:
-    """How a successful state write answers, including the note on writing too soon."""
-    minutes = tasks.STATE_WRITE_SPACING // timedelta(minutes=1)
-    return (
-        "Success returns the card view with the card and detail budgets, plus `cadence` "
-        f"when this session wrote the task's state less than {minutes} minutes earlier."
     )
 
 
@@ -359,9 +341,9 @@ def build_server() -> Any:
                     routed=routed,
                 )
                 note = (
-                    "Knowledge is pushed, not searched. Call trace_put for a "
-                    "later re-derivation and pain_report when forgetting caused pain; "
-                    "only an explicit user instruction can authorize memory_admit, "
+                    "Knowledge is pushed, not searched. Call pain_report when forgetting "
+                    "caused an incident; only an explicit user instruction can authorize "
+                    "memory_admit, "
                     "memory_change_instructed, memory_redeliver, or memory_change_apply in the "
                     "same session. The Agent executes it, and "
                     "the stored instruction quote is provenance rather than authentication. "
@@ -382,20 +364,25 @@ def build_server() -> Any:
 
     @server.tool(
         description=(
-            "Record a pain and show related evidence.\n\n"
+            "Record an incident that missing or stale knowledge caused, and show related "
+            "evidence.\n\n"
             "Use `rule` for reusable guidance or `work` with `task_id` for a one-time fix; this "
             "never admits knowledge directly. A `rule` prevention becomes a candidate Memory "
             f"body, so it is held to {memories.CONTENT_LIMIT} chars and states the rule alone; "
-            "put the reason, measurements, dates, and history in `what`."
+            "put the reason, measurements, dates, and history in `what`. Pass the rule's "
+            "memory_id as `violated_memory_id` when a rule delivered to this session covered "
+            "what went wrong and was not followed; it must be active, and no candidate is "
+            "created for a rule already in force."
         )
     )
     def pain_report(
-        kind: str,
         what: str,
         prevention: str,
+        kind: Annotated[str, _Choice(("incident",))] = "incident",
         scope: str | None = None,
         prevention_kind: str = "rule",
         task_id: UUID | None = None,
+        violated_memory_id: UUID | None = None,
     ) -> dict[str, Any]:
         try:
             with db.transaction() as cur:
@@ -412,54 +399,9 @@ def build_server() -> Any:
                     prevention_kind=prevention_kind,
                     task_id=task_id,
                     session=session,
+                    violated_memory_id=violated_memory_id,
                 )
                 return _plain({"ok": True, **answer})
-        except MashuError as error:
-            return _failure(error)
-
-    @server.tool()
-    def trace_put(content: str, scope: str | None = None) -> dict[str, Any]:
-        """Record a dated observation for later matching.
-
-        Traces are not knowledge and are not pushed to sessions.
-        """
-        try:
-            with db.transaction() as cur:
-                scope_id, _, _ = _scope(cur, scope)
-                answer = traces.put_trace(
-                    cur,
-                    content=content,
-                    actor=actor(),
-                    scope_id=scope_id,
-                )
-                return _plain({"ok": True, **answer})
-        except MashuError as error:
-            return _failure(error)
-
-    @server.tool()
-    def trace_search(
-        query: str | None = None,
-        scope: str | None = None,
-        limit: int = 8,
-    ) -> dict[str, Any]:
-        """Search dated, unverified traces; results are observations, not current knowledge."""
-        try:
-            with db.transaction() as cur:
-                scope_id, _, _ = _scope(cur, scope)
-                found = traces.search_traces(
-                    cur,
-                    query=query,
-                    scope_id=scope_id,
-                    limit=limit,
-                )
-                rows = [{**row, "created_at": row.get("created_at")} for row in found]
-                return _plain(
-                    {
-                        "ok": True,
-                        "traces": rows,
-                        "note": "These are dated, unverified observations, not knowledge.",
-                    }
-                )
         except MashuError as error:
             return _failure(error)
 
@@ -469,7 +411,9 @@ def build_server() -> Any:
 
         Pass exactly one. `scope='always'` (or `global`) lists the Memories pushed to every
         session. With `topic`, read the rules before starting the work its trigger names;
-        bootstrap lists topics but never their rules.
+        bootstrap lists topics but never their rules. A topic's `source` names where its
+        long form lives, from the vault or a repository root; when it is a vault note,
+        `source_path` and `source_exists` say where and whether it is there.
         """
         if (scope is None) == (topic is None):
             return _failure(MashuError("pass exactly one of scope or topic"))
@@ -541,7 +485,9 @@ def build_server() -> Any:
             "For a rule the user wants read only during one kind of work, pass "
             "`delivery='topic'` and a `topic` name. A topic that does not exist yet is opened "
             "with the rule, never without it, and needs `topic_trigger` (one sentence saying "
-            "when to read it); `scope` names where it is listed, or omit it for every session."
+            "when to read it); `scope` names where it is listed, or omit it for every session. "
+            "`topic_source` optionally names where the new topic's long form lives, as a path "
+            "from the vault or repository root with an optional #heading."
             f"\n\n{body_contract} `why` goes with `content`, not with `nomination_id`."
         )
     )
@@ -559,9 +505,12 @@ def build_server() -> Any:
         topic: str | None = None,
         topic_trigger: str | None = None,
         why: str | None = None,
+        topic_source: str | None = None,
     ) -> dict[str, Any]:
         if topic_trigger is not None and topic is None:
             return _failure(MashuError("topic_trigger opens the topic named by topic; pass both"))
+        if topic_source is not None and topic is None:
+            return _failure(MashuError("topic_source belongs to the topic named by topic"))
         if (nomination_id is None) == (content is None):
             return _failure(
                 MashuError("pass exactly one of nomination_id (with nomination_version) or content")
@@ -590,7 +539,9 @@ def build_server() -> Any:
                 topic_id, new_topic = None, None
                 if topic:
                     listed = scopes.require_scope(cur, scope)["scope_id"] if scope else None
-                    topic_id, new_topic = topics.for_filing(cur, topic, topic_trigger, listed)
+                    topic_id, new_topic = topics.for_filing(
+                        cur, topic, topic_trigger, listed, topic_source
+                    )
                 if content is not None:
                     scope_id, _, _ = _scope(cur, scope)
                     answer = nominations.remember_explicit(
@@ -968,15 +919,24 @@ def build_server() -> Any:
 
     @server.tool(
         description=(
-            'Replace the state fields given; omitted fields keep their value, "" or [] '
-            f"clears.\n\n{_WRITE_TRIGGER} Pass the read state's `updated_at` as "
-            "`expect_updated_at`. `name` renames the task unless it reads like another open "
-            "one. `goal` names the outcome and `status_text` says where the task stands, so "
-            "it changes only when that does; both ride on every bootstrap card, so details go "
-            f"in approach or next_actions. {state_contract} {_REFUSALS} {_write_success()}"
+            "Write a task's state: replace the fields given and append the history they rest "
+            "on. The only task state write.\n\n"
+            "Hand off to the next session with it: before stopping, pausing, or compaction and "
+            "when the approach or next actions change, not after each commit, since git log "
+            'carries progress. Omitted fields keep their value; "" or [] clears one. Pass the '
+            "read state's `updated_at` as `expect_updated_at`. `name` renames the task unless "
+            "it reads like another open one. `goal` names the outcome and `status_text` says "
+            "where the task stands, so it changes only when that does; both ride on every "
+            "bootstrap card, so details go in approach or next_actions. Optional "
+            "`what_changed` is logged with the write and never delivered. Optional history, "
+            "all written with the state or not at all: `attempts` for failed tries, "
+            "`decisions` for reasons costly to re-derive, and `artifacts` for external "
+            "sources. No snapshot is frozen per write; closing the task freezes the final "
+            f"state. {state_contract} {_history_contract()} {_REFUSALS} Success returns the "
+            "card view with the card and detail budgets."
         )
     )
-    def task_update(
+    def task_checkpoint(
         task_id: UUID,
         expect_updated_at: datetime,
         name: str | None = None,
@@ -986,51 +946,7 @@ def build_server() -> Any:
         open_questions: list[str] | None = None,
         blockers: list[str] | None = None,
         next_actions: list[str] | None = None,
-    ) -> dict[str, Any]:
-        try:
-            with db.transaction() as cur:
-                answer = tasks.task_update(
-                    cur,
-                    task_id,
-                    actor=actor(),
-                    expect_updated_at=expect_updated_at,
-                    goal=goal,
-                    approach=approach,
-                    status_text=status_text,
-                    open_questions=open_questions,
-                    blockers=blockers,
-                    next_actions=next_actions,
-                    name=name,
-                    session=session,
-                )
-                return _plain({"ok": True, **_task_card_view(answer)})
-        except MashuError as error:
-            return _failure(error, task_write="task_update", task_id=task_id)
-
-    @server.tool(
-        description=(
-            "Replace the state fields given and record a checkpoint with its history.\n\n"
-            f"{_WRITE_TRIGGER} "
-            'Omitted fields keep their value; "" or [] clears one. Pass the read state\'s '
-            "`updated_at` as `expect_updated_at`. `goal` names the outcome and `status_text` "
-            "says where the task stands, so it changes only when that does; both ride on every "
-            "bootstrap card, so what was done goes in `what_changed`. Optional history, all "
-            "written with the checkpoint or not at all: `attempts` for failed tries, "
-            "`decisions` for reasons costly to re-derive, and `artifacts` for external "
-            "sources, which become the checkpoint's evidence. "
-            f"{state_contract} {_history_contract()} {_REFUSALS} {_write_success()}"
-        )
-    )
-    def task_checkpoint(
-        task_id: UUID,
-        what_changed: str,
-        expect_updated_at: datetime,
-        goal: str | None = None,
-        approach: str | None = None,
-        status_text: str | None = None,
-        open_questions: list[str] | None = None,
-        blockers: list[str] | None = None,
-        next_actions: list[str] | None = None,
+        what_changed: str | None = None,
         attempts: AttemptList | None = None,
         decisions: DecisionList | None = None,
         artifacts: ArtifactList | None = None,
@@ -1041,8 +957,9 @@ def build_server() -> Any:
                     cur,
                     task_id,
                     actor=actor(),
-                    what_changed=what_changed,
                     expect_updated_at=expect_updated_at,
+                    what_changed=what_changed,
+                    name=name,
                     goal=goal,
                     approach=approach,
                     status_text=status_text,
@@ -1054,11 +971,6 @@ def build_server() -> Any:
                     artifacts=artifacts,
                     session=session,
                 )
-                answer["checkpoint"] = {
-                    key: value
-                    for key, value in answer["checkpoint"].items()
-                    if key not in tasks.EDITABLE_FIELDS
-                }
                 return _plain({"ok": True, **_task_card_view(answer)})
         except MashuError as error:
             return _failure(error, task_write="task_checkpoint", task_id=task_id)

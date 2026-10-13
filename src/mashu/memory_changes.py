@@ -476,6 +476,12 @@ def propose(
     )
     if problems:
         raise MalformedRequestError(problems)
+    # A reference is a locator rather than a body, so its home directory is kept from ~
+    # instead of being refused.
+    evidence = [
+        {**row, "ref": approvals.home_relative(row["ref"])} if row.get("ref") else row
+        for row in evidence
+    ]
     _gate_texts(evidence, retire_reason, restore_reason)
     current = None
     if change_id is not None:

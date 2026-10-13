@@ -8,13 +8,14 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import approvals, capacity, events, redact
+from mashu import approvals, capacity, events, redact, vault
 from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
 NAME_LIMIT = 40
 TRIGGER_LIMIT = 160
 ACTION_LIMIT = 40
+SOURCE_LIMIT = 300
 _ACTION = re.compile(r"[A-Za-z0-9_.-]+")
 
 #: What bootstrap tells the Agent to do with the index it pushes.
@@ -75,6 +76,39 @@ def clean_action(value: str | None) -> str:
     return action
 
 
+def clean_source(value: str | None) -> str:
+    """Where the topic's long form lives: a path from the vault or a repository root.
+
+    The vault's own location is configured, never stored, so the path is relative.
+    """
+    if not (value or "").strip():
+        raise MashuError("a topic's source cannot be empty; clear it instead")
+    source = _text(value, "source", SOURCE_LIMIT)
+    vault.relative_parts(source)
+    redact.gate({"topic_source": source})
+    return source
+
+
+def source_view(source: str | None) -> dict[str, Any]:
+    """The stored source and, when it reads as a vault note, where it is and whether it exists."""
+    view: dict[str, Any] = {"source": source}
+    located = vault.note(source)
+    if located is not None:
+        view.update(source_path=str(located.path), source_exists=located.exists)
+    return view
+
+
+def source_text(source: str | None) -> str | None:
+    """The source as one line for a person or a denial, with the vault path it lands on."""
+    view = source_view(source)
+    if not view["source"]:
+        return None
+    if "source_path" not in view:
+        return view["source"]
+    missing = "" if view["source_exists"] else " (not found)"
+    return f"{view['source']} -> {view['source_path']}{missing}"
+
+
 def has_actions(cur: psycopg.Cursor) -> bool:
     """Whether this store's topics can carry an action yet."""
     cur.execute(
@@ -126,20 +160,31 @@ def unknown(cur: psycopg.Cursor, name: str) -> MashuError:
 
 
 def for_filing(
-    cur: psycopg.Cursor, name: str, trigger: str | None, scope_id: UUID | None
+    cur: psycopg.Cursor,
+    name: str,
+    trigger: str | None,
+    scope_id: UUID | None,
+    source: str | None = None,
 ) -> tuple[UUID | None, dict[str, Any] | None]:
     """The open topic an instructed rule is filed under, or the topic it opens.
 
-    Returns the existing topic's id, or the cleaned name, trigger, and scope of a topic to
-    open once the rule is sure to land. A trigger for an existing topic is accepted only
-    when it and the scope are the ones the topic has, so a resent request reads the same.
+    Returns the existing topic's id, or the cleaned name, trigger, scope, and source of a
+    topic to open once the rule is sure to land. A trigger or source for an existing topic
+    is accepted only when it and the scope are the ones the topic has, so a resent request
+    reads the same.
     """
     existing = get_topic(cur, name)
     if existing is None:
         if trigger is None:
             raise unknown(cur, name)
         name, trigger = validate_new(name, trigger)
-        return None, {"name": name, "trigger": trigger, "scope_id": scope_id}
+        cleaned = clean_source(source) if source is not None else None
+        return None, {"name": name, "trigger": trigger, "scope_id": scope_id, "source": cleaned}
+    if source is not None and source.strip() != existing.get("source"):
+        raise MashuError(
+            f"topic '{existing['name']}' already exists with source "
+            f"{existing.get('source') or 'none'}; omit topic_source to file under it"
+        )
     if trigger is not None and (trigger.strip(), scope_id) != (
         existing["trigger"],
         existing["scope_id"],
@@ -156,10 +201,10 @@ def open_instructed(
     cur: psycopg.Cursor, topic: dict[str, Any], *, approval: dict[str, Any], actor: str
 ) -> UUID:
     """Open the topic an instructed write files its rule under, keeping whose words opened it."""
-    source = approvals.validate(
+    provenance = approvals.validate(
         {key: approval.get(key) for key in ("kind", "instruction", "conversation_ref")}
     )
-    return create_topic(cur, actor=actor, approval_source=source, **topic)["topic_id"]
+    return create_topic(cur, actor=actor, approval_source=provenance, **topic)["topic_id"]
 
 
 def lock_open_topic(cur: psycopg.Cursor, topic_id: UUID) -> dict[str, Any]:
@@ -180,6 +225,7 @@ def create_topic(
     trigger: str,
     actor: str,
     scope_id: UUID | None = None,
+    source: str | None = None,
     approval_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Open a topic. An empty one pushes nothing, so no seat is checked.
@@ -187,17 +233,18 @@ def create_topic(
     An agent opens one only on a user's instruction, whose `approval_source` the event keeps.
     """
     name, trigger = _clean(name, trigger)
+    source = clean_source(source) if source is not None else None
     existing = get_topic(cur, name)
     if existing is not None:
         state = " (archived)" if existing["archived_at"] is not None else ""
         raise MashuError(f"topic '{name}' already exists{state}")
     cur.execute(
         """
-        INSERT INTO topic (name, scope_id, trigger, created_by)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO topic (name, scope_id, trigger, source, created_by)
+        VALUES (%s, %s, %s, %s, %s)
         RETURNING *
         """,
-        (name, scope_id, trigger, actor),
+        (name, scope_id, trigger, source, actor),
     )
     row = cur.fetchone()
     detail = {
@@ -206,6 +253,8 @@ def create_topic(
         "trigger": trigger,
         "scope_id": str(scope_id) if scope_id else None,
     }
+    if source is not None:
+        detail["source"] = source
     if approval_source is not None:
         detail["approval_source"] = approval_source
     events.record(cur, "topic_created", actor, detail=detail)
@@ -223,12 +272,16 @@ def update_topic(
     clear_scope: bool = False,
     action: str | None = None,
     clear_action: bool = False,
+    source: str | None = None,
+    clear_source: bool = False,
 ) -> dict[str, Any]:
-    """Rename, reword, move, or link a topic, weighing its index line where it will land."""
+    """Rename, reword, move, link, or point a topic, weighing its index line where it lands."""
     if clear_scope and scope_id is not None:
         raise MashuError("pass a scope or clear it, not both")
     if clear_action and action is not None:
         raise MashuError("pass an action or clear it, not both")
+    if clear_source and source is not None:
+        raise MashuError("pass a source or clear it, not both")
     cur.execute("SELECT * FROM topic WHERE topic_id = %s FOR UPDATE", (topic_id,))
     current = cur.fetchone()
     if current is None:
@@ -253,12 +306,21 @@ def update_topic(
                 f"topic '{holder['name']}' already applies before {new_action}; one action "
                 "leads to one topic, so clear that topic's action first"
             )
+    new_source = None if clear_source else (current.get("source") if source is None else source)
+    if new_source is not None and new_source != current.get("source"):
+        new_source = clean_source(new_source)
     if new_name != current["name"]:
         taken = get_topic(cur, new_name)
         if taken is not None:
             raise MashuError(f"topic '{new_name}' already exists")
-    before = (current["name"], current["trigger"], current["scope_id"], current["action"])
-    if (new_name, new_trigger, home, new_action) == before:
+    before = (
+        current["name"],
+        current["trigger"],
+        current["scope_id"],
+        current["action"],
+        current.get("source"),
+    )
+    if (new_name, new_trigger, home, new_action, new_source) == before:
         return current
 
     verdict = capacity.check_topic_edit(
@@ -268,11 +330,12 @@ def update_topic(
         raise RefusedError(verdict["refusal"])
     cur.execute(
         """
-        UPDATE topic SET name = %s, trigger = %s, scope_id = %s, action = %s, updated_at = now()
+        UPDATE topic SET name = %s, trigger = %s, scope_id = %s, action = %s, source = %s,
+                         updated_at = now()
         WHERE topic_id = %s
         RETURNING *
         """,
-        (new_name, new_trigger, home, new_action, topic_id),
+        (new_name, new_trigger, home, new_action, new_source, topic_id),
     )
     row = cur.fetchone()
     if home != current["scope_id"]:
@@ -295,12 +358,14 @@ def update_topic(
                 "trigger": current["trigger"],
                 "scope_id": str(current["scope_id"]) if current["scope_id"] else None,
                 "action": current["action"],
+                "source": current.get("source"),
             },
             "to": {
                 "name": new_name,
                 "trigger": new_trigger,
                 "scope_id": str(home) if home else None,
                 "action": new_action,
+                "source": new_source,
             },
         },
     )
@@ -425,6 +490,7 @@ def topic_rules(cur: psycopg.Cursor, name: str) -> dict[str, Any]:
             "trigger": topic["trigger"],
             "scope": topic["scope_name"],
             "action": topic.get("action"),
+            **source_view(topic.get("source")),
         },
         "memories": cur.fetchall(),
     }

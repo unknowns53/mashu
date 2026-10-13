@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -650,3 +652,21 @@ def test_memory_change_instructed_takes_the_users_words_in_one_call(mcp, dsn, mo
         assert cur.fetchone()["n"] == 1
     cited = "~/.claude/projects/~-adapter/a.jsonl"
     assert change["evidence"][0]["ref"] == change["approval_source"]["conversation_ref"] == cited
+
+
+def test_an_evidence_reference_keeps_the_home_directory_from_tilde(cur, monkeypatch, tmp_path):
+    home = str(Path.home())
+    (tmp_path / "patterns").write_text(re.escape(home) + "\n", encoding="utf-8")
+    monkeypatch.setenv("MASHU_BANNED_PATTERNS", str(tmp_path / "patterns"))
+    evidence = [{"kind": "artifact", "ref": f"{home}/notes/a.md", "observation": "it moved"}]
+
+    change = propose_change(
+        cur,
+        remember(cur, RULE),
+        "retire",
+        evidence=evidence,
+        retirement_kind="out_of_scope",
+        retire_reason="the conditions it served ended",
+    )
+
+    assert change["evidence"][0]["ref"] == "~/notes/a.md"

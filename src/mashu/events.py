@@ -9,8 +9,8 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 _INSERT = """
-INSERT INTO event_log (event_type, actor, memory_id, ledger_id, nomination_id, trace_id, detail)
-VALUES (%s, %s, %s, %s, %s, %s, %s)
+INSERT INTO event_log (event_type, actor, memory_id, ledger_id, nomination_id, detail)
+VALUES (%s, %s, %s, %s, %s, %s)
 RETURNING event_id
 """
 
@@ -23,7 +23,6 @@ def record(
     memory_id: UUID | None = None,
     ledger_id: UUID | None = None,
     nomination_id: UUID | None = None,
-    trace_id: UUID | None = None,
     detail: dict[str, Any] | None = None,
 ) -> int:
     """Append one event and return its id."""
@@ -35,7 +34,6 @@ def record(
             memory_id,
             ledger_id,
             nomination_id,
-            trace_id,
             Jsonb(detail) if detail is not None else None,
         ),
     )
