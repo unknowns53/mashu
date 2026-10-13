@@ -17,18 +17,19 @@ from mashu import (
 from mashu import migrate as migration
 
 _KEYS = (
-    "  ↑↓/jk move   ⏎ open   a attention   m memories   w work   s settings\n"
-    "  r review   d include deferred   c Memory changes   t close tasks   ? help   q leave"
+    "  ↑↓/jk move   ⏎ open   a attention   m memories   w work   s settings   ? help\n"
+    "  r review   d include deferred   c Memory changes   t close tasks   q quit"
 )
 
 _ATTENTION_KEYS = (
-    "  ↑↓/jk move   ⏎ open   r ready   d include deferred   c Memory changes   ←/q dashboard"
+    "  ↑↓/jk move   ⏎ open   r ready   d include deferred   c Memory changes\n"
+    "  t close tasks   ? help   ← back   q quit"
 )
 
 _HELP = """
   Mashu opens here when it is run without a command.
 
-  ↑↓ or j/k  move between Attention, Memories, Work, and Settings & health
+  ↑↓ or j/k    move between Attention, Memories, Work, and Settings & health
   ⏎            open the selected area
   a            open everything waiting for a person's attention
   m / w / s    open Memories, Work, or Settings & health directly
@@ -37,13 +38,26 @@ _HELP = """
   d            review candidates including ones put off earlier
   t            open task closing directly
   ?            show this help
-  q            leave Mashu
+  q            quit Mashu, from any screen
+  ← or Esc     go back one screen, from any screen below this one
 
   Deferred candidates are counted separately. Press d to include them in the
   review queue; r and Enter keep the usual queue focused on ready candidates.
 """
 
-_HELP_KEYS = "  any key goes back"
+_ATTENTION_HELP = """
+  ↑↓ or j/k    move between the rows
+  ⏎            open the selected row
+  r            open memory review of ready candidates
+  d            open memory review including deferred candidates
+  c            open proposed Memory changes
+  t            open task closing
+  ?            show this help
+  ← or Esc     go back to the dashboard
+  q            quit Mashu
+"""
+
+_HELP_KEYS = "  q quit   any other key goes back"
 
 
 @dataclass(frozen=True)
@@ -189,9 +203,11 @@ def _screen_text(state: Dashboard, at: int) -> str:
     )
 
 
-def _help() -> None:
-    screen.paint(f"{screen.bold(screen.accent('Mashu help'))}\n\n{_HELP.strip()}\n\n{_HELP_KEYS}")
-    screen.getkey()
+def _help(title: str = "Mashu help", text: str = _HELP) -> None:
+    body = text.strip("\n")  # the blank lines around the block, not the indent inside it
+    screen.paint(f"{screen.bold(screen.accent(title))}\n\n{body}\n\n{_HELP_KEYS}")
+    if screen.getkey() == "q":
+        raise screen.Quit()
 
 
 def _attention_text(state: Dashboard, at: int) -> str:
@@ -233,8 +249,13 @@ def _attention(dsn: str | None) -> None:
         state = _dashboard(dsn)
         screen.paint(_attention_text(state, at))
         key = screen.getkey()
-        if key in ("q", "left", "h"):
+        if key == "q":
+            raise screen.Quit()
+        if key in ("left", "h"):
             return
+        if key == "?":
+            _help("Attention help", _ATTENTION_HELP)
+            continue
         if key in ("up", "k"):
             at = max(0, at - 1)
             continue
@@ -269,7 +290,7 @@ def run(dsn: str | None = None) -> int:
         key = screen.getkey()
 
         if key == "q":
-            return 0
+            raise screen.Quit()
         if key == "?":
             _help()
             continue

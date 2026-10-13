@@ -11,12 +11,14 @@ from mashu.errors import MashuError
 
 # the screens
 _QUEUE_KEYS = (
-    "  j/↓ k/↑ move   Home/End first/last   / search   ⏎ open   s put off   ? help   q leave"
+    "  ↑↓/jk move   Home/End first/last   / search   ⏎ open   s put off\n"
+    "  d include deferred   ? help   ← back   q quit"
 )
 _ITEM_KEYS = (
-    "  y admit   e edit   r turn down   s put off   j/↓ k/↑ next   "
-    "Home/End first/last   ← queue   ? help   q leave"
+    "  y admit   e edit   r turn down   s put off   ↑↓/jk next   Home/End first/last\n"
+    "  ? help   ← back   q quit"
 )
+_EMPTY_KEYS = "  ← back   q quit"
 
 #: What the keys do, for the one keystroke that asks.
 _HELP = """
@@ -33,28 +35,44 @@ _HELP = """
   r  turn it down, with a reason. The same pain will be reported again, and
      the reason is what tells the next reader this was considered.
 
-  s  put it off, saying why. It stops leading the queue, and comes back with
-     'mashu review --all'. Nothing is decided, and the count of what is
-     pending does not change.
+  s  put it off, saying why. It leaves the queue until d includes deferred
+     candidates. Nothing is decided, and the count of what is pending does
+     not change.
+
+  d  include deferred candidates in the queue, marked ·, or hide them again.
 
   /  search the queue by id, kind, scope, content, or the what/prevention in
      its evidence. Search ignores case; submit an empty search to show all.
 
   j/↓ and k/↑ move one candidate. Home and End go to the first and last;
      PageUp and PageDown move a screenful. These work in the queue and while
-     reading a candidate. Escape or ← returns, and returns from the queue leave.
+     reading a candidate.
+
+  ← or Escape goes back: from a candidate to the queue, from a search to the
+     whole queue, and from the queue to the screen it was opened from.
+
+  q  quit Mashu.
 
   space  read on where a candidate is longer than the screen; b goes back a
          page.
 
-  There is no key that admits the rest. Each seat is given out on its own
-  evidence, and every decision is written as it is made — leaving with q keeps
-  what is behind you, and the next sitting opens on the rest.
+  There is no key that admits the rest. Every decision is written as it is
+  made, so ← and q keep the decisions already made.
 """
 
-_HELP_KEYS = "  space read on   any other key goes back"
+_HELP_KEYS = "  space read on   q quit   any other key goes back"
 
 _NOTHING = "nothing waiting for review"
+
+
+def _title() -> str:
+    return screen.bold(screen.accent("Review"))
+
+
+def _queue_keys(show_deferred: bool) -> str:
+    if show_deferred:
+        return _QUEUE_KEYS.replace("d include deferred", "d hide deferred")
+    return _QUEUE_KEYS
 
 
 def _help() -> None:
@@ -65,7 +83,10 @@ def _help() -> None:
         # three lines are pinned above the body, so one of them says what this is
         page, more = screen.paged(f"  what each key does\n\n\n{body}", offset, _HELP_KEYS)
         screen.paint(page + "\n" + _HELP_KEYS)
-        if screen.getkey() != "space" or not more:
+        key = screen.getkey()
+        if key == "q":
+            raise screen.Quit()
+        if key != "space" or not more:
             return
         offset = more
 
@@ -133,9 +154,13 @@ def _queue_screen(
     else:
         head = f"{len(rows)} waiting for review"
     if hidden:
-        head += f"; {hidden} deferred; --all to see them"
+        head += f"  ·  {hidden} deferred, d includes them"
+    elif any(row.get("deferred_at") for row in rows):
+        head += "  ·  deferred included, d hides them"
     preview = _queue_preview(rows[at]) if rows else screen.warning("  no candidates match")
-    return screen.list_screen(screen.bold(head), lines, at, screen.trailer(preview, keys))
+    return screen.list_screen(
+        f"{_title()}\n{screen.bold(head)}", lines, at, screen.trailer(preview, keys)
+    )
 
 
 def _item_text(row: dict[str, Any], place: int, total: int) -> str:
@@ -370,7 +395,7 @@ def _move(at: int, total: int, key: str) -> int:
     """Move through candidates the same way from the queue and item views."""
     if total <= 0:
         return 0
-    page = max(1, screen.room_under(_QUEUE_KEYS) - 6)
+    page = max(1, screen.room_under(_QUEUE_KEYS) - 7)
     if key in ("down", "j"):
         return min(total - 1, at + 1)
     if key in ("up", "k"):
@@ -407,9 +432,23 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
 
     while True:
         if not all_rows:
-            if note:
-                print(note)
-            print(_NOTHING + (f"; {hidden} deferred, --all to see them" if hidden else ""))
+            if not screen.in_alternate_screen():
+                if note:
+                    print(note)
+                print(_NOTHING + (f"; {hidden} deferred, --all to see them" if hidden else ""))
+                return 0
+            empty_keys = ("  d include deferred " if hidden else "") + _EMPTY_KEYS
+            empty = _NOTHING + (f"  ·  {hidden} deferred" if hidden else "")
+            shown = screen.trailer(_title(), screen.bold(empty), note)
+            screen.paint(f"{shown}\n\n{empty_keys}")
+            key = screen.getkey()
+            if key == "q":
+                raise screen.Quit()
+            if key == "d" and hidden:
+                show_deferred, note = True, ""
+                all_rows, hidden = _queue(dsn, show_deferred)
+                rows = _filtered(all_rows, query)
+                continue
             return 0
         at = min(at, max(0, len(rows) - 1))
 
@@ -426,7 +465,7 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
                     rows,
                     at,
                     hidden,
-                    screen.trailer(_QUEUE_KEYS, note),
+                    screen.trailer(_queue_keys(show_deferred), note),
                     query=query,
                     total=len(all_rows),
                 )
@@ -438,7 +477,18 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
             _help()
             continue
         if key == "q":
-            return 0
+            raise screen.Quit()
+
+        if not reading and key == "d":
+            selected = rows[at]["nomination_id"] if rows else None
+            show_deferred = not show_deferred
+            all_rows, hidden = _queue(dsn, show_deferred)
+            rows = _filtered(all_rows, query)
+            at = next(
+                (number for number, row in enumerate(rows) if row["nomination_id"] == selected),
+                0,
+            )
+            continue
 
         if not reading and key == "/":
             searched = _search(query)
@@ -470,8 +520,8 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
                 continue
             return 0
 
-        # A zero-result search is still a live queue: it can be searched again,
-        # cleared with left/Escape, or left with q.
+        # A zero-result search is still a live queue: it can be searched again
+        # or cleared with left/Escape.
         if not rows:
             continue
 

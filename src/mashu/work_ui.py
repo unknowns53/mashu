@@ -16,14 +16,34 @@ VIEWS = ("active", "dormant", "closed", "projects")
 _VIEW_KEYS = {str(number): view for number, view in enumerate(VIEWS, 1)}
 
 _TASK_KEYS = (
-    "  1 active  2 dormant  3 closed  4 projects   ↑↓/jk move   Home/End   PgUp/PgDn\n"
-    "  / search   ⏎ details   n new   e edit   t renew   c close   o reopen   ← back   q leave"
+    "  ↑↓/jk move   Home/End   PgUp/PgDn   / search   ⏎ details   ? help\n"
+    "  n new   e edit   t renew   c close   o reopen   ← back   q quit"
 )
 _PROJECT_KEYS = (
-    "  1 active  2 dormant  3 closed  4 projects   ↑↓/jk move   Home/End   PgUp/PgDn\n"
-    "  / search   ⏎ details   n new project   e edit   ← back   q leave"
+    "  ↑↓/jk move   Home/End   PgUp/PgDn   / search   ⏎ details   ? help\n"
+    "  n new project   e edit   ← back   q quit"
 )
-_DETAIL_KEYS = "  space read on   any other key goes back"
+_DETAIL_KEYS = "  space read on   q quit   ? help   any other key goes back"
+
+_HELP = """
+  1 / 2 / 3 / 4  show active, dormant, or closed tasks, or projects
+  ↑↓ or j/k      move one row
+  Home/End       go to the first or last row
+  PgUp/PgDn      move one screenful
+  /              search tasks by id, name, project, state, proposal, or history,
+                 and projects by id, name, or scope
+  ⏎              read the selected task or project in full
+  space          while reading, show the next screenful
+  n              create a task; in the projects view, create a project
+  e              edit the selected task or project
+  t              renew the selected active or dormant task, making it active
+  c              close the selected active or dormant task
+  o              reopen the selected closed task
+  ← or Esc       clear the search; without a search, go back
+  ?              show this help
+  q              quit Mashu
+"""
+_HELP_KEYS = "  space read on   q quit   any other key goes back"
 
 
 def _short(value: Any) -> str:
@@ -122,14 +142,30 @@ def _tabs(view: str) -> str:
     for number, name in enumerate(VIEWS, 1):
         label = f"{number} {name}"
         tabs.append(screen.bold(f"[{label}]") if name == view else label)
-    return "  Work   " + "   ".join(tabs)
+    return "  " + "   ".join(tabs)
 
 
 def _heading(view: str, shown: int, total: int, query: str) -> str:
     noun = "project" if view == "projects" else "task"
     count = f"{shown}/{total}" if query else str(total)
     suffix = f"  ·  search {screen.accent(repr(query))}" if query else ""
-    return f"{_tabs(view)}\n  {count} {view} {noun}(s){suffix}"
+    title = screen.bold(screen.accent("Work"))
+    return f"{title}\n{_tabs(view)}\n  {count} {view} {noun}(s){suffix}"
+
+
+def _help() -> None:
+    offset = 0
+    body = _HELP.strip("\n")
+    while True:
+        title = screen.bold(screen.accent("Work help"))
+        page, more = screen.paged(f"{title}\n\n\n{body}", offset, _HELP_KEYS)
+        screen.paint(page + "\n" + _HELP_KEYS)
+        key = screen.getkey()
+        if key == "q":
+            raise screen.Quit()
+        if key != "space" or not more:
+            return
+        offset = more
 
 
 def _task_line(row: dict[str, Any], width: int) -> str:
@@ -150,19 +186,25 @@ def _project_line(row: dict[str, Any], width: int) -> str:
     return fixed + screen.clip(row["name"], max(1, width - screen.cells(fixed)))
 
 
-def _field(label: str, value: Any) -> list[str]:
+def _field(label: str, value: Any, indent: str = "  ", width: int = 0) -> list[str]:
+    """A labelled value whose wrapped rows continue under the value, not the label."""
     if value in (None, "", []):
         return []
     if isinstance(value, (list, tuple)):
-        lines = [f"  {screen.bold(label)}"]
+        lines = [f"{indent}{screen.bold(label)}"]
         for item in value:
-            lines.extend(screen.wrap(f"• {item}", "    ").splitlines())
+            lines.extend(screen.wrap(f"• {item}", indent + "  ").splitlines())
         return lines
-    prefix = f"  {screen.bold(label)}  "
-    wrapped = screen.wrap(str(value), "    ").splitlines()
+    name = label.ljust(width)
+    hang = " " * (len(indent) + len(name) + 2)
+    wrapped = screen.wrap(str(value), hang).splitlines()
     if not wrapped:
         return []
-    return [prefix + wrapped[0].strip(), *wrapped[1:]]
+    return [f"{indent}{screen.bold(name)}  {wrapped[0][len(hang) :]}", *wrapped[1:]]
+
+
+#: Where the fields of one history entry start, one level under the entry's own line.
+_ENTRY = "      "
 
 
 def _history_lines(row: dict[str, Any]) -> list[str]:
@@ -178,7 +220,7 @@ def _history_lines(row: dict[str, Any]) -> list[str]:
                 f"    {_short(item['reference_id'])}  {_date(item.get('created_at'))}  "
                 f"{item.get('kind', 'other')}"
             )
-            lines.extend(_field("locator", f"{item.get('locator') or '-'}{label}"))
+            lines.extend(_field("locator", f"{item.get('locator') or '-'}{label}", _ENTRY))
 
     checkpoints = row.get("checkpoints") or []
     if checkpoints:
@@ -186,7 +228,7 @@ def _history_lines(row: dict[str, Any]) -> list[str]:
         for item in checkpoints:
             dated = f"{_date(item.get('created_at'))}  {item.get('created_by', '-')}"
             lines.append(f"    {screen.dim(dated)}")
-            lines.extend(_field("changed", item.get("what_changed")))
+            lines.extend(_field("changed", item.get("what_changed"), _ENTRY, 8))
             for reference_id in item.get("evidence") or []:
                 artifact = artifacts_by_id.get(reference_id)
                 evidence = (
@@ -194,7 +236,7 @@ def _history_lines(row: dict[str, Any]) -> list[str]:
                     if artifact
                     else _short(reference_id)
                 )
-                lines.extend(_field("evidence", evidence))
+                lines.extend(_field("evidence", evidence, _ENTRY, 8))
 
     attempts = row.get("attempts") or []
     if attempts:
@@ -202,9 +244,9 @@ def _history_lines(row: dict[str, Any]) -> list[str]:
         for item in attempts:
             dated = f"{_date(item.get('created_at'))}  {item.get('created_by', '-')}"
             lines.append(f"    {screen.dim(dated)}")
-            lines.extend(_field("attempt", item.get("attempt")))
+            lines.extend(_field("attempt", item.get("attempt"), _ENTRY, 7))
             for field in ("result", "reason", "next"):
-                lines.extend(_field(field, item.get(field)))
+                lines.extend(_field(field, item.get(field), _ENTRY, 7))
 
     decisions = row.get("decisions") or []
     if decisions:
@@ -212,10 +254,10 @@ def _history_lines(row: dict[str, Any]) -> list[str]:
         for item in decisions:
             dated = f"{_date(item.get('created_at'))}  {item.get('created_by', '-')}"
             lines.append(f"    {screen.dim(dated)}")
-            lines.extend(_field("decision", item.get("decision")))
-            lines.extend(_field("reason", item.get("reason")))
+            lines.extend(_field("decision", item.get("decision"), _ENTRY, 10))
+            lines.extend(_field("reason", item.get("reason"), _ENTRY, 10))
             if item.get("supersedes_id"):
-                lines.extend(_field("supersedes", _short(item["supersedes_id"])))
+                lines.extend(_field("supersedes", _short(item["supersedes_id"]), _ENTRY, 10))
     return lines
 
 
@@ -275,17 +317,30 @@ def _detail(row: dict[str, Any], view: str) -> str:
 
 
 def _preview(row: dict[str, Any], view: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
     lines = _detail(row, view).splitlines()
-    if len(lines) <= limit:
+    shown = screen.fill(lines, limit)
+    if len(shown) == len(lines):
         return "\n".join(lines)
-    marker = screen.dim(f"  … {len(lines) - limit + 1} more; ⏎ reads all")
-    return "\n".join([*lines[: max(1, limit - 1)], marker])
+    shown = screen.fill(lines, limit - 1)
+    marker = screen.dim(f"  … {len(lines) - len(shown)} more line(s); ⏎ reads all")
+    return "\n".join([*shown, marker])
 
 
-def _preview_limit(head: str, keys: str, note: str) -> int:
+def _preview_limit(head: str, keys: str, note: str, rows: int) -> int:
+    """The lines left for the preview once the list has its share.
+
+    The list keeps every row up to two thirds of the free lines, and never fewer than
+    eight, so a 24-line terminal still shows a usable list.
+    """
     height = shutil.get_terminal_size((screen.WIDTH, 24)).lines
-    fixed = screen.height_of(head) + screen.height_of(keys) + screen.height_of(note) + 7
-    return max(3, min(14, height - fixed))
+    fixed = screen.height_of(head) + screen.height_of(keys)
+    # Two blank lines around the list, one above the keys, and the cursor's line.
+    free = height - fixed - (screen.height_of(note) if note else 0) - 4
+    listed = max(1, min(rows, max(8, free * 2 // 3)))
+    preview = free - listed
+    return preview if preview >= 2 else 0
 
 
 def _screen_text(
@@ -336,6 +391,11 @@ def _show_detail(row: dict[str, Any], view: str) -> None:
         page, more = screen.paged(body, offset, _DETAIL_KEYS)
         screen.paint(page + "\n\n" + _DETAIL_KEYS)
         key = screen.getkey()
+        if key == "q":
+            raise screen.Quit()
+        if key == "?":
+            _help()
+            continue
         if key != "space" or not more:
             return
         offset = more
@@ -548,14 +608,18 @@ def run(dsn: str | None = None, *, initial_view: str = "active") -> int:
 
         keys = _PROJECT_KEYS if view == "projects" else _TASK_KEYS
         head = _heading(view, len(rows), len(all_rows), query)
-        preview = _preview(rows[at], view, _preview_limit(head, keys, note)) if rows else ""
+        limit = _preview_limit(head, keys, note, len(rows))
+        preview = _preview(rows[at], view, limit) if rows else ""
         under = screen.trailer(f"{preview}\n" if preview else "", keys, note)
         screen.paint(_screen_text(rows, at, view, under, total=len(all_rows), query=query))
         key = screen.getkey()
         note = ""
 
         if key == "q":
-            return 0
+            raise screen.Quit()
+        if key == "?":
+            _help()
+            continue
         if key in _VIEW_KEYS:
             view, at, query = _VIEW_KEYS[key], 0, ""
             continue

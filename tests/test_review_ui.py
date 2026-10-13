@@ -283,3 +283,20 @@ def test_an_unknown_topic_at_admission_keeps_the_candidate_pending(dsn, monkeypa
     assert review_ui.run(dsn) == 0
     assert "no topic named 'nowhere'" in capsys.readouterr().out
     assert nomination_row(dsn, nomination["nomination_id"])["status"] == "pending"
+
+
+def test_the_queue_is_named_and_d_includes_deferred_candidates_from_inside(
+    dsn, monkeypatch, capsys
+):
+    first = a_candidate(dsn, RULE)
+    a_candidate(dsn, OTHER)
+    with db.transaction(dsn) as cur:
+        nominations.defer(cur, first["nomination_id"], actor="user", reason="later")
+    keys(monkeypatch, "d", "q")
+
+    assert review_ui.run(dsn) == 0
+
+    out = capsys.readouterr().out
+    assert "Review\n1 waiting for review  ·  1 deferred, d includes them" in out
+    assert "Review\n2 waiting for review  ·  deferred included, d hides them" in out
+    assert "--all" not in out

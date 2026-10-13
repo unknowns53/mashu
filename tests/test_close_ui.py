@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+from uuid import uuid4
+
 import pytest
 
 from conftest import committed_task, expire, keys, new_project, task_row, update_task
@@ -155,3 +158,29 @@ def test_non_tty_output_has_no_ansi_and_small_screens_stay_bounded(dsn, monkeypa
     out = capsys.readouterr().out
     assert "\x1b[" not in out
     assert len(out.splitlines()) <= 12
+
+
+def test_every_preview_label_stands_two_spaces_clear_of_its_value(dsn):
+    task_id = a_task(dsn, "replace the launch rail", propose="completed", **DETAIL)
+
+    detail = close_ui._detail(task_row(dsn, task_id))
+
+    assert re.search(r"open questions {2,}whether the forward mount", detail)
+    assert re.search(r"reason {2,}deleted before the merge", detail)
+
+
+def test_the_project_column_fits_the_longest_name_and_activity_is_spelled_out():
+    rows = [
+        {
+            "task": {"task_id": uuid4(), "project_name": name, "name": "a task"},
+            "activity": activity,
+            "age_days": 3,
+        }
+        for name, activity in (("mythogenesis", "active"), ("output-style", "dormant"))
+    ]
+
+    text = close_ui._screen_text(rows, 0, close_ui._KEYS)
+
+    assert text.startswith("Close tasks\n")
+    assert "mythogenesis  active" in text and "output-style  dormant" in text
+    assert "…" not in text

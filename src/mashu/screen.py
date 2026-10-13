@@ -106,6 +106,11 @@ def _enter_alternate_screen() -> None:
         _ALTERNATE_ACTIVE = True
 
 
+def in_alternate_screen() -> bool:
+    """Whether the alternate buffer is up, where a printed line is painted over or lost."""
+    return _ALTERNATE_ACTIVE
+
+
 def color_enabled() -> bool:
     """Whether terminal decoration is useful and has not been disabled."""
     return sys.stdout.isatty() and "NO_COLOR" not in os.environ
@@ -366,16 +371,21 @@ def pad(text: str, limit: int) -> str:
     return clipped + " " * max(0, limit - cells(clipped))
 
 
-def wrap(text: str, indent: str = "  ", width: int | None = None) -> str:
-    """Wrap for reading, keeping the line breaks whoever wrote it put in."""
+def wrap(text: str, indent: str = "  ", width: int | None = None, hang: str | None = None) -> str:
+    """Wrap for reading, keeping the line breaks whoever wrote it put in.
+
+    With hang, every row after the very first starts there, so text that follows a
+    label or an id stays in its own column.
+    """
     width = width or terminal_width()
-    out = []
+    rest = indent if hang is None else hang
+    out: list[str] = []
     for line in text.strip().splitlines():
         if not line.strip():
             out.append("")
             continue
-        hang = indent + "  " if line.lstrip().startswith(("-", "*", "•")) else indent
-        out.extend(_rows(line.strip(), width, indent, hang))
+        bullet = "  " if line.lstrip().startswith(("-", "*", "•")) else ""
+        out.extend(_rows(line.strip(), width, rest if out else indent, rest + bullet))
     return "\n".join(out)
 
 

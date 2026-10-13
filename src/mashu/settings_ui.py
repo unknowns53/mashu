@@ -21,9 +21,9 @@ from mashu.errors import MashuError
 
 ACTOR = "user"
 
-_TOP_KEYS = "  ↑↓/jk move   ⏎ open   ? help   q leave"
-_LIST_KEYS = "  ↑↓/jk move   Home/End first/last   ←/q settings   ? help"
-_READ_KEYS = "  space/PgDn read on   b/PgUp back   Home top   ←/q settings   ? help"
+_TOP_KEYS = "  ↑↓/jk move   ⏎ open   ← back   q quit   ? help"
+_LIST_KEYS = "  ↑↓/jk move   Home/End   ← back   q quit   ? help"
+_READ_KEYS = "  space/PgDn read on   b/PgUp page back   Home top   ← back   q quit   ? help"
 
 _TOP_ITEMS = (
     ("Health/status", "capacity, queues, recent evidence, and work"),
@@ -35,18 +35,19 @@ _TOP_ITEMS = (
 )
 
 _HELP = """
-  Settings & health is the human view of Mashu's operating state.
-
-  ↑↓ or j/k  move through a list
+  ↑↓ or j/k    move through a list
   ⏎            open the selected page
-  space        read the next screenful of a long page
-  b            go back one screenful
+  space/PgDn   read the next screenful of a long page
+  b/PgUp       go back one screenful
   Home/End     jump to the first or last list item
-  ← or q       return one level; from this page, leave
-
-  Scope, topic, and route pages show their own write keys. A topic is archived
-  only once it holds no active rule. Route removal, topic archiving, and schema
-  migration always ask for confirmation before changing the store.
+  n            Scopes, Topics, Routes: add one
+  e            Scopes, Topics, Routes: edit the selected one
+  x            Topics, Routes: remove the selected one, after confirmation
+  i            Routes: add an ignored path
+  m            Schema/migrations: apply pending migrations, after confirmation
+  ← or Esc     go back one level
+  ?            show this help
+  q            quit Mashu
 """
 
 
@@ -169,7 +170,8 @@ def _memory_lines(label: str, rows: list[dict[str, Any]]) -> list[str]:
         lines.append("    —")
     for row in rows:
         memory_id = str(row.get("memory_id", ""))[:8]
-        lines.append(screen.wrap(f"{memory_id}  {row['content']}", indent="    "))
+        hang = " " * (4 + screen.cells(memory_id) + 2)
+        lines.append(screen.wrap(f"{memory_id}  {row['content']}", indent="    ", hang=hang))
     return lines
 
 
@@ -236,7 +238,9 @@ def _read_page(title: str, body: str, *, allow_help: bool = True) -> None:
         page, more = screen.paged(f"{_title(title)}\n\n\n{body}", offset, _READ_KEYS)
         screen.paint(f"{page}\n{_READ_KEYS}")
         key = screen.getkey()
-        if key in ("q", "left"):
+        if key == "q":
+            raise screen.Quit()
+        if key == "left":
             return
         if key == "?" and allow_help:
             _help()
@@ -253,7 +257,7 @@ def _read_page(title: str, body: str, *, allow_help: bool = True) -> None:
 
 
 def _help() -> None:
-    _read_page("Settings & health help", _HELP.strip(), allow_help=False)
+    _read_page("Settings & health help", _HELP.strip("\n"), allow_help=False)
 
 
 def _answer(prompt: str) -> screen.InputResult:
@@ -329,7 +333,9 @@ def _scopes_page(dsn: str | None) -> None:
         screen.paint(screen.list_screen(_title("Scopes"), lines, at, keys))
         key = screen.getkey()
         note = ""
-        if key in ("q", "left"):
+        if key == "q":
+            raise screen.Quit()
+        if key == "left":
             return
         if key == "?":
             _help()
@@ -454,7 +460,9 @@ def _topics_page(dsn: str | None) -> None:
         screen.paint(screen.list_screen(_title("Topics"), lines, at, keys))
         key = screen.getkey()
         note = ""
-        if key in ("q", "left"):
+        if key == "q":
+            raise screen.Quit()
+        if key == "left":
             return
         if key == "?":
             _help()
@@ -589,7 +597,9 @@ def _routes_page(dsn: str | None) -> None:
         screen.paint(screen.list_screen(_title("Routes"), lines, at, keys))
         key = screen.getkey()
         note = ""
-        if key in ("q", "left"):
+        if key == "q":
+            raise screen.Quit()
+        if key == "left":
             return
         if key == "?":
             _help()
@@ -698,11 +708,13 @@ def _schema_page(dsn: str | None) -> None:
             body = f"  {screen.success('Schema is up to date.')}"
         if note:
             body += f"\n\n{note}"
-        keys = "  m apply pending migrations   ←/q settings   ? help"
+        keys = "  m apply pending migrations   ← back   q quit   ? help"
         screen.paint(f"{_title('Schema/migrations')}\n\n{body}\n\n{keys}")
         key = screen.getkey()
         note = ""
-        if key in ("q", "left"):
+        if key == "q":
+            raise screen.Quit()
+        if key == "left":
             return
         if key == "?":
             _help()
@@ -728,13 +740,7 @@ def _top_text(at: int, note: str = "") -> str:
         line = screen.clip(f"    {screen.pad(label, 23)} {detail}", screen.terminal_width())
         rows.append(screen.selected(line) if index == at else line)
     keys = screen.trailer(_TOP_KEYS, note)
-    subtitle = screen.dim("Inspect the store, then change only what you choose.")
-    return screen.list_screen(
-        f"{_title('Settings & health')}\n{subtitle}",
-        rows,
-        at,
-        keys,
-    )
+    return screen.list_screen(_title("Settings & health"), rows, at, keys)
 
 
 def _health_page(dsn: str | None) -> None:
@@ -763,7 +769,9 @@ def run(dsn: str | None = None) -> int:
         screen.paint(_top_text(at, note))
         key = screen.getkey()
         note = ""
-        if key in ("q", "left"):
+        if key == "q":
+            raise screen.Quit()
+        if key == "left":
             return 0
         if key == "?":
             _help()

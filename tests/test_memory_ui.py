@@ -281,3 +281,39 @@ def test_a_topic_rule_shows_its_trigger_and_is_not_converted(dsn, monkeypatch, c
     assert "topic:difficulty" in out
     assert "Before changing win rates" in out
     assert "topic memories cannot become temporary" in out
+
+
+def test_q_quits_from_the_list_and_from_a_read_memory(dsn, monkeypatch):
+    remember(dsn)
+    for pressed in (("q",), ("enter", "q")):
+        keys(monkeypatch, *pressed)
+        with pytest.raises(screen.Quit):
+            memory_ui.run.__wrapped__(dsn)
+
+
+def test_help_lists_the_keys_and_q_quits_from_it(dsn, monkeypatch, capsys):
+    keys(monkeypatch, "?", "x", "?", "q")
+    with pytest.raises(screen.Quit):
+        memory_ui.run.__wrapped__(dsn)
+    out = capsys.readouterr().out
+    assert out.count("Memories help") == 2
+    assert "retire the selected active memory" in out
+    assert out.startswith("Memories\n")
+
+
+def test_columns_fit_the_values_listed_so_the_content_gets_the_rest():
+    rows = [
+        {"memory_id": "0123456789", "delivery": "always", "scope_name": None, "content": "x " * 60},
+        {"memory_id": "abcdef0123", "delivery": "scope", "scope_name": "enrai", "content": "y"},
+    ]
+    columns = memory_ui._columns(rows, 79)
+    assert columns == (6, 5)
+    assert memory_ui._line(rows[0], "active", 79, columns).startswith(
+        "   01234567  always  -      x x"
+    )
+    long = {
+        "delivery": "topic",
+        "topic_name": "a-very-long-topic-name",
+        "scope_name": "a-very-long-scope-name",
+    }
+    assert memory_ui._columns([long], 79) == (13, 11)

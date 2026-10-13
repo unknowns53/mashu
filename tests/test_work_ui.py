@@ -242,3 +242,44 @@ def test_navigation_zero_results_and_non_tty_output_stay_bounded(dsn, monkeypatc
     assert "\x1b[" not in out
     # Each repaint is independently bounded even though redirected output retains all of them.
     assert max(len(block.splitlines()) for block in out.split("> ")) <= 15
+
+
+def test_q_quits_from_the_list_from_details_and_from_help(dsn, monkeypatch, capsys):
+    make_task(dsn, "active hull")
+    for pressed in (("q",), ("enter", "q"), ("?", "q")):
+        keys(monkeypatch, *pressed)
+        with pytest.raises(screen.Quit):
+            work_ui.run.__wrapped__(dsn)
+    out = capsys.readouterr().out
+    assert out.startswith("Work\n")
+    assert "Work help" in out and "reopen the selected closed task" in out
+
+
+def test_a_24_line_terminal_lists_eight_tasks_before_the_preview(dsn, monkeypatch, capsys):
+    names = [f"task {number:02}" for number in range(8)]
+    for name in names:
+        task_id = make_task(dsn, name)
+        with db.transaction(dsn) as cur:
+            update_task(cur, task_id, **STATE)
+    monkeypatch.setenv("COLUMNS", "80")
+    monkeypatch.setenv("LINES", "24")
+    keys(monkeypatch, "q")
+
+    assert work_ui.run(dsn) == 0
+    first = capsys.readouterr().out.split("> ")[0]
+    assert all(name in first for name in names)
+    assert "more line(s); ⏎ reads all" in first
+    assert len(first.splitlines()) <= 24
+
+
+def test_history_fields_sit_under_their_entry_and_wrap_under_the_value(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "40")
+    row = {
+        "artifacts": [],
+        "checkpoints": [{"created_at": None, "created_by": "agent", "what_changed": "word " * 12}],
+    }
+    lines = work_ui._history_lines(row)
+    assert lines[0] == "  Checkpoints (1)"
+    assert lines[1].startswith("    -  agent")
+    assert lines[2].startswith("      changed   word")
+    assert all(line.startswith(" " * 16) and line[16] != " " for line in lines[3:])

@@ -12,12 +12,32 @@ from mashu.errors import MashuError, RetiredConflictError
 ACTOR = "user"
 
 _VIEWS = {"1": "active", "2": "retired", "3": "temporary"}
-_TABS = "  1 active   2 retired   3 temporary"
 _KEYS = (
-    "  ↑↓/jk move   Home/End   PgUp/PgDn   / search   ⏎ why   ← back   q leave\n"
+    "  ↑↓/jk move   PgUp/PgDn   / search   ⏎ why   ← back   q quit   ? help\n"
     "  n remember   p temporary   e edit   c convert   r retire   d delivery"
 )
-_ITEM_KEYS = "  space read on   b page back   ← list   q leave"
+_ITEM_KEYS = "  space read on   b page back   ← back   q quit   ? help"
+
+_HELP = """
+  1 / 2 / 3    show active memories, retired memories, or temporary context
+  ↑↓ or j/k    move one row
+  Home/End     go to the first or last row
+  PgUp/PgDn    move one screenful
+  /            search by id, content, scope, delivery, topic, reason, or expiry
+  ⏎ or →       read the selected row in full, with its evidence and revisions
+  space        while reading, show the next screenful
+  b            while reading, show the previous screenful
+  n            remember a new rule
+  p            add temporary context
+  e            edit the selected memory or temporary context
+  c            convert an active memory to temporary context, or the reverse
+  r            retire the selected active memory
+  d            change where the selected active memory is delivered
+  ← or Esc     clear the search; without a search, go back
+  ?            show this help
+  q            quit Mashu
+"""
+_HELP_KEYS = "  space read on   q quit   any other key goes back"
 
 #: Each delivery in one plain line, shown wherever a person chooses one.
 DELIVERY_CHOICES = (
@@ -62,15 +82,25 @@ def _delivery(row: dict[str, Any]) -> str:
     return delivery
 
 
-def _line(row: dict[str, Any], view: str, width: int) -> str:
-    scope = row.get("scope_name") or "-"
+def _columns(rows: list[dict[str, Any]], width: int) -> tuple[int, int]:
+    """Delivery and scope widths that fit the longest value listed.
+
+    Capped so one long topic or scope name cannot take the content's room.
+    """
+    delivery = max((screen.cells(_delivery(row)) for row in rows if "delivery" in row), default=1)
+    scope = max((screen.cells(row.get("scope_name") or "-") for row in rows), default=1)
+    return min(delivery, max(6, width // 6)), min(scope, max(6, width // 7))
+
+
+def _line(row: dict[str, Any], view: str, width: int, columns: tuple[int, int]) -> str:
+    delivery, scope = columns
+    scope_name = screen.pad(row.get("scope_name") or "-", scope)
     if view == "temporary":
-        fixed = f"   {_short(row['context_id'])}  {screen.pad(scope, 14)}  "
+        fixed = f"   {_short(row['context_id'])}  {scope_name}  "
         expiry = _date(row["expires_at"])
         return screen.clip(f"{fixed}{expiry}  {row['content']}", width)
-    fixed = (
-        f"   {_short(row['memory_id'])}  {screen.pad(_delivery(row), 22)} {screen.pad(scope, 14)}  "
-    )
+    route = screen.pad(_delivery(row), delivery)
+    fixed = f"   {_short(row['memory_id'])}  {route}  {scope_name}  "
     return screen.clip(f"{fixed}{row['content']}", width)
 
 
@@ -196,11 +226,35 @@ def _full_temporary(row: dict[str, Any]) -> str:
     )
 
 
+def _tabs(view: str) -> str:
+    tabs = []
+    for key, name in _VIEWS.items():
+        label = f"{key} {name}"
+        tabs.append(screen.bold(f"[{label}]") if name == view else label)
+    return "  " + "   ".join(tabs)
+
+
 def _heading(view: str, shown: int, total: int, query: str) -> str:
     name = "temporary context" if view == "temporary" else f"{view} memories"
     count = f"{shown}/{total}" if query else str(total)
     suffix = f"  ·  search {screen.accent(repr(query))}" if query else ""
-    return f"{_TABS}\n\n  {screen.bold(name)}  {count}{suffix}"
+    title = screen.bold(screen.accent("Memories"))
+    return f"{title}\n{_tabs(view)}\n\n  {screen.bold(name)}  {count}{suffix}"
+
+
+def _help() -> None:
+    offset = 0
+    body = _HELP.strip("\n")
+    while True:
+        title = screen.bold(screen.accent("Memories help"))
+        page, more = screen.paged(f"{title}\n\n\n{body}", offset, _HELP_KEYS)
+        screen.paint(page + "\n" + _HELP_KEYS)
+        key = screen.getkey()
+        if key == "q":
+            raise screen.Quit()
+        if key != "space" or not more:
+            return
+        offset = more
 
 
 def _screen_text(
@@ -213,12 +267,11 @@ def _screen_text(
     query: str,
 ) -> str:
     head = _heading(view, len(rows), total, query)
-    rendered = [
-        screen.selected(_line(row, view, screen.terminal_width() - 1))
-        if number == at
-        else _line(row, view, screen.terminal_width() - 1)
-        for number, row in enumerate(rows)
-    ]
+    width = screen.terminal_width() - 1
+    columns = _columns(rows, width)
+    rendered = [_line(row, view, width, columns) for row in rows]
+    if rows:
+        rendered[at] = screen.selected(rendered[at])
     if not rows:
         rendered.append(screen.dim("  no rows match; / searches again, ← clears the search"))
     detail = _detail(rows[at], view) if rows else ""
@@ -733,7 +786,10 @@ def run(dsn: str | None = None) -> int:
         note = ""
 
         if key == "q":
-            return 0
+            raise screen.Quit()
+        if key == "?":
+            _help()
+            continue
         if reading:
             if key == "space" and more:
                 back.append(scroll)
