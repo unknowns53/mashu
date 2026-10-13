@@ -238,6 +238,7 @@ v1 で実際に機能した部品なので、中核に据える。v2.0 はこれ
 - 一つの action に結びつく open な topic は一つだけで、DB の部分 unique index が保証する。action は topic の編集でだけ設定し、作成の手順には足さない
 - action を持つ topic も、見出しは他の topic と同じく bootstrap に載る。作業に入るときに読まれる経路はそのまま残り、guard はその上に重なる
 - 発火は 1 セッションにつき行為ごとに一度（compaction のたびに改めて一度）。発火は topic の ID とともに event_log に残る
+- 拒否の次の最初の呼び出しが、拒否された呼び出しと同じ tool_input（キー順を除いた JSON の hash）だったか、変えたかを `guard_followed` に残す。拒否が判断を動かしたかはこの割合でしか観測できない。記録するのは最初の一回だけで、それより後の呼び出しは何もしない。記録に失敗しても呼び出しは通す
 - 蔵に届かないときは通す。接続できないことは、いま下そうとしている判断についての証拠ではない
 
 bootstrap は「セッションの前提」を、guard は「判断の直前」を受け持つ。文脈にあることと、判断の前にあることは違う、という v1 の教訓の直接の継承である。
@@ -281,7 +282,7 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 |---|---|
 | `mashu` | 人向け dashboard。Attention / Memories / Work / Settings & health を開く |
 | `mashu gui` | 読み取り専用の一覧ページを 127.0.0.1 で配信する。書き込みの経路を持たない |
-| `mashu status` | 在庫と定員の使用量（always 層と、最も重い開き方の二つ）、pending 件数、台帳の直近、配信失敗の疑い件数とその経路別の内訳（push された規則、読まれなかった topic、読まれた topic、guard、不明） |
+| `mashu status` | 在庫と定員の使用量（always 層と、最も重い開き方の二つ）、pending 件数、台帳の直近、配信失敗の疑い件数とその経路別の内訳（push された規則、読まれなかった topic、読まれた topic、guard、不明）、action を持つ topic ごとの直近 30 日の発火回数、記録された次の呼び出しの件数と、そのうち変わった割合 |
 | `mashu review` / `mashu review --changes` | nomination または Memory change proposal を読み、編集・適用・却下・取り下げ |
 | `mashu remember <body>` | User 明示。CLI で即時 active にする経路。本文は 120 字までで、理由は `--why` で evidence に残す。invalidated / legacy conflict は理由を表示して個別 ID を確認する |
 | `mashu retire <id> --kind K --reason <r>` | 退役。kind と理由が必須。`legacy` は既存データと移行用 |
@@ -291,7 +292,7 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 | `mashu pain` | 痛みの手動記録（CLI から） |
 | `mashu ledger` | 台帳の閲覧 |
 | `mashu trace [query]` | 痕跡の閲覧と検索 |
-| `mashu guard <action>` | guard の照会。action に結びついた topic の規則を表示し、規則があれば終了コード 2 を返す。PreToolUse フックが読む |
+| `mashu guard <action>` | guard の照会。action に結びついた topic の規則を表示し、規則があれば終了コード 2 を返す。PreToolUse フックが読む。`--outcome same\|changed --topic <name>` は拒否の次の呼び出しの結末をフックが記録する |
 | `mashu deliver <id> <delivery>` | delivery の変更。topic へは `--topic <name>` で移す |
 | `mashu topic` | topic の一覧・作成・編集・削除（User のみ）。active な規則が無い topic だけを消せる。一度も使われていなければ削除し、退役した規則や提案が参照していれば archive する。`mashu topic show <name>` で規則の本文を読む。`--edit <name> --action <act>` で action に結びつけ、`--no-action` で外す。一覧と show は結びついた action を `before: <act>` と示す |
 | `mashu scope` / `mashu route` | Scope 台帳と cwd 対応表（v1 と同じ、User のみ作成） |

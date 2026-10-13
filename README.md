@@ -250,7 +250,7 @@ TUI の操作は次のとおり。
 
 | コマンド | 役割 |
 |---|---|
-| mashu status | schema、容量、pending 件数、最近の ledger、配信失敗の疑いとその経路別の内訳を表示 |
+| mashu status | schema、容量、pending 件数、最近の ledger、配信失敗の疑いとその経路別の内訳、action つき topic ごとの直近 30 日の guard の発火回数と、拒否の次の呼び出しが変わった割合を表示 |
 | mashu bootstrap | 現在のディレクトリのセッションへ配信される内容と token 数を表示 |
 | mashu gui | Memory、Temporary Context、Task、review 待ちを読み取り専用のページとしてブラウザに表示 |
 | mashu show REF | Memory、candidate、Ledger、Memory change proposal の 1 件を根拠・履歴つきで表示 |
@@ -264,7 +264,7 @@ TUI の操作は次のとおり。
 | mashu deliver REF always\|scope\|topic | active Memory の配信先を変更する。topic は --topic NAME で指定する |
 | mashu topic | topic の一覧・作成・編集・削除。`mashu topic show NAME` で本文を読む |
 | mashu topic --edit NAME --action ACT | topic を action に結びつける。`--no-action` で外す |
-| mashu guard ACTION | ACTION に結びついた topic のルールを表示する。PreToolUse hook が読む |
+| mashu guard ACTION | ACTION に結びついた topic のルールを表示する。PreToolUse hook が読む。`--outcome same\|changed` は拒否の次の呼び出しが同じだったかを hook が記録する |
 | mashu admin migrate | 未適用の migration を実行する |
 
 ID は list コマンドが表示する先頭 8 文字を使える。4 文字以上の一意な前方一致も受け付ける。複数の候補に一致する場合は拒否される。
@@ -429,7 +429,7 @@ task_checkpoint は、作業を止めるとき、中断するとき、compaction
 
 ### PreToolUse hook で action つきの topic を示す
 
-tools/pretooluse_guard.py を PreToolUse hook に登録すると、action を結びつけた topic のルールが、その action に当たる呼び出しの直前に表示される。最初の呼び出しは一度止まり、読んだうえで同じ判断なら同じ呼び出しをもう一度行う。止めるのはセッションごと（compaction をまたぐと改めて）一回だけだ。DB に接続できない場合は作業を止めない。
+tools/pretooluse_guard.py を PreToolUse hook に登録すると、action を結びつけた topic のルールが、その action に当たる呼び出しの直前に表示される。最初の呼び出しは一度止まり、読んだうえで同じ判断なら同じ呼び出しをもう一度行う。止めるのはセッションごと（compaction をまたぐと改めて）一回だけだ。拒否の次の最初の呼び出しが拒否された呼び出しと同じ tool_input だったか変えたかを `guard_followed` として記録し、`mashu status` が topic ごとに集計する。それより後の呼び出しは何も記録しない。DB に接続できない場合は作業を止めず、記録できなくても呼び出しは通す。
 
 以前の delivery `guard` の Memory は、migration `0011_guard_into_topics.sql` が action と同じ名前の topic へ移し、その topic を action に結びつける。
 

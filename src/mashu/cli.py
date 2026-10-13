@@ -228,6 +228,7 @@ def _print_state_rows(rows: list[dict[str, Any]]) -> None:
 def cmd_status(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
         status = application.status_snapshot(cur)
+        guards = events.guard_outcomes(cur) if topics.has_actions(cur) else []
 
     if status.schema_pending:
         print(
@@ -263,6 +264,13 @@ def cmd_status(args: argparse.Namespace) -> int:
         for route in application.DELIVERY_FAILURE_ROUTES
     )
     print(f"delivery  suspected_failures_30d={status.delivery_failures_30d}  {routes}")
+    for row in guards:
+        followed = row["followed"]
+        share = f"{round(100 * row['changed'] / followed)}%" if followed else "-"
+        print(
+            f"guard   {row['name']} ({row['action']})  served_30d={row['served']}  "
+            f"followed={followed}  changed={share}"
+        )
     print("scopes")
     print("name                         active  push_tokens")
     for row in status.scope_rows:
@@ -1085,7 +1093,29 @@ def cmd_deliver(args: argparse.Namespace) -> int:
     return 0
 
 
+def _guard_outcome(args: argparse.Namespace) -> int:
+    """Record what the first call after a denial did, for the hook that denied it."""
+    with db.transaction(args.dsn) as cur:
+        topic = topics.get_topic(cur, args.topic) if args.topic else None
+        events.record(
+            cur,
+            "guard_followed",
+            ACTOR,
+            detail={
+                "action": args.action,
+                "topic": args.topic,
+                "topic_id": str(topic["topic_id"]) if topic else None,
+                "changed": args.outcome == "changed",
+            },
+        )
+    return 0
+
+
 def cmd_guard(args: argparse.Namespace) -> int:
+    if args.topic and not args.outcome:
+        raise MashuError("--topic names the topic of a recorded outcome; pass --outcome with it")
+    if args.outcome:
+        return _guard_outcome(args)
     with db.transaction(args.dsn) as cur:
         scope_id, _, _ = _routed_scope(cur)
         topic, rules = topics.action_rules(cur, args.action, scope_id)
@@ -1912,15 +1942,24 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Print the active rules of the topic linked to ACTION (mashu topic --edit NAME "
             "--action ACTION) when that topic is listed in this directory's sessions. Rules "
-            "exit 2 so a hook can show them and ask the caller to retry; none exits 0."
+            "exit 2 so a hook can show them and ask the caller to retry; none exits 0. With "
+            "--outcome the hook records instead whether its first call after a denial repeated "
+            "the denied call; that prints nothing."
         ),
         examples=(
             "mashu guard delegate",
             "mashu guard delegate --json",
+            "mashu guard --outcome changed --topic delegation -- delegate",
         ),
     )
     guard.add_argument("action", help="the action a tool call carries out, such as delegate")
     guard.add_argument("--json", action="store_true", help="print as JSON, for the hook to read")
+    guard.add_argument(
+        "--outcome",
+        choices=("same", "changed"),
+        help="record whether the first call after a denial repeated the denied call",
+    )
+    guard.add_argument("--topic", help="the topic whose rules the denial showed, with --outcome")
     guard.set_defaults(func=cmd_guard)
 
     scope = _command(
