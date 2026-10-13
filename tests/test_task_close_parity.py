@@ -130,3 +130,17 @@ def test_acceptance_rechecks_the_displayed_snapshot(dsn, monkeypatch, entry, cha
     current = task_row(dsn, task_id)
     assert current["task"]["status"] == "open"
     assert current["proposal"] is not None
+
+
+@pytest.mark.parametrize(("stale", "status"), [(False, "closed"), (True, "open")])
+def test_y_takes_a_standing_proposal_as_enter_does_and_leaves_a_stale_one(
+    dsn, monkeypatch, entry, stale, status
+):
+    task_id = make_task(dsn, proposal=True, stale=stale)
+    run_entry(dsn, task_id, entry, monkeypatch, "y", *(() if stale else ("y",)))
+
+    row = task_row(dsn, task_id)
+    assert row["task"]["status"] == status
+    if status == "closed":
+        assert row["task"]["outcome"] == "completed"
+        assert row["task"]["close_reason"] == PROPOSAL_REASON

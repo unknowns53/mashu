@@ -31,9 +31,11 @@ _ACTIVITY_WIDTH = 7
 _PROJECT_SHARE = 5
 
 _KEYS = (
-    "  ↑↓/jk move   Home/End   PgUp/PgDn   / search   ? help   ← back   q quit\n"
-    "  ⏎ take proposal   c completed   a abandoned   s superseded   w drop   t renew"
+    "  ↑↓/jk move   Home/End   PgUp/PgDn   / search   ⏎ take   y take all   q quit\n"
+    "  c completed   a abandoned   s superseded   w drop   t renew   ? help   ← back"
 )
+
+_ALL_KEYS = "  y close them   any other key leaves them open   q quit"
 
 _EMPTY_KEYS = "  ← back   q quit"
 
@@ -67,7 +69,10 @@ _HELP = """
   ◌  before a task: a close proposal whose task state was written after it.
      ⏎ asks once more before taking it.
 
-  There is no key that closes the rest; each task is decided on its own.
+  y  take every standing proposal (●) at once. One screen lists the tasks
+     with their proposed outcomes and asks once; y there closes each as ⏎
+     would. Stale proposals (◌) stay open for review one by one. With a
+     search, only the tasks it shows are taken.
 """
 
 _HELP_KEYS = "  space read on   q quit   any other key goes back"
@@ -446,16 +451,78 @@ def run(
             selected_id = _task_id(rows[at])
             continue
 
-        try:
-            note = _decide(dsn, row, key)
-        except MashuError as error:
-            note = screen.danger(f"  ✗ {error}")
+        if key == "y":
+            note = _take_all(dsn, rows)
+        else:
+            try:
+                note = _decide(dsn, row, key)
+            except MashuError as error:
+                note = screen.danger(f"  ✗ {error}")
         if task_id is not None:
             if return_result:
                 return CloseScreenResult(0, note)
             if note:
                 print(note)
             return 0
+
+
+def _standing(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """The rows whose proposal can be taken without a second look, and the stale count."""
+    taken = [row for row in rows if row.get("proposal") and not row["proposal"]["stale"]]
+    stale = sum(1 for row in rows if row.get("proposal") and row["proposal"]["stale"])
+    return taken, stale
+
+
+def _left_for_review(stale: int) -> str:
+    return f"  ·  {stale} stale proposal(s) left for review one by one" if stale else ""
+
+
+def _all_screen(taken: list[dict[str, Any]], stale: int) -> str:
+    """What y would close, as much of it as fits, with the count it cannot show."""
+    head = (
+        f"{screen.bold(screen.accent('Close tasks'))}\n"
+        f"  close {len(taken)} task(s) on their standing proposals"
+    )
+    stale_line = screen.warning(f"  ◌ {stale} stale proposal(s) stay open") if stale else ""
+    under = "\n" + screen.trailer(stale_line, _ALL_KEYS)
+    width = screen.terminal_width() - 1
+    lines = []
+    for row in taken:
+        task = row["task"]
+        fixed = f"  {_short(task['task_id'])}  {screen.pad(row['proposal']['outcome'], 10)}  "
+        room = max(1, width - screen.cells(fixed))
+        lines.append(f"{fixed}{screen.clip(task['name'], room)}")
+    # The blank line under the heading is not counted by room_under.
+    room = max(1, screen.room_under(head, under) - 1)
+    if len(lines) > room:
+        shown = lines[: room - 1]
+        lines = [*shown, screen.dim(f"  … and {len(taken) - len(shown)} more")]
+    return "\n".join((head, "", *lines, under))
+
+
+def _take_all(dsn: str | None, rows: list[dict[str, Any]]) -> str:
+    """Close every standing proposal in the list after one confirmation, stopping at a failure."""
+    taken, stale = _standing(rows)
+    if not taken:
+        return screen.warning("  ! nothing taken — no standing proposal" + _left_for_review(stale))
+    screen.paint(_all_screen(taken, stale))
+    key = screen.getkey()
+    if key == "q":
+        raise screen.Quit()
+    if key != "y":
+        return screen.warning("  ! left open — nothing closed")
+    closed = 0
+    for row in taken:
+        proposal = row["proposal"]
+        try:
+            _close(dsn, row, proposal["outcome"], proposal["reason"], accept_proposal=True)
+        except MashuError as error:
+            failed = _short(row["task"]["task_id"])
+            return screen.danger(
+                f"  ✗ {failed} not closed: {error}  ·  {closed} of {len(taken)} closed before it"
+            )
+        closed += 1
+    return screen.success(f"  ✓ closed {closed} task(s)" + _left_for_review(stale))
 
 
 def _decide(dsn: str | None, row: dict[str, Any], key: str) -> str:
@@ -501,4 +568,4 @@ def _decide(dsn: str | None, row: dict[str, Any], key: str) -> str:
             f"  ✓ {_short(task_id)} renewed; nothing said about whether it is finished"
         )
 
-    return screen.warning("  ! no action — choose Enter, c, a, s, w or t")
+    return screen.warning("  ! no action — choose Enter, y, c, a, s, w or t")

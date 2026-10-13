@@ -207,7 +207,7 @@ session summary・daily summary・進捗レポートの類は保存しない。�
 Task の完了を Agent に推測させない。Agent が「実装は完了したと思われる」と判断しても `closed` にはできない。User が最後の手作業をする、User が結果を見て判断する、Agent が完了条件を誤認する、Agent の担当範囲だけが終わる。いずれも v1 で実測された誤判定の形である。
 
 ```text
-mashu task close                     決定の画面。open な Task を一覧し、1 件 1 打鍵
+mashu task close                     決定の画面。open な Task を一覧し、1 件 1 打鍵、立っている提案はまとめて 1 確認
 mashu task close <id>... --outcome   outcome: completed / abandoned / superseded
 ```
 
@@ -220,6 +220,8 @@ close 時は最終 checkpoint を凍結し、bootstrap から除外する。atte
 そこで Agent は `task_propose_close`（outcome と理由、理由は必須）で提案だけを置く。提案は Task の open / closed に一切影響せず、lease も延長しない（完了に見える Task を opening の先頭に留めてしまうため）。提案が立った状態で User が同じ outcome で close し、自分の理由を書かなかった場合、提案の理由がそのまま close_reason になる。同意した文をもう一度打たせないためである。outcome が違えば User は提案に反対したのだから、その理由は記録しない。
 
 提案は `task_state.updated_at` を控える。提案後に state が書き換えられていれば「追い越された提案」として表示され、決定の画面では 1 打鍵での受理ではなく確認を挟む。画面と repository が食い違っていると分かっている唯一の形だからである。
+
+決定の画面の `y` は、追い越されていない提案をすべて一度に受理する。閉じる Task の件数と ID、名前、提案された outcome を一画面に並べ、確認は一度だけ取る。各 Task は 1 件ずつの受理と同じ経路で閉じ、提案と state を transaction 内で再照合する。追い越された提案は残して 1 件ずつの判断に回す。途中で一件が失敗したらそこで止め、閉じた分はそのまま残す。提案の大半はそのままの outcome と理由で受理されており、1 件ずつの打鍵は判断ではなく転記になっていたためである。
 
 ## 7. Activity Lease — 沈黙は完了ではないが、現在でもない
 
