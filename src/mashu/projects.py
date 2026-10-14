@@ -96,6 +96,12 @@ def update_project(
 
 def get_project(cur: psycopg.Cursor, project: UUID | str) -> dict[str, Any] | None:
     """One project, by id or by name."""
+    if isinstance(project, str):
+        # MCP hands an id over as a string, since the argument also accepts a name.
+        try:
+            project = UUID(project)
+        except ValueError:
+            pass
     if isinstance(project, UUID):
         cur.execute("SELECT * FROM project WHERE project_id = %s", (project,))
     else:
