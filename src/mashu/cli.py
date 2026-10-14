@@ -17,6 +17,7 @@ import psycopg
 
 from mashu import (
     application,
+    compactions,
     config,
     db,
     events,
@@ -271,6 +272,82 @@ def cmd_status(args: argparse.Namespace) -> int:
     print("name                         active  push_tokens")
     for row in status.scope_rows:
         print(f"{row['name'][:28]:28}  {row['n_active']:6}  {row['push_tokens']:11}")
+    return 0
+
+
+def _quartiles(values: list[int]) -> str:
+    if not values:
+        return "median=-  p75=-"
+    ordered = sorted(values)
+    pick = lambda share: ordered[round(share * (len(ordered) - 1))]  # noqa: E731
+    return f"median={pick(0.5)}  p75={pick(0.75)}"
+
+
+def _compaction_missed(row: compactions.Compaction) -> bool:
+    """Whether the state on either side of this compaction lagged behind the work."""
+    if row.task_id is None:
+        return False
+    stale = row.calls_since_checkpoint is None or bool(row.edits_since_checkpoint)
+    unread = row.calls_after > 0 and (
+        row.calls_before_retrieval is None or row.edits_before_retrieval > 0
+    )
+    return stale or unread
+
+
+def cmd_compactions(args: argparse.Namespace) -> int:
+    report = compactions.scan(days=args.days)
+    rows = report.compactions
+    on_task = [row for row in rows if row.task_id is not None]
+    triggers = "  ".join(
+        f"{trigger}={sum(row.trigger == trigger for row in rows)}" for trigger in ("manual", "auto")
+    )
+    print(
+        f"compactions  last_{args.days}_days={len(rows)}  {triggers}  on_a_task={len(on_task)}  "
+        f"transcripts={report.transcripts}"
+    )
+    for trigger in ("manual", "auto"):
+        group = [row for row in on_task if row.trigger == trigger]
+        written = [row for row in group if row.calls_since_checkpoint is not None]
+        since = [
+            row.calls_since_checkpoint for row in written if row.calls_since_checkpoint is not None
+        ]
+        edited = sum(bool(row.edits_since_checkpoint) for row in written)
+        print(
+            f"capture    {trigger}  checkpointed={len(written)}/{len(group)}  "
+            f"calls_since {_quartiles(since)}  edited_since={edited}"
+        )
+    worked = [row for row in on_task if row.calls_after > 0]
+    read = [row for row in worked if row.calls_before_retrieval is not None]
+    waited = [row.calls_before_retrieval for row in read if row.calls_before_retrieval is not None]
+    edited_first = sum(row.edits_before_retrieval > 0 for row in worked)
+    unread = [row for row in worked if row.calls_before_retrieval is None]
+    switched = sum(row.read_other_task for row in unread)
+    print(
+        f"retrieval  read_same_task={len(read)}/{len(worked)}  calls_before {_quartiles(waited)}  "
+        f"edited_before={edited_first}"
+    )
+    print(f"retrieval  not_read  other_task_read={switched}  none_read={len(unread) - switched}")
+    if report.unreadable_lines:
+        print(f"unreadable_lines={report.unreadable_lines}")
+    if args.list:
+        # since/edits count from the last checkpoint; read/edits count from the compaction.
+        head = ("at", "trigger", "project", "before", "since", "edits", "after", "read", "edits")
+        print("{:16}  {:7}  {:20}  {:>6}  {:>5}  {:>5}  {:>5}  {:>4}  {:>5}".format(*head))
+        for row in rows:
+            if not _compaction_missed(row):
+                continue
+            at = row.at.astimezone().strftime("%Y-%m-%d %H:%M") if row.at else "-"
+            cells = (
+                row.calls_since_checkpoint,
+                row.edits_since_checkpoint,
+                row.calls_after,
+                row.calls_before_retrieval,
+            )
+            since, edits, after, read_at = ("-" if cell is None else cell for cell in cells)
+            print(
+                f"{at:16}  {row.trigger or '-':7}  {row.project[:20]:20}  {row.calls_before:6}  "
+                f"{since:>5}  {edits:>5}  {after:5}  {read_at:>4}  {row.edits_before_retrieval:5}"
+            )
     return 0
 
 
@@ -1538,6 +1615,7 @@ Start here:
   mashu gui                 Browse every list read-only in a web browser.
   mashu status              Summarize the store and pending review work.
   mashu bootstrap           Show what a session in this directory receives.
+  mashu compactions         Check whether task state crossed each compaction.
   mashu memories            List active durable rules.
   mashu task list           List current work.
 
@@ -1642,6 +1720,25 @@ def build_parser() -> argparse.ArgumentParser:
         "stock, seats used, pending count, recent ledger",
         examples=("mashu status",),
     ).set_defaults(func=cmd_status)
+    compaction = _command(
+        sub,
+        "compactions",
+        "whether task state crossed each compaction, read from Claude Code transcripts",
+        description=(
+            "Read the local Claude Code transcripts and, for each compaction whose context "
+            "window checkpointed or read a task, report capture (was task_checkpoint called "
+            "before it, and how many calls and file edits came after that checkpoint) and "
+            "retrieval (did task_get read the same task after it, and how many calls and edits "
+            "came first). Subagent turns are left out. --list prints the compactions where "
+            "either side lagged behind the work."
+        ),
+        examples=("mashu compactions", "mashu compactions --days 7 --list"),
+    )
+    compaction.add_argument("--days", type=int, default=30, help="how far back to read")
+    compaction.add_argument(
+        "--list", action="store_true", help="list the compactions where state lagged the work"
+    )
+    compaction.set_defaults(func=cmd_compactions)
     _command(
         sub,
         "bootstrap",
