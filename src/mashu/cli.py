@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pathlib
 import re
 import sys
 import textwrap
@@ -351,9 +352,22 @@ def cmd_compactions(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resumed_task(cur: psycopg.Cursor, transcript: str) -> dict[str, Any] | None:
+    """The open task a compacted session was on, or None when its transcript names none."""
+    task_id = compactions.resumed_task(pathlib.Path(transcript))
+    if task_id is None:
+        return None
+    try:
+        found = tasks.task_get(cur, UUID(task_id))
+    except (ValueError, MashuError):
+        return None
+    return found["task"] if found["task"]["status"] == "open" else None
+
+
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
         answer = application.bootstrap_preview(cur, cwd=os.getcwd(), actor=ACTOR)
+        resumed = _resumed_task(cur, args.resume_transcript) if args.resume_transcript else None
     unapplied = answer.get("schema_pending") or []
     if unapplied:
         print(f"schema    {len(unapplied)} MIGRATION(S) PENDING: {', '.join(unapplied)}")
@@ -371,6 +385,12 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     _print_state_rows(answer.get("states", []))
     if answer.get("task_instruction"):
         print(f"          {answer['task_instruction']}")
+    if resumed is not None:
+        print(f"resumed   {resumed['task_id']}  {resumed['name']}")
+        print(
+            "          This session was working on this task before the compaction. Call "
+            "task_get with this task_id before taking that work up again."
+        )
     print("temporary")
     for row in answer.get("temporary", []):
         print(f"  {row['content']}  (expires {row['expires_at']})")
@@ -1739,7 +1759,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--list", action="store_true", help="list the compactions where state lagged the work"
     )
     compaction.set_defaults(func=cmd_compactions)
-    _command(
+    bootstrap = _command(
         sub,
         "bootstrap",
         "what a session in this directory is pushed, and its token cost",
@@ -1748,7 +1768,16 @@ def build_parser() -> argparse.ArgumentParser:
             "session started in the current working directory."
         ),
         examples=("mashu bootstrap",),
-    ).set_defaults(func=cmd_bootstrap)
+    )
+    bootstrap.add_argument(
+        "--resume-transcript",
+        metavar="PATH",
+        help=(
+            "a compacted session's transcript; name the open task it was working on, for the "
+            "SessionStart hook"
+        ),
+    )
+    bootstrap.set_defaults(func=cmd_bootstrap)
 
     remember = _command(
         sub,

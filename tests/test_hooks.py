@@ -226,3 +226,19 @@ def test_a_failed_bootstrap_leaves_the_session_without_output(delivered, stdout,
     out, _ = delivered({"source": "compact"}, stdout=stdout, returncode=returncode)
 
     assert out == ""
+
+
+def test_a_compaction_hands_its_transcript_over_so_the_resumed_task_is_named(delivered, tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    named = ["bootstrap", "--resume-transcript", str(transcript)]
+
+    _, seen = delivered({"source": "compact", "transcript_path": str(transcript)})
+    assert seen == [(named, None)]
+    for event in (
+        {"source": "startup", "transcript_path": str(transcript)},
+        {"source": "compact", "transcript_path": str(tmp_path / "missing.jsonl")},
+        {"source": "compact"},
+    ):
+        _, seen = delivered(event)
+        assert seen == [(["bootstrap"], None)]

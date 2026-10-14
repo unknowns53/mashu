@@ -170,6 +170,15 @@ def compactions_in(events: list[Call | Boundary]) -> list[Compaction]:
     return out
 
 
+def resumed_task(path: pathlib.Path) -> str | None:
+    """The task a session was on, read from its transcript by the same rule the measure uses."""
+    try:
+        events, _ = read(path)
+    except OSError:
+        return None
+    return _current_task((event for event in events if isinstance(event, Call)), None)
+
+
 def scan(paths: Iterable[pathlib.Path] | None = None, *, days: float | None = None) -> Report:
     """Every compaction in these transcripts, or in all local ones, within the last `days`."""
     files = list(paths) if paths is not None else sorted(transcripts_root().glob("*/*.jsonl"))

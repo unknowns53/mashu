@@ -615,3 +615,38 @@ def test_a_store_behind_the_code_says_so_instead_of_raising(capsys, old_store, c
     captured = capsys.readouterr()
     assert code == 1 and "behind the code" in captured.err
     assert "0010_topics.sql" in captured.err
+
+
+def test_a_compacted_session_is_told_which_open_task_it_was_on(run, committing_dsn, tmp_path):
+    with db.transaction(committing_dsn) as cur:
+        projects.create_project(cur, name="the compactions", actor="user")
+        made = [
+            tasks.task_create(cur, project="the compactions", name=name, actor="agent")
+            for name in ("carry the work over a compaction", "an errand already finished")
+        ]
+    ongoing, finished = (str(task["task"]["task_id"]) for task in made)
+
+    def transcript(name, *task_ids):
+        calls = [
+            {"type": "tool_use", "name": "mcp__mashu__task_get", "input": {"task_id": task_id}}
+            for task_id in task_ids
+        ]
+        path = tmp_path / name
+        lines = [json.dumps({"type": "assistant", "message": {"content": [c]}}) for c in calls]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return str(path)
+
+    _, out, _ = run("bootstrap", "--resume-transcript", transcript("a.jsonl", finished, ongoing))
+    assert f"resumed   {ongoing}  carry the work over a compaction" in out
+    assert "Call task_get with this task_id" in out
+
+    with db.transaction(committing_dsn) as cur:
+        tasks.close(cur, UUID(finished), outcome="completed", actor="user")
+    for path in (
+        transcript("b.jsonl", ongoing, finished),
+        transcript("c.jsonl", "not-a-task-id"),
+        transcript("d.jsonl"),
+        str(tmp_path / "missing.jsonl"),
+    ):
+        code, out, _ = run("bootstrap", "--resume-transcript", path)
+        assert code == 0 and "resumed" not in out

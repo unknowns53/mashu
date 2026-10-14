@@ -250,7 +250,7 @@ TUI の操作は次のとおり。
 | コマンド | 役割 |
 |---|---|
 | mashu status | schema、容量、pending 件数、最近の ledger、配信失敗の疑いとその経路別の内訳、action つき topic ごとの直近 30 日の guard の発火回数と、拒否の次の呼び出しが変わった割合を表示 |
-| mashu bootstrap | 現在のディレクトリのセッションへ配信される内容と token 数を表示 |
+| mashu bootstrap | 現在のディレクトリのセッションへ配信される内容と token 数を表示。`--resume-transcript PATH` は、その transcript のセッションが続けていた open な task を名指しする行を足す |
 | mashu compactions | Claude Code の transcript から、圧縮ごとに task の状態が圧縮をまたげたかを集計する。`--list` で遅れた回を並べる |
 | mashu gui | Memory、Temporary Context、Task、review 待ちを読み取り専用のページとしてブラウザに表示 |
 | mashu show REF | Memory、candidate、Ledger、Memory change proposal の 1 件を根拠・履歴つきで表示 |
@@ -470,7 +470,7 @@ subject は tool または command。tool は名前全体、command は正規表
 
 ### SessionStart hook で開始時の配信を自動化する
 
-tools/sessionstart_guard.py を SessionStart hook に登録すると、startup / resume では bootstrap の内容を配信し、compact では圧縮で落ちた内容を再配信する。
+tools/sessionstart_guard.py を SessionStart hook に登録すると、startup / resume では bootstrap の内容を配信し、compact では圧縮で落ちた内容を再配信する。compact のときは hook が受け取った transcript_path を `mashu bootstrap --resume-transcript` に渡し、圧縮の前にそのセッションが続けていた open な task を、task_get で読み直すよう促す一行とともに名指しする。続けていた task の決め方は `mashu compactions` と同じである。
 
 ~~~json
 {
