@@ -183,3 +183,62 @@ def test_status_shows_how_often_each_linked_topic_changed_the_next_call(committi
 
     assert cli.main(["--dsn", committing_dsn, "guard", "--topic", name, action]) == 1
     assert "--outcome" in capsys.readouterr().err
+
+
+@pytest.fixture
+def delivered(monkeypatch):
+    """Run the SessionStart hook for one event, and hand back its output and CLI calls."""
+
+    def fire(event, *, stdout="always\n  rule\n", returncode=0):
+        seen = []
+
+        def run(argv, **kw):
+            seen.append((argv[1:], kw.get("cwd")))
+            return subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+        monkeypatch.setattr(sessionstart_guard.subprocess, "run", run)
+        monkeypatch.setattr(sessionstart_guard.sys, "stdin", io.StringIO(json.dumps(event)))
+        out = io.StringIO()
+        monkeypatch.setattr(sessionstart_guard.sys, "stdout", out)
+        assert sessionstart_guard.main() == 0
+        return out.getvalue(), seen
+
+    return fire
+
+
+def test_a_compaction_redelivers_the_bootstrap_under_the_redelivery_preamble(delivered, tmp_path):
+    out, seen = delivered({"source": "compact", "cwd": str(tmp_path)})
+
+    assert out.startswith(sessionstart_guard.REDELIVERY + "\n\n")
+    assert out.endswith("always\n  rule\n")
+    assert seen == [(["bootstrap"], str(tmp_path))]
+
+
+@pytest.mark.parametrize("source", ["startup", "resume", "", None])
+def test_every_other_start_uses_the_startup_preamble(delivered, source):
+    out, _ = delivered({"source": source})
+
+    assert out.startswith(sessionstart_guard.DELIVERY + "\n\n")
+
+
+@pytest.mark.parametrize("stdout,returncode", [("", 0), ("rule\n", 1)])
+def test_a_failed_bootstrap_leaves_the_session_without_output(delivered, stdout, returncode):
+    out, _ = delivered({"source": "compact"}, stdout=stdout, returncode=returncode)
+
+    assert out == ""
+
+
+def test_a_compaction_hands_its_transcript_over_so_the_resumed_task_is_named(delivered, tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    named = ["bootstrap", "--resume-transcript", str(transcript)]
+
+    _, seen = delivered({"source": "compact", "transcript_path": str(transcript)})
+    assert seen == [(named, None)]
+    for event in (
+        {"source": "startup", "transcript_path": str(transcript)},
+        {"source": "compact", "transcript_path": str(tmp_path / "missing.jsonl")},
+        {"source": "compact"},
+    ):
+        _, seen = delivered(event)
+        assert seen == [(["bootstrap"], None)]

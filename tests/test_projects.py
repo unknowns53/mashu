@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import expire
-from mashu import projects, tasks
+from mashu import db, projects, tasks
 from mashu.errors import MashuError, RefusedError, UnknownProjectError
 
 
@@ -16,6 +16,17 @@ def test_a_project_name_is_taken_once_and_a_near_miss_is_answered_with_it(cur, s
         projects.create_project(cur, name="mashu", actor="user")
     with pytest.raises(UnknownProjectError, match="mashu"):
         projects.require_project(cur, "mashi")
+
+
+def test_a_project_id_from_project_list_finds_its_project_through_mcp(mcp, dsn):
+    with db.transaction(dsn) as cur:
+        project = projects.create_project(cur, name="mashu", actor="user")
+    [listed] = mcp("project_list")["projects"]
+
+    created = mcp("task_create", project=listed["project_id"], name="measure compactions")
+
+    assert created["ok"] is True
+    assert created["task"]["project_id"] == str(project["project_id"])
 
 
 def test_a_banned_pattern_in_a_name_is_refused(cur):

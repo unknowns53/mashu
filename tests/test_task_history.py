@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
 from conftest import expire, new_project, new_task, update_task
-from mashu import db, redact, server, task_history, tasks
+from mashu import approvals, db, redact, server, task_history, tasks
 from mashu.errors import (
     ClosedTaskError,
     DuplicateTaskError,
@@ -226,6 +226,19 @@ def test_refusal_says_how_to_rewrite_by_where_the_match_sits(monkeypatch, tmp_pa
     assert not named.in_home and "refer to people by role" in named.reason()
     assert in_scratch.in_home and "write the path from ~" in in_scratch.reason()
     assert user not in named.reason() + in_scratch.reason()
+
+
+def test_a_windows_home_is_written_from_tilde_in_each_spelling_an_agent_uses(monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: PureWindowsPath(r"C:\Users\SECRETMARKER1"))
+    spellings = [
+        r"C:\Users\SECRETMARKER1\.claude\projects\C--Users-SECRETMARKER1-adapter\a.jsonl",
+        "C:/Users/SECRETMARKER1/.claude/projects/C--Users-SECRETMARKER1-adapter/a.jsonl",
+    ]
+
+    assert [approvals.home_relative(text) for text in spellings] == [
+        r"~\.claude\projects\~-adapter\a.jsonl",
+        "~/.claude/projects/~-adapter/a.jsonl",
+    ]
 
 
 def test_checkpoint_writes_attempts_decisions_and_artifacts_with_the_state(cur, task, task_id):

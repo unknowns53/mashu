@@ -46,9 +46,16 @@ def main() -> int:
     if not where or not pathlib.Path(where).is_dir():
         where = None
 
+    argv = [mashu_command(), "bootstrap"]
+    # After a compaction the transcript tells which task the session was on, so the
+    # redelivery can name it.
+    transcript = event.get("transcript_path")
+    if event.get("source") == "compact" and transcript and pathlib.Path(transcript).is_file():
+        argv += ["--resume-transcript", transcript]
+
     try:
         done = subprocess.run(
-            [mashu_command(), "bootstrap"],
+            argv,
             capture_output=True,
             text=True,
             timeout=20,

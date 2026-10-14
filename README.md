@@ -250,7 +250,8 @@ TUI の操作は次のとおり。
 | コマンド | 役割 |
 |---|---|
 | mashu status | schema、容量、pending 件数、最近の ledger、配信失敗の疑いとその経路別の内訳、action つき topic ごとの直近 30 日の guard の発火回数と、拒否の次の呼び出しが変わった割合を表示 |
-| mashu bootstrap | 現在のディレクトリのセッションへ配信される内容と token 数を表示 |
+| mashu bootstrap | 現在のディレクトリのセッションへ配信される内容と token 数を表示。`--resume-transcript PATH` は、その transcript のセッションが続けていた open な task を名指しする行を足す |
+| mashu compactions | Claude Code の transcript から、圧縮ごとに task の状態が圧縮をまたげたかを集計する。`--list` で遅れた回を並べる |
 | mashu gui | Memory、Temporary Context、Task、review 待ちを読み取り専用のページとしてブラウザに表示 |
 | mashu show REF | Memory、candidate、Ledger、Memory change proposal の 1 件を根拠・履歴つきで表示 |
 | mashu memories | active Memory の一覧を表示 |
@@ -469,7 +470,7 @@ subject は tool または command。tool は名前全体、command は正規表
 
 ### SessionStart hook で開始時の配信を自動化する
 
-tools/sessionstart_guard.py を SessionStart hook に登録すると、startup / resume では bootstrap の内容を配信し、compact では圧縮で落ちた内容を再配信する。
+tools/sessionstart_guard.py を SessionStart hook に登録すると、startup / resume では bootstrap の内容を配信し、compact では圧縮で落ちた内容を再配信する。compact のときは hook が受け取った transcript_path を `mashu bootstrap --resume-transcript` に渡し、圧縮の前にそのセッションが続けていた open な task を、task_get で読み直すよう促す一行とともに名指しする。続けていた task の決め方は `mashu compactions` と同じである。
 
 ~~~json
 {
@@ -496,6 +497,15 @@ hook が DB に接続できない場合は何も出力せず終了する。フ�
 
 - Mashu MCP が接続されているセッションでは、開始時に一度 session_bootstrap を呼ぶ。SessionStart hook が既に配信していれば不要
 ~~~
+
+### 圧縮をまたいだ task の状態を測る
+
+`mashu compactions` は `~/.claude/projects`（`CLAUDE_CONFIG_DIR` があればその下の `projects`）の transcript を読み、直近 `--days`（既定 30）日の圧縮ごとに次の二つを数える。transcript は一つの Claude Code セッションの圧縮の境目と Mashu の呼び出しを両方持つので、hook のセッション ID と MCP server のセッション ID を対応づけなくても測れる。
+
+- capture は、圧縮の前の文脈で task_checkpoint を呼んだか、呼んだならその後に何回の呼び出しとファイル編集（Edit / MultiEdit / Write / NotebookEdit）があったかを数える。
+- retrieval は、圧縮の後に同じ task を task_get で読んだか、読むまでに何回の呼び出しと編集があったかを数える。読まなかった回は、別の task を読んだ回と、何も読まなかった回に分ける。
+
+続けていた task は、transcript の始めから見て最後に task_checkpoint か task_get で名指しした task とする。subagent の呼び出しは、その圧縮が要約した文脈に含まれないので数えない。resume や fork でできた transcript は元の圧縮の境目を写して持つので、同じ境目は一つに数え、その後の作業が最も長く続いた写しを採る。transcript は Claude Code の内部形式で文書化されていないので、読めなかった行は `unreadable_lines` として数を出す。
 
 ### セッション開始時に返るもの
 
