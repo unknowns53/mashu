@@ -620,7 +620,9 @@ def test_an_instructed_restore_needs_the_reversal_and_conflicts_its_retirement_c
 
 
 def test_memory_change_instructed_takes_the_users_words_in_one_call(mcp, dsn, monkeypatch):
-    monkeypatch.setenv("HOME", "/Users/SECRETMARKER1")
+    # Path.home() reads USERPROFILE on Windows and HOME elsewhere.
+    for name in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(name, "/Users/SECRETMARKER1")
     transcript = "/Users/SECRETMARKER1/.claude/projects/-Users-SECRETMARKER1-adapter/a.jsonl"
     with db.transaction(dsn) as cur:
         memory = remember(cur, RULE)

@@ -105,9 +105,12 @@ def load() -> tuple[list[re.Pattern[str]], int] | None:
 
 def home_spans(text: str) -> list[tuple[int, int]]:
     """Where the home directory appears, as a path or as a path flattened with dashes."""
-    home = str(pathlib.Path.home()).lower()
-    # Claude Code names its project and scratch directories by replacing each / with -.
-    forms = {home, home.replace("/", "-")}
+    home = pathlib.Path.home()
+    native, posix = str(home).lower(), home.as_posix().lower()
+    # Claude Code names its project and scratch directories by turning each separator, and on
+    # Windows the drive colon, into -, so C:\Users\a becomes C--Users-a. Agents on Windows also
+    # write paths with forward slashes.
+    forms = {native, posix, re.sub(r"[/\\:]", "-", native)}
     lowered = text.lower()
     out = []
     for form in forms:
