@@ -94,6 +94,36 @@ def topic_home(cur: psycopg.Cursor, delivery: str, topic_id: UUID | None) -> UUI
     return topics.lock_open_topic(cur, topic_id)["scope_id"]
 
 
+def _retired_conflicts(
+    cur: psycopg.Cursor, content: str, acknowledged_conflicts: list[UUID] | None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The retirements a direct write resembles, and the invalidated or legacy ones among them.
+
+    Refuses until `acknowledged_conflicts` names exactly those invalidated or legacy rows, so
+    a body that repeats a withdrawn rule is written only after its reason has been read.
+    """
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(%s, %s)",
+        (capacity.LOCK_NAMESPACE, capacity.LOCK_RETIREMENT),
+    )
+    tombstones = match.similar_tombstones(cur, content, limit=None)
+    retirement_matches = [row for row in tombstones if row["score"] >= config.match_threshold()]
+    overruled = [
+        row for row in retirement_matches if row.get("retirement_kind") in ("invalidated", "legacy")
+    ]
+    expected_conflicts = {row["memory_id"] for row in overruled}
+    if expected_conflicts != set(acknowledged_conflicts or []):
+        if expected_conflicts:
+            raise RetiredConflictError(
+                "this repeats retired memories marked invalidated or legacy; read and "
+                "acknowledge those retirement reasons before writing it back",
+                overruled,
+            )
+        if acknowledged_conflicts:
+            raise MashuError("no current invalidated or legacy conflicts match the acknowledgment")
+    return retirement_matches, overruled
+
+
 def remember(
     cur: psycopg.Cursor,
     *,
@@ -117,30 +147,12 @@ def remember(
 
     verdict = redact.gate({"content": content, "why": why})
 
-    cur.execute(
-        "SELECT pg_advisory_xact_lock(%s, %s)",
-        (capacity.LOCK_NAMESPACE, capacity.LOCK_RETIREMENT),
-    )
-    tombstones = match.similar_tombstones(cur, content, limit=None)
-    retirement_matches = [row for row in tombstones if row["score"] >= config.match_threshold()]
-    overruled = [
-        row for row in retirement_matches if row.get("retirement_kind") in ("invalidated", "legacy")
-    ]
+    retirement_matches, overruled = _retired_conflicts(cur, content, acknowledged_conflicts)
     warnings = [row for row in retirement_matches if row not in overruled]
-    expected_conflicts = {row["memory_id"] for row in overruled}
-    if expected_conflicts != set(acknowledged_conflicts or []):
-        if expected_conflicts:
-            raise RetiredConflictError(
-                "this repeats retired memories marked invalidated or legacy; read and "
-                "acknowledge those retirement reasons before writing it back",
-                overruled,
-            )
-        if acknowledged_conflicts:
-            raise MashuError("no current invalidated or legacy conflicts match the acknowledgment")
     if overruled:
         approval_source = {
             "kind": "user_direct",
-            "conflict_ids": sorted(map(str, expected_conflicts)),
+            "conflict_ids": sorted(str(row["memory_id"]) for row in overruled),
         }
     else:
         approval_source = {"kind": "user_direct"}
@@ -421,12 +433,26 @@ def convert_to_temporary(
 
 
 def revise(
-    cur: psycopg.Cursor, memory_id: UUID, *, content: str, actor: str, note: str | None = None
+    cur: psycopg.Cursor,
+    memory_id: UUID,
+    *,
+    content: str,
+    actor: str,
+    note: str | None = None,
+    acknowledged_conflicts: list[UUID] | None = None,
 ) -> dict[str, Any]:
-    """Rewrite the body, keeping the old one in the revision history."""
+    """Rewrite the body, keeping the old one in the revision history.
+
+    A new body is checked against retirements as remember checks one, since a rewrite can
+    bring back a rule that was withdrawn as wrong.
+    """
     current = _require_active(cur, memory_id)
+    overruled: list[dict[str, Any]] = []
     if content != current["content"]:
         check_body(content, rest=None)
+        _, overruled = _retired_conflicts(cur, content, acknowledged_conflicts)
+    elif acknowledged_conflicts:
+        raise MashuError("no current invalidated or legacy conflicts match the acknowledgment")
     redact.gate({"content": content, "note": note})
     admission = capacity.check_admission(
         cur,
@@ -448,7 +474,10 @@ def revise(
         "INSERT INTO memory_revision (memory_id, content, actor, note) VALUES (%s, %s, %s, %s)",
         (memory_id, content, actor, note),
     )
-    events.record(cur, "memory_revised", actor, memory_id=memory_id, detail={"note": note})
+    detail: dict[str, Any] = {"note": note}
+    if overruled:
+        detail["overrides"] = [str(conflict["memory_id"]) for conflict in overruled]
+    events.record(cur, "memory_revised", actor, memory_id=memory_id, detail=detail)
     return row
 
 

@@ -113,7 +113,7 @@ v1 の投機的捕捉との関係。セッションから安く残すという�
 - v1 の汎用 Entity / Version / Proposal の三層は持たない。本文の revision 表と、既存 Memory の retire / replace / restore / redeliver だけを扱う `memory_change` を使う
 - **evidence の無い active な記憶は存在できない**（User 明示の場合は明示の記録そのものが evidence になる）
 - content の改訂は User のみが行い、revision に旧本文が残る
-- **content には 1 件ごとに 120 字（`char_length`）の上限を置く。**規則の理由・測定値・日付・経緯は `why`（500 字まで）に書き、evidence の台帳行の `what` として残す。`why` を渡さなければ `what` は定型文になる。台帳行は `memory_get` で読めるが push されない。定員（5.2 節）が縛るのは在庫の総量で、1 件の長さではない。運用では本文の月平均が 53 字から 181 字、200 字へ伸び、規則に理由や測定値が混ざって、規則そのものが読み取りにくくなった。上限を掛けるのは呼び出し側が新しく書く本文だけで、`mashu remember` / TUI の登録、`memory_admit` と `memory_nominate` の本文、候補と Memory の本文の編集、採用時の書き換え、`pain_report` の `rule` の `prevention`（候補の本文になる）が当たる。Temporary Context からの変換も、新しい Memory の本文を作るので当たる。書き換えずに引き継ぐ本文、つまり本文を変えない候補の採用、復帰、配信の変更、退役には掛けない。上限より前に書かれた本文を、ほかの操作のたびに書き直させないためである。超えた書き込みは欄・上限・実際の長さを添えて拒否し、残りの置き場所（MCP では `why`、CLI では `--why`、`pain_report` では `what`）を文面で示す
+- **content には 1 件ごとに 120 字（`char_length`）の上限を置く。**規則の理由・測定値・日付・経緯は `why`（500 字まで）に書き、evidence の台帳行の `what` として残す。`why` を渡さなければ `what` は定型文になる。台帳行は `memory_get` で読めるが push されない。定員（5.2 節）が縛るのは在庫の総量で、1 件の長さではない。運用では本文の月平均が 53 字から 181 字、200 字へ伸び、規則に理由や測定値が混ざって、規則そのものが読み取りにくくなった。上限を掛けるのは呼び出し側が新しく書く本文だけで、`mashu remember` / TUI の登録、`memory_admit` と `memory_nominate` の本文、候補と Memory の本文の編集、採用時の書き換え、`pain_report` の `rule` の `prevention`（候補の本文になる）が当たる。Temporary Context からの変換も、新しい Memory の本文を作るので当たる。書き換えずに引き継ぐ本文、つまり本文を変えない候補の採用、復帰、配信の変更、退役には掛けない。上限より前に書かれた本文を、ほかの操作のたびに書き直させないためである。超えた書き込みは欄・上限・実際の長さを添えて拒否し、残りの置き場所（MCP では `why`、CLI では `--why`、`pain_report` では `what`）を文面で示す。空白しか含まない本文は、push すると空行になるだけなので、同じ経路で拒否し、DB の CHECK でも止める
 - 個人識別情報（本名、所属、学籍番号、ホームディレクトリを含む絶対パス）を含む書き込みは入口で拒否する。パターン一覧はリポジトリ外の既存ファイル（commit hook と共用）を読む。一覧が見つからない、または読めないときは「合格」ではなく「検査できなかった」と報告して書き込みを通す
 - 例外として、参照の欄（`conversation_ref`、evidence の `ref`、artifact の `locator`）だけはホームディレクトリを `~` に書き換えてから検査する。禁止パターンによる拒否の 6 割がこの欄のホームのパスで、参照は誰かが選んだ本文ではないので、書き換えても provenance は崩れない。本文の欄は今までどおり書き換えずに拒否する
 - 拒否には、当たった引数の名前（リストの項目なら `artifacts[0].locator` のように位置まで）と、その本文の中の文字位置とパターンの番号を添える。どこを直せばよいかが分からない拒否は、Agent に関係のない欄を書き直させるだけだからである。当たった文字列とパターンそのものは拒否理由にもログにも載せない。一覧は非公開で、拒否は記録に残るからである
@@ -145,7 +145,7 @@ incident から自動生成した候補と、Agent 自身の追加・変更案�
 | `pain_report`（1・2） | 通常の条件で候補を生成し、衝突した tombstone の id を `conflicts` に記録する。active な後継と一致すれば配信問題として扱う |
 | `memory_admit` に本文を渡す経路（3） | 候補に衝突した tombstone を記録する。invalidated / legacy はその conflict を踏まえた明示指示なしに採用できず、採用せずに候補を返す。out_of_scope / relocated / superseded は警告として応答に含める |
 | `memory_admit` / `memory_change_apply` | nomination または proposal の version、対象、後継内容・Scope・evidence、conflict の現在状態を照合し、読み取り後に変わっていたら拒否する。適用承認根拠を event に保存する |
-| CLI / TUI の直接操作 | 直接操作として `user_direct` を保存する。invalidated / legacy の conflict は理由を見せ、対象 ID の明示的な確認を要求する |
+| CLI / TUI の直接操作（登録、本文の書き換え、Temporary Context からの変換） | 直接操作として `user_direct` を保存する。invalidated / legacy の conflict は理由を見せ、対象 ID の明示的な確認を要求する |
 
 衝突を候補に積んで運ぶことで、新しい反証は候補一覧から消えない。一方で invalidated / legacy は理由を確認して、それを踏まえて採用する明示指示がなければ適用されない。
 
@@ -185,7 +185,7 @@ always 層で拒否されたものには、scope 規則には無い出口が一�
 - bootstrap と類似照合結果は退役本文を返さない。明示的な `memory_get` と管理画面では、本文・revision・evidence と retired 状態・理由・後継または移動先をまとめて返す。
 - 復帰は通常の本文・定員・重複・conflict 検査を通す。invalidated / legacy の復帰には、退役判断を覆す明示指示と理由を記録し、過去の退役 event は残す。
 - `replace` は一つの transaction で後継採用と旧 Memory 退役を行う。定員は完了後の active 集合に対して判定し、失敗時は元の active 集合を保つ。
-- Temporary Context への変換は `relocated` と移動先を記録する。逆変換はその移動済み行だけを扱い、無関係な invalidated / legacy の理由を一括上書きしない。
+- Temporary Context への変換は `relocated` と移動先を記録する。逆変換はその移動済み行だけを扱い、無関係な invalidated / legacy の理由を一括上書きしない。本文がそれらに当たるときは、ほかの直接操作と同じく理由を見せて対象 ID の確認を求める。
 - CLI と TUI の新しい退役操作は `--kind` / 種別選択を必須にする。`legacy` は既存データと移行用で、新しい退役理由には使わない。
 - Agent による提案の詳細には対象本文・種別・入力済み理由・根拠・後継・conflict を並べる。User の適用キー自体が `user_direct` の承認であり、同じ確認は重ねない。
 - 点検期日・stale 掃き出しは持たない。在庫が定員内なら User は bootstrap の内容を日常的に目にしており、腐った行に気づく点検器は人自身である。この前提が破れた（在庫が目視で追えない規模になった）なら、それは定員の設定が誤っている

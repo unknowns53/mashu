@@ -578,8 +578,28 @@ def cmd_revise(args: argparse.Namespace) -> int:
         raise MashuError(f"memory '{memory_id}' not found")
     if content is None:
         content = screen.edit_long_text("Edit memory", current["content"])
-    with db.transaction(args.dsn) as cur:
-        row = memories.revise(cur, memory_id, content=content, actor=ACTOR)
+    acknowledged: list[UUID] | None = None
+    while True:
+        try:
+            with db.transaction(args.dsn) as cur:
+                row = memories.revise(
+                    cur,
+                    memory_id,
+                    content=content,
+                    actor=ACTOR,
+                    acknowledged_conflicts=acknowledged,
+                )
+            break
+        except RetiredConflictError as conflict:
+            if args.force:
+                _print_retirement_conflicts(conflict)
+                acknowledged = [row["memory_id"] for row in conflict.tombstones]
+                continue
+            acknowledged = _confirm_override(conflict)
+            if acknowledged is None:
+                return 1
+    if acknowledged:
+        print(f"overrode  {len(acknowledged)} retirement(s)")
     print(f"revised  {row['memory_id']}")
     return 0
 
@@ -1902,6 +1922,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     revise.add_argument("memory_id", help=_REF_HELP)
     revise.add_argument("--content", help="the new body; without it, an editor opens on the old")
+    revise.add_argument(
+        "--force",
+        action="store_true",
+        help="rewrite it over a retirement whose reason you have already read",
+    )
     revise.set_defaults(func=cmd_revise)
 
     show = _command(

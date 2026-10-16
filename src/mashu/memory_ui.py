@@ -470,9 +470,23 @@ def _delivery_answers(
 
 def _revise(dsn: str | None, row: dict[str, Any]) -> str:
     content = screen.edit_long_text("Edit memory", row["content"])
-    with db.transaction(dsn) as cur:
-        memories.revise(cur, row["memory_id"], content=content, actor=ACTOR)
-    return screen.success(f"  ✓ revised {_short(row['memory_id'])}")
+    acknowledged: list[UUID] | None = None
+    while True:
+        try:
+            with db.transaction(dsn) as cur:
+                memories.revise(
+                    cur,
+                    row["memory_id"],
+                    content=content,
+                    actor=ACTOR,
+                    acknowledged_conflicts=acknowledged,
+                )
+            return screen.success(f"  ✓ revised {_short(row['memory_id'])}")
+        except RetiredConflictError as conflict:
+            print(_conflict_text(conflict))
+            if not _confirm("rewrite it after reading these retirement reasons?"):
+                return screen.warning("  ! nothing revised — retirement kept")
+            acknowledged = [tomb["memory_id"] for tomb in conflict.tombstones]
 
 
 def _revise_temporary(dsn: str | None, row: dict[str, Any]) -> str:

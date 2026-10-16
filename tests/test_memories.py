@@ -487,3 +487,59 @@ def test_a_revision_note_passes_the_same_gate_as_the_body(cur):
         memories.revise(
             cur, memory["memory_id"], content=REVISED, actor="user", note="from SECRETMARKER7"
         )
+
+
+def test_a_revision_into_a_withdrawn_rule_is_written_only_once_its_reason_is_read(cur):
+    withdrawn = remember(cur, RULE)
+    retire(cur, withdrawn, WITHDRAWN)
+    kept = remember(cur, PINNED)
+
+    with pytest.raises(RetiredConflictError) as raised:
+        memories.revise(cur, kept["memory_id"], content=REVISED, actor="user")
+    assert [row["memory_id"] for row in raised.value.tombstones] == [withdrawn["memory_id"]]
+    assert memories.get_memory(cur, kept["memory_id"])["content"] == PINNED
+
+    memories.revise(
+        cur,
+        kept["memory_id"],
+        content=REVISED,
+        actor="user",
+        acknowledged_conflicts=[withdrawn["memory_id"]],
+    )
+    assert memories.get_memory(cur, kept["memory_id"])["content"] == REVISED
+    cur.execute(
+        "SELECT detail FROM event_log WHERE event_type = 'memory_revised' AND memory_id = %s",
+        (kept["memory_id"],),
+    )
+    assert cur.fetchone()["detail"]["overrides"] == [str(withdrawn["memory_id"])]
+
+
+def test_the_cli_rewrites_over_a_withdrawn_rule_only_with_force(dsn, capsys):
+    with db.transaction(dsn) as cur:
+        withdrawn = remember(cur, RULE)
+        retire(cur, withdrawn, WITHDRAWN)
+        kept = remember(cur, PINNED)
+    ref = str(kept["memory_id"])
+
+    assert cli.main(["--dsn", dsn, "revise", ref, "--content", REVISED]) == 1
+    assert WITHDRAWN in capsys.readouterr().err
+    assert cli.main(["--dsn", dsn, "revise", ref, "--content", REVISED, "--force"]) == 0
+    with db.transaction(dsn) as cur:
+        assert memories.get_memory(cur, kept["memory_id"])["content"] == REVISED
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE memory SET content = ' ' WHERE memory_id = %(memory)s",
+        "INSERT INTO memory_revision (memory_id, content, actor) VALUES (%(memory)s, '', 'x')",
+        "INSERT INTO temporary_context (content, created_by, expires_at) "
+        "VALUES (E'\\t', 'x', now() + interval '1 day')",
+    ],
+)
+def test_the_store_itself_holds_no_blank_body(cur, statement):
+    import psycopg
+
+    memory = remember(cur, RULE)
+    with pytest.raises(psycopg.errors.CheckViolation), cur.connection.transaction():
+        cur.execute(statement, {"memory": memory["memory_id"]})

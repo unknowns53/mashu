@@ -365,3 +365,15 @@ def test_a_rule_made_always_keeps_its_scope_unless_it_is_dropped(dsn, monkeypatc
     assert memory_ui.run(dsn) == 0
     row = memory_row(dsn, memory["memory_id"])
     assert (row["delivery"], row["scope_id"]) == ("always", home if kept else None)
+
+
+def test_a_short_terminal_gives_up_the_blank_lines_before_the_heading(monkeypatch):
+    head = memory_ui._heading("active", 20, 20, "")
+    rows = [f"  row {n}" for n in range(20)]
+    # The heading, one row, the note line, the keys, and the cursor's line under them.
+    least = screen.height_of(head) + 1 + 1 + screen.height_of(memory_ui._KEYS) + 1
+    for lines in range(least, least + 6):
+        monkeypatch.setenv("LINES", str(lines))
+        frame = screen.list_with_preview(head, rows, 5, "preview", memory_ui._KEYS)
+        assert screen.height_of(frame) + 1 <= lines, lines
+        assert frame.startswith(head)
