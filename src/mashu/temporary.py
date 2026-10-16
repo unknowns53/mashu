@@ -108,6 +108,8 @@ def put_temporary(
     """Record a condition together with the moment it stops being one."""
     if not 0 < days <= config.TEMPORARY_MAX_DAYS:
         raise RefusedError(_TOO_LONG.format(max=config.TEMPORARY_MAX_DAYS, asked=f"{days:g} days"))
+    if not content.strip():
+        raise MashuError("temporary context cannot be empty")
     verdict = redact.gate({"content": content})
 
     # Pushed, so it is weighed before it is written (v3 8).
@@ -182,8 +184,13 @@ def convert_to_memory(
     context_id: UUID,
     *,
     actor: str,
+    acknowledged_conflicts: list[UUID] | None = None,
 ) -> dict[str, Any]:
-    """Replace a standing condition with a durable memory in one transaction."""
+    """Replace a standing condition with a durable memory in one transaction.
+
+    `acknowledged_conflicts` passes through to memories.remember, which refuses a body that
+    repeats an invalidated or legacy Memory until the caller has read those retirements.
+    """
     from mashu import memories
 
     cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (capacity.LOCK_NAMESPACE, LOCK_TEMPORARY))
@@ -201,6 +208,7 @@ def convert_to_memory(
         actor=actor,
         scope_id=current["scope_id"],
         delivery=delivery,
+        acknowledged_conflicts=acknowledged_conflicts,
     )
     cur.execute(
         "UPDATE temporary_context SET expires_at = now() WHERE context_id = %s RETURNING *",

@@ -198,7 +198,11 @@ def getkey() -> str:
     try:
         # TCSAFLUSH can discard input buffered between key reads.
         tty.setcbreak(descriptor, termios.TCSANOW)
-        key = _byte(descriptor)
+        try:
+            key = _byte(descriptor)
+        except KeyboardInterrupt:
+            # cbreak leaves ISIG on, so Ctrl-C arrives as SIGINT rather than as "\x03".
+            key = "\x03"
         # Read the descriptor rather than sys.stdin.
         if key == "\x1b" and select.select([descriptor], [], [], 0.05)[0]:
             key += _byte(descriptor)

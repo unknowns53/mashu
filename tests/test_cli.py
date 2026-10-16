@@ -11,6 +11,7 @@ from mashu import (
     cli,
     config,
     db,
+    events,
     memories,
     nominations,
     projects,
@@ -650,3 +651,61 @@ def test_a_compacted_session_is_told_which_open_task_it_was_on(run, committing_d
     ):
         code, out, _ = run("bootstrap", "--resume-transcript", path)
         assert code == 0 and "resumed" not in out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("ledger", "--limit", "-1"),
+        ("gui", "--port", "70000"),
+        ("gui", "--port", "-1"),
+        ("compactions", "--days", "-3"),
+        ("compactions", "--days", "0"),
+    ],
+)
+def test_a_number_out_of_its_range_is_refused_before_the_command_runs(run, capsys, argv):
+    with pytest.raises(SystemExit) as raised:
+        run(*argv)
+    assert raised.value.code == 2
+    assert "expected an integer" in capsys.readouterr().err
+
+
+def test_a_value_the_database_rejects_is_reported_without_a_traceback(run, monkeypatch):
+    import psycopg
+
+    def reject(*_args, **_kwargs):
+        raise psycopg.errors.InvalidRowCountInLimitClause("LIMIT must not be negative")
+
+    monkeypatch.setattr(cli.ledger_domain, "ledger_entries", reject)
+    assert run("ledger") == (1, "", "LIMIT must not be negative\n")
+
+
+def test_an_option_the_command_would_drop_is_refused(run):
+    name = f"show-{uuid4().hex[:8]}"
+    run("topic", "--add", name, "--trigger", "Before showing")
+    code, _, err = run("topic", "--rename", "other", "show", name)
+    assert code == 1 and "takes no options" in err
+
+    code, _, err = run("task", "close", "--outcome", "completed")
+    assert code == 1 and "name the tasks" in err
+    code, _, err = run("task", "close", TWIN_A, "--outcome", "completed", "--project", "x")
+    assert code == 1 and "--project" in err
+
+    code, _, err = run("scope", "--add", "")
+    assert code == 1 and "needs a name" in err
+    scope = f"scope-{uuid4().hex[:8]}"
+    run("scope", "--add", scope)
+    code, _, err = run("route", "--add", "", "--scope", scope)
+    assert code == 1 and "needs the directory" in err
+
+
+def test_a_guard_outcome_without_its_topic_is_counted_under_the_actions_topic(run, committing_dsn):
+    name, action = f"delegation-{uuid4().hex[:8]}", f"act{uuid4().hex[:8]}"
+    run("topic", "--add", name, "--trigger", "Before handing work to a subagent")
+    run("remember", SOURCED, "--topic", name)
+    run("topic", "--edit", name, "--action", action)
+
+    assert run("guard", "--outcome", "changed", "--", action) == (0, "", "")
+    with db.transaction(committing_dsn) as cur:
+        counted = next(row for row in events.guard_outcomes(cur) if row["name"] == name)
+    assert (counted["followed"], counted["changed"]) == (1, 1)

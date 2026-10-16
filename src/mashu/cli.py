@@ -188,6 +188,20 @@ def _width() -> int | None:
     return screen.terminal_width()
 
 
+def _bounded_int(minimum: int, maximum: int | None = None) -> Any:
+    """An argparse type that refuses an integer outside its range before any command runs."""
+
+    def parse(value: str) -> int:
+        number = int(value)
+        if number < minimum or (maximum is not None and number > maximum):
+            bound = f"from {minimum} to {maximum}" if maximum is not None else f"{minimum} or more"
+            raise argparse.ArgumentTypeError(f"expected an integer {bound}, got {value}")
+        return number
+
+    parse.__name__ = "int"
+    return parse
+
+
 def _parse_days(value: str) -> float:
     match = _DAYS.fullmatch(value.strip())
     if match is None:
@@ -864,7 +878,7 @@ _SHOW = {
 
 
 def cmd_show(args: argparse.Namespace) -> int:
-    """One row, whichever of the three tables it lives in, opened in full."""
+    """One row, whichever of the _REFERENCE_TABLES it lives in, opened in full."""
     with db.transaction(args.dsn) as cur:
         found = [
             (table, value)
@@ -1168,14 +1182,19 @@ def cmd_deliver(args: argparse.Namespace) -> int:
 def _guard_outcome(args: argparse.Namespace) -> int:
     """Record what the first call after a denial did, for the hook that denied it."""
     with db.transaction(args.dsn) as cur:
-        topic = topics.get_topic(cur, args.topic) if args.topic else None
+        if args.topic:
+            topic = topics.get_topic(cur, args.topic)
+        else:
+            # guard_outcomes counts by topic_id, so an outcome reported without its topic is
+            # filed under the one this action leads to here.
+            topic, _ = topics.action_rules(cur, args.action, _routed_scope(cur)[0])
         events.record(
             cur,
             "guard_followed",
             ACTOR,
             detail={
                 "action": args.action,
-                "topic": args.topic,
+                "topic": topic["name"] if topic else args.topic,
                 "topic_id": str(topic["topic_id"]) if topic else None,
                 "changed": args.outcome == "changed",
             },
@@ -1226,11 +1245,11 @@ def cmd_guard(args: argparse.Namespace) -> int:
 
 def cmd_scope(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
-        if args.add:
+        if args.add is not None:
             row = scopes.create_scope(cur, name=args.add, summary=args.about, actor=ACTOR)
         else:
             rows = scopes.list_scopes(cur)
-    if args.add:
+    if args.add is not None:
         _gate_warnings(row)
         print(f"created  {row['name']}")
         return 0
@@ -1256,8 +1275,12 @@ def _print_topic_rows(rows: list[dict[str, Any]]) -> None:
 
 def cmd_topic(args: argparse.Namespace) -> int:
     if args.topic_command == "show":
-        if any(flag is not None for flag in (args.add, args.edit, args.remove)):
-            raise MashuError("topic show reads one topic; run --add, --edit, or --remove alone")
+        options = (args.add, args.edit, args.remove, args.trigger, args.scope, args.rename)
+        options += (args.source, args.action)
+        if args.no_action or any(option is not None for option in options):
+            raise MashuError(
+                "topic show reads one topic and takes no options; run them without show"
+            )
         with db.transaction(args.dsn) as cur:
             answer = topics.topic_rules(cur, args.name)
         topic = answer["topic"]
@@ -1332,7 +1355,7 @@ def cmd_topic(args: argparse.Namespace) -> int:
 
 def cmd_route(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
-        if args.add:
+        if args.add is not None:
             if args.scope is None:
                 raise MashuError(
                     "--add requires --scope. Example: mashu route --add <path> --scope <name>"
@@ -1342,7 +1365,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             )
             print(f"route  {row['path_prefix']}  {args.scope}")
             return 0
-        if args.ignore:
+        if args.ignore is not None:
             if args.scope is not None:
                 raise MashuError(
                     "--ignore cannot be combined with --scope; ignored paths are unscoped"
@@ -1350,7 +1373,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             row = application.ignore_route(cur, path_prefix=args.ignore, actor=ACTOR)
             print(f"ignored  {row['path_prefix']}")
             return 0
-        if args.remove:
+        if args.remove is not None:
             if args.scope is not None:
                 raise MashuError(
                     "--remove cannot be combined with --scope; omit --scope to remove the route"
@@ -1571,9 +1594,18 @@ def cmd_task_touch(args: argparse.Namespace) -> int:
 def cmd_task_close(args: argparse.Namespace) -> int:
     """End a task. Only a person reaches this, and only with an outcome (v3 6)."""
     if not args.ref:
+        if args.outcome is not None or args.reason is not None:
+            raise MashuError(
+                "--outcome and --reason close the tasks named with them; name the tasks, or "
+                "run mashu task close alone for the closing screen, which asks for both"
+            )
         from mashu import close_ui
 
         return close_ui.run(args.dsn, project=args.project)
+    if args.project is not None:
+        raise MashuError(
+            "--project narrows the closing screen; omit it when naming the tasks to close"
+        )
     if not args.outcome:
         raise MashuError(
             f"Choose an outcome with --outcome: {', '.join(tasks.OUTCOMES)}.\n"
@@ -1754,7 +1786,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         examples=("mashu compactions", "mashu compactions --days 7 --list"),
     )
-    compaction.add_argument("--days", type=int, default=30, help="how far back to read")
+    compaction.add_argument("--days", type=_bounded_int(1), default=30, help="how far back to read")
     compaction.add_argument(
         "--list", action="store_true", help="list the compactions where state lagged the work"
     )
@@ -1878,7 +1910,7 @@ def build_parser() -> argparse.ArgumentParser:
         "one memory, candidate, or ledger row in full",
         examples=("mashu show 1a2b3c4d",),
     )
-    show.add_argument("ref", help=f"{_REF_HELP}, in any of the three tables")
+    show.add_argument("ref", help=f"{_REF_HELP}, of a Memory, nomination, pain, or Memory change")
     show.set_defaults(func=cmd_show)
 
     memories_parser = _command(
@@ -1950,7 +1982,9 @@ def build_parser() -> argparse.ArgumentParser:
         "read the pain ledger, newest first",
         examples=("mashu ledger", "mashu ledger --scope deployment --limit 50"),
     )
-    ledger.add_argument("--limit", type=int, default=20, help="how many rows to show (default 20)")
+    ledger.add_argument(
+        "--limit", type=_bounded_int(0), default=20, help="how many rows to show (default 20)"
+    )
     ledger.add_argument("--scope", help="only the pains recorded in this scope")
     ledger.set_defaults(func=cmd_ledger)
 
@@ -2069,7 +2103,13 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("same", "changed"),
         help="record whether the first call after a denial repeated the denied call",
     )
-    guard.add_argument("--topic", help="the topic whose rules the denial showed, with --outcome")
+    guard.add_argument(
+        "--topic",
+        help=(
+            "the topic whose rules the denial showed, with --outcome; "
+            "the topic ACTION leads to by default"
+        ),
+    )
     guard.set_defaults(func=cmd_guard)
 
     scope = _command(
@@ -2341,7 +2381,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gui.add_argument(
         "--port",
-        type=int,
+        type=_bounded_int(0, 65535),
         help="the local port to serve on; a fixed one by default, so the address can be bookmarked",
     )
     gui.add_argument("--no-open", action="store_true", help="do not open a browser window")
@@ -2393,6 +2433,10 @@ def main(argv: list[str] | None = None) -> int:
     except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as error:
         # A pending migration adds tables and columns alike; explain either instead of raising.
         print(_behind(args) or str(error), file=sys.stderr)
+        return 1
+    except psycopg.DataError as error:
+        # A value the database cannot take is the caller's input, not a fault to trace.
+        print(str(error).strip(), file=sys.stderr)
         return 1
 
 

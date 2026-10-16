@@ -167,7 +167,7 @@ mashu remember "Keep the win rate between 40 and 60 percent" --topic difficulty
 
 期限つきの条件は --until で登録する。Temporary Context は review 不要で期限に消える。--until は --scope、--delivery、--topic、--force と併用できず、期限は最大 14 日。
 
-Memories TUI では `c` で active な always / scope Memory を Temporary Context に変換できる。日数を入力すると元の Memory は `relocated` と移動先 ID を記録して retire され、同じ本文と Scope の Temporary Context が有効になる。Temporary Context で `c` を押すと、同じ本文と Scope の active Memory に戻る。無関係な invalidated / legacy conflict は上書きしない。topic の Memory は発動条件を失うため Temporary Context には変換しない。
+Memories TUI では `c` で active な always / scope Memory を Temporary Context に変換できる。日数を入力すると元の Memory は `relocated` と移動先 ID を記録して retire され、同じ本文と Scope の Temporary Context が有効になる。Temporary Context で `c` を押すと、同じ本文と Scope の active Memory に戻る。本文が invalidated / legacy の Memory に似ているときは、`n` で登録するときと同じく退役理由を表示し、明示の yes を受けてから戻す。topic の Memory は発動条件を失うため Temporary Context には変換しない。
 
 ~~~bash
 mashu remember "The staging host is down" --until 2d

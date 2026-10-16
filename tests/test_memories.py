@@ -446,3 +446,44 @@ def test_memory_list_reads_the_always_layer_by_either_name_and_lists_it_when_los
         assert answer["scope"] == "always"
         assert [row["memory_id"] for row in answer["memories"]] == [str(always["memory_id"])]
     assert "valid names: always, adapter" in mcp("memory_list", scope="everywhere")["error"]
+
+
+def test_an_empty_body_is_refused_on_every_write_path(dsn, mcp, capsys):
+    with db.transaction(dsn) as cur:
+        memory = remember(cur, RULE)
+
+    for content in ("", "   "):
+        assert cli.main(["--dsn", dsn, "remember", content]) == 1
+        assert "content is empty" in capsys.readouterr().err
+        assert cli.main(["--dsn", dsn, "remember", content, "--until", "2d"]) == 1
+        assert "cannot be empty" in capsys.readouterr().err
+        for tool, extra in (
+            ("memory_admit", {"request_id": str(uuid4()), "instruction": "Remember this"}),
+            ("memory_nominate", {}),
+        ):
+            answer = mcp(tool, content=content, **extra)
+            assert answer["ok"] is False and "content is empty" in answer["error"], tool
+        with (
+            pytest.raises(MalformedRequestError, match="content is empty"),
+            db.transaction(dsn) as cur,
+        ):
+            memories.revise(cur, memory["memory_id"], content=content, actor="user")
+        with pytest.raises(MashuError, match="cannot be empty"), db.transaction(dsn) as cur:
+            temporary.put_temporary(cur, content=content, actor="agent", days=1)
+
+    with db.transaction(dsn) as cur:
+        cur.execute("SELECT count(*) AS n FROM memory")
+        assert cur.fetchone()["n"] == 1
+        cur.execute("SELECT count(*) AS n FROM nomination")
+        assert cur.fetchone()["n"] == 0
+        cur.execute("SELECT count(*) AS n FROM temporary_context")
+        assert cur.fetchone()["n"] == 0
+        assert memories.get_memory(cur, memory["memory_id"])["content"] == RULE
+
+
+def test_a_revision_note_passes_the_same_gate_as_the_body(cur):
+    memory = remember(cur, RULE)
+    with pytest.raises(RefusedError):
+        memories.revise(
+            cur, memory["memory_id"], content=REVISED, actor="user", note="from SECRETMARKER7"
+        )

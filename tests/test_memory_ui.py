@@ -334,3 +334,34 @@ def test_moving_the_cursor_moves_neither_the_list_nor_the_keys(dsn, monkeypatch)
         for at in range(len(rows))
     ]
     assert_steady_layout(frames, names, memory_ui._KEYS)
+
+
+@pytest.mark.parametrize(("answer", "active"), [("n", 0), ("yes", 1)])
+def test_a_condition_repeating_a_withdrawn_rule_converts_only_after_explicit_yes(
+    dsn, monkeypatch, capsys, answer, active
+):
+    memory = remember(dsn)
+    with db.transaction(dsn) as cur:
+        retire(cur, memory, "the service now enforces this")
+        context = temporary.put_temporary(cur, content=RULE, actor="user", days=2)
+    keys(monkeypatch, "3", "c", "y", answer, "q")
+
+    assert memory_ui.run(dsn) == 0
+    assert "the service now enforces this" in capsys.readouterr().out
+    with db.transaction(dsn) as cur:
+        cur.execute("SELECT count(*) AS n FROM memory WHERE status = 'active'")
+        assert cur.fetchone()["n"] == active
+        standing = [row["context_id"] for row in temporary.active_temporary(cur)]
+    assert standing == ([] if active else [context["context_id"]])
+
+
+@pytest.mark.parametrize(("typed", "kept"), [("", True), ("-", False)])
+def test_a_rule_made_always_keeps_its_scope_unless_it_is_dropped(dsn, monkeypatch, typed, kept):
+    with db.transaction(dsn) as cur:
+        home = scopes.require_scope(cur, "deployments")["scope_id"]
+    memory = remember(dsn, delivery="scope", scope_id=home)
+    keys(monkeypatch, "d", "always", typed, "q")
+
+    assert memory_ui.run(dsn) == 0
+    row = memory_row(dsn, memory["memory_id"])
+    assert (row["delivery"], row["scope_id"]) == ("always", home if kept else None)

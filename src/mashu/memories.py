@@ -51,9 +51,11 @@ def body_problems(
     why: str | None = None,
     field: str = "content",
     rest: str | None = "why",
-) -> list[OverLimit]:
+) -> list[str | OverLimit]:
     """What check_body refuses, for a caller reporting it with the request's other problems."""
-    problems = []
+    problems: list[str | OverLimit] = []
+    if not content.strip():
+        problems.append(f"{field} is empty; a Memory body states the rule itself")
     if len(content) > CONTENT_LIMIT:
         where = (
             f"put its reason, measurements, dates, and history in {rest}"
@@ -425,7 +427,7 @@ def revise(
     current = _require_active(cur, memory_id)
     if content != current["content"]:
         check_body(content, rest=None)
-    redact.gate({"content": content})
+    redact.gate({"content": content, "note": note})
     admission = capacity.check_admission(
         cur,
         content=content,

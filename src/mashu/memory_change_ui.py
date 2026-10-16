@@ -6,7 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from mashu import db, memories, memory_changes, nominations, screen
-from mashu.errors import MashuError
+from mashu.errors import ChangedSinceReadError, MashuError
 
 _KEYS = "  ↑↓/jk move   ⏎ open   ← back   q quit"
 _DETAIL_KEYS = (
@@ -257,21 +257,21 @@ def _apply(dsn: str | None, row: dict[str, Any]) -> tuple[str, bool, bool]:
                 approval={"kind": "user_direct", "conflict_ids": conflicts},
                 actor="user",
             )
+    except ChangedSinceReadError as refusal:
+        try:
+            refreshed = _refresh(dsn, row)
+        except MashuError:
+            return screen.danger(f"  {refusal}"), False, False
+        row.update(refreshed)
+        return (
+            screen.warning(
+                "  ! target, successor, or retirement conflicts changed; "
+                "read the updated proposal and press y again"
+            ),
+            False,
+            True,
+        )
     except MashuError as refusal:
-        if "changed" in str(refusal):
-            try:
-                refreshed = _refresh(dsn, row)
-            except MashuError:
-                return screen.danger(f"  {refusal}"), False, False
-            row.update(refreshed)
-            return (
-                screen.warning(
-                    "  ! target, successor, or retirement conflicts changed; "
-                    "read the updated proposal and press y again"
-                ),
-                False,
-                True,
-            )
         return screen.danger(f"  {refusal}"), False, False
     body = result.get("memory") or {}
     return (

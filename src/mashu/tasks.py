@@ -758,6 +758,11 @@ def task_update(
     process writing, and `history` is what task_checkpoint wrote with this state; both are
     kept on the state-replaced event, since a write freezes no checkpoint row.
     """
+    if expect_updated_at.utcoffset() is None:
+        # An offset-less time never equals the stored one, so it would read as a lost race.
+        raise MashuError(
+            "expect_updated_at needs its UTC offset; pass updated_at as task_get returned it"
+        )
     _lock(cur)
     task = _require_open(cur, task_id)
     current = task_get(cur, task_id)
