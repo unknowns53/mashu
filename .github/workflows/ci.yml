@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -15,7 +16,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # A tag names a commit main's run has already checked, so a tag runs only the release job.
   lint:
+    if: github.ref_type != 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -29,7 +32,10 @@ jobs:
 
       - run: uv run ruff format --check
 
+      - run: bash -n tools/release.sh
+
   test:
+    if: github.ref_type != 'tag'
     name: test (${{ matrix.os }}, Python ${{ matrix.python }})
     strategy:
       fail-fast: false
@@ -78,3 +84,47 @@ jobs:
       - run: uv sync --locked --extra mcp
 
       - run: uv run pytest -q -rs
+
+  release:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      # The full history, so the tagged commit can be looked for on main.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # A release names the version the package reports, and only a commit main's run passed.
+      - name: Check the version tag
+        run: |
+          found="$(sed -n -E 's/^__version__ = "([^"]*)"$/\1/p' src/mashu/__init__.py)"
+          if [[ "v$found" != "$TAG" ]]; then
+            echo "::error::Tag $TAG does not match __version__ $found in src/mashu/__init__.py. Commit the version to main and tag that commit."
+            exit 1
+          fi
+          sha="$(git rev-parse 'HEAD^{commit}')"
+          if ! git merge-base --is-ancestor "$sha" origin/main; then
+            echo "::error::Tag $TAG is on ${sha::12}, which is not on main. Tag a commit that main has."
+            exit 1
+          fi
+          passed="$(gh run list --workflow CI --commit "$sha" --branch main --status success --json databaseId --jq length)"
+          if [[ "$passed" == "0" ]]; then
+            echo "::error::No passing CI run on main for ${sha::12}. Tag the commit after main's run has passed."
+            exit 1
+          fi
+
+      # PEP 440 marks a prerelease with a letter (a, b or rc) after the release numbers.
+      - name: Publish the release
+        run: |
+          if [[ "${TAG#v}" =~ [a-z] ]]; then
+            kind=(--prerelease --latest=false)
+          else
+            kind=(--latest)
+          fi
+          gh release create "$TAG" --verify-tag "${kind[@]}" --title "mashu $TAG" --generate-notes

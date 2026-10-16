@@ -90,6 +90,15 @@ def test_every_command_help_has_a_description_and_an_example(path, capsys):
     assert "examples:\n  mashu " in out
 
 
+def test_the_version_printed_is_the_one_the_package_carries(run, capsys):
+    import mashu
+
+    with pytest.raises(SystemExit) as raised:
+        run("--version")
+    assert raised.value.code == 0
+    assert capsys.readouterr().out == f"mashu {mashu.__version__}\n"
+
+
 def test_serve_uses_the_explicit_dsn_for_server_transactions(committing_dsn, monkeypatch):
     from mashu import server
 

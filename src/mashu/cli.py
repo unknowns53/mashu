@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 import psycopg
 
 from mashu import (
+    __version__,
     application,
     compactions,
     config,
@@ -1784,6 +1785,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=_HelpFormatter,
     )
     parser.add_argument("--dsn", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--version", action="version", version=f"mashu {__version__}")
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     _command(
