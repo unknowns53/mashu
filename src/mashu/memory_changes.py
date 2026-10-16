@@ -20,7 +20,13 @@ from mashu import (
     redact,
     topics,
 )
-from mashu.errors import MalformedRequestError, MashuError, OverLimit, RetiredConflictError
+from mashu.errors import (
+    ChangedSinceReadError,
+    MalformedRequestError,
+    MashuError,
+    OverLimit,
+    RetiredConflictError,
+)
 
 Operation = Literal["retire", "replace", "restore", "redeliver"]
 #: The kinds a proposal may set. `legacy` marks rows retired before kinds existed, so only a
@@ -493,7 +499,9 @@ def propose(
             raise MashuError("updating a proposal cannot change its target Memory")
     target = _current(cur, target_memory_id)
     if target["revision_id"] != target_revision_id or target["updated_at"] != target_updated_at:
-        raise MashuError("target revision changed; read the current Memory before proposing")
+        raise ChangedSinceReadError(
+            "target revision changed; read the current Memory before proposing"
+        )
     successor = _validate_change(
         cur,
         target=target,
@@ -505,7 +513,7 @@ def propose(
     )
     if operation == "replace":
         if successor["version"] != successor_nomination_version:
-            raise MashuError(
+            raise ChangedSinceReadError(
                 "successor nomination version changed; read the current candidate before proposing"
             )
         successor_settings = _successor_settings(cur, target, successor_settings)
@@ -531,7 +539,7 @@ def propose(
         set(successor.get("conflicts") or []) != set(conflict_ids)
         or successor.get("conflict_snapshot") != conflict_snapshot
     ):
-        raise MashuError(
+        raise ChangedSinceReadError(
             "successor nomination retirement conflicts changed; refresh and reread the candidate"
         )
 
@@ -730,12 +738,12 @@ def _assert_conflicts_unchanged(
     current = _current_conflicts(cur, content, exclude_memory_id=row["target_memory_id"])
     current_ids = {item["memory_id"] for item in current}
     if current_ids != set(row["conflict_ids"] or []):
-        raise MashuError(
+        raise ChangedSinceReadError(
             "retirement conflicts changed after this proposal was read; read the conflicts and "
             "update the proposal before applying it"
         )
     if _conflict_snapshot(current) != row["conflict_snapshot"]:
-        raise MashuError(
+        raise ChangedSinceReadError(
             "retirement conflict details changed after this proposal was read; read the current "
             "reasons and update the proposal before applying it"
         )
@@ -776,7 +784,9 @@ def apply(
     if change["status"] != "pending":
         raise MashuError(f"memory change is already {change['status']}")
     if change["version"] != version:
-        raise MashuError("memory change version changed; read the current proposal before applying")
+        raise ChangedSinceReadError(
+            "memory change version changed; read the current proposal before applying"
+        )
     cur.execute(
         "SELECT * FROM memory WHERE memory_id = %s FOR UPDATE", (change["target_memory_id"],)
     )
@@ -788,7 +798,7 @@ def apply(
         fresh["revision_id"] != change["target_revision_id"]
         or fresh["updated_at"] != change["target_updated_at"]
     ):
-        raise MashuError(
+        raise ChangedSinceReadError(
             "target Memory changed after this proposal was read; read it and update the proposal"
         )
 
@@ -805,7 +815,7 @@ def apply(
         if successor is None or successor["status"] != "pending":
             raise MashuError("replacement nomination is no longer pending")
         if _successor_snapshot(successor) != change["successor_snapshot"]:
-            raise MashuError(
+            raise ChangedSinceReadError(
                 "successor nomination changed after this proposal was read; read it and update "
                 "the replacement proposal"
             )

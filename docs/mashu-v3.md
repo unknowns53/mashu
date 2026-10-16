@@ -382,7 +382,7 @@ Work の `c` は選択中の Task だけを同じ close decision screen で開�
 
 ## 14. スキーマ
 
-現在の Memory 11 表に Project State 7 表を加えて 18 表。Project State の migration は 0004 から始まる。`ledger` には 0005 で 2 列を足し（`prevention_kind`、`filed_task`。9 節）、0006 で両者を結ぶ CHECK を張る（`filed_task` が非 NULL なら `prevention_kind='work'`）。台帳行そのものは append-only のままで、**提出先は行が書かれる前に決まり、後から書き込むことはできない**。矛盾した行を後から直す手段が無いことが、規約ではなく制約で持つ理由である。0012 は `ledger` に `violated_memory_id`（守られなかった active Memory、`docs/mashu-v2.md` 4.1 節）を、`topic` に `source`（原典の場所、同 6 節）を足す。`trace` 表は Trace の撤回後も既存の行を保つために残す。
+現在の Memory 11 表に Project State 7 表を加えて 18 表。Project State の migration は 0004 から始まる。`ledger` には 0005 で 2 列を足し（`prevention_kind`、`filed_task`。9 節）、0006 で両者を結ぶ CHECK を張る（`filed_task` が非 NULL なら `prevention_kind='work'`）。台帳行そのものは append-only のままで、**提出先は行が書かれる前に決まり、後から書き込むことはできない**。矛盾した行を後から直す手段が無いことが、規約ではなく制約で持つ理由である。0012 は `ledger` に `violated_memory_id`（守られなかった active Memory、`docs/mashu-v2.md` 4.1 節）を、`topic` に `source`（原典の場所、同 6 節）を足す。0013 は `memory`、`memory_revision`、`nomination`、`temporary_context` の本文に、空白しか含まない値を拒む CHECK を張る。`trace` 表は Trace の撤回後も既存の行を保つために残す。
 
 ```text
 既存: scope route ledger trace memory memory_revision topic

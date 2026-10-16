@@ -25,6 +25,8 @@ def add_route(
     cur: psycopg.Cursor, *, path_prefix: str, scope_id: UUID | None, actor: str
 ) -> dict[str, Any]:
     """Map a directory tree onto a scope, replacing any earlier mapping for it."""
+    if not str(path_prefix).strip():
+        raise MashuError("a route needs the directory it maps")
     prefix = normalise(path_prefix)
     cur.execute(
         """

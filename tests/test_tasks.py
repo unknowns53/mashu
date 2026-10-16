@@ -491,3 +491,12 @@ def test_a_session_writing_state_again_soon_is_answered_like_any_other_write(mcp
         cur.execute("SELECT count(*) AS n FROM task_checkpoint")
         assert cur.fetchone()["n"] == 0
     assert len(sessions) == 1 and None not in sessions
+
+
+def test_a_state_time_without_its_offset_is_refused_rather_than_read_as_a_lost_race(cur, task):
+    task_id = task["task"]["task_id"]
+    naive = task["state"]["updated_at"].replace(tzinfo=None)
+
+    with pytest.raises(MashuError, match="UTC offset") as raised:
+        update_task(cur, task_id, at=naive, status_text="still writing the tables")
+    assert not isinstance(raised.value, StaleStateError)

@@ -111,6 +111,10 @@ class StaleStateError(MashuError):
         self.current = current
 
 
+class ChangedSinceReadError(MashuError):
+    """A decision made on a reading of rows that have changed since it was read."""
+
+
 class ProjectBudgetError(RefusedError):
     """A card that would push the active-task share past its ceiling."""
 

@@ -456,15 +456,37 @@ def _delivery_answers(
         if scope_name is None:
             return None
     elif scope_default:
-        scope_name = scope_default
+        # An always rule may keep the scope it belonged to; '-' drops it, as mashu deliver
+        # --no-scope does.
+        kept_scope = screen.editline(
+            f"  scope it belongs to [enter={scope_default}, - drops it]: ", scope_default
+        )
+        if isinstance(kept_scope, screen.Cancelled):
+            return None
+        kept = kept_scope.text or scope_default
+        scope_name = None if kept == "-" else kept
     return chosen, scope_name, topic
 
 
 def _revise(dsn: str | None, row: dict[str, Any]) -> str:
     content = screen.edit_long_text("Edit memory", row["content"])
-    with db.transaction(dsn) as cur:
-        memories.revise(cur, row["memory_id"], content=content, actor=ACTOR)
-    return screen.success(f"  ✓ revised {_short(row['memory_id'])}")
+    acknowledged: list[UUID] | None = None
+    while True:
+        try:
+            with db.transaction(dsn) as cur:
+                memories.revise(
+                    cur,
+                    row["memory_id"],
+                    content=content,
+                    actor=ACTOR,
+                    acknowledged_conflicts=acknowledged,
+                )
+            return screen.success(f"  ✓ revised {_short(row['memory_id'])}")
+        except RetiredConflictError as conflict:
+            print(_conflict_text(conflict))
+            if not _confirm("rewrite it after reading these retirement reasons?"):
+                return screen.warning("  ! nothing revised — retirement kept")
+            acknowledged = [tomb["memory_id"] for tomb in conflict.tombstones]
 
 
 def _revise_temporary(dsn: str | None, row: dict[str, Any]) -> str:
@@ -691,8 +713,19 @@ def _convert_to_temporary(dsn: str | None, row: dict[str, Any]) -> tuple[str, UU
 def _convert_to_memory(dsn: str | None, row: dict[str, Any]) -> tuple[str, UUID | None]:
     if not _confirm(f"convert temporary {_short(row['context_id'])} to active memory?"):
         return screen.warning("  ! conversion cancelled"), None
-    with db.transaction(dsn) as cur:
-        converted = temporary.convert_to_memory(cur, row["context_id"], actor=ACTOR)
+    acknowledged: list[UUID] | None = None
+    while True:
+        try:
+            with db.transaction(dsn) as cur:
+                converted = temporary.convert_to_memory(
+                    cur, row["context_id"], actor=ACTOR, acknowledged_conflicts=acknowledged
+                )
+            break
+        except RetiredConflictError as conflict:
+            print(_conflict_text(conflict))
+            if not _confirm("convert it after reading these retirement reasons?"):
+                return screen.warning("  ! nothing converted — retirement kept"), None
+            acknowledged = [tomb["memory_id"] for tomb in conflict.tombstones]
     memory = converted["memory"]
     note = screen.success(
         f"  ✓ converted {_short(row['context_id'])} to memory {_short(memory['memory_id'])}"

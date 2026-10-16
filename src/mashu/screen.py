@@ -198,7 +198,11 @@ def getkey() -> str:
     try:
         # TCSAFLUSH can discard input buffered between key reads.
         tty.setcbreak(descriptor, termios.TCSANOW)
-        key = _byte(descriptor)
+        try:
+            key = _byte(descriptor)
+        except KeyboardInterrupt:
+            # cbreak leaves ISIG on, so Ctrl-C arrives as SIGINT rather than as "\x03".
+            key = "\x03"
         # Read the descriptor rather than sys.stdin.
         if key == "\x1b" and select.select([descriptor], [], [], 0.05)[0]:
             key += _byte(descriptor)
@@ -448,10 +452,11 @@ def trailer(*parts: str) -> str:
 
 def list_screen(head: str, rows: list[str], at: int, keys: str, note: str = "") -> str:
     """A heading, as much of a list as fits under it, and the keys on the last line."""
-    room = max(1, _free_lines(head, keys))
+    free, above, below = _spacing(head, keys)
+    room = max(1, free)
     note, used = _note_block(note, 1 + max(0, room - len(rows)))
     listed = _list_block(rows, at, room - (used - 1))
-    return "\n".join((head, "", *listed, "", note, keys))
+    return "\n".join((head, *above, *listed, *below, note, keys))
 
 
 def list_with_preview(
@@ -469,12 +474,13 @@ def list_with_preview(
     Where each part sits depends on the terminal, the heading, the keys and the row
     count, never on the preview, so moving the cursor moves nothing but the cursor.
     """
+    free, above, below = _spacing(head, keys)
     listed = list_room(head, keys, len(rows))
-    room = max(0, _free_lines(head, keys) - listed)
+    room = max(0, free - listed)
     note, used = _note_block(note, 1 + room)
     room -= used - 1
     shown = _preview_block(preview, room, more) if room >= 2 else [""] * room
-    return "\n".join((head, "", *_list_block(rows, at, listed), "", *shown, note, keys))
+    return "\n".join((head, *above, *_list_block(rows, at, listed), *below, *shown, note, keys))
 
 
 def list_room(head: str, keys: str, count: int) -> int:
@@ -483,7 +489,7 @@ def list_room(head: str, keys: str, count: int) -> int:
     The list keeps every row up to two thirds of the free lines, and never fewer than
     eight, so a 24-line terminal still shows a usable list.
     """
-    free = _free_lines(head, keys)
+    free = _spacing(head, keys)[0]
     return max(0, min(count, max(8, free * 2 // 3), max(1, free)))
 
 
@@ -496,6 +502,18 @@ def _free_lines(head: str, keys: str) -> int:
     """
     height = shutil.get_terminal_size((WIDTH, 24)).lines
     return height - height_of(head) - height_of(keys) - 4
+
+
+def _spacing(head: str, keys: str) -> tuple[int, list[str], list[str]]:
+    """The lines a list gets, with the blank lines kept under the heading and under the list.
+
+    On a terminal too short for one row of the list, the blank under the list goes first and
+    then the one under the heading, so the heading is not pushed off the top. The choice
+    depends on the terminal, the heading and the keys only, like the rest of the layout.
+    """
+    free = _free_lines(head, keys)
+    dropped = min(2, max(0, 1 - free))
+    return free + dropped, [""] * (dropped < 2), [""] * (dropped < 1)
 
 
 def _list_block(rows: list[str], at: int, room: int) -> list[str]:

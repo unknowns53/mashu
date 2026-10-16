@@ -15,6 +15,8 @@ def create_scope(
     cur: psycopg.Cursor, *, name: str, summary: str | None = None, actor: str
 ) -> dict[str, Any]:
     """Open a scope, refusing a name that is already taken."""
+    if not name.strip():
+        raise MashuError("a scope needs a name")
     verdict = redact.gate({"name": name, "summary": summary})
     if get_scope(cur, name) is not None:
         raise MashuError(f"scope '{name}' already exists")
