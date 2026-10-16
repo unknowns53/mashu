@@ -114,41 +114,16 @@ def guarded(monkeypatch, tmp_path):
     return call, seen, tmp_path / "markers" / "s1.delegate.0"
 
 
-@pytest.mark.parametrize(
-    "again,outcome",
-    [
-        ({"description": "port", "prompt": "do it"}, "same"),
-        ({"prompt": "do it", "description": "port"}, "same"),
-        ({"description": "port", "prompt": "do it, keeping the goal"}, "changed"),
-    ],
-)
-def test_the_first_call_after_a_denial_records_whether_it_was_repeated(guarded, again, outcome):
+def test_the_first_call_carries_the_rules_as_a_warning_and_later_calls_pass_silently(guarded):
     call, seen, marker = guarded
-    denied = {"description": "port", "prompt": "do it"}
-    out = call(denied)
-    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
-    stored = json.loads(marker.read_text(encoding="utf-8"))
-    assert stored == {"topic": "handover", "input": pretooluse_guard.fingerprint(denied)}
-
-    assert call(again) == ""
-    assert seen[-1] == ["guard", "--outcome", outcome, "--topic", "handover", "--", "delegate"]
+    out = json.loads(call({"description": "port", "prompt": "do it"}))["hookSpecificOutput"]
+    assert "permissionDecision" not in out
+    assert "hand over the goal, not the steps" in out["additionalContext"]
+    assert json.loads(marker.read_text(encoding="utf-8")) == {"topic": "handover"}
 
     seen.clear()
-    assert call(denied) == "" and call(again) == ""
+    assert call({"description": "port", "prompt": "do it, keeping the goal"}) == ""
     assert seen == []
-
-
-def test_a_follow_up_that_cannot_be_recorded_lets_the_call_through_once(guarded):
-    call, seen, _ = guarded
-    call({"prompt": "do it"})
-
-    def unreachable(argv):
-        raise subprocess.TimeoutExpired(argv, 5)
-
-    assert call({"prompt": "do it"}, cli=unreachable) == ""
-    assert len(seen) == 2
-    assert call({"prompt": "do it"}, cli=unreachable) == ""
-    assert len(seen) == 2
 
 
 def test_a_marker_written_before_outcomes_were_kept_stays_silent(guarded):

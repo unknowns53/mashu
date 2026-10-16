@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Show the rules of the topic linked to a tool call's action before the call runs."""
+"""Add the rules of the topic linked to a tool call's action to the call as a warning, without stopping it."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import pathlib
@@ -73,35 +72,8 @@ MARKERS = pathlib.Path(tempfile.gettempdir()) / "mashu-guard"
 #: What a completed compaction leaves in the transcript.
 COMPACTED = '"isCompactSummary":true'
 
-#: Appended to a marker's name once the call after the denial has been recorded.
+#: Appended by the earlier guard once a follow-up was recorded; such a marker also stays silent.
 FOLLOWED = ".followed"
-
-
-def fingerprint(tool_input: object) -> str:
-    """A hash of the call's input that ignores key order, to tell a repeated call from a new one."""
-    canonical = json.dumps(tool_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def follow_up(marker: pathlib.Path, action: str, tool_input: object) -> None:
-    """Record whether the first call after the denial repeated the denied call."""
-    followed = marker.with_name(marker.name + FOLLOWED)
-    try:
-        # The rename is the claim, so calls made in parallel record one follow-up between them.
-        os.rename(marker, followed)
-        denied = json.loads(followed.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-    if not isinstance(denied, dict) or not denied.get("input"):
-        return
-    outcome = "same" if denied["input"] == fingerprint(tool_input) else "changed"
-    argv = [mashu_command(), "guard", "--outcome", outcome]
-    if denied.get("topic"):
-        argv += ["--topic", str(denied["topic"])]
-    try:
-        subprocess.run([*argv, "--", action], capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError):
-        pass
 
 
 def generation(transcript: str | None) -> int:
@@ -147,10 +119,8 @@ def main() -> int:
 
     session = str(event.get("session_id") or "unknown")
     marker = MARKERS / f"{session}.{action}.{generation(event.get('transcript_path'))}"
-    if marker.with_name(marker.name + FOLLOWED).exists():
-        return 0
-    if marker.exists():
-        follow_up(marker, action, event.get("tool_input"))
+    # The rules are shown once per session and compaction; a stop on every first call cost more tempo than it saved.
+    if marker.exists() or marker.with_name(marker.name + FOLLOWED).exists():
         return 0
 
     try:
@@ -174,26 +144,19 @@ def main() -> int:
 
     topic = pinned[0].get("topic") if pinned else None
     MARKERS.mkdir(parents=True, exist_ok=True)
-    marker.write_text(
-        json.dumps({"topic": topic, "input": fingerprint(event.get("tool_input"))}),
-        encoding="utf-8",
-    )
+    marker.write_text(json.dumps({"topic": topic}), encoding="utf-8")
 
-    lines = [f"Mashu topic '{topic}' applies before {action}. Read it, then decide again.", ""]
+    lines = [f"Mashu topic '{topic}' applies to this {action}. The call goes ahead; check it against these rules.", ""]
     for row in pinned:
         lines.append(row["content"])
         lines.append("")
-    lines.append(
-        "If it still points the same way, make the same call again and it will go through."
-    )
 
     print(
         json.dumps(
             {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": "\n".join(lines),
+                    "additionalContext": "\n".join(lines).rstrip(),
                 }
             }
         )

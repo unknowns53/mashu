@@ -433,7 +433,7 @@ task_checkpoint は、作業を止めるとき、中断するとき、compaction
 
 ### PreToolUse hook で action つきの topic を示す
 
-tools/pretooluse_guard.py を PreToolUse hook に登録すると、action を結びつけた topic のルールが、その action に当たる呼び出しの直前に表示される。最初の呼び出しは一度止まり、読んだうえで同じ判断なら同じ呼び出しをもう一度行う。止めるのはセッションごと（compaction をまたぐと改めて）一回だけだ。拒否の次の最初の呼び出しが拒否された呼び出しと同じ tool_input だったか変えたかを `guard_followed` として記録し、`mashu status` が topic ごとに集計する。それより後の呼び出しは何も記録しない。DB に接続できない場合は作業を止めず、記録できなくても呼び出しは通す。topic に source があれば、拒否の文面はルールの後に `Source: ...` の一行を添える（vault のノートなら解決した絶対パスと、無ければ `(not found)`）。
+tools/pretooluse_guard.py を PreToolUse hook に登録すると、action を結びつけた topic のルールが、その action に当たる呼び出しに警告として添えられる（`additionalContext`）。呼び出しは止めない。添えるのはセッションごと（compaction をまたぐと改めて）一回だけだ。DB に接続できない場合は何も添えずに通す。topic に source があれば、警告の文面はルールの後に `Source: ...` の一行を添える（vault のノートなら解決した絶対パスと、無ければ `(not found)`）。
 
 以前の delivery `guard` の Memory は、migration `0011_guard_into_topics.sql` が action と同じ名前の topic へ移し、その topic を action に結びつける。
 
