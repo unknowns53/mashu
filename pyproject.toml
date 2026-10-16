@@ -1,6 +1,8 @@
 [project]
 name = "mashu"
-version = "2.0.0"
+# The one version is __version__ in src/mashu/__init__.py, which mashu --version reads directly,
+# so an editable install reports a bump without being reinstalled.
+dynamic = ["version"]
 description = "Shared agent knowledge state that keeps only what forgetting has provably cost"
 requires-python = ">=3.11"
 dependencies = [
@@ -24,6 +26,9 @@ mashu = "mashu.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/mashu/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mashu"]

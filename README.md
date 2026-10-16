@@ -112,7 +112,7 @@ uv run mashu status
 uv run mashu bootstrap
 ~~~
 
-status の先頭に未適用 migration が表示されたら、uv run mashu admin migrate を実行する。bootstrap は、現在の作業ディレクトリのセッションに配信される内容と token 数を表示する。
+status の先頭に未適用 migration が表示されたら、uv run mashu admin migrate を実行する。bootstrap は、現在の作業ディレクトリのセッションに配信される内容と token 数を表示する。`uv run mashu --version` は、入っている mashu の版を表示する。
 
 ## 日常の使い方
 
@@ -546,6 +546,8 @@ main への push と pull request では、GitHub Actions の CI（`.github/work
 
 テストを足すときは、先に既存のテストを広げること、conftest の共有 fixture で状態を作ること、一つの不変条件を一つの層でだけ確かめること、画面や CLI の文言ではなく状態を確かめることを優先する。実際の呼び出し元（MCP の tool、CLI、TUI、git hook）が作らない入力や状態のテストは足さない。
 
+版は `src/mashu/__init__.py` の `__version__` だけに書き、pyproject.toml はそこから読む。版は PEP 440 の正規形で書き、`3.0.1` のように数字だけなら正式なリリース、`3.1.0b1` のように a、b、rc と番号で終わればプレリリースになる。リリースは main の checkout で `tools/release.sh <版>` を実行して作る。このスクリプトは版を書き換えて main へコミットと push をし、main の CI が通るのを待ってから `v<版>` のタグを push する。タグの CI は、タグの版が `__version__` と一致すること、そのコミットが main にあって main の CI を通っていることを確かめてから、GitHub Release を公開する。
+
 仕様を変えるときは、コードと対応する設計書を一緒に更新する。撤回した設計は削除せず、何を撤回したかと理由を設計書に残す。
 
 ## 主な配置
@@ -559,6 +561,7 @@ tests/                       実 PostgreSQL に対するテスト
 tools/pretooluse_guard.py    action つき topic 用 PreToolUse hook
 tools/sessionstart_guard.py  SessionStart 用 hook
 hooks/                       pre-commit / commit-msg
+tools/release.sh             版を上げてタグと GitHub Release を作る
 .github/workflows/ci.yml     GitHub Actions の CI
 ~~~
 

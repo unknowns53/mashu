@@ -308,7 +308,6 @@ wheels = [
 
 [[package]]
 name = "mashu"
-version = "2.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "psycopg", extra = ["binary"] },
