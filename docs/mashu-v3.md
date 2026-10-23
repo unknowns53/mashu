@@ -6,7 +6,7 @@ v2 の中核原理
 
 > 忘却による損害が実証された知識だけを常設化する
 
-は撤回しない。v3 が足すのは、それとは身分の異なる「現在の作業状態・試行・判断」を扱う **Project State** である。
+は撤回しない。v3 が足すのは、Memory とは種類の異なる情報である「現在の作業状態・試行・判断」を扱う **Project State** である。
 
 本書は v3.0 草稿を全面改稿した v3 の正本である。**Memory subsystem の正本は引き続き `docs/mashu-v2.md` であり、本書はそれを置き換えない。**本書が規定するのは Project State の追加と、bootstrap・token budget の統合だけである。現在の Memory schema と信頼境界は v2 文書に記す。
 
@@ -14,15 +14,15 @@ v2 の中核原理
 
 v2 は作業状態を意図的に対象外とし、「プロジェクト側の文書か Obsidian が持つ」とした。運用を始めると、この線引きの圧力が二つの形で観測された。
 
-**第一に、作業状態が Memory の入口に押し寄せている。**再入場（2026-08-28）の台帳を見ると、「TBP/TOPO だけ `_reopt2` が最終構造」「モデル化合物の正称は HEMP」「fgroup のパイプラインの置き場所」のような、恒久規則ではなく特定プロジェクトの現況に属する事実が相当数、Memory として入場している。これらは腐る。プロジェクトが進めば最終構造の枝番も置き場所も変わるが、Memory の退役は人の手作業である。作業状態に置き場が無いために、腐る事実が腐らない前提の席（定員 2000 token）を使っている。
+**第一に、作業状態が Memory の入口に押し寄せている。**v1 の Memory を v2 へ登録し直した作業（2026-08-28）の `ledger` を見ると、「TBP/TOPO だけ `_reopt2` が最終構造」「モデル化合物の正称は HEMP」「fgroup のパイプラインの置き場所」のような、恒久規則ではなく特定プロジェクトの現況に属する事実が相当数、Memory として登録されている。これらの事実はやがて古くなる。プロジェクトが進めば最終構造の枝番も置き場所も変わるが、Memory の retire は人の手作業である。作業状態に置き場が無いために、やがて古くなる事実が、古くならないことを前提にした Memory の容量（上限 2000 token）を使っている。
 
 **第二に、セッション再開のたびに現在地を拾い直している。**複数マシン・複数 CLI で運用しているが、現在どこまで進んだか・何を試して駄目だったか・なぜ今の方針なのかは、git 履歴・repository 内文書・Obsidian・過去の会話に分散しており、Agent が一つの窓口から復元できない。再開のたびの拾い直しは、v2 の言葉で言えば friction の反復である。
 
-ただし正直に書く。「再開の失敗が誤った作業を生んだ」という incident としての台帳記録はまだ薄い。したがって v3 自身の反証条件（17 節）に stale-state incident と再開コストの指標を含め、この判断そのものを運用で検証可能にする。
+ただし正直に書く。「再開の失敗が誤った作業を生んだ」という incident を `ledger` に記録した例はまだ少ない。したがって v3 自身の反証条件（17 節）に stale-state incident と再開コストの指標を含め、この判断そのものを運用で検証可能にする。
 
 もう一つの選択肢、すなわち作業日誌 Markdown への統合は採らない。Agent が追記を続ける自由文書は数万行の履歴になることが v1 型の失敗として予測でき、読む側の予算を必ず破る。
 
-## 2. 三つの身分
+## 2. 三種類の情報
 
 Mashu 内には保存目的の異なる三種類の情報が存在する。
 
@@ -33,7 +33,7 @@ Mashu
 └── Trace           再導出を検出するための短寿命・未検証観測（v2 のまま。のちに撤回）
 ```
 
-Trace は 30 日の運用で台帳への凍結も候補も一件も生まず、書き込みと検索の経路を撤回した（`docs/mashu-v2.md` 4.2 節）。テーブルと既存の行は履歴として残る。以下の Trace への言及は撤回前の設計の記録である。
+Trace は 30 日の運用で、`ledger` へ写して固定した行も候補も一件も生まず、書き込みと検索の経路を撤回した（`docs/mashu-v2.md` 4.2 節）。テーブルと既存の行は履歴として残る。以下の Trace への言及は撤回前の設計の記録である。
 
 この三者を共通の knowledge 型へ一般化しない。`type = memory / task / state` のような万能 Entity は v1 への逆戻りであり、作らない。
 
@@ -61,16 +61,16 @@ Trace は 30 日の運用で台帳への凍結も候補も一件も生まず、�
 | 決定境界 | Agent 独自の案は pending。明示指示の実行は出所を記録するが、server は真正性を認証しない | 日々の state 更新に都度の承認は不要 |
 | 寿命 | 原則恒久 | 短い |
 | 更新 | 稀 | 頻繁 |
-| 腐敗対策 | 入口を絞る | lease による退場 |
+| 古くなることへの対策 | 入口を絞る | lease による退場 |
 | bootstrap | 全量 push | active Task の索引 card のみ。Current State 全文は `task_get` |
 | 履歴 | revision | checkpoint / attempt / decision |
-| 終了 | retire / replace / restore。理由と退役種別を記録 | close（User）/ dormant（lease） |
+| 終了 | retire / replace / restore。理由と retire の種類（`retirement_kind`）を記録 | close（User）/ dormant（lease） |
 
 Project State から Memory への昇格経路は作らない。作業中に恒久規則が見つかったなら、それは通常どおり `pain_report` の実証経路か、User の明示指示による `memory_admit` を通る。
 
 ### 3.1 信頼境界 — 明示指示と Project State の継続更新
 
-Memory の信頼境界は v2 5.1 節に定める。Agent は自分の判断で恒久 Memory を採用・退役・置換・復帰できない。Agent が独自に考えた変更は根拠つき proposal として pending に置く。一方、会話中のユーザー明示指示を Agent が運ぶ場合は、その指示を `user_instruction` として記録して同じセッションで実行できる。actor は Agent のまま残す。短い原文と会話参照は監査用であり、サーバーが指示の真正性を認証するものではない。Agent の有用性判断・confidence・ユーザーの沈黙は承認ではない。
+Memory の信頼境界は v2 5.1 節に定める。Agent は自分の判断で恒久 Memory の採用、retire、置換、復帰を行えない。Agent が独自に考えた変更は根拠つき proposal として pending に置く。一方、会話中のユーザー明示指示を Agent が運ぶ場合は、その指示を `user_instruction` として記録して同じセッションで実行できる。actor は Agent のまま残す。短い原文と会話参照は監査用であり、サーバーが指示の真正性を認証するものではない。Agent の有用性判断・confidence・ユーザーの沈黙は承認ではない。
 
 Project State は性質が異なる。Agent が書いた Current State のうち Task 名・goal・status・詳細件数からなる索引 card は、人の review を経ずに次のセッションの bootstrap へ push される。approach・open questions・blockers・next actions の本文は `task_get` で明示取得する。
 
@@ -82,7 +82,7 @@ Project State は性質が異なる。Agent が書いた Current State のうち
 2. **時間** — Activity Lease（7 節）により、活動の証拠が絶えた state は bootstrap から退場する
 3. **提示** — 正しさそのものは bound できないので、配信の形式で受ける。**Task card は「現在の真実」の顔で配信しない。**card には必ず最終確認日時を添え、「YYYY-MM-DD に最後に確認された索引」として提示する。Memory（今後も守るべき規則）と同じ顔をさせず、着手前の `task_get` を要求する
 
-v2 の trace が持つ「書き忘れても検出が弱くなるだけで、嘘は生まれない」という性質を、Current State は持たない。セッションが作業したのに state を更新しなければ、次のセッションには古い card が届く。日付の明示はこの失敗を無くすのではなく、**受け手が古さを判定できる形にする**ための最低限である。Agent は card だけで着手せず、完全な task_id で `task_get` したうえ、日付が古ければ repository と artifacts で裏を取る。この規律は bootstrap と server instructions の両方が運ぶ。
+v2 の trace が持つ「書き忘れても検出が弱くなるだけで、誤った情報は生まれない」という性質を、Current State は持たない。セッションが作業したのに state を更新しなければ、次のセッションには古い card が届く。日付の明示はこの失敗を無くすのではなく、**受け手が古さを判定できる形にする**ための最低限である。Agent は card だけで着手せず、完全な task_id で `task_get` したうえ、日付が古ければ repository と artifacts で裏を取る。この規律は bootstrap と server instructions の両方が運ぶ。
 
 ## 4. Single storage ではなく single view
 
@@ -115,13 +115,13 @@ Project と Scope は同じ概念ではない。Scope は delivery / routing の
 
 保存される status は `open` / `closed` の二つだけである。active と dormant は保存されず、lease から導出する（7 節）。
 
-**生成時に重複照合を行う。**nomination が pending 照合で二重の席を防ぐのと同じ理屈で、`task_create` は生成前に既存の open な Task（dormant 相当を含む）と名前・goal を pg_trgm で照合する。閾値以上の一致があれば新規作成せず候補を返し、Agent に既存 Task の継続か明示的な新規作成かを選ばせる。これが無いと、Agent が `task_search` で既存 Task を見つけ損ねるたびに Task が分裂し、state が二箇所に育つ。
+**生成時に重複照合を行う。**nomination が pending の候補と照合して同じ内容の二重登録を防ぐのと同じ理屈で、`task_create` は生成前に既存の open な Task（dormant 相当を含む）と名前・goal を pg_trgm で照合する。閾値以上の一致があれば新規作成せず候補を返し、Agent に既存 Task の継続か明示的な新規作成かを選ばせる。これが無いと、Agent が `task_search` で既存 Task を見つけ損ねるたびに Task が分裂し、state が二箇所に育つ。
 
 ### 5.3 Current State
 
 Task の「今」だけを持つ。履歴を書かない。状態が変われば**置換**し、古い記述を残さない。
 
-置換は欄ごとに行う。渡した欄は丸ごと置き換え、省いた欄は前の値を保ち、空文字か空リストを渡した欄は空になる。欄の中身へ継ぎ足すことはしない。goal と approach はめったに変わらないので、全欄の送信を求めると、status だけを書き換えるつもりの呼び出しがこの二つを黙って消す。
+置換はフィールドごとに行う。渡したフィールドは丸ごと置き換え、省いたフィールドは前の値を保ち、空文字か空リストを渡したフィールドは空になる。フィールドの中身へ継ぎ足すことはしない。goal と approach はめったに変わらないので、全フィールドの送信を求めると、status だけを書き換えるつもりの呼び出しが、エラーを出さずにこの二つを消してしまう。
 
 ```text
 goal / approach / status_text / open_questions / blockers / next_actions / updated_at / updated_by
@@ -140,23 +140,23 @@ bootstrap card  200 estimated tokens / Task
 full detail     800 estimated tokens / Task
 ```
 
-goal と status は Scope の全セッションへ card として push されるので、他の欄より短く抑える。運用では status が「何をしたか」の日誌になり、コミットのハッシュ・パス・測定値が並んで、一つの Scope の card 枠を埋めた。status は Task がいまどこにいるかを一、二文で言う欄で、したことは git log、コミットやパスは Artifact Reference、残りの作業は next_actions が持つ。上限は書き込む値にだけ掛け、書き換えずに引き継がれた値には掛けない。上限を締める前に書かれた state を、別の欄の更新のたびに書き直させないためである。DB の CHECK 制約はそのため 0004 の広い上限のまま残す。
+goal と status は Scope の全セッションへ card として push されるので、他のフィールドより短く抑える。運用では status が「何をしたか」の日誌になり、コミットのハッシュ・パス・測定値が並んで、一つの Scope の Task card の予算を使い切った。status は Task がいまどこにいるかを一、二文で言うためのフィールドで、したことは git log、コミットやパスは Artifact Reference、残りの作業は next_actions が持つ。上限は書き込む値にだけ掛け、書き換えずに引き継がれた値には掛けない。上限を締める前に書かれた state を、別のフィールドの更新のたびに書き直させないためである。DB の CHECK 制約はそのため 0004 の広い上限のまま残す。
 
-初期値であり、実測後に変更してよい。bootstrap card は Task 名・goal・statusと、approach / open questions / blockers / next actions が存在することを示す件数だけから作る。full detail は全欄を含むが常時配信しない。長文が必要なら原典を Artifact Reference に置く。
+初期値であり、実測後に変更してよい。bootstrap card は Task 名・goal・statusと、approach / open questions / blockers / next actions が存在することを示す件数だけから作る。full detail は全フィールドを含むが常時配信しない。長文が必要なら原典を Artifact Reference に置く。
 
-**上限までの距離を書き手に返す。**上限は拒否されて初めて知るものにしない。`task_get` と MCP の `task_create` / `task_checkpoint` の成功応答は `card_tokens`・`card_limit`・`card_remaining`・`detail_tokens`・`detail_limit` を含む。card 上限を超えた書き込みは、`field`・`limit`・`actual`・`unit`・`over_by` と、card の token を Task 名・goal・status_text・詳細件数・行 overhead に割り振った `breakdown` を構造化して返す。内訳の合計は card の token 数に一致するので、Agent はどの欄を何 token 削れば通るかを試行せずに知れる。MCP の write がこの理由で拒否されたときは、本文を保存せず、拒否された書き込みの transaction とは別に `task_card_write_refused` を event_log に記録し、応答の `refusal_recorded` で記録できたかを示す。
+**上限までの距離を書き手に返す。**上限は拒否されて初めて知るものにしない。`task_get` と MCP の `task_create` / `task_checkpoint` の成功応答は `card_tokens`・`card_limit`・`card_remaining`・`detail_tokens`・`detail_limit` を含む。card 上限を超えた書き込みは、`field`・`limit`・`actual`・`unit`・`over_by` と、card の token を Task 名・goal・status_text・詳細件数・行 overhead に割り振った `breakdown` を構造化して返す。内訳の合計は card の token 数に一致するので、Agent はどのフィールドを何 token 削れば通るかを試行せずに知れる。MCP の write がこの理由で拒否されたときは、本文を保存せず、拒否された書き込みの transaction とは別に `task_card_write_refused` を event_log に記録し、応答の `refusal_recorded` で記録できたかを示す。
 
-欄ごとの上限（文字数と件数）は、書き込みの前に全欄へかけ、超えた欄すべてを一度の拒否で `problems` と `over_limit`（`field`・`limit`・`actual`・`unit`）に並べて返す。一欄ずつ拒否すると、Agent は超えた欄の数だけ往復する。上限の値は MCP の Tool 説明にもコードの定数から載せる。
+フィールドごとの上限（文字数と件数）は、書き込みの前に全フィールドへかけ、超えたフィールドすべてを一度の拒否で `problems` と `over_limit`（`field`・`limit`・`actual`・`unit`）に並べて返す。一フィールドずつ拒否すると、Agent は超えたフィールドの数だけ往復する。上限の値は MCP の Tool 説明にもコードの定数から載せる。
 
 MCP で全文の state を返すのは `task_get` だけである。検索結果、重複候補、楽観チェックで返す現在の state、write の成功応答は card view、つまり goal・status_text・詳細の有無と件数・`updated_at`・`updated_by` だけを返す。全文を write の応答で返すと、読んだつもりのない state が文脈に積もり、card と full detail を分けた意味が薄れる。
 
-**追記は一箇所だけ許す。**`append_next_action` は next_actions に 1 件足すだけで他の欄に触れない。呼び出すのは痛みの記録（9 節の `work`）であって、state を読み終えたセッションではない。痛みは痛かった当人がその場で書くものである。置換は next_actions を丸ごと置き換え、読み取り時の `updated_at` も要求するので、置換で書かせれば、報告は既存の next actions を消すか、state を読みに行く往復のせいで行われないかのどちらかになる。上限・入口拒否・予算判定は置換とまったく同じものを通すので、追記で書ける state は置換でも書けた state に限られる。追記も `updated_at` を動かすため、追記前に読んだ置換は楽観チェックで拒否される。
+**追記は一箇所だけ許す。**`append_next_action` は next_actions に 1 件足すだけで他のフィールドに触れない。呼び出すのは痛みの記録（9 節の `work`）であって、state を読み終えたセッションではない。痛みは痛かった当人がその場で書くものである。置換は next_actions を丸ごと置き換え、読み取り時の `updated_at` も要求するので、置換で書かせれば、報告は既存の next actions を消すか、state を読みに行く往復のせいで行われないかのどちらかになる。上限・入口拒否・予算判定は置換とまったく同じものを通すので、追記で書ける state は置換でも書けた state に限られる。追記も `updated_at` を動かすため、追記前に読んだ置換は楽観チェックで拒否される。
 
-**並行する置換は楽観チェックで受ける。**複数セッションが同じ Task を同時に更新しうる。`task_checkpoint` と User の state 編集は読み取り時の `updated_at` を添えて置換し、不一致なら拒否して現在の state を返す。黙って last-writer-wins にすると、並行セッションの一方の作業が痕跡なく消える。
+**並行する置換は楽観チェックで受ける。**複数セッションが同じ Task を同時に更新しうる。`task_checkpoint` と User の state 編集は読み取り時の `updated_at` を添えて置換し、不一致なら拒否して現在の state を返す。この照合をせずに last-writer-wins で上書きすると、並行セッションの一方の作業が、何の記録も残さずに消える。
 
-**予算境界の挙動も store が持つ。**Task card 枠は Scope ごとに独立する。state の置換の結果、その Scope に配信される active Task card の合計が枠（8 節）を超えるなら、書き込みを拒否し、現在の内訳と出口を返す。Scope を持たない Project の card は全 Scope 共通分として各枠に含め、共通分への書き込みは最も重い Scope に対して判定する。別 Scope の固有 card は競合しない。full detail の本文はこの配信枠を消費せず、1 Task 800-token の上限で別に bound する。溢れたぶんを黙って切り詰めない。
+**予算境界の挙動も store が持つ。**Task card の予算は Scope ごとに独立する。state の置換の結果、その Scope に配信される active Task card の合計が予算（8 節）を超えるなら、書き込みを拒否し、現在の内訳と出口を返す。Scope を持たない Project の card は全 Scope 共通分として各 Scope の予算に含め、共通分への書き込みは最も重い Scope に対して判定する。別 Scope の固有 card は競合しない。full detail の本文はこの配信予算を消費せず、1 Task 800-token の上限で別に bound する。予算を超えたぶんを、書き手に知らせないまま切り詰めることはしない。
 
-ただし**その Task 自身の card を小さくする書き込みは、枠を超えている状態からでも通す**。枠は設定値であり、card の重さは配信の形から計算されるので、どちらも誰も触っていない行の下で動きうる。つまり書き込みを経ずに枠を超えた状態が成立する。そこで一律に拒否すると、他の active Task だけで枠を超えている場合、対象を空にしても総量が枠を割らないため拒否され、「他を縮めろ」と言いながらその縮約自体を拒む閉じた輪になる。入口拒否の思想は保ったまま、枠が求めている向きの書き込みだけを通す。
+ただし**その Task 自身の card を小さくする書き込みは、予算を超えている状態からでも通す**。予算は設定値であり、card の重さは配信の形から計算されるので、どちらも誰も行を書き換えていないのに変わりうる。つまり書き込みを経ずに予算を超えた状態が成立する。そこで一律に拒否すると、他の active Task だけで予算を超えている場合、対象を空にしても総量が予算を下回らないため拒否される。「他を縮めろ」と言いながらその縮約自体を拒むので、抜け出す手段が無くなる。入口拒否の思想は保ったまま、card を縮めて予算に近づける書き込みだけを通す。
 
 ### 5.4 Attempt / Decision
 
@@ -188,19 +188,19 @@ kind は `git_commit` / `git_branch` / `file` / `document` / `obsidian` / `issue
 
 ### 5.6 Checkpoint
 
-Agent が次のセッションへ作業を引き継ぐために打つ。打つのは、作業を止めるとき、中断するとき、compaction の前、approach や next actions が変わったとき、失敗した試行や判断を残すときである。commit ごとには打たない。進捗は git log が持っている。`task_checkpoint` は **Agent が Task の state を書く唯一の動詞である**。渡した欄だけを置き換え、省いた欄は前の値を保ち、空文字か空リストで欄を空にする。`name` を渡せば Task 名も変える（重複照合つき）。
+Agent が次のセッションへ作業を引き継ぐために打つ。打つのは、作業を止めるとき、中断するとき、compaction の前、approach や next actions が変わったとき、失敗した試行や判断を残すときである。commit ごとには打たない。進捗は git log が持っている。`task_checkpoint` は **Agent が Task の state を書く唯一の動詞である**。渡したフィールドだけを置き換え、省いたフィールドは前の値を保ち、空文字か空リストでフィールドを空にする。`name` を渡せば Task 名も変える（重複照合つき）。
 
-失敗した試行・判断・外部成果物の原典は同じ呼び出しの `attempts` / `decisions` / `artifacts` で渡す。state の置換とそれらの追記は一つの transaction で行い、文字上限・入口拒否・kind・supersedes・楽観チェック・予算の検査は最初の行を書く前にすべてかけ、形の誤りと上限の超過は行と欄をまたいで一度の拒否にまとめて返す。一行でも拒否されれば state も履歴も書かない。履歴を書くための動詞を別に覚えさせずに済む。
+失敗した試行・判断・外部成果物の原典は同じ呼び出しの `attempts` / `decisions` / `artifacts` で渡す。state の置換とそれらの追記は一つの transaction で行い、文字上限・入口拒否・kind・supersedes・楽観チェック・予算の検査は最初の行を書く前にすべてかけ、形の誤りと上限の超過は行とフィールドをまたいで一度の拒否にまとめて返す。一行でも拒否されれば state も履歴も書かない。履歴を書くための動詞を別に覚えさせずに済む。
 
-**呼び出しのたびに state を凍結しない。**呼ぶたびに Current State の写しを凍結していた 30 日間、task_checkpoint は Agent の書き込みの 6 割を占めたが、凍結した行の 8 割は evidence を持たず、checkpoint 履歴を展開した `task_get` は 5% だった。what_changed は commit log の言い直しになり、51% が同じ Task の前回から 30 分以内に打たれ、書き直しの間隔を知らせる注意を返してもこの割合は下がらなかった。読まれない写しを書かせる代わりに、任意の `what_changed` と、同じ呼び出しで書いた attempt / decision / artifact の id を `task_state_replaced` の event に残す。Attempt・Decision・Artifact Reference はもともと Task に結びついているので、schema は変えない。
+**呼び出しのたびに state のスナップショットを保存しない。**呼ぶたびに Current State の写しをスナップショットとして保存していた 30 日間、task_checkpoint は Agent の書き込みの 6 割を占めたが、保存した行の 8 割は evidence を持たず、checkpoint 履歴を展開した `task_get` は 5% だった。what_changed は commit log の言い直しになり、51% が同じ Task の前回から 30 分以内に打たれ、書き直しの間隔を知らせる注意を返してもこの割合は下がらなかった。読まれない写しを書かせる代わりに、任意の `what_changed` と、同じ呼び出しで書いた attempt / decision / artifact の id を `task_state_replaced` の event に残す。Attempt・Decision・Artifact Reference はもともと Task に結びついているので、schema は変えない。
 
-凍結は close のときだけ行う（6 節）。close は終了時点の Current State と、close の outcome と理由を what_changed に持つ checkpoint 行を一つ作る。
+スナップショットの保存は close のときだけ行う（6 節）。close は終了時点の Current State と、close の outcome と理由を what_changed に持つ checkpoint 行を一つ作る。
 
 ```text
-what_changed / 凍結時点の Current State / evidence (以前の呼び出しが凍結した行だけが artifact 参照を持つ) / created_at / created_by
+what_changed / 保存時点の Current State / evidence (以前の呼び出しが保存した行だけが artifact 参照を持つ) / created_at / created_by
 ```
 
-Checkpoint は append-only の履歴であり、bootstrap には載らない。以前に凍結された行も消さず、`task_get` の `checkpoints` 展開と Work 画面で読める。そして **`task_checkpoint` は Task の終了ではない**。
+Checkpoint は append-only の履歴であり、bootstrap には載らない。以前に保存された行も消さず、`task_get` の `checkpoints` 展開と Work 画面で読める。そして **`task_checkpoint` は Task の終了ではない**。
 
 ### 5.7 要約を永続化しない
 
@@ -215,7 +215,7 @@ mashu task close                     決定の画面。open な Task を一覧�
 mashu task close <id>... --outcome   outcome: completed / abandoned / superseded
 ```
 
-close 時は最終 checkpoint を凍結し、bootstrap から除外する。state を凍結するのはこのときだけで、行は終了時点の Current State と、`closed as <outcome>: <理由>` の what_changed を持つ（5.6 節）。attempt / decision / artifact は保持する。closed の再開は `mashu task reopen <id>`（User のみ）。
+close 時は最終 checkpoint を固定して残し、Task を bootstrap から除外する。state のスナップショットを保存するのはこのときだけで、行は終了時点の Current State と、`closed as <outcome>: <理由>` の what_changed を持つ（5.6 節）。attempt / decision / artifact は保持する。closed の再開は `mashu task reopen <id>`（User のみ）。
 
 ### 6.1 Close Proposal — 判定は渡さない、転記だけ消す
 
@@ -229,7 +229,7 @@ close 時は最終 checkpoint を凍結し、bootstrap から除外する。stat
 
 ## 7. Activity Lease — 沈黙は完了ではないが、現在でもない
 
-close を User に強制すると、忘れられた Task が腐った state を永久に push し続ける。かといって沈黙を完了と解釈すれば、Agent に終了判定をさせないという 6 節の原則が裏口から破れる。この間を lease で取る。
+close を User に強制すると、忘れられた Task が、事実と合わなくなった state を永久に push し続ける。かといって沈黙を完了と解釈すれば、Agent に終了判定をさせないという 6 節の原則が裏口から破れる。この間を lease で取る。
 
 open な Task は `last_activity_at` と `active_until` を持つ。`task_checkpoint` / User の state 編集と `task touch` が lease を延長する。初期値は 14 日とし、計算のキュー待ちや査読待ちで正当に週単位の空白が生じる研究のリズムに対して短すぎるかどうかは、reactivate の頻度（17 節)で較正する。
 
@@ -251,7 +251,7 @@ silence = absence of evidence for current activity
 
 dormant な Task は bootstrap に載らず、履歴は保持され、明示検索と reactivate が可能である。dormant の Current State を返すときは「Last known state as of YYYY-MM-DD」と明示し、現在の真実として提示しない（3.1 節の提示規律の一貫）。
 
-これで「User が README を直して close を忘れた」ケースは、14 日後に自動で bootstrap から消え、勝手に completed にもならず、後日検索すれば「この日が最後に確認できた状態」と返る。**終了を正しく判定できなくても、腐った working state を配信し続けない。**
+これで「User が README を直して close を忘れた」ケースは、14 日後に自動で bootstrap から消え、勝手に completed にもならず、後日検索すれば「この日が最後に確認できた状態」と返る。**終了を正しく判定できなくても、古くなった working state を配信し続けない。**
 
 ## 8. Bootstrap と token budget の統合
 
@@ -281,7 +281,7 @@ TOTAL            4000 tokens
   Temporary       400
 ```
 
-重要なのは、**Agent に押し込まれる総量を Mashu が一元管理し、subsystem が互いの枠を暗黙に借りない**ことである。Memory が余った Task card 枠を恒久的に使うことも、その逆もしない。Memory の定員判定は v2 のまま admission 時に、Task card は Scope ごとの配信量を 5.3 節のとおり書き込み時に判定する。`mashu status` は card の全 Scope 合計ではなく、最も重い Scope の配信量を表示する。full detail は「入りきらないため検索へ落とす」のではない。存在と取得先を必ず push したうえで、選んだ Task の既知の IDから決定的に pull する。Memory は存在自体を忘れるため本文 push が必要だが、Work は card が取得契機を運ぶため、この二段構造を取れる。
+重要なのは、**Agent に押し込まれる総量を Mashu が一元管理し、subsystem が互いの予算を暗黙に借りない**ことである。Task card の予算が余っていても Memory がそれを恒久的に使うことはなく、その逆もしない。Memory の容量の判定は v2 のまま admission 時に、Task card は Scope ごとの配信量を 5.3 節のとおり書き込み時に判定する。`mashu status` は card の全 Scope 合計ではなく、最も重い Scope の配信量を表示する。full detail は「入りきらないため検索へ落とす」のではない。存在と取得先を必ず push したうえで、選んだ Task の既知の IDから決定的に pull する。Memory は存在自体を忘れるため本文 push が必要だが、Work は card が取得契機を運ぶため、この二段構造を取れる。
 
 guard（v2 6.2 節、action を持つ topic）は Durable Memory の配信機構であり、Project State はそこに使わない。
 
@@ -295,20 +295,20 @@ User が覚えてと言った     → memory_admit
 次のセッションへ引き継ぐ  → task_checkpoint
 ```
 
-task_checkpoint の `attempts` と `decisions` は「失敗した試行の結末」「後から理由を失うと高くつく判断」に限って埋める欄であり、毎回の checkpoint で書くものではない。独立した動詞にはしないので、上の三行は増えない。
+task_checkpoint の `attempts` と `decisions` は「失敗した試行の結末」「後から理由を失うと高くつく判断」に限って埋める引数であり、毎回の checkpoint で書くものではない。独立した動詞にはしないので、上の三行は増えない。
 
 **痛みの答えには二つの形がある。**v2 では、痛みを防いだはずのものはすべて「誰かが毎回持っているべき一文」＝規則の形をしていた。それ以外の置き場が無かったので、そう書くしかなかったのである。Project State ができた以上その前提は無くなる。一度直せば以後は何も覚えなくてよい変更 ＝ 作業は、規則ではない。
 
 ```text
-毎回持っていないと再発する    → prevention_kind=rule（既定）。候補になり、人が席を決める
+毎回持っていないと再発する    → prevention_kind=rule（既定）。候補になり、Memory に採るかを人が決める
 一度直せば終わる              → prevention_kind=work。候補にならず、task の next_actions へ入る
 ```
 
-`prevention_kind=work` は review を回避する経路ではない。台帳行はどちらでも書かれ、忘却が何を払わせたかを数えるのは台帳だからである。変わるのは、Review 卓に何を載せるかだけである。Review 卓の動詞は確定・却下・保留の三つで、そこに「やる」は無い。作業をそこへ載せると、決められない項目が席を待ち続ける。
+`prevention_kind=work` は review を回避する経路ではない。`ledger` の行はどちらの場合も書かれる。忘却によってどれだけの損害が出たかを数えるのは `ledger` だからである。変わるのは、review の対象に何を載せるかだけである。review でできる操作は確定・却下・保留の三つで、そこに「やる」は無い。作業を review の対象に載せると、確定も却下もできない項目が、Memory に採られるのを待ったまま残り続ける。
 
-正確には、`work` は**自分では候補を作らない**のであって、台帳から消えるわけではない。同じ文面が後日 `rule` として報告されたとき、`work` の friction 行は再導出の前半として数えられる、としていた。friction と再導出の経路は撤回した（`docs/mashu-v2.md` 4.2 節）ので、いま `work` の台帳行は類似の台帳エントリとして示されるだけである。
+正確には、`work` は**自分では候補を作らない**のであって、`ledger` から消えるわけではない。同じ文面が後日 `rule` として報告されたとき、`work` の friction 行は再導出の前半として数えられる、としていた。friction と再導出の経路は撤回した（`docs/mashu-v2.md` 4.2 節）ので、いま `work` の `ledger` の行は、類似する `ledger` の行として示されるだけである。
 
-`task_id` を伴わない `work` は拒否せず記録し、**「どこにも提出されていない」と名指しして返す**。台帳側は `filed_task` が NULL のまま残るので、後から未提出の作業を数えられる。Task を立てていない場面で痛みの記録そのものが失敗する方が高くつく、という判断である。
+`task_id` を伴わない `work` は拒否せず記録し、**「どこにも提出されていない」と名指しして返す**。`ledger` の行は `filed_task` が NULL のまま残るので、後から未提出の作業を数えられる。Task を立てていない場面で痛みの記録そのものが失敗する方が高くつく、という判断である。
 
 記録漏れは起こる前提で設計する。checkpoint が打たれなかったセッションの被害は「次のセッションが古い日付の state を見て、裏を取りに行く」であり（3.1 節）、誤情報の自動生成より安全側にある。記録率は instructions と hooks（Stop フックでの促し等）で改善するが、記録の強制はしない。
 
@@ -332,7 +332,7 @@ v2 の入口拒否（`redact.py`、commit hook と共用の禁止パターン）
 
 ## 11. 自動処理は決定的なもののみ
 
-LLM background worker や、利用頻度・経過日数・confidence による自律的な Memory 採用・退役は置かない。実行できるのは、明示指示に従った操作、登録済み Temporary Context の期限失効、承認済み置換に伴う旧 Memory の退役までである。その他の存在する自動処理は Trace expiry・lease の導出判定・token count・hard limit・重複照合・orphan reference check であり、決定的である。「この Task は終わったように見える」という LLM 判定はしない。
+LLM background worker や、利用頻度・経過日数・confidence による自律的な Memory の採用や retire は置かない。実行できるのは、明示指示に従った操作、登録済み Temporary Context の期限失効、承認済み置換に伴う旧 Memory の retire までである。その他の存在する自動処理は Trace expiry・lease の導出判定・token count・hard limit・重複照合・orphan reference check であり、決定的である。「この Task は終わったように見える」という LLM 判定はしない。
 
 ## 12. v2 文書への修正点
 
@@ -350,7 +350,7 @@ Memory 関連 Tool は `docs/mashu-v2.md` 8.1 節に記す。`session_bootstrap`
 |---|---|
 | `task_create` | 重複照合つきの Task 作成（5.2 節） |
 | `task_get` / `task_search` / `project_list` | 明示取得・検索 |
-| `task_checkpoint` | Agent が state を書く唯一の Tool。Current State の置換と任意の Task 名変更（楽観チェック・重複照合・hard limit・予算判定つき）+ attempt / decision / artifact の追記。凍結はしない（5.6 節） |
+| `task_checkpoint` | Agent が state を書く唯一の Tool。Current State の置換と任意の Task 名変更（楽観チェック・重複照合・hard limit・予算判定つき）+ attempt / decision / artifact の追記。state のスナップショットは保存しない（5.6 節） |
 | `task_propose_close` / `task_withdraw_close_proposal` | 終了の提案と取り下げ（6.1 節） |
 
 `attempt_list` / `decision_list` / `artifact_list` は `task_get` の展開引数として提供し、Tool 数の増殖を避ける。全文の state を返すのは `task_get` だけで、他の Task 系 Tool は card view と予算を返す（5.3 節）。**`task_close` は Agent 用 MCP に置かない。**提案は close ではないので `task_propose_close` はこの禁止に触れない。
@@ -382,7 +382,7 @@ Work の `c` は選択中の Task だけを同じ close decision screen で開�
 
 ## 14. スキーマ
 
-現在の Memory 11 表に Project State 7 表を加えて 18 表。Project State の migration は 0004 から始まる。`ledger` には 0005 で 2 列を足し（`prevention_kind`、`filed_task`。9 節）、0006 で両者を結ぶ CHECK を張る（`filed_task` が非 NULL なら `prevention_kind='work'`）。台帳行そのものは append-only のままで、**提出先は行が書かれる前に決まり、後から書き込むことはできない**。矛盾した行を後から直す手段が無いことが、規約ではなく制約で持つ理由である。0012 は `ledger` に `violated_memory_id`（守られなかった active Memory、`docs/mashu-v2.md` 4.1 節）を、`topic` に `source`（原典の場所、同 6 節）を足す。0013 は `memory`、`memory_revision`、`nomination`、`temporary_context` の本文に、空白しか含まない値を拒む CHECK を張る。`trace` 表は Trace の撤回後も既存の行を保つために残す。
+現在の Memory 11 表に Project State 7 表を加えて 18 表。Project State の migration は 0004 から始まる。`ledger` には 0005 で 2 列を足し（`prevention_kind`、`filed_task`。9 節）、0006 で両者を結ぶ CHECK を張る（`filed_task` が非 NULL なら `prevention_kind='work'`）。`ledger` の行そのものは append-only のままで、**提出先は行が書かれる前に決まり、後から書き込むことはできない**。矛盾した行を後から直す手段が無いことが、規約ではなく制約で持つ理由である。0012 は `ledger` に `violated_memory_id`（守られなかった active Memory、`docs/mashu-v2.md` 4.1 節）を、`topic` に `source`（原典の場所、同 6 節）を足す。0013 は `memory`、`memory_revision`、`nomination`、`temporary_context` の本文に、空白しか含まない値を拒む CHECK を張る。`trace` 表は Trace の撤回後も既存の行を保つために残す。
 
 ```text
 既存: scope route ledger trace memory memory_revision topic
@@ -394,7 +394,7 @@ Work の `c` は選択中の Task だけを同じ close decision screen で開�
 
 PostgreSQL の schema 分離（`memory.*` / `project.*`）は行わない。既存表が public にある以上、途中から分離しても境界は語られない。**境界はコードの module boundary で持つ**（`projects.py` / `tasks.py` / `task_history.py` を新設し、既存 module に Project State のロジックを混ぜない）。拡張は引き続き pg_trgm のみで、pgvector は導入しない。
 
-並行書き込みは v2 と同じく advisory lock で直列化する。lock 対象に Task 生成時の重複照合と生成の間、および checkpoint（置換 + 履歴の追記）と close（凍結 + 終了）の原子性を加える。lease に遷移が無い（7 節）ため、遷移の競合対策は不要である。
+並行書き込みは v2 と同じく advisory lock で直列化する。lock 対象に Task 生成時の重複照合と生成の間、および checkpoint（置換 + 履歴の追記）と close（スナップショットの保存 + 終了）の原子性を加える。lease に遷移が無い（7 節）ため、遷移の競合対策は不要である。
 
 ## 15. 不変条件
 
@@ -414,34 +414,34 @@ Memory（v2 のまま）:
   明示指示の実行では actor と承認根拠を別に記録する
   MCP の承認出所は監査用であり、会話の真正性を認証しない
   active な Memory には必ず evidence がある
-  退役には理由と retirement_kind が必須で、conflict を種類に応じて扱う
+  retire には理由と retirement_kind が必須で、conflict を種類に応じて扱う
   proposal version、対象 revision、conflict が変われば古い判断で適用できない
 
 Bootstrap:
   active な Memory と active な Task card だけが push される
-  topic は見出しだけが push され、本文は bootstrap に載らない。見出しは Memory の席で数える
-  dormant / closed / 履歴 / trace は黙って push されない
+  topic は見出しだけが push され、本文は bootstrap に載らない。見出しの token は Memory の容量に含めて数える
+  dormant / closed / 履歴 / trace は push されない
   総 token が hard cap を超えない
 ```
 
 ## 16. 実装計画 — v2.1 への増築
 
-v2 の凍結・再現・移植の工程は存在しない。すでに動いているものは動かしたままにする。
+v2 への移行のときのように、旧版を読み取り専用で保管し、作り直して移植する工程は無い。すでに動いているものは動かしたままにする。
 
 **Phase A — Project State core**
 migration 0004（7 表）、`projects.py` / `tasks.py`、Task 生成の重複照合、Current State の置換・hard limit・楽観チェック・予算判定、lease の導出判定、task_search。
 
 **Phase B — History**
-checkpoint（置換 + 凍結の原子性）、attempt、decision、artifact reference、supersedes、`task_get` の展開。
+checkpoint（置換 + スナップショット保存の原子性）、attempt、decision、artifact reference、supersedes、`task_get` の展開。
 
 **Phase C — Bootstrap 統合**
-`bootstrap.py` の拡張（active Task card の選択・日付つき整形・task_get 導線）、budget の一元管理（TOTAL / Task card 枠の追加）、`mashu bootstrap` / `mashu status` の表示拡張。
+`bootstrap.py` の拡張（active Task card の選択・日付つき整形・task_get 導線）、budget の一元管理（TOTAL / Task card の予算の追加）、`mashu bootstrap` / `mashu status` の表示拡張。
 
 **Phase D — インターフェース**
 MCP Tool 追加、server instructions への 9 節の規律の追記、CLI 追加、v2 文書と CLAUDE.md の修正（12 節）。
 
 **Phase E — 運用開始**
-過去の会話・文書からの自動 ingest はしない。v3 導入時点の作業から Task を起こす。Memory の腐った作業状態行（1 節で観測されたもの）は、対応する Task へ写したうえで User が retire する。この作業自体が Project State の最初の運用テストになる。
+過去の会話・文書からの自動 ingest はしない。v3 導入時点の作業から Task を起こす。Memory に入っている、古くなった作業状態の行（1 節で観測されたもの）は、対応する Task へ写したうえで User が retire する。この作業自体が Project State の最初の運用テストになる。
 
 各 Phase は feature branch で行い、既存テストを常に green に保つ。
 
@@ -452,7 +452,7 @@ event_log から最低限次を測れるようにする。active / dormant Task 
 | 観測 | 意味 |
 |---|---|
 | Task card が長文化する | goal / status が索引でなく日誌になっている。card 上限を較正する |
-| `task_card_write_refused` が多い | card 上限が実際の書き方に対して狭いか、goal / status に詳細を書いている。内訳でどの欄が超過を生んだかを見る |
+| `task_card_write_refused` が多い | card 上限が実際の書き方に対して狭いか、goal / status に詳細を書いている。内訳でどのフィールドが超過を生んだかを見る |
 | full detail が長文化する | schema が広すぎるか、原典を Task に複製している。field 数・上限を見直す |
 | active Task が増え続ける | lease が長すぎるか activity の定義が広すぎる |
 | dormant から頻繁に reactivate される | lease が短すぎる（研究のリズムに合っていない） |
@@ -463,13 +463,13 @@ event_log から最低限次を測れるようにする。active / dormant Task 
 | Memory nomination が再び大量になる | Project State の情報を Memory へ安易に昇格させていないか疑う |
 | 再開の拾い直しが減らない | Project State そのものの誤りを疑う。1 節の動機が反証されたことになる |
 
-成功条件。新セッションで bootstrap card から継続対象を短時間で選び、`task_get` 1 回で現在地を復元できる。同じ試行の無駄な再実行が減る。重要な Decision の理由を再導出しなくてよい。Agent が長大な作業日誌を生成できない。User が close を忘れても腐った card が push され続けない。そして Memory の定員から作業状態の圧力が消える。
+成功条件。新セッションで bootstrap card から継続対象を短時間で選び、`task_get` 1 回で現在地を復元できる。同じ試行の無駄な再実行が減る。重要な Decision の理由を再導出しなくてよい。Agent が長大な作業日誌を生成できない。User が close を忘れても古くなった card が push され続けない。そして作業状態が Memory の容量を圧迫しなくなる。
 
 ## 18. 非目標と、復活させない v1 の機構
 
 Mashu v3 は、chat history の全保存・AI 日記・Git / Obsidian / Issue tracker の置き換え・document management・vector knowledge base・自律的な project manager・完了の自動判定・universal semantic memory のいずれでもない。
 
-Project State が入っても、speculative extraction・Session End Extraction・LLM sweeper・pgvector 既定・unified Knowledge Entity・未審査知識の配信・束 Review・stale の自動書き換え・Agent の自律的な Memory 採用や退役・AI による Task 完了判定は復活させない。明示指示に従う Memory 操作は v2 の記録済み provenance を伴う。
+Project State が入っても、speculative extraction・Session End Extraction・LLM sweeper・pgvector 既定・unified Knowledge Entity・未審査知識の配信・束 Review・stale の自動書き換え・Agent の自律的な Memory の採用や retire・AI による Task 完了判定は復活させない。明示指示に従う Memory 操作は v2 の記録済み provenance を伴う。
 
 ## 19. 中心命題
 
