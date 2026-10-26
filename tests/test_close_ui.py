@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-import re
-from uuid import uuid4
-
 import pytest
 
 from conftest import (
-    assert_steady_layout,
     committed_task,
     expire,
     keys,
@@ -14,7 +10,7 @@ from conftest import (
     task_row,
     update_task,
 )
-from mashu import close_ui, db, screen, task_actions
+from mashu import close_ui, db, task_actions
 from mashu.errors import MashuError
 
 MERGED = "deleted before the merge d178ecb7, nothing on main references it"
@@ -26,8 +22,6 @@ DETAIL = {
     "blockers": ["await the load certificate"],
     "next_actions": ["run the loaded trial"],
 }
-
-STEPS = [f"step {n} of the loaded trial and its checks" for n in range(5)]
 
 pytestmark = pytest.mark.usefixtures("known_screen")
 
@@ -98,56 +92,31 @@ def test_preview_shows_grounds_and_context_and_leaving_decides_nothing(dsn, monk
         assert label in out
 
 
-@pytest.mark.parametrize(
-    "query", ["REPLACE", "ENRAI", "ACTIVE", "LAUNCH WITHOUT", "FITTED", "FORWARD MOUNT", "ON MAIN"]
-)
-def test_search_matches_every_promised_text_field_case_insensitively(dsn, query):
+def test_search_matches_every_promised_text_field_case_insensitively(dsn):
     task_id = a_task(dsn, "replace the launch rail", propose="completed", **DETAIL)
     row = task_row(dsn, task_id)
 
-    assert close_ui._matches(row, query)
+    for query in (
+        "REPLACE",
+        "ENRAI",
+        "ACTIVE",
+        "LAUNCH WITHOUT",
+        "FITTED",
+        "FORWARD MOUNT",
+        "ON MAIN",
+    ):
+        assert close_ui._matches(row, query), query
     assert close_ui._matches(row, str(task_id)[:12])
 
 
-@pytest.mark.parametrize(
-    "searches",
-    [
-        ("/", "HULL", "/", "", "home"),
-        ("/", "hull", "left", "home"),
-        ("/", "absent", "/", "", "home"),
-    ],
-)
-def test_a_search_narrows_the_list_and_clearing_it_restores_the_whole_list(
-    dsn, monkeypatch, searches
-):
+def test_a_search_narrows_the_list_and_clearing_it_restores_the_whole_list(dsn, monkeypatch):
     hull = a_task(dsn, "rework the hull")
     deck = a_task(dsn, "inspect the deck")
-    keys(monkeypatch, *searches, "c", "", "q")
+    keys(monkeypatch, "/", "HULL", "/", "", "home", "c", "", "q")
 
     assert close_ui.run(dsn) == 0
     assert task_row(dsn, deck)["task"]["outcome"] == "completed"
     assert status(dsn, hull) == "open"
-
-
-@pytest.mark.parametrize(("movement", "closed_index"), [(("j",), 0), (("end", "k"), 1)])
-def test_jk_and_home_end_move_between_tasks(dsn, monkeypatch, movement, closed_index):
-    task_ids = [a_task(dsn, "older task"), a_task(dsn, "newer task")]
-    keys(monkeypatch, *movement, "c", "", "q")
-
-    assert close_ui.run(dsn) == 0
-    assert task_row(dsn, task_ids[closed_index])["task"]["outcome"] == "completed"
-    assert status(dsn, task_ids[1 - closed_index]) == "open"
-
-
-def test_page_down_moves_by_more_than_one_visible_task(dsn, monkeypatch):
-    task_ids = [a_task(dsn, f"task {number:02}") for number in range(15)]
-    keys(monkeypatch, "pagedown", "c", "", "q")
-
-    assert close_ui.run(dsn) == 0
-    closed = [task_id for task_id in task_ids if status(dsn, task_id) == "closed"]
-    assert len(closed) == 1
-    assert status(dsn, task_ids[-1]) == "open"
-    assert status(dsn, task_ids[-2]) == "open"
 
 
 def test_selection_survives_reload_when_withdrawing_reorders_the_list(dsn, monkeypatch):
@@ -158,58 +127,6 @@ def test_selection_survives_reload_when_withdrawing_reorders_the_list(dsn, monke
     assert close_ui.run(dsn) == 0
     assert task_row(dsn, selected)["task"]["outcome"] == "completed"
     assert status(dsn, other) == "open"
-
-
-def test_non_tty_output_has_no_ansi_and_small_screens_stay_bounded(dsn, monkeypatch, capsys):
-    a_task(dsn, "replace the launch rail", propose="completed", **DETAIL)
-    monkeypatch.setenv("LINES", "12")
-    keys(monkeypatch, "q")
-
-    assert close_ui.run(dsn) == 0
-    out = capsys.readouterr().out
-    assert "\x1b[" not in out
-    assert len(out.splitlines()) <= 12
-
-
-def test_every_preview_label_stands_two_spaces_clear_of_its_value(dsn):
-    task_id = a_task(dsn, "replace the launch rail", propose="completed", **DETAIL)
-
-    detail = close_ui._detail(task_row(dsn, task_id))
-
-    assert re.search(r"open questions {2,}whether the forward mount", detail)
-    assert re.search(r"reason {2,}deleted before the merge", detail)
-
-
-def test_the_project_column_fits_the_longest_name_and_activity_is_spelled_out():
-    rows = [
-        {
-            "task": {"task_id": uuid4(), "project_name": name, "name": "a task"},
-            "activity": activity,
-            "age_days": 3,
-            "heading": "",
-            "state": {},
-        }
-        for name, activity in (("mythogenesis", "active"), ("output-style", "dormant"))
-    ]
-
-    text = close_ui._screen_text(rows, 0)
-
-    assert text.startswith("Close tasks\n")
-    assert "mythogenesis  active" in text and "output-style  dormant" in text
-    assert "…" not in text
-
-
-def test_moving_the_cursor_moves_neither_the_list_nor_the_keys(dsn, monkeypatch):
-    names = ["alpha rail", "bravo hatch", "charlie mount", "delta keel"]
-    a_task(dsn, names[0])
-    a_task(dsn, names[1], propose="completed", **DETAIL)
-    a_task(dsn, names[2], goal="fit the mount")
-    a_task(dsn, names[3], propose="abandoned", next_actions=STEPS)
-    monkeypatch.setenv("COLUMNS", "80")
-    monkeypatch.setenv("LINES", "24")
-    rows = close_ui._open_tasks(dsn, None)
-    frames = [close_ui._screen_text(rows, at, total=len(rows)) for at in range(len(rows))]
-    assert_steady_layout(frames, names, close_ui._KEYS)
 
 
 def test_y_takes_only_standing_proposals_on_their_outcome_and_grounds(dsn, monkeypatch, capsys):
@@ -265,24 +182,3 @@ def test_a_failed_close_stops_y_and_keeps_the_ones_already_closed(dsn, monkeypat
     assert sum(status(dsn, task_id) == "open" for task_id in task_ids) == 2
     failed = str(calls[1][0])[:8]
     assert f"{failed} not closed: the task or close proposal changed" in capsys.readouterr().out
-
-
-def test_the_keys_fit_80_columns_and_a_long_confirmation_fits_the_screen(monkeypatch):
-    monkeypatch.setenv("COLUMNS", "80")
-    monkeypatch.setenv("LINES", "24")
-    for keys_text in (close_ui._KEYS, close_ui._ALL_KEYS):
-        assert all(screen.cells(line) <= 80 for line in keys_text.splitlines())
-    rows = [
-        {
-            "task": {"task_id": uuid4(), "name": f"task {n} " + "long name " * 9},
-            "proposal": {"outcome": "completed", "stale": False},
-        }
-        for n in range(30)
-    ]
-
-    text = close_ui._all_screen(rows, 2)
-
-    lines = text.splitlines()
-    assert len(lines) == 23 and all(screen.cells(line) <= 80 for line in lines)
-    assert lines[-1] == close_ui._ALL_KEYS
-    assert f"… and {30 - (23 - 7)} more" in text

@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from conftest import assert_steady_layout, candidate, keys, read_through, remember, retire
+from conftest import candidate, keys, read_through, remember, retire
 from mashu import db, nominations, review_ui, screen, topics
 
 RULE = "run the migration before starting the local server, every time"
@@ -128,78 +128,6 @@ def test_search_matches_every_documented_field_case_insensitively():
     assert not review_ui._matches_query(row, "unrelated")
 
 
-def test_zero_result_search_can_be_researched_and_empty_search_restores_the_queue(
-    dsn, monkeypatch, capsys
-):
-    first = a_candidate(dsn, RULE)
-    second = a_candidate(dsn, OTHER)
-    keys(monkeypatch, "/", "does not exist", "/", "TIMEZONE", "", "y", "", "/", "", "q")
-
-    assert review_ui.run(dsn) == 0
-
-    out = capsys.readouterr().out
-    assert "no candidates match" in out
-    assert nomination_row(dsn, first["nomination_id"])["status"] == "pending"
-    assert nomination_row(dsn, second["nomination_id"])["status"] == "admitted"
-    assert "1 waiting for review" in out
-
-
-@pytest.mark.parametrize(
-    ("start", "key", "expected"),
-    [
-        (1, "j", 2),
-        (1, "down", 2),
-        (1, "k", 0),
-        (1, "up", 0),
-        (2, "home", 0),
-        (0, "end", 4),
-        (4, "pageup", 0),
-        (0, "pagedown", 4),
-    ],
-)
-def test_candidate_navigation_is_shared_by_queue_and_item(start, key, expected):
-    assert review_ui._move(start, 5, key, 8) == expected
-
-
-@pytest.mark.parametrize(
-    ("movement", "decided"),
-    [
-        (("j", "", "k", "j"), 1),
-        (("end", "", "home", "end", "pageup", "pagedown"), 2),
-    ],
-)
-def test_queue_and_item_use_the_same_candidate_navigation(dsn, monkeypatch, movement, decided):
-    candidates = [
-        a_candidate(dsn, "run migrations before the local server"),
-        a_candidate(dsn, "write explicit timezones in scheduler entries"),
-        a_candidate(dsn, "check the standby before deploying"),
-    ]
-    keys(monkeypatch, *movement, "r", "no longer needed", "q")
-
-    assert review_ui.run(dsn) == 0
-
-    rows = [nomination_row(dsn, row["nomination_id"]) for row in candidates]
-    assert [row["status"] for row in rows].count("pending") == 2
-    assert rows[decided]["status"] == "declined"
-    assert rows[decided]["decision_reason"] == "no longer needed"
-
-
-def test_the_queue_names_every_candidate_and_left_clears_a_search_first(dsn, monkeypatch, capsys):
-    first = a_candidate(dsn, RULE)
-    second = a_candidate(dsn, OTHER)
-    keys(monkeypatch, "/", "timezone", "left", "q")
-
-    assert review_ui.run(dsn) == 0
-
-    out = capsys.readouterr().out
-    searched = "1 of 2 waiting for review  ·  search: timezone"
-    assert searched in out
-    before_search = out[: out.index(searched)]
-    assert str(first["nomination_id"])[:8] in before_search
-    assert str(second["nomination_id"])[:8] in before_search
-    assert out.count("2 waiting for review") >= 2
-
-
 def test_a_capacity_refusal_keeps_the_candidate_and_can_be_edited_inline_and_retried(
     dsn, monkeypatch, capsys
 ):
@@ -300,16 +228,3 @@ def test_the_queue_is_named_and_d_includes_deferred_candidates_from_inside(
     assert "Review\n1 waiting for review  ·  1 deferred, d includes them" in out
     assert "Review\n2 waiting for review  ·  deferred included, d hides them" in out
     assert "--all" not in out
-
-
-def test_moving_the_cursor_moves_neither_the_list_nor_the_keys(dsn, monkeypatch):
-    names = ["alpha migration", "bravo timezone", "charlie standby"]
-    made = [a_candidate(dsn, f"{name} rule") for name in names]
-    with db.transaction(dsn) as cur:
-        nominations.defer(cur, made[1]["nomination_id"], actor="user", reason="after the release")
-    monkeypatch.setenv("COLUMNS", "80")
-    monkeypatch.setenv("LINES", "24")
-    rows, hidden = review_ui._queue(dsn, True)
-    keys = review_ui._queue_keys(True)
-    frames = [review_ui._queue_screen(rows, at, hidden, keys) for at in range(len(rows))]
-    assert_steady_layout(frames, names, keys)

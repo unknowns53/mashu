@@ -19,12 +19,34 @@ TEST_DB = os.environ.get("MASHU_TEST_DB", "mashu_test")
 ADMIN_DSN = os.environ.get("MASHU_ADMIN_DSN", "dbname=postgres")
 
 
-def fresh_database(name: str, template: str | None = None) -> str:
-    copy = f' TEMPLATE "{template}"' if template else ""
+def fresh_database(name: str) -> str:
     with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
-        conn.execute(f'CREATE DATABASE "{name}"{copy}')
+        conn.execute(f'CREATE DATABASE "{name}"')
     return f"dbname={name}"
+
+
+def emptied(dsn: str) -> str:
+    """Delete every row but the migration record, history tables included."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        # A connection a test left open would hold the lock TRUNCATE waits for.
+        conn.execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+            "WHERE datname = current_database() AND pid <> pg_backend_pid()"
+        )
+        tables = [
+            row[0]
+            for row in conn.execute(
+                "SELECT tablename FROM pg_tables "
+                "WHERE schemaname = 'public' AND tablename <> 'schema_migration'"
+            )
+        ]
+        # The append-only triggers refuse TRUNCATE; replica mode skips them (superuser only).
+        conn.execute("SET session_replication_role = replica")
+        conn.execute(
+            "TRUNCATE " + ", ".join(f'"{name}"' for name in tables) + " RESTART IDENTITY CASCADE"
+        )
+    return dsn
 
 
 @pytest.fixture(scope="session")
@@ -44,16 +66,16 @@ def committing_dsn() -> str:
 
 
 @pytest.fixture(scope="session")
-def migrated_template() -> str:
-    name = f"{TEST_DB}_template"
-    migrate(fresh_database(name))
-    return name
+def own_database() -> str:
+    dsn = fresh_database(f"{TEST_DB}_own")
+    migrate(dsn)
+    return dsn
 
 
 @pytest.fixture
-def dsn(migrated_template: str) -> str:
+def dsn(own_database: str) -> str:
     """A committed database of the test's own, empty but for the migrations."""
-    return fresh_database(f"{TEST_DB}_own", template=migrated_template)
+    return emptied(own_database)
 
 
 @pytest.fixture
@@ -135,26 +157,6 @@ def read_through(monkeypatch: pytest.MonkeyPatch, text: str, under: str, *after:
     while offset := screen.paged(text, offset, under)[1]:
         spaces.append("space")
     keys(monkeypatch, "", *spaces, *after)
-
-
-def assert_steady_layout(frames: list[str], names: list[str], keys: str) -> None:
-    """The list's first and last rows and the keys keep their lines in every frame.
-
-    Each name is the text of one list row; its first occurrence is its row, since the
-    preview always sits under the list. The keys end every frame, which fills the
-    terminal but for the cursor's line under it.
-    """
-    height = shutil.get_terminal_size().lines
-    places = set()
-    for frame in frames:
-        lines = frame.splitlines()
-        rows = [next(n for n, line in enumerate(lines) if name in line) for name in names]
-        assert lines[-len(keys.splitlines()) :] == keys.splitlines()
-        assert len(lines) == height - 1
-        places.add((min(rows), max(rows)))
-    assert len(places) == 1
-    # Otherwise nothing was tested: the previews must differ in length.
-    assert len({sum(1 for line in frame.splitlines() if line.strip()) for frame in frames}) > 1
 
 
 def getkeys(monkeypatch: pytest.MonkeyPatch, *pressed: str) -> None:

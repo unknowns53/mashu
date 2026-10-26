@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import candidate, expire, getkeys, new_project, new_task, remember
-from mashu import db, nominations, routing, scopes, screen, settings_ui, tasks, temporary, topics
+from mashu import db, nominations, routing, scopes, settings_ui, tasks, temporary, topics
 from mashu.errors import RefusedError
 
 pytestmark = pytest.mark.usefixtures("known_screen")
@@ -19,44 +19,6 @@ def answers(monkeypatch, *typed: str) -> list[str]:
 
     monkeypatch.setattr("builtins.input", answer)
     return prompts
-
-
-def test_top_level_reaches_every_settings_page_and_leaves_cleanly(dsn, monkeypatch, capsys):
-    getkeys(monkeypatch, "enter", "left", *(("down", "enter", "left") * 5), "q")
-
-    assert settings_ui.run(dsn) == 0
-
-    out = capsys.readouterr().out
-    for heading in (
-        "Health/status",
-        "Bootstrap preview",
-        "Scopes",
-        "Topics",
-        "Routes",
-        "Schema/migrations",
-    ):
-        assert heading in out
-    assert "\x1b[" not in out
-
-
-def test_q_on_a_page_quits_settings_and_left_goes_back(dsn, monkeypatch, capsys):
-    getkeys(monkeypatch, "enter", "q")
-    with pytest.raises(screen.Quit):
-        settings_ui.run.__wrapped__(dsn)
-    capsys.readouterr()
-
-    getkeys(monkeypatch, "down", "down", "enter", "left", "q")
-    assert settings_ui.run(dsn) == 0
-    assert capsys.readouterr().out.count("Settings & health") == 4
-
-
-def test_bootstrap_memory_rows_hang_under_their_content(monkeypatch):
-    monkeypatch.setenv("COLUMNS", "40")
-    rows = [{"memory_id": "0123456789abcdef", "content": "one two three four five six seven eight"}]
-    lines = settings_ui._memory_lines("Always memories", rows)[1].splitlines()
-    assert lines[0].startswith("    01234567  one")
-    assert len(lines) > 1
-    assert all(line.startswith(" " * 14) and line[14] != " " for line in lines[1:])
 
 
 def test_health_collects_capacity_queues_evidence_and_task_activity(dsn):
@@ -203,19 +165,6 @@ def test_schema_apply_is_confirmed_and_reports_a_noop(dsn, monkeypatch, capsys):
     assert called == [dsn]
     assert prompts and "apply 0 pending migration" in prompts[0]
     assert "already up to date" in capsys.readouterr().out
-
-
-def test_long_pages_move_forward_and_back_without_losing_the_header(monkeypatch, capsys):
-    monkeypatch.setenv("LINES", "10")
-    getkeys(monkeypatch, "space", "b", "left")
-    body = "\n".join(f"  detail line {number}" for number in range(30))
-
-    settings_ui._read_page("Long health page", body)
-
-    out = capsys.readouterr().out
-    assert "more line(s)" in out
-    assert out.count("Long health page") == 3
-    assert out.count("detail line 0") == 2
 
 
 def test_topic_page_creates_edits_and_removes_a_topic(dsn, monkeypatch):

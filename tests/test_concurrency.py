@@ -34,7 +34,7 @@ def two(committing_dsn: str) -> Iterator[tuple[psycopg.Connection, psycopg.Conne
 def impatient(conn: psycopg.Connection) -> psycopg.Cursor:
     """A cursor that refuses to wait, so a held lock shows up as a failure."""
     cur = conn.cursor()
-    cur.execute("SET lock_timeout = '500ms'")
+    cur.execute("SET lock_timeout = '50ms'")
     return cur
 
 

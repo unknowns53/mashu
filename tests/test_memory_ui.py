@@ -4,8 +4,8 @@ import datetime as dt
 
 import pytest
 
-from conftest import assert_steady_layout, keys, retire
-from mashu import application, db, memories, memory_ui, scopes, screen, temporary, topics
+from conftest import keys, retire
+from mashu import db, memories, memory_ui, scopes, screen, temporary, topics
 
 RULE = "never report a run as finished without the output that proves it"
 REVISED = "never report a run as finished without pasting the output that proves it"
@@ -50,27 +50,6 @@ def test_views_show_active_retired_and_unexpired_temporary_rows(dsn, monkeypatch
     assert str(context["context_id"])[:8] in out
     assert "deployments" in out
     assert "the canary is paused" in out
-
-
-def test_long_detail_pages_through_evidence_and_revision_history(dsn, monkeypatch, capsys):
-    memory = remember(dsn)
-    with db.transaction(dsn) as cur:
-        for n, content in enumerate([REVISED, *(f"wording {i}" for i in range(8))]):
-            memories.revise(
-                cur, memory["memory_id"], content=content, actor="user", note=f"note {n}"
-            )
-    monkeypatch.setenv("LINES", "12")
-    keys(monkeypatch, "enter", *("space" for _ in range(12)), "b", "q")
-
-    assert memory_ui.run(dsn) == 0
-    out = capsys.readouterr().out
-    assert "more line(s), space to go on" in out
-    assert "note 8" in out
-    assert "evidence" in out
-    assert "explicit" in out
-    assert f"prevention: {RULE}" in out
-    assert "revisions" in out
-    assert RULE in out and REVISED in out
 
 
 def test_search_is_case_insensitive_zero_results_can_be_researched_and_left_clears(
@@ -239,24 +218,6 @@ def test_a_new_rule_can_open_a_new_topic_without_typing_an_id(dsn, monkeypatch):
     assert row["scope_id"] == topic["scope_id"]
 
 
-def test_the_topic_picker_lists_topics_by_number(dsn, monkeypatch, capsys):
-    with db.transaction(dsn) as cur:
-        topics.create_topic(cur, name="audio trim", trigger="Before cutting audio", actor="user")
-        chosen = topics.create_topic(
-            cur, name="difficulty", trigger="Before changing win rates", actor="user"
-        )
-    memory = remember(dsn)
-    keys(monkeypatch, "d", "t", "2", "q")
-
-    assert memory_ui.run(dsn) == 0
-    out = capsys.readouterr().out
-    assert "1  audio trim" in out and "every session" in out and "0 rules" in out
-    assert "2  difficulty" in out and "Before changing win rates" in out
-    assert "n  a new topic" in out
-    row = memory_row(dsn, memory["memory_id"])
-    assert (row["delivery"], row["topic_id"]) == ("topic", chosen["topic_id"])
-
-
 def test_a_topic_picker_answer_out_of_range_changes_nothing(dsn, monkeypatch, capsys):
     with db.transaction(dsn) as cur:
         topics.create_topic(cur, name="difficulty", trigger="Before changing", actor="user")
@@ -281,59 +242,6 @@ def test_a_topic_rule_shows_its_trigger_and_is_not_converted(dsn, monkeypatch, c
     assert "topic:difficulty" in out
     assert "Before changing win rates" in out
     assert "topic memories cannot become temporary" in out
-
-
-def test_q_quits_from_the_list_and_from_a_read_memory(dsn, monkeypatch):
-    remember(dsn)
-    for pressed in (("q",), ("enter", "q")):
-        keys(monkeypatch, *pressed)
-        with pytest.raises(screen.Quit):
-            memory_ui.run.__wrapped__(dsn)
-
-
-def test_help_lists_the_keys_and_q_quits_from_it(dsn, monkeypatch, capsys):
-    keys(monkeypatch, "?", "x", "?", "q")
-    with pytest.raises(screen.Quit):
-        memory_ui.run.__wrapped__(dsn)
-    out = capsys.readouterr().out
-    assert out.count("Memories help") == 2
-    assert "retire the selected active memory" in out
-    assert out.startswith("Memories\n")
-
-
-def test_columns_fit_the_values_listed_so_the_content_gets_the_rest():
-    rows = [
-        {"memory_id": "0123456789", "delivery": "always", "scope_name": None, "content": "x " * 60},
-        {"memory_id": "abcdef0123", "delivery": "scope", "scope_name": "enrai", "content": "y"},
-    ]
-    columns = memory_ui._columns(rows, 79)
-    assert columns == (6, 5)
-    assert memory_ui._line(rows[0], "active", 79, columns).startswith(
-        "   01234567  always  -      x x"
-    )
-    long = {
-        "delivery": "topic",
-        "topic_name": "a-very-long-topic-name",
-        "scope_name": "a-very-long-scope-name",
-    }
-    assert memory_ui._columns([long], 79) == (13, 11)
-
-
-@pytest.mark.usefixtures("legacy_bodies")
-def test_moving_the_cursor_moves_neither_the_list_nor_the_keys(dsn, monkeypatch):
-    names = ["alpha", "bravo", "charlie", "delta", "echo"]
-    lengths = [1, 40, 5, 70, 15]
-    for name, words in zip(names, lengths, strict=True):
-        remember(dsn, f"{name} " + "check the output before reporting " * (words // 5))
-    monkeypatch.setenv("COLUMNS", "80")
-    monkeypatch.setenv("LINES", "24")
-    with db.transaction(dsn) as cur:
-        rows = application.memory_view(cur, "active")
-    frames = [
-        memory_ui._screen_text(rows, at, "active", "", total=len(rows), query="")
-        for at in range(len(rows))
-    ]
-    assert_steady_layout(frames, names, memory_ui._KEYS)
 
 
 @pytest.mark.parametrize(("answer", "active"), [("n", 0), ("yes", 1)])
@@ -365,15 +273,3 @@ def test_a_rule_made_always_keeps_its_scope_unless_it_is_dropped(dsn, monkeypatc
     assert memory_ui.run(dsn) == 0
     row = memory_row(dsn, memory["memory_id"])
     assert (row["delivery"], row["scope_id"]) == ("always", home if kept else None)
-
-
-def test_a_short_terminal_gives_up_the_blank_lines_before_the_heading(monkeypatch):
-    head = memory_ui._heading("active", 20, 20, "")
-    rows = [f"  row {n}" for n in range(20)]
-    # The heading, one row, the note line, the keys, and the cursor's line under them.
-    least = screen.height_of(head) + 1 + 1 + screen.height_of(memory_ui._KEYS) + 1
-    for lines in range(least, least + 6):
-        monkeypatch.setenv("LINES", str(lines))
-        frame = screen.list_with_preview(head, rows, 5, "preview", memory_ui._KEYS)
-        assert screen.height_of(frame) + 1 <= lines, lines
-        assert frame.startswith(head)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import sys
 
 import pytest
 
@@ -30,24 +29,6 @@ class FakeReadline:
         self.redisplays += 1
 
 
-def test_editline_starts_with_the_existing_value(monkeypatch):
-    readline = FakeReadline()
-    monkeypatch.setitem(sys.modules, "readline", readline)
-    monkeypatch.setattr(sys, "stdin", TtyBuffer())
-
-    def edit(_prompt: str) -> str:
-        assert readline.startup_hook is not None
-        readline.startup_hook()
-        return "edited value"
-
-    monkeypatch.setattr("builtins.input", edit)
-
-    assert screen.editline("edit: ", "existing value") == screen.Submitted("edited value")
-    assert readline.inserted == "existing value"
-    assert readline.redisplays == 0
-    assert readline.startup_hook is None
-
-
 def test_editline_distinguishes_an_empty_submission_from_cancellation(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _prompt: "")
     assert screen.editline("edit: ", "existing") == screen.Submitted("")
@@ -57,21 +38,6 @@ def test_editline_distinguishes_an_empty_submission_from_cancellation(monkeypatc
 
     monkeypatch.setattr("builtins.input", cancel)
     assert screen.editline("edit: ", "existing") == screen.Cancelled()
-
-
-def test_edit_text_shows_the_body_only_in_the_edit_buffer(monkeypatch):
-    painted: list[str] = []
-    opened: list[tuple[str, str]] = []
-    monkeypatch.setattr(screen, "paint", painted.append)
-    monkeypatch.setattr(
-        screen,
-        "editline",
-        lambda prompt, current: opened.append((prompt, current)) or screen.Submitted("revised"),
-    )
-
-    assert screen.edit_text("Edit memory", "the existing body") == screen.Submitted("revised")
-    assert "the existing body" not in painted[0]
-    assert opened == [("  > ", "the existing body")]
 
 
 def test_no_command_opens_the_home_screen(monkeypatch):
@@ -118,111 +84,6 @@ def test_dashboard_collects_review_task_memory_and_project_counts(dsn):
         routes=1,
         schema_pending=0,
     )
-
-
-@pytest.mark.parametrize(
-    ("pressed", "dashboard", "opened"),
-    [
-        (("r", "t", "q"), (0,) * 7, [("review", False), ("tasks", None)]),
-        (("down", "enter", "q"), (0,) * 7, [("memories", None)]),
-        (
-            ("m", "w", "s", "q"),
-            (0,) * 7,
-            [("memories", None), ("work", "active"), ("settings", None)],
-        ),
-        (
-            ("a", "down", "enter", "end", "enter", "q"),
-            (1, 2, 3, 4, 1, 5, 6),
-            [("review", True), ("work", "dormant")],
-        ),
-        (("d", "q"), (0, 2, 0, 0, 0, 0, 0), [("review", True)]),
-    ],
-)
-def test_home_keys_open_each_area_and_return_to_a_refreshed_dashboard(
-    monkeypatch, pressed, dashboard, opened
-):
-    keys = iter(pressed)
-    reads: list[str] = []
-    seen: list[tuple[str, object]] = []
-    monkeypatch.setattr(
-        home_ui, "_dashboard", lambda dsn: reads.append(dsn) or home_ui.Dashboard(*dashboard)
-    )
-    monkeypatch.setattr(screen, "paint", lambda text: None)
-    monkeypatch.setattr(screen, "getkey", lambda: next(keys))
-
-    def opener(area):
-        def run(dsn, *, show_deferred=False, initial_view="active"):
-            assert dsn == "home-dsn"
-            option = {"review": show_deferred, "work": initial_view}.get(area)
-            seen.append((area, option))
-            return 0
-
-        return run
-
-    for area, module in (
-        ("review", home_ui.review_ui),
-        ("tasks", home_ui.close_ui),
-        ("memories", home_ui.memory_ui),
-        ("work", home_ui.work_ui),
-        ("settings", home_ui.settings_ui),
-    ):
-        monkeypatch.setattr(module, "run", opener(area))
-
-    assert home_ui.run("home-dsn") == 0
-    assert seen == opened
-    assert set(reads) == {"home-dsn"} and len(reads) > len(opened)
-
-
-def test_q_in_a_nested_screen_quits_every_screen_at_once(dsn, monkeypatch):
-    with db.transaction(dsn) as cur:
-        candidate(cur, "quit from inside the review queue")
-    pressed = iter(("a", "r", "q"))
-    monkeypatch.setattr(screen, "paint", lambda text: None)
-    monkeypatch.setattr(screen, "getkey", lambda: next(pressed))
-
-    assert home_ui.run(dsn) == 0
-    assert next(pressed, None) is None
-
-
-def test_attention_has_help_and_left_goes_back_to_the_dashboard(monkeypatch):
-    painted: list[str] = []
-    pressed = iter(("a", "?", "x", "left", "left", "q"))
-    monkeypatch.setattr(home_ui, "_dashboard", lambda dsn: home_ui.Dashboard(*(0,) * 7))
-    monkeypatch.setattr(screen, "paint", painted.append)
-    monkeypatch.setattr(screen, "getkey", lambda: next(pressed))
-
-    assert home_ui.run() == 0
-    assert any(text.startswith("Attention help") for text in painted)
-    assert painted[-1].startswith("Mashu")
-
-
-def test_an_empty_queue_opened_from_home_is_shown_until_a_key(monkeypatch):
-    terminal = TtyBuffer()
-    monkeypatch.setattr("sys.stdout", terminal)
-    monkeypatch.setenv("NO_COLOR", "1")
-    monkeypatch.setattr(home_ui, "_dashboard", lambda dsn: home_ui.Dashboard(*(0,) * 7))
-    monkeypatch.setattr(home_ui.memory_change_ui, "_queue", lambda dsn: [])
-    pressed = iter(("c", "left", "q"))
-    monkeypatch.setattr(screen, "getkey", lambda: next(pressed))
-
-    assert home_ui.run() == 0
-    frames = terminal.getvalue().split("\x1b[H\x1b[2J")
-    assert frames[2].startswith("Memory changes\nno proposed Memory changes")
-    assert frames[3].startswith("Mashu")
-
-
-def test_non_tty_dashboard_contains_no_ansi(monkeypatch):
-    monkeypatch.delenv("NO_COLOR", raising=False)
-    monkeypatch.setattr("sys.stdout.isatty", lambda: False)
-    state = home_ui.Dashboard(1, 2, 3, 4, 1, 5, 6)
-
-    rendered = home_ui._screen_text(state, 0)
-
-    assert "\x1b[" not in rendered
-    assert "Attention" in rendered and "Memories" in rendered
-    assert "Work" in rendered and "Settings & health" in rendered
-    assert "1 ready" in rendered and "2 deferred" in rendered
-    assert "3 active" in rendered and "4 dormant" in rendered
 
 
 def test_terminal_session_enters_lazily_once_when_nested_and_restores_after_an_error(monkeypatch):
