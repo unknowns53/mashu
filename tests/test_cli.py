@@ -435,6 +435,18 @@ def test_the_route_listing_keeps_the_tail_that_tells_two_routes_apart(run):
     assert len({cli._cells(row) for row in rows}) == 1, out
 
 
+def test_a_project_is_never_global_by_default_and_its_scope_can_be_edited(
+    run, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    code, _, err = run("project", "create", "the unrouted project")
+    assert code == 1 and "--scope -" in err
+    run("project", "create", "the global project", "--scope", "-")
+    run("scope", "--add", "the edited scope")
+    code, out, _ = run("project", "edit", "the global project", "--scope", "the edited scope")
+    assert code == 0 and "scope the edited scope" in out
+
+
 #: Unique text prevents cross-test trigram matches.
 REVIVED = "vacuum the audit table on the replica, and never while an export is running"
 DELIVERED = "hold a lock across the whole rename, or a reader sees half of it applied"
@@ -501,7 +513,7 @@ def created_task(out: str) -> str:
 
 
 def test_a_task_is_created_read_back_ended_and_reopened_through_the_command_line(run):
-    code, out, _ = run("project", "create", PARSER_PROJECT)
+    code, out, _ = run("project", "create", PARSER_PROJECT, "--scope", "-")
     assert code == 0 and out.startswith("created")
 
     code, out, _ = run(
@@ -548,7 +560,7 @@ def test_a_task_is_created_read_back_ended_and_reopened_through_the_command_line
 
 
 def test_a_task_that_reads_like_one_already_open_is_refused_with_the_candidates(run):
-    run("project", "create", DUPLICATE_PROJECT)
+    run("project", "create", DUPLICATE_PROJECT, "--scope", "-")
     _, out, _ = run("task", "create", DUPLICATE_TASK, "--project", DUPLICATE_PROJECT)
     first = created_task(out)
 
@@ -565,7 +577,7 @@ def test_a_task_that_reads_like_one_already_open_is_refused_with_the_candidates(
 
 
 def test_the_history_and_the_artifact_locators_are_visible_on_one_task(run, committing_dsn):
-    run("project", "create", HISTORY_PROJECT)
+    run("project", "create", HISTORY_PROJECT, "--scope", "-")
     _, out, _ = run("task", "create", HISTORY_TASK, "--project", HISTORY_PROJECT)
     short = created_task(out)
 
@@ -598,7 +610,7 @@ def test_the_history_and_the_artifact_locators_are_visible_on_one_task(run, comm
 
 
 def test_a_task_whose_lease_has_run_out_is_listed_only_when_it_is_asked_for(run, committing_dsn):
-    run("project", "create", DORMANT_PROJECT)
+    run("project", "create", DORMANT_PROJECT, "--scope", "-")
     _, out, _ = run("task", "create", DORMANT_TASK, "--project", DORMANT_PROJECT)
     short = created_task(out)
 

@@ -436,7 +436,7 @@ def _create_project(dsn: str | None) -> tuple[str, UUID | None]:
     name = _readline("  project name [empty cancels]: ")
     if not name:
         return screen.warning("  ! project creation cancelled"), None
-    scope_name = _readline("  scope [optional]: ")
+    scope_name = _readline("  scope [empty pushes its cards into every scope]: ")
     if scope_name is None:
         return screen.warning("  ! project creation cancelled"), None
     with db.transaction(dsn) as cur:

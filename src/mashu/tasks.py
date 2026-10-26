@@ -509,7 +509,7 @@ def task_create(
             hits,
         )
 
-    _check_budget(cur, task_id=None, name=name, state=state, scope_id=home["scope_id"])
+    _check_budget(cur, task_id=None, name=name, state=state, project=home)
 
     lease = config.task_lease_days()
     cur.execute(
@@ -670,14 +670,14 @@ def _check_budget(
     task_id: UUID | None,
     name: str,
     state: dict[str, Any],
-    scope_id: UUID | None,
+    project: dict[str, Any],
 ) -> None:
     """Refuse a write that would push its scope's task-card share over (5.3)."""
     cost = card_cost(name, state)
     seated = active_state_costs(cur)
     was = next((row["tokens"] for row in seated if row["task_id"] == task_id), None)
     others, boundary = _budget_competitors(
-        [row for row in seated if row["task_id"] != task_id], scope_id=scope_id
+        [row for row in seated if row["task_id"] != task_id], scope_id=project["scope_id"]
     )
     reported = [
         {"task_id": row["task_id"], "name": row["name"], "tokens": row["tokens"]} for row in others
@@ -693,11 +693,21 @@ def _check_budget(
         return
     if was is not None and cost < was:
         return
+    # A card pushed everywhere is weighed against another project's scope, so the
+    # fix the agent can't see from the breakdown is the project's missing scope.
+    unscoped = (
+        ""
+        if project["scope_id"] is not None
+        else f"Project '{project['name']}' has no scope, so its cards are pushed into every "
+        "scope and weighed against the busiest one. If its work belongs to one scope, ask "
+        f"the user to set it (`mashu project edit '{project['name']}' --scope <scope>`) "
+        "and write again; nothing else here changes that. "
+    )
     raise ProjectBudgetError(
         f"the task-card share for {boundary} seats {ceiling} tokens and this would "
         f"take it to {total} "
         f"({cost} for '{name}' on top of {total - cost} already pushed by "
-        f"{len(others)} active task(s)). A write that makes this task's own card "
+        f"{len(others)} active task(s)). {unscoped}A write that makes this task's own card "
         "smaller is allowed through even from here, so shrink this card; otherwise "
         "leave a task alone until its lease runs out, or ask the user to close one "
         "(`mashu task close <id>`).",
@@ -818,7 +828,7 @@ def task_update(
                 hits,
             )
 
-    _check_budget(cur, task_id=task_id, name=new_name, state=state, scope_id=home["scope_id"])
+    _check_budget(cur, task_id=task_id, name=new_name, state=state, project=home)
 
     cur.execute(
         "UPDATE task SET name = %s, project_id = %s WHERE task_id = %s",
@@ -879,7 +889,7 @@ def append_next_action(
     )
     verdict = _gate(_texts(state))
     home = projects.require_project(cur, task["project_id"])
-    _check_budget(cur, task_id=task_id, name=task["name"], state=state, scope_id=home["scope_id"])
+    _check_budget(cur, task_id=task_id, name=task["name"], state=state, project=home)
 
     cur.execute(
         "UPDATE task_state SET next_actions = %s, updated_at = clock_timestamp(), "

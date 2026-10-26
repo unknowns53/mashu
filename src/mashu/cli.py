@@ -1446,15 +1446,51 @@ def cmd_project_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _project_scope(cur: Any, given: str) -> UUID | None:
+    """A project's scope by name, with '-' for the cards pushed into every scope."""
+    return None if given == "-" else _scope(cur, given)
+
+
+def _scope_label(cur: Any, project_id: UUID) -> str:
+    return projects.show_project(cur, project_id)["scope_name"] or "- (every scope)"
+
+
 def cmd_project_create(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
-        row = projects.create_project(
+        if args.scope is not None:
+            scope_id = _project_scope(cur, args.scope)
+        else:
+            # An unscoped project spends a seat in every scope's card share, so it is
+            # never the default; the directory's route stands in for a missing --scope.
+            scope_id, _, _ = _routed_scope(cur)
+            if scope_id is None:
+                raise MashuError(
+                    "no --scope given and this directory is not routed to a scope. Pass "
+                    "--scope <name>, or --scope - to push this project's task cards into "
+                    "every scope."
+                )
+        row = projects.create_project(cur, name=args.name, actor=ACTOR, scope_id=scope_id)
+        label = _scope_label(cur, row["project_id"])
+    print(f"created  {_short(row['project_id'])}  {row['name']}  scope {label}")
+    return 0
+
+
+def cmd_project_edit(args: argparse.Namespace) -> int:
+    if args.name is None and args.scope is None:
+        raise MashuError("pass --name, --scope, or both to say what changes")
+    with db.transaction(args.dsn) as cur:
+        current = projects.require_project(cur, _project_ref(cur, args.ref))
+        row = projects.update_project(
             cur,
-            name=args.name,
+            current["project_id"],
+            name=current["name"] if args.name is None else args.name,
+            scope_id=(
+                current["scope_id"] if args.scope is None else _project_scope(cur, args.scope)
+            ),
             actor=ACTOR,
-            scope_id=_scope(cur, args.scope) if args.scope else None,
         )
-    print(f"created  {_short(row['project_id'])}  {row['name']}")
+        label = _scope_label(cur, row["project_id"])
+    print(f"edited  {_short(row['project_id'])}  {row['name']}  scope {label}")
     return 0
 
 
@@ -2248,12 +2284,14 @@ def build_parser() -> argparse.ArgumentParser:
         "project",
         "the projects work state is filed under",
         description=(
-            "List, create, or inspect projects. Projects group tasks; scopes control knowledge "
-            "delivery, so the two are related but not interchangeable."
+            "List, create, edit, or inspect projects. Projects group tasks; scopes control "
+            "knowledge delivery, so the two are related but not interchangeable. A project's "
+            "scope decides which sessions receive its task cards."
         ),
         examples=(
             "mashu project list",
             "mashu project create website --scope frontend",
+            "mashu project edit website --scope backend",
             "mashu project show website",
         ),
     )
@@ -2268,11 +2306,45 @@ def build_parser() -> argparse.ArgumentParser:
         project_sub,
         "create",
         "open a project (User only)",
-        examples=("mashu project create website --scope frontend",),
+        description=(
+            "Open a project. Its task cards are pushed only to sessions in its scope. Without "
+            "--scope, the scope this directory is routed to is used, and a directory with no "
+            "routed scope is refused; '--scope -' pushes the cards into every scope."
+        ),
+        examples=(
+            "mashu project create website --scope frontend",
+            "mashu project create website",
+            "mashu project create notes --scope -",
+        ),
     )
     project_create.add_argument("name", help="what its tasks are filed under")
-    project_create.add_argument("--scope", help="the scope this project's sessions run in")
+    project_create.add_argument(
+        "--scope",
+        help="the scope its task cards are pushed to; '-' means every scope; "
+        "defaults to this directory's routed scope",
+    )
     project_create.set_defaults(func=cmd_project_create)
+    project_edit = _command(
+        project_sub,
+        "edit",
+        "rename a project or change its scope (User only)",
+        description=(
+            "Rename a project or change the scope its task cards are pushed to, keeping its "
+            "tasks. A change that would push the busiest scope further over its card share "
+            "is refused."
+        ),
+        examples=(
+            "mashu project edit website --scope frontend",
+            "mashu project edit website --scope -",
+            "mashu project edit 1a2b3c4d --name storefront",
+        ),
+    )
+    project_edit.add_argument("ref", help=f"the project's name, or {_REF_HELP}")
+    project_edit.add_argument("--name", help="its new name")
+    project_edit.add_argument(
+        "--scope", help="the scope its task cards are pushed to; '-' means every scope"
+    )
+    project_edit.set_defaults(func=cmd_project_edit)
     project_show = _command(
         project_sub,
         "show",

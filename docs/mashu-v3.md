@@ -107,7 +107,7 @@ Task の所属単位。通常は repository または研究単位に対応する
 id / name / scope_id / created_at / archived_at
 ```
 
-Project と Scope は同じ概念ではない。Scope は delivery / routing の境界、Project は work state の所属である。初期実装では一つの Project が一つの主要 Scope を持つ形から始め、多対多への一般化は必要が実測されるまでしない。Scope を持つ Project の active Task card はその Scope だけに配信する。Scope を持たない Project の card は全 Scope 共通であり、unrouted session にはこの共通分だけを配信する。Current State 全文は Scope にかかわらず、Task IDを指定した `task_get` にだけ返す。
+Project と Scope は同じ概念ではない。Scope は delivery / routing の境界、Project は work state の所属である。初期実装では一つの Project が一つの主要 Scope を持つ形から始め、多対多への一般化は必要が実測されるまでしない。Scope を持つ Project の active Task card はその Scope だけに配信する。Scope を持たない Project の card は全 Scope 共通であり、unrouted session にはこの共通分だけを配信する。Scope を持たない Project は全 Scope の枠を一席ずつ使うので、作成の既定にはしない。`mashu project create` は `--scope` を省くと cwd の route が指す Scope を使い、route の無いディレクトリでは拒否する。全 Scope 共通にするには `--scope -` を明示する。Current State 全文は Scope にかかわらず、Task IDを指定した `task_get` にだけ返す。
 
 ### 5.2 Task
 
@@ -360,7 +360,7 @@ Memory 関連 Tool は `docs/mashu-v2.md` 8.1 節に記す。`session_bootstrap`
 ```text
 mashu                           人向け dashboard。Attention / Memories / Work / Settings を開く
 mashu gui                       Task を含む一覧の読み取り専用ブラウザ表示（v2 8.2 節）
-mashu project list / create / show <id>
+mashu project list / create / edit <id> / show <id>
 mashu task list [--dormant] [--closed]
 mashu task show <id>            state・履歴・artifacts を全文
 mashu task create / touch <id>

@@ -179,6 +179,8 @@ def test_unscoped_state_spends_a_seat_in_every_scope_and_is_weighed_against_the_
     with pytest.raises(ProjectBudgetError) as raised:
         new_task(cur, "global work", "global project")
     assert {row["name"] for row in raised.value.breakdown} == {"busy work", "global work"}
+    assert "Project 'global project' has no scope" in raised.value.reason
+    assert "mashu project edit 'global project' --scope" in raised.value.reason
 
     monkeypatch.delenv("MASHU_PROJECT_CAPACITY")
     global_task = new_task(cur, "global work", "global project")

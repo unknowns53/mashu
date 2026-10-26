@@ -298,7 +298,7 @@ Scope ごとの Memory に独立した上限は無い。2000 から always の�
 
 環境変数 MASHU_TOTAL_CAPACITY、MASHU_CAPACITY、MASHU_ALWAYS_CAPACITY、MASHU_PROJECT_CAPACITY、MASHU_TASK_CARD_CAPACITY、MASHU_TASK_DETAIL_CAPACITY、MASHU_TEMPORARY_CAPACITY、MASHU_TOPIC_CAPACITY で変更できる。
 
-Task card の枠は Scope ごとに独立している。Scope を持たない Project の card は全 Scope 共通分として各枠に含まれ、unrouted session にはこの共通分だけが届く。`mashu status` の card 使用量は、最も重い Scope の値である。Task detail は配信枠には含めず、1 Task ごとの上限だけを持つ。
+Task card の枠は Scope ごとに独立している。Scope を持たない Project の card は全 Scope 共通分として各枠に含まれ、unrouted session にはこの共通分だけが届く。共通分への書き込みが枠で拒否されたときは、拒否文が Project に Scope が無いことを示し、`mashu project edit <project> --scope <scope>` での付け直しを案内する。`mashu status` の card 使用量は、最も重い Scope の値である。Task detail は配信枠には含めず、1 Task ごとの上限だけを持つ。
 
 ## Scope と route
 
@@ -350,6 +350,7 @@ Project は Task をまとめる単位。Scope が知識の配信範囲を決め
 ~~~bash
 mashu project list
 mashu project create website --scope frontend
+mashu project edit website --scope backend
 mashu project show website
 
 mashu task list
@@ -363,6 +364,8 @@ mashu task close 1a2b3c4d --outcome completed --reason "Merged and released"
 mashu task close 1a2b3c4d 5e6f7a8b --outcome superseded
 mashu task reopen 1a2b3c4d
 ~~~
+
+`mashu project create` で `--scope` を省くと、cwd の route が指す Scope を使う。route の無いディレクトリでは拒否するので、全 Scope へ card を配る Project は `--scope -` で明示して作る。`mashu project edit` は Project の名前と Scope を、Task を保ったまま変える。`--scope -` で Scope を外す。
 
 `mashu task create` は `--project` を省略できる。cwd の route から一意に決まる Project、または開いている Project が一つだけならそれを使う。候補が複数なら選択を求める。Work TUI でも同じ候補解決を使い、一件だけならその Project を既定値として表示する。
 
