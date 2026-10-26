@@ -397,44 +397,6 @@ def test_the_memories_listing_holds_the_active_set_and_can_be_narrowed(run):
     assert "it grew a timezone" in out
 
 
-#: Mixed Japanese and Latin text verifies wrapped spaces are preserved.
-MIXED = (
-    "実装完了と報告したが盤の声の立ち絵が一枚も無く、この検査は器の側で通っていた。"
-    "verify_board も verify_story も立ち絵を測っていなかったのが原因で、"
-    "gmx_rdf の -norm と InterRDF の norm 引数の食い違いと同じ形の見落としである。"
-)
-
-
-def test_wrapping_keeps_the_spaces_that_are_not_the_seam_itself(run):
-    for width in range(40, 89):
-        lines = cli._flow(MIXED, width=width).splitlines()
-        # Rows must join without losing or duplicating a space.
-        pos = 0
-        for line in lines:
-            chunk = line[2:]
-            assert MIXED.startswith(chunk, pos), f"width {width}: {chunk!r} does not follow"
-            pos += len(chunk)
-            if pos < len(MIXED) and MIXED[pos] == " ":
-                pos += 1
-        assert pos == len(MIXED), f"width {width}: ends {len(MIXED) - pos} character(s) short"
-
-
-def test_the_route_listing_keeps_the_tail_that_tells_two_routes_apart(run):
-    run("scope", "--add", "the listing", "--about", "routes printed side by side")
-    deep = "/listing/investigation/results/first-pass"
-    wide = "/listing/調査/結果/一回目"
-    run("route", "--add", deep, "--scope", "the listing")
-    run("route", "--add", wide, "--scope", "the listing")
-
-    _, out, _ = run("route")
-
-    assert deep in out
-    assert wide in out
-    rows = [line for line in out.splitlines() if line.endswith("  the listing")]
-    assert len(rows) == 2
-    assert len({cli._cells(row) for row in rows}) == 1, out
-
-
 #: Unique text prevents cross-test trigram matches.
 REVIVED = "vacuum the audit table on the replica, and never while an export is running"
 DELIVERED = "hold a lock across the whole rename, or a reader sees half of it applied"

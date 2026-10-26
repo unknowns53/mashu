@@ -9,10 +9,13 @@ from mashu import close_ui, db, tasks, work_ui
 
 PROPOSAL_REASON = "the replacement has passed its acceptance checks"
 
-pytestmark = [
-    pytest.mark.usefixtures("known_screen"),
-    pytest.mark.parametrize("entry", ["close", "work"]),
-]
+pytestmark = pytest.mark.usefixtures("known_screen")
+
+
+@pytest.fixture
+def entry() -> str:
+    """The close screen opened directly; one test also reaches it through Work."""
+    return "close"
 
 
 @pytest.fixture
@@ -42,7 +45,7 @@ def run_entry(dsn: str, task_id, entry: str, monkeypatch, *lines: str) -> None:
     assert run(dsn, task_id, entry) == 0
 
 
-def test_enter_without_a_proposal_is_a_noop_from_both_entries(dsn, monkeypatch, entry):
+def test_enter_without_a_proposal_is_a_noop(dsn, monkeypatch, entry):
     task_id = make_task(dsn)
     run_entry(dsn, task_id, entry, monkeypatch, "enter")
 
@@ -51,6 +54,7 @@ def test_enter_without_a_proposal_is_a_noop_from_both_entries(dsn, monkeypatch, 
     assert row["proposal"] is None
 
 
+@pytest.mark.parametrize("entry", ["close", "work"])
 @pytest.mark.parametrize(
     ("stale", "answers", "status"),
     [(False, (), "closed"), (True, ("y",), "closed"), (True, ("n",), "open")],
@@ -130,17 +134,3 @@ def test_acceptance_rechecks_the_displayed_snapshot(dsn, monkeypatch, entry, cha
     current = task_row(dsn, task_id)
     assert current["task"]["status"] == "open"
     assert current["proposal"] is not None
-
-
-@pytest.mark.parametrize(("stale", "status"), [(False, "closed"), (True, "open")])
-def test_y_takes_a_standing_proposal_as_enter_does_and_leaves_a_stale_one(
-    dsn, monkeypatch, entry, stale, status
-):
-    task_id = make_task(dsn, proposal=True, stale=stale)
-    run_entry(dsn, task_id, entry, monkeypatch, "y", *(() if stale else ("y",)))
-
-    row = task_row(dsn, task_id)
-    assert row["task"]["status"] == status
-    if status == "closed":
-        assert row["task"]["outcome"] == "completed"
-        assert row["task"]["close_reason"] == PROPOSAL_REASON

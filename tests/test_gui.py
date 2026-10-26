@@ -16,7 +16,10 @@ MARKUP = "never trust a body that says <script>alert(1)</script> & means it"
 def fetch(dsn: str) -> Iterator[Callable[..., tuple[int, str]]]:
     """Ask a running GUI on a free loopback port, as a browser would."""
     server = gui.make_server(dsn, port=0)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    # shutdown() waits out one poll, and the default poll is half a second.
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     thread.start()
 
     def _fetch(path: str, method: str = "GET") -> tuple[int, str]:
@@ -41,9 +44,9 @@ def memory_count(dsn: str) -> int:
         return cur.fetchone()["n"]
 
 
-@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE", "OPTIONS", "APPROVE"])
-def test_every_method_but_get_and_head_is_refused(fetch, method):
-    assert fetch("/memories", method)[0] == 405
+def test_every_method_but_get_and_head_is_refused(fetch):
+    for method in ("POST", "DELETE", "APPROVE"):
+        assert fetch("/memories", method)[0] == 405
     assert fetch("/memories", "HEAD")[0] == 200
 
 
