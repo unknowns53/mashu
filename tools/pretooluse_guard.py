@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Add the rules of the topic linked to a tool call's action to the call as a warning, without stopping it."""
+"""Add the rules of the topic linked to a tool call's action to the call as a warning.
+
+The call is not stopped.
+"""
 
 from __future__ import annotations
 
@@ -119,7 +122,8 @@ def main() -> int:
 
     session = str(event.get("session_id") or "unknown")
     marker = MARKERS / f"{session}.{action}.{generation(event.get('transcript_path'))}"
-    # The rules are shown once per session and compaction; a stop on every first call cost more tempo than it saved.
+    # The rules are shown once per session and compaction; a stop on every first call
+    # cost more tempo than it saved.
     if marker.exists() or marker.with_name(marker.name + FOLLOWED).exists():
         return 0
 
@@ -146,7 +150,11 @@ def main() -> int:
     MARKERS.mkdir(parents=True, exist_ok=True)
     marker.write_text(json.dumps({"topic": topic}), encoding="utf-8")
 
-    lines = [f"Mashu topic '{topic}' applies to this {action}. The call goes ahead; check it against these rules.", ""]
+    lines = [
+        f"Mashu topic '{topic}' applies to this {action}. "
+        "The call goes ahead; check it against these rules.",
+        "",
+    ]
     for row in pinned:
         lines.append(row["content"])
         lines.append("")
