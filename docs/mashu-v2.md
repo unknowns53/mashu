@@ -63,6 +63,8 @@ append-only の記録。1 エントリが一度の痛みに対応する。
 | scope_id | 起きた Scope |
 | source | セッション参照 |
 | violated_memory_id | 報告者が「届いていたのに守られなかった」と名指した active Memory（任意） |
+| ignored_task_id | 報告者が「読んだ state にあったのに使わなかった」と名指した Task（任意） |
+| ignored_decision_id | その Task の中で事態を扱っていた decision（任意。ignored_task_id を伴う） |
 | created_at | 記録時刻 |
 
 `ledger` は知識ではない。配信されず、他のセッションに主張として届くことはない。役割は二つあり、初回の痛みを安く残すことと、二度目を検出する照合対象になることである。
@@ -77,6 +79,8 @@ append-only の記録。1 エントリが一度の痛みに対応する。
 3. **pending の昇格候補** に閾値以上で当たった場合は、新しい候補を作らず**今回の `ledger` の行を既存候補の evidence に追加する**（5.1 節）
 4. （撤回）類似の `friction` または trace が既にある場合に二度目を成立させ、双方を根拠とする昇格候補を自動生成していた。3 節末の測定のとおり一度も候補を生まなかったので、`friction` の報告とともに外した
 5. `incident` は単独で昇格候補を生成する
+
+報告者が `ignored_task_id` で Task を名指した場合は、照合 2 で配信失敗が見つからなければ 3 と 5 に進まず、候補を作らない。知識は Task の state にあり、セッションはそれを読んでいたので、欠けていたのは知識ではない。ここで「Task の state を読んでから動く」という規則を候補にしても、失敗したことを繰り返し求めるだけで、その review は User に回る。`ledger` の行は残り、`task_state_unused` を event_log に記録し、`mashu status` が直近 30 日の件数を出す。この件数は Memory の入口ではなく、Task の state の引き渡し方を疑う材料になる（`docs/mashu-v3.md` 17 節）。名指された Task が無いか、decision がその Task のものでなければ、何も書かずに拒否する
 
 閾値は運用開始後に実測で較正する。当初は保守的に置き、機械判定を確定に使わず、類似候補を提示して人または報告した Agent に「同じ穴か」を確認させる。
 
@@ -269,7 +273,7 @@ Memories TUI の `c` は、active な always / scope Memory と Temporary Contex
 | Tool | 役割 |
 |---|---|
 | `session_bootstrap` | 6.1 節の内容を返す。セッション開始時に一度 |
-| `pain_report` | incident を `ledger` へ記録し、類似の `ledger` の行・tombstone・active な記憶を返す。候補を生成する。`rule` の `prevention` は候補の本文になるので 120 字までとし、理由や経緯は `what` に書く。届いていた規則が守られなかったときは `violated_memory_id` でその active Memory を指す（4.1 節の照合 0） |
+| `pain_report` | incident を `ledger` へ記録し、類似の `ledger` の行・tombstone・active な記憶を返す。候補を生成する。`rule` の `prevention` は候補の本文になるので 120 字までとし、理由や経緯は `what` に書く。届いていた規則が守られなかったときは `violated_memory_id` でその active Memory を指す（4.1 節の照合 0）。読んだ Task の state にあったのに使わなかったときは `ignored_task_id`（と任意の `ignored_decision_id`）で指し、候補を作らない |
 | `memory_list` | 指定 Scope の active な記憶を列挙する。`always`（または `global`）は全セッションへ push される記憶を返す。`topic` を渡すと、その topic の発動条件・source（vault のノートなら `source_path` と `source_exists`）と規則の本文を返し、読んだことをセッション単位で event_log に残す |
 | `memory_get` | 指定した Memory の本文、revision、evidence、retire の情報を返す。retire された Memory の本文は明示取得でのみ読む |
 | `memory_nominate` | 新規 Memory の pending 候補を作るだけで採用しない。replace の後継候補に使う。本文は 120 字までで、理由は `why` に渡す |
@@ -297,7 +301,7 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 | `mashu revise <id>` | 本文の改訂（User のみ） |
 | `mashu show <id>` | 記憶・候補・`ledger` の行・Memory change proposal を 1 件、根拠と履歴つきで表示 |
 | `mashu memories` | 記憶の一覧。既定は active、`--retired` で retire された Memory とその理由 |
-| `mashu pain` | incident の手動記録（CLI から）。`--violated <id>` は守られなかった active Memory を指す |
+| `mashu pain` | incident の手動記録（CLI から）。`--violated <id>` は守られなかった active Memory を、`--ignored-task <id>` は使われなかった state の Task を指す |
 | `mashu ledger` | `ledger` の閲覧 |
 | `mashu guard <action>` | guard の照会。action に結びついた topic の規則を表示し、規則があれば終了コード 2 を返す。PreToolUse フックが読む。`--outcome same\|changed --topic <name>` は拒否の次の呼び出しの結末をフックが記録する |
 | `mashu deliver <id> <delivery>` | delivery の変更。topic へは `--topic <name>` で移す |

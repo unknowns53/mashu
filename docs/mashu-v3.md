@@ -382,7 +382,7 @@ Work の `c` は選択中の Task だけを同じ close decision screen で開�
 
 ## 14. スキーマ
 
-現在の Memory 11 表に Project State 7 表を加えて 18 表。Project State の migration は 0004 から始まる。`ledger` には 0005 で 2 列を足し（`prevention_kind`、`filed_task`。9 節）、0006 で両者を結ぶ CHECK を張る（`filed_task` が非 NULL なら `prevention_kind='work'`）。`ledger` の行そのものは append-only のままで、**提出先は行が書かれる前に決まり、後から書き込むことはできない**。矛盾した行を後から直す手段が無いことが、規約ではなく制約で持つ理由である。0012 は `ledger` に `violated_memory_id`（守られなかった active Memory、`docs/mashu-v2.md` 4.1 節）を、`topic` に `source`（原典の場所、同 6 節）を足す。0013 は `memory`、`memory_revision`、`nomination`、`temporary_context` の本文に、空白しか含まない値を拒む CHECK を張る。`trace` 表は Trace の撤回後も既存の行を保つために残す。
+現在の Memory 11 表に Project State 7 表を加えて 18 表。Project State の migration は 0004 から始まる。`ledger` には 0005 で 2 列を足し（`prevention_kind`、`filed_task`。9 節）、0006 で両者を結ぶ CHECK を張る（`filed_task` が非 NULL なら `prevention_kind='work'`）。`ledger` の行そのものは append-only のままで、**提出先は行が書かれる前に決まり、後から書き込むことはできない**。矛盾した行を後から直す手段が無いことが、規約ではなく制約で持つ理由である。0012 は `ledger` に `violated_memory_id`（守られなかった active Memory、`docs/mashu-v2.md` 4.1 節）を、`topic` に `source`（原典の場所、同 6 節）を足す。0013 は `memory`、`memory_revision`、`nomination`、`temporary_context` の本文に、空白しか含まない値を拒む CHECK を張る。0014 は `ledger` に `ignored_task_id` と `ignored_decision_id`（読まれたのに使われなかった Task の state、17 節）を足し、decision だけを指す行を CHECK で拒む。`trace` 表は Trace の撤回後も既存の行を保つために残す。
 
 ```text
 既存: scope route ledger trace memory memory_revision topic
@@ -447,7 +447,7 @@ MCP Tool 追加、server instructions への 9 節の規律の追記、CLI 追�
 
 ## 17. 観測指標と、この設計が誤りだったと知る方法
 
-event_log から最低限次を測れるようにする。active / dormant Task 数、自動 dormant 率、reactivate 頻度、Task card と full detail の token 使用量、`task_card_write_refused` の件数と超過量、Task あたり attempt 数、checkpoint の打たれた率、stale-state incident（古い state を信じて誤った作業が出た pain_report）。
+event_log から最低限次を測れるようにする。active / dormant Task 数、自動 dormant 率、reactivate 頻度、Task card と full detail の token 使用量、`task_card_write_refused` の件数と超過量、Task あたり attempt 数、checkpoint の打たれた率、stale-state incident（古い state を信じて誤った作業が出た pain_report）、state が読まれたのに使われなかった incident（新しい state を読んだのに、その decisions や attempts を使わずに誤った作業が出た pain_report。`ignored_task_id` を渡すと `task_state_unused` として数える）。
 
 | 観測 | 意味 |
 |---|---|
@@ -460,6 +460,7 @@ event_log から最低限次を測れるようにする。active / dormant Task 
 | Attempt が大量で役に立たない | 記録基準を見直す。自由文書化では解決しない |
 | Agent が state を記録しない | instructions / hooks を改善する。記録漏れは誤情報の自動生成より安全 |
 | stale-state incident が起きる | 日付つき提示と裏取り規律（3.1 節）が機能していない。配信形式を疑う |
+| state が読まれたのに使われなかった incident が起きる | state は届いて読まれたが、判断の瞬間に効いていない。decisions の書き方か、別の Task にある決定を辿れないことを疑う。Memory に「state を読め」という規則を足しても直らない |
 | Memory nomination が再び大量になる | Project State の情報を Memory へ安易に昇格させていないか疑う |
 | 再開の拾い直しが減らない | Project State そのものの誤りを疑う。1 節の動機が反証されたことになる |
 

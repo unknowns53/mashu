@@ -30,8 +30,10 @@ Memory 以外の記録は、Memory の代わりではない。便利なメモや
 実際に困った（誤った作業が出た）
     └─ pain_report
          ├─ 防ぐルールがまだ無い → pending candidate
-         └─ 届いていたルールが守られなかった（violated_memory_id）
-              └─ candidate を作らず、配信失敗の疑いとして記録
+         ├─ 届いていたルールが守られなかった（violated_memory_id）
+         │    └─ candidate を作らず、配信失敗の疑いとして記録
+         └─ 読んだ Task の state にあったのに使わなかった（ignored_task_id）
+              └─ candidate を作らず、Task の state が使われなかった記録として残す
 
 User が会話中に「覚えて」と言った
     └─ memory_admit（content を渡す）→ active Memory（1 回の呼び出しで完了）
@@ -182,6 +184,7 @@ pain は、忘れたことによって起きたことと、その再発を防ぐ
 - prevention-kind rule: 毎回覚えておく必要があるルール。既定値で、candidate の対象になる。prevention がそのまま candidate の本文になるので 120 字までとし、理由や経緯は --what に書く
 - prevention-kind work: 一度だけ行う変更。candidate にはせず、指定した Task の next_actions に入れる
 - --violated MEMORY: 届いていた active な Memory がその事態を扱っていたのに守られなかったときに、その Memory を指す。candidate は作らず、`ledger` の行に Memory を残して配信失敗の疑いとして記録する。retire された Memory は指せない
+- --ignored-task TASK: 読んだ Task の state（decisions や attempts）がその事態を扱っていたのに使わなかったときに、その Task を指す。知識は無かったのではなく有ったので、candidate は作らない。`ledger` の行に Task を残し、`task_state_unused` を event_log に記録する。決定が一つに絞れるときは --ignored-decision でその decision も指す。`mashu status` が直近 30 日の件数を出す
 
 ~~~bash
 mashu pain \
@@ -192,6 +195,11 @@ mashu pain \
   --what "Deployed twice" \
   --prevention "Check the release ledger" \
   --violated 5e6f7a8b
+
+mashu pain \
+  --what "Re-proposed a settled change" \
+  --prevention "Weigh the task decisions" \
+  --ignored-task 1a2b3c4d
 
 mashu pain \
   --what "Bad export" \
@@ -404,7 +412,7 @@ MCP tool は 18 個ある。
 | 分類 | Tool | 役割 |
 |---|---|---|
 | Knowledge | session_bootstrap | セッション開始時に一度呼び、Memory・active Task card・Temporary Context を受け取る |
-| Knowledge | pain_report | 事故（incident）を Ledger に記録する。`rule` の `prevention` は 120 字までで、理由や経緯は `what` に書く。届いていたルールが守られなかったときは `violated_memory_id` でその active Memory を指す |
+| Knowledge | pain_report | 事故（incident）を Ledger に記録する。`rule` の `prevention` は 120 字までで、理由や経緯は `what` に書く。届いていたルールが守られなかったときは `violated_memory_id` でその active Memory を、読んだ Task の state にあったのに使わなかったときは `ignored_task_id` でその Task を指す |
 | Knowledge | memory_list | 指定 Scope の active Memory を一覧する。`scope='always'`（または `global`）は全セッションへ push される Memory を返す。`topic` を渡すと、その topic の本文と原典（source、vault のノートなら `source_path` と `source_exists`）を読み、読んだことを記録する |
 | Knowledge | memory_get | 指定 Memory の本文、revision、evidence、retire の種別、理由、後継を読む |
 | Knowledge | memory_nominate | 新規 Memory の pending candidate を作る。replace の後継に使う。`content` は 120 字までで、理由は `why` に渡す |
@@ -425,7 +433,7 @@ MCP tool は 18 個ある。
 Agent が守る基本の動詞は次のとおり。
 
 ~~~text
-実際に困った            → pain_report（守られなかったルールがあれば violated_memory_id）
+実際に困った            → pain_report（守られなかったルールがあれば violated_memory_id、使わなかった Task の state があれば ignored_task_id）
 User が「覚えて」と言った → memory_admit（content）
 User が既存 Memory の retire、置換、復帰を指示 → memory_change_instructed
 User が配信先の変更を指示 → memory_redeliver

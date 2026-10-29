@@ -34,13 +34,17 @@ def report_pain(
     task_id: UUID | None = None,
     session: UUID | None = None,
     violated_memory_id: UUID | None = None,
+    ignored_task_id: UUID | None = None,
+    ignored_decision_id: UUID | None = None,
 ) -> dict[str, Any]:
     """Record one pain, show what it resembles, and nominate when it is proven.
 
     `session` names the MCP server process reporting it, so a pain against a topic rule
     can say whether that session had read the topic. `violated_memory_id` names an active
     rule the reporter says was delivered and not followed, which similarity cannot find
-    when the pain is worded differently from the rule.
+    when the pain is worded differently from the rule. `ignored_task_id` names a task whose
+    state covered the pain and was read but not used, optionally with `ignored_decision_id`;
+    knowledge that was there is not missing knowledge, so no candidate is created.
     """
     if kind == "friction":
         raise MashuError(
@@ -65,6 +69,8 @@ def report_pain(
         memories.check_body(prevention, field="prevention", rest="what")
     verdict = redact.gate({"what": what, "prevention": prevention})
     violated = _violated(cur, violated_memory_id) if violated_memory_id is not None else None
+    if ignored_decision_id is not None or ignored_task_id is not None:
+        _ignored(cur, ignored_task_id, ignored_decision_id)
 
     # Before the insert and before any matching.
     cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (LOCK_NAMESPACE, LOCK_PAIN))
@@ -79,8 +85,9 @@ def report_pain(
     cur.execute(
         """
         INSERT INTO ledger (kind, what, prevention, scope_id, source, created_by,
-                            prevention_kind, filed_task, violated_memory_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            prevention_kind, filed_task, violated_memory_id,
+                            ignored_task_id, ignored_decision_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING *
         """,
         (
@@ -93,6 +100,8 @@ def report_pain(
             prevention_kind,
             filed_task,
             violated_memory_id,
+            ignored_task_id,
+            ignored_decision_id,
         ),
     )
     entry = cur.fetchone()
@@ -122,6 +131,8 @@ def report_pain(
         "prevention_kind": prevention_kind,
         "filed_task": filed_task,
         "violated_memory_id": violated_memory_id,
+        "ignored_task_id": ignored_task_id,
+        "ignored_decision_id": ignored_decision_id,
     }
     if verdict.malformed:
         result["malformed"] = verdict.malformed
@@ -131,6 +142,17 @@ def report_pain(
         result["delivery_suspect"] = True
         _suspect_delivery(
             cur, violated, ledger_id=ledger_id, actor=actor, session=session, found_by="reported"
+        )
+    if ignored_task_id is not None:
+        events.record(
+            cur,
+            "task_state_unused",
+            actor,
+            ledger_id=ledger_id,
+            detail={
+                "task_id": str(ignored_task_id),
+                "decision_id": str(ignored_decision_id) if ignored_decision_id else None,
+            },
         )
 
     # Work leaves before the branches below, all of which decide something about a nomination.
@@ -180,6 +202,13 @@ def report_pain(
                 "names the work in words recognisable when it begins."
             )
         return result
+    if ignored_task_id is not None:
+        result["note"] = (
+            "No nomination was created: the task's state already held this and was read, so "
+            "a rule telling sessions to read it would repeat what failed. The ledger row "
+            "counts against how task state is handed over."
+        )
+        return result
 
     # A candidate already waiting for this rule is not a second candidate.
     waiting = match.similar_pending_nominations(cur, prevention, limit=1)
@@ -223,6 +252,23 @@ def _violated(cur: psycopg.Cursor, memory_id: UUID) -> dict[str, Any]:
             "been the rule not followed; leave violated_memory_id out"
         )
     return row
+
+
+def _ignored(cur: psycopg.Cursor, task_id: UUID | None, decision_id: UUID | None) -> None:
+    """Refuse a named task or decision that does not exist, or a decision of another task."""
+    if task_id is None:
+        raise MashuError("ignored_decision_id names a decision of ignored_task_id; pass both")
+    cur.execute("SELECT 1 FROM task WHERE task_id = %s", (task_id,))
+    if cur.fetchone() is None:
+        raise MashuError(f"no task {task_id}")
+    if decision_id is None:
+        return
+    cur.execute("SELECT task_id FROM decision WHERE decision_id = %s", (decision_id,))
+    row = cur.fetchone()
+    if row is None:
+        raise MashuError(f"no decision {decision_id}")
+    if row["task_id"] != task_id:
+        raise MashuError(f"decision {decision_id} belongs to task {row['task_id']}, not {task_id}")
 
 
 def _suspect_delivery(

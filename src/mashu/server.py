@@ -50,6 +50,9 @@ DEFAULT_ACTOR = "agent"
 INSTRUCTIONS_BYTE_LIMIT = 2048
 INSTRUCTIONS = (
     "Mashu pushes active Memory; call session_bootstrap first in every session. "
+    "Memory is pushed to every session, so it holds only rules whose absence caused wrong "
+    "work. A task's findings and settled decisions go in its decisions, read by task_get "
+    "and never pushed; notes and long material stay in repository docs. "
     "When the work at hand matches a bootstrap topic's trigger, call memory_list with that "
     "topic before starting it. "
     "Before continuing a task from a bootstrap card, call task_get with its full id and "
@@ -63,9 +66,9 @@ INSTRUCTIONS = (
     "Writes naming people or home paths are refused, so call the user 'the user' and write "
     "paths from ~ or the repository. "
     "Use pain_report only when missing or stale knowledge caused an incident; pass "
-    "violated_memory_id when a rule delivered to this session covered it and was not "
-    "followed. Use prevention_kind='work' and task_id for one-time fixes. Temporary Context "
-    "handles expiry. "
+    "violated_memory_id when a delivered rule covered it, or ignored_task_id when task state "
+    "you read covered it. Use prevention_kind='work' and task_id for one-time fixes. "
+    "Temporary Context handles expiry. "
     "Durable Memory changes need an explicit user instruction. For a request to remember, "
     "call memory_admit with the content. For an existing Memory, a retire, replace, or "
     "restore the user asked for takes one memory_change_instructed call and a delivery move "
@@ -372,7 +375,10 @@ def build_server() -> Any:
             "put the reason, measurements, dates, and history in `what`. Pass the rule's "
             "memory_id as `violated_memory_id` when a rule delivered to this session covered "
             "what went wrong and was not followed; it must be active, and no candidate is "
-            "created for a rule already in force."
+            "created for a rule already in force. Pass `ignored_task_id`, and the decision's id "
+            "as `ignored_decision_id` when one decision held it, when that task's state covered "
+            "it and was read but not used; that knowledge was not missing, so no candidate is "
+            "created and the row counts against how task state is handed over."
         )
     )
     def pain_report(
@@ -383,6 +389,8 @@ def build_server() -> Any:
         prevention_kind: str = "rule",
         task_id: UUID | None = None,
         violated_memory_id: UUID | None = None,
+        ignored_task_id: UUID | None = None,
+        ignored_decision_id: UUID | None = None,
     ) -> dict[str, Any]:
         try:
             with db.transaction() as cur:
@@ -400,6 +408,8 @@ def build_server() -> Any:
                     task_id=task_id,
                     session=session,
                     violated_memory_id=violated_memory_id,
+                    ignored_task_id=ignored_task_id,
+                    ignored_decision_id=ignored_decision_id,
                 )
                 return _plain({"ok": True, **answer})
         except MashuError as error:
