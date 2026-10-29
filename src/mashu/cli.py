@@ -277,6 +277,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         for route in application.DELIVERY_FAILURE_ROUTES
     )
     print(f"delivery  suspected_failures_30d={status.delivery_failures_30d}  {routes}")
+    print(f"unused  knowledge_30d={status.knowledge_unused_30d}")
     for row in guards:
         followed = row["followed"]
         share = f"{round(100 * row['changed'] / followed)}%" if followed else "-"
@@ -416,7 +417,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         f"cards={answer.get('card_tokens', answer.get('project_tokens', 0))}  "
         f"temporary={answer.get('temporary_tokens', 0)}"
     )
-    print(f"pending   {answer.get('pending', 0)}")
+    print(f"pending   {answer.get('pending', 0)}  (the user's review queue)")
     return 0
 
 
@@ -622,6 +623,19 @@ def cmd_pain(args: argparse.Namespace) -> int:
             prevention_kind=args.prevention_kind,
             task_id=_task_ref(cur, args.task) if args.task else None,
             violated_memory_id=_memory_ref(cur, args.violated) if args.violated else None,
+            ignored_task_id=_task_ref(cur, args.ignored_task) if args.ignored_task else None,
+            ignored_source=args.ignored_source,
+            ignored_decision_id=(
+                _resolve(
+                    cur,
+                    args.ignored_decision,
+                    table="decision",
+                    id_col="decision_id",
+                    label="decision",
+                )
+                if args.ignored_decision
+                else None
+            ),
         )
     _gate_warnings(row)
     matches = row.get("matches", {})
@@ -630,6 +644,9 @@ def cmd_pain(args: argparse.Namespace) -> int:
         print(f"{name}: {len(matches.get(name, []))}")
     if row.get("violated_memory_id"):
         print(f"violated  {_short(row['violated_memory_id'])}: suspected delivery failure recorded")
+    if row.get("ignored_task_id") or row.get("ignored_source"):
+        where = row.get("ignored_source") or f"task {_short(row['ignored_task_id'])}"
+        print(f"ignored  {where}: unused knowledge recorded instead of a candidate")
     if row.get("prevention_kind") == "work":
         filed = row.get("filed_task")
         print(
@@ -2001,12 +2018,16 @@ def build_parser() -> argparse.ArgumentParser:
             "that would prevent it. A rule becomes a review candidate; work is filed into a "
             "task's next actions when --task is supplied. --violated names an active memory "
             "that covered it and was not followed, which records a suspected delivery failure "
-            "instead of a candidate."
+            "instead of a candidate. --ignored-task names a task whose state held it, and "
+            "--ignored-source an instruction file or skill that held it; either records the "
+            "unused knowledge instead of a candidate."
         ),
         examples=(
             'mashu pain --what "Deployed twice" --prevention "Check the release ledger"',
             'mashu pain --what "Deployed twice" --prevention "Check the release ledger" '
             "--violated 5e6f7a8b",
+            'mashu pain --what "Re-proposed a settled change" '
+            '--prevention "Weigh the task decisions" --ignored-task 1a2b3c4d',
             'mashu pain --what "Bad export" '
             '--prevention "Validate the manifest" --prevention-kind work --task 1a2b3c4d',
         ),
@@ -2021,6 +2042,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--violated",
         metavar="MEMORY",
         help="an active memory that covered this and was not followed",
+    )
+    pain.add_argument(
+        "--ignored-task",
+        metavar="TASK",
+        help="a task whose state held this, read or not",
+    )
+    pain.add_argument(
+        "--ignored-source",
+        metavar="FILE",
+        help="an instruction file or skill that held this, such as ~/.claude/CLAUDE.md",
+    )
+    pain.add_argument(
+        "--ignored-decision",
+        metavar="DECISION",
+        help="the decision of --ignored-task that held it",
     )
     pain.add_argument("--what", required=True, help="what went wrong")
     pain.add_argument(

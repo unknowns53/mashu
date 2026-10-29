@@ -117,7 +117,10 @@ def require_project(cur: psycopg.Cursor, project: UUID | str) -> dict[str, Any]:
     cur.execute("SELECT name FROM project WHERE archived_at IS NULL ORDER BY name")
     known = [r["name"] for r in cur.fetchall()]
     listed = ", ".join(known) if known else "none yet"
-    raise UnknownProjectError(f"no project '{project}' (open projects: {listed})")
+    raise UnknownProjectError(
+        f"no project '{project}' (open projects: {listed}); projects are the user's, so if "
+        "none fits, ask the user to run 'mashu project create'"
+    )
 
 
 #: What every listing counts.

@@ -11,10 +11,11 @@ from psycopg.types.json import Jsonb
 from mashu import approvals, capacity, config, events, match, redact, topics
 from mashu.errors import MashuError, RefusedError
 
-KINDS = ("incident", "rederivation", "user_explicit")
+KINDS = ("incident", "rederivation", "user_explicit", "proposed")
 
 #: What the ledger records when an agent carries an instruction in (5.1).
 CLAIMED_WHAT = "a user instruction carried by an agent; admission records its approval source"
+PROPOSED_WHAT = "a successor an agent drafted for its own replace proposal, not a user instruction"
 
 #: What an agent is told when the instruction it carries repeats something already withdrawn.
 _TOMBSTONE_NOTE = (
@@ -185,7 +186,54 @@ def nominate_user_explicit(
     with the evidence instead of riding in the pushed body. Without `join_pending` a similar
     pending candidate is left alone, for a caller that admits this exact content at once.
     """
+    return _nominate(
+        cur,
+        content=content,
+        actor=actor,
+        scope_id=scope_id,
+        why=why,
+        join_pending=join_pending,
+        stated=("claimed", "user_explicit", CLAIMED_WHAT),
+    )
+
+
+def nominate_proposed(
+    cur: psycopg.Cursor,
+    *,
+    content: str,
+    actor: str,
+    scope_id: UUID | None = None,
+    why: str | None = None,
+) -> dict[str, Any]:
+    """Hold the successor an agent drafts for its own replace proposal.
+
+    It never joins another candidate, because the proposal fixes this exact body for review.
+    """
+    return _nominate(
+        cur,
+        content=content,
+        actor=actor,
+        scope_id=scope_id,
+        why=why,
+        join_pending=False,
+        stated=("proposed", "proposed", PROPOSED_WHAT),
+    )
+
+
+def _nominate(
+    cur: psycopg.Cursor,
+    *,
+    content: str,
+    actor: str,
+    scope_id: UUID | None,
+    why: str | None,
+    join_pending: bool,
+    stated: tuple[str, str, str],
+) -> dict[str, Any]:
+    """Write the ledger row and the candidate for a body someone stated, ledger kind first."""
     from mashu import memories
+
+    ledger_kind, nomination_kind, default_what = stated
 
     why = (why or "").strip() or None
     memories.check_body(content, why=why)
@@ -201,13 +249,13 @@ def nominate_user_explicit(
     cur.execute(
         """
         INSERT INTO ledger (kind, what, prevention, scope_id, created_by)
-        VALUES ('claimed', %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s)
         RETURNING ledger_id
         """,
-        (why or CLAIMED_WHAT, content, scope_id, actor),
+        (ledger_kind, why or default_what, content, scope_id, actor),
     )
     ledger_id = cur.fetchone()["ledger_id"]
-    events.record(cur, "pain_recorded", actor, ledger_id=ledger_id, detail={"kind": "claimed"})
+    events.record(cur, "pain_recorded", actor, ledger_id=ledger_id, detail={"kind": ledger_kind})
 
     result: dict[str, Any] = {
         "ledger_id": ledger_id,
@@ -244,7 +292,7 @@ def nominate_user_explicit(
     result["nomination"] = create_nomination(
         cur,
         content=content,
-        kind="user_explicit",
+        kind=nomination_kind,
         evidence=[ledger_id],
         actor=actor,
         scope_id=scope_id,

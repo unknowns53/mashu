@@ -7,7 +7,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import config, events, match, memories, nominations, redact, tasks, topics
+from mashu import approvals, config, events, match, memories, nominations, redact, tasks, topics
 from mashu.capacity import LOCK_NAMESPACE, LOCK_PAIN
 from mashu.errors import MashuError
 
@@ -19,6 +19,9 @@ PREVENTION_KINDS = ("rule", "work")
 
 #: The kinds a person's own statement takes.
 STATED_KINDS = ("explicit", "claimed")
+
+#: How long the name of an instruction file or skill that held the knowledge may be.
+IGNORED_SOURCE_LIMIT = 200
 
 
 def report_pain(
@@ -34,13 +37,19 @@ def report_pain(
     task_id: UUID | None = None,
     session: UUID | None = None,
     violated_memory_id: UUID | None = None,
+    ignored_task_id: UUID | None = None,
+    ignored_decision_id: UUID | None = None,
+    ignored_source: str | None = None,
 ) -> dict[str, Any]:
     """Record one pain, show what it resembles, and nominate when it is proven.
 
     `session` names the MCP server process reporting it, so a pain against a topic rule
     can say whether that session had read the topic. `violated_memory_id` names an active
     rule the reporter says was delivered and not followed, which similarity cannot find
-    when the pain is worded differently from the rule.
+    when the pain is worded differently from the rule. `ignored_task_id` names a task whose
+    state held what would have prevented the pain, read or not, optionally with
+    `ignored_decision_id`, and `ignored_source` names an instruction file or skill that held
+    it. Knowledge that was there is not missing knowledge, so no candidate is created.
     """
     if kind == "friction":
         raise MashuError(
@@ -51,7 +60,7 @@ def report_pain(
         raise MashuError(
             f"kind must be {' or '.join(REPORTABLE_KINDS)}; 'explicit' and 'claimed' are "
             "reserved for a person's own statement, written by mashu remember and by "
-            "memory_nominate or memory_admit respectively"
+            "memory_admit respectively, and 'proposed' for memory_nominate"
         )
     if prevention_kind not in PREVENTION_KINDS:
         raise MashuError(f"prevention_kind must be one of {', '.join(PREVENTION_KINDS)}")
@@ -60,11 +69,22 @@ def report_pain(
             "a task is where work is filed; a prevention that is a rule is filed by review, "
             "so pass prevention_kind='work' or leave the task out"
         )
-    if prevention_kind == "rule":
+    if ignored_source is not None:
+        ignored_source = approvals.home_relative(ignored_source.strip())
+        if not 1 <= len(ignored_source) <= IGNORED_SOURCE_LIMIT:
+            raise MashuError(
+                f"ignored_source names the file or skill in 1 to {IGNORED_SOURCE_LIMIT} chars"
+            )
+    ignored = ignored_task_id is not None or ignored_source is not None
+    if prevention_kind == "rule" and violated_memory_id is None and not ignored:
         # A rule's prevention becomes a candidate's body, and the pain's own account is `what`.
         memories.check_body(prevention, field="prevention", rest="what")
-    verdict = redact.gate({"what": what, "prevention": prevention})
+    verdict = redact.gate(
+        {"what": what, "prevention": prevention, "ignored_source": ignored_source}
+    )
     violated = _violated(cur, violated_memory_id) if violated_memory_id is not None else None
+    if ignored_decision_id is not None or ignored_task_id is not None:
+        _ignored(cur, ignored_task_id, ignored_decision_id)
 
     # Before the insert and before any matching.
     cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (LOCK_NAMESPACE, LOCK_PAIN))
@@ -79,8 +99,9 @@ def report_pain(
     cur.execute(
         """
         INSERT INTO ledger (kind, what, prevention, scope_id, source, created_by,
-                            prevention_kind, filed_task, violated_memory_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            prevention_kind, filed_task, violated_memory_id,
+                            ignored_task_id, ignored_decision_id, ignored_source)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING *
         """,
         (
@@ -93,6 +114,9 @@ def report_pain(
             prevention_kind,
             filed_task,
             violated_memory_id,
+            ignored_task_id,
+            ignored_decision_id,
+            ignored_source,
         ),
     )
     entry = cur.fetchone()
@@ -122,6 +146,9 @@ def report_pain(
         "prevention_kind": prevention_kind,
         "filed_task": filed_task,
         "violated_memory_id": violated_memory_id,
+        "ignored_task_id": ignored_task_id,
+        "ignored_decision_id": ignored_decision_id,
+        "ignored_source": ignored_source,
     }
     if verdict.malformed:
         result["malformed"] = verdict.malformed
@@ -131,6 +158,18 @@ def report_pain(
         result["delivery_suspect"] = True
         _suspect_delivery(
             cur, violated, ledger_id=ledger_id, actor=actor, session=session, found_by="reported"
+        )
+    if ignored:
+        events.record(
+            cur,
+            "knowledge_unused",
+            actor,
+            ledger_id=ledger_id,
+            detail={
+                "task_id": str(ignored_task_id) if ignored_task_id else None,
+                "decision_id": str(ignored_decision_id) if ignored_decision_id else None,
+                "source": ignored_source,
+            },
         )
 
     # Work leaves before the branches below, all of which decide something about a nomination.
@@ -180,6 +219,22 @@ def report_pain(
                 "names the work in words recognisable when it begins."
             )
         return result
+    if ignored:
+        where = " and ".join(
+            part
+            for part in (
+                "the task's state" if ignored_task_id else None,
+                ignored_source,
+            )
+            if part
+        )
+        result["note"] = (
+            f"No nomination was created: {where} already held this, so a rule telling "
+            "sessions to read it would repeat what failed. The ledger row counts against how "
+            "that place hands knowledge over; if its wording or reach is what failed, change "
+            "it there as work (prevention_kind='work' with a task)."
+        )
+        return result
 
     # A candidate already waiting for this rule is not a second candidate.
     waiting = match.similar_pending_nominations(cur, prevention, limit=1)
@@ -223,6 +278,23 @@ def _violated(cur: psycopg.Cursor, memory_id: UUID) -> dict[str, Any]:
             "been the rule not followed; leave violated_memory_id out"
         )
     return row
+
+
+def _ignored(cur: psycopg.Cursor, task_id: UUID | None, decision_id: UUID | None) -> None:
+    """Refuse a named task or decision that does not exist, or a decision of another task."""
+    if task_id is None:
+        raise MashuError("ignored_decision_id names a decision of ignored_task_id; pass both")
+    cur.execute("SELECT 1 FROM task WHERE task_id = %s", (task_id,))
+    if cur.fetchone() is None:
+        raise MashuError(f"no task {task_id}")
+    if decision_id is None:
+        return
+    cur.execute("SELECT task_id FROM decision WHERE decision_id = %s", (decision_id,))
+    row = cur.fetchone()
+    if row is None:
+        raise MashuError(f"no decision {decision_id}")
+    if row["task_id"] != task_id:
+        raise MashuError(f"decision {decision_id} belongs to task {row['task_id']}, not {task_id}")
 
 
 def _suspect_delivery(
@@ -273,8 +345,9 @@ def _file_work(
             appended = tasks.append_next_action(cur, task_id, prevention, actor=actor)
     except MashuError as error:
         return None, unseated + (
-            f"Filing it on the task failed: {error}. The ledger row stands; the fix still "
-            "needs a home."
+            f"Filing it on the task failed: {error}. The ledger row stands, and the fix "
+            "still needs a home. Fold it into the task's next actions yourself with task_get "
+            "and task_checkpoint."
         )
     return task_id, unseated + (
         "It is on the task's next actions."

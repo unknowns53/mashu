@@ -801,7 +801,9 @@ def task_update(
         raise StaleStateError(
             "this state was replaced by "
             f"{current['state']['updated_by']} at {current['state']['updated_at']:%Y-%m-%d %H:%M}; "
-            "the version that won is attached — redo the change against it",
+            "the card of the version that won is attached, but it carries no list contents, "
+            "so call task_get for the full state, merge your change into it, and resend with "
+            "its updated_at",
             current,
         )
 
