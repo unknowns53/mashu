@@ -7,7 +7,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import config, events, match, memories, nominations, redact, tasks, topics
+from mashu import approvals, config, events, match, memories, nominations, redact, tasks, topics
 from mashu.capacity import LOCK_NAMESPACE, LOCK_PAIN
 from mashu.errors import MashuError
 
@@ -19,6 +19,9 @@ PREVENTION_KINDS = ("rule", "work")
 
 #: The kinds a person's own statement takes.
 STATED_KINDS = ("explicit", "claimed")
+
+#: How long the name of an instruction file or skill that held the knowledge may be.
+IGNORED_SOURCE_LIMIT = 200
 
 
 def report_pain(
@@ -36,6 +39,7 @@ def report_pain(
     violated_memory_id: UUID | None = None,
     ignored_task_id: UUID | None = None,
     ignored_decision_id: UUID | None = None,
+    ignored_source: str | None = None,
 ) -> dict[str, Any]:
     """Record one pain, show what it resembles, and nominate when it is proven.
 
@@ -43,8 +47,9 @@ def report_pain(
     can say whether that session had read the topic. `violated_memory_id` names an active
     rule the reporter says was delivered and not followed, which similarity cannot find
     when the pain is worded differently from the rule. `ignored_task_id` names a task whose
-    state covered the pain and was read but not used, optionally with `ignored_decision_id`;
-    knowledge that was there is not missing knowledge, so no candidate is created.
+    state held what would have prevented the pain, read or not, optionally with
+    `ignored_decision_id`, and `ignored_source` names an instruction file or skill that held
+    it. Knowledge that was there is not missing knowledge, so no candidate is created.
     """
     if kind == "friction":
         raise MashuError(
@@ -55,7 +60,7 @@ def report_pain(
         raise MashuError(
             f"kind must be {' or '.join(REPORTABLE_KINDS)}; 'explicit' and 'claimed' are "
             "reserved for a person's own statement, written by mashu remember and by "
-            "memory_nominate or memory_admit respectively"
+            "memory_admit respectively, and 'proposed' for memory_nominate"
         )
     if prevention_kind not in PREVENTION_KINDS:
         raise MashuError(f"prevention_kind must be one of {', '.join(PREVENTION_KINDS)}")
@@ -64,10 +69,19 @@ def report_pain(
             "a task is where work is filed; a prevention that is a rule is filed by review, "
             "so pass prevention_kind='work' or leave the task out"
         )
-    if prevention_kind == "rule":
+    if ignored_source is not None:
+        ignored_source = approvals.home_relative(ignored_source.strip())
+        if not 1 <= len(ignored_source) <= IGNORED_SOURCE_LIMIT:
+            raise MashuError(
+                f"ignored_source names the file or skill in 1 to {IGNORED_SOURCE_LIMIT} chars"
+            )
+    ignored = ignored_task_id is not None or ignored_source is not None
+    if prevention_kind == "rule" and violated_memory_id is None and not ignored:
         # A rule's prevention becomes a candidate's body, and the pain's own account is `what`.
         memories.check_body(prevention, field="prevention", rest="what")
-    verdict = redact.gate({"what": what, "prevention": prevention})
+    verdict = redact.gate(
+        {"what": what, "prevention": prevention, "ignored_source": ignored_source}
+    )
     violated = _violated(cur, violated_memory_id) if violated_memory_id is not None else None
     if ignored_decision_id is not None or ignored_task_id is not None:
         _ignored(cur, ignored_task_id, ignored_decision_id)
@@ -86,8 +100,8 @@ def report_pain(
         """
         INSERT INTO ledger (kind, what, prevention, scope_id, source, created_by,
                             prevention_kind, filed_task, violated_memory_id,
-                            ignored_task_id, ignored_decision_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ignored_task_id, ignored_decision_id, ignored_source)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING *
         """,
         (
@@ -102,6 +116,7 @@ def report_pain(
             violated_memory_id,
             ignored_task_id,
             ignored_decision_id,
+            ignored_source,
         ),
     )
     entry = cur.fetchone()
@@ -133,6 +148,7 @@ def report_pain(
         "violated_memory_id": violated_memory_id,
         "ignored_task_id": ignored_task_id,
         "ignored_decision_id": ignored_decision_id,
+        "ignored_source": ignored_source,
     }
     if verdict.malformed:
         result["malformed"] = verdict.malformed
@@ -143,15 +159,16 @@ def report_pain(
         _suspect_delivery(
             cur, violated, ledger_id=ledger_id, actor=actor, session=session, found_by="reported"
         )
-    if ignored_task_id is not None:
+    if ignored:
         events.record(
             cur,
-            "task_state_unused",
+            "knowledge_unused",
             actor,
             ledger_id=ledger_id,
             detail={
-                "task_id": str(ignored_task_id),
+                "task_id": str(ignored_task_id) if ignored_task_id else None,
                 "decision_id": str(ignored_decision_id) if ignored_decision_id else None,
+                "source": ignored_source,
             },
         )
 
@@ -202,11 +219,20 @@ def report_pain(
                 "names the work in words recognisable when it begins."
             )
         return result
-    if ignored_task_id is not None:
+    if ignored:
+        where = " and ".join(
+            part
+            for part in (
+                "the task's state" if ignored_task_id else None,
+                ignored_source,
+            )
+            if part
+        )
         result["note"] = (
-            "No nomination was created: the task's state already held this and was read, so "
-            "a rule telling sessions to read it would repeat what failed. The ledger row "
-            "counts against how task state is handed over."
+            f"No nomination was created: {where} already held this, so a rule telling "
+            "sessions to read it would repeat what failed. The ledger row counts against how "
+            "that place hands knowledge over; if its wording or reach is what failed, change "
+            "it there as work (prevention_kind='work' with a task)."
         )
         return result
 
@@ -319,8 +345,9 @@ def _file_work(
             appended = tasks.append_next_action(cur, task_id, prevention, actor=actor)
     except MashuError as error:
         return None, unseated + (
-            f"Filing it on the task failed: {error}. The ledger row stands; the fix still "
-            "needs a home."
+            f"Filing it on the task failed: {error}. The ledger row stands, and the fix "
+            "still needs a home. Fold it into the task's next actions yourself with task_get "
+            "and task_checkpoint."
         )
     return task_id, unseated + (
         "It is on the task's next actions."

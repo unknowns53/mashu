@@ -57,14 +57,15 @@ append-only の記録。1 エントリが一度の痛みに対応する。
 
 | フィールド | 内容 |
 |---|---|
-| kind | `incident`（誤った作業が出た）/ `friction`（調べ直し・訂正で時間を失った。報告は撤回し、既存の行だけが残る）/ `explicit`（User 明示の記録。5.1 節の即時経路が evidence として残す）/ `claimed`（Agent が運んだ User の記録指示。5.1 節の経路 3 が evidence として残す） |
+| kind | `incident`（誤った作業が出た）/ `friction`（調べ直し・訂正で時間を失った。報告は撤回し、既存の行だけが残る）/ `explicit`（User 明示の記録。5.1 節の即時経路が evidence として残す）/ `claimed`（Agent が運んだ User の記録指示。5.1 節の経路 3 が evidence として残す）/ `proposed`（Agent が自分の replace 提案のために書いた後継の本文。User の指示ではない） |
 | what | 何が起きたか |
 | prevention | 何を知っていれば防げたか。**照合のキーになる本文** |
 | scope_id | 起きた Scope |
 | source | セッション参照 |
 | violated_memory_id | 報告者が「届いていたのに守られなかった」と名指した active Memory（任意） |
-| ignored_task_id | 報告者が「読んだ state にあったのに使わなかった」と名指した Task（任意） |
+| ignored_task_id | 報告者が「state にあったのに使わなかった」と名指した Task（任意。読んだかどうかは問わない） |
 | ignored_decision_id | その Task の中で事態を扱っていた decision（任意。ignored_task_id を伴う） |
+| ignored_source | 報告者が「ここにあったのに使わなかった」と名指した指示ファイルや skill（任意。~ かリポジトリからのパス、または `skill <name>`） |
 | created_at | 記録時刻 |
 
 `ledger` は知識ではない。配信されず、他のセッションに主張として届くことはない。役割は二つあり、初回の痛みを安く残すことと、二度目を検出する照合対象になることである。
@@ -80,7 +81,9 @@ append-only の記録。1 エントリが一度の痛みに対応する。
 4. （撤回）類似の `friction` または trace が既にある場合に二度目を成立させ、双方を根拠とする昇格候補を自動生成していた。3 節末の測定のとおり一度も候補を生まなかったので、`friction` の報告とともに外した
 5. `incident` は単独で昇格候補を生成する
 
-報告者が `ignored_task_id` で Task を名指した場合は、照合 2 で配信失敗が見つからなければ 3 と 5 に進まず、候補を作らない。知識は Task の state にあり、セッションはそれを読んでいたので、欠けていたのは知識ではない。ここで「Task の state を読んでから動く」という規則を候補にしても、失敗したことを繰り返し求めるだけで、その review は User に回る。`ledger` の行は残り、`task_state_unused` を event_log に記録し、`mashu status` が直近 30 日の件数を出す。この件数は Memory の入口ではなく、Task の state の引き渡し方を疑う材料になる（`docs/mashu-v3.md` 17 節）。名指された Task が無いか、decision がその Task のものでなければ、何も書かずに拒否する
+報告者が `ignored_task_id` で Task を、または `ignored_source` で指示ファイルや skill を名指した場合は、照合 2 で配信失敗が見つからなければ 3 と 5 に進まず、候補を作らない。知識はその場所にあったので、欠けていたのは知識ではない。ここで「そこを読んでから動く」という規則を候補にしても、失敗したことを繰り返し求めるだけで、その review は User に回る。運用では、pain_report のほとんどが User に叱られた直後に呼ばれ、prevention は行動の規則になっていた。`ledger` の行は残り、`knowledge_unused` を event_log に記録し、`mashu status` が直近 30 日の件数を出す。この件数は Memory の入口ではなく、その場所の引き渡し方を疑う材料になる（`docs/mashu-v3.md` 17 節）。その場所の文面や届き方を直すなら、それは `prevention_kind='work'` として Task に積む。名指されたものが候補を作らない以上、`prevention` に 120 字の上限は掛けない。名指された Task が無いか、decision がその Task のものでなければ、何も書かずに拒否する
+
+`violated_memory_id` と `ignored_task_id` は、完全な id のほかに、SessionStart フックが出す 8 文字の前置きでも受ける。フックで配信されたセッションは完全な id を持たないからである
 
 閾値は運用開始後に実測で較正する。当初は保守的に置き、機械判定を確定に使わず、類似候補を提示して人または報告した Agent に「同じ穴か」を確認させる。
 
@@ -132,7 +135,7 @@ v1 の投機的捕捉との関係。セッションから安く残すという�
 
 incident から自動生成した候補と、Agent 自身の追加・変更案は pending のまま残る。**明示指示を受けて Agent が実行する新規採用や変更には、別画面での再承認を要求しない。** 出所には `user_instruction` と指示の短い原文、会話参照を記録し、actor は Agent として残す。MCP の Tool は承認の種類を引数に取らず、サーバーが `user_instruction` を記録する。Agent が実行できる承認はそれしか無いので、引数にしても誤りの元にしかならない。これは認証ではなく監査用の出所記録であり、サーバーは会話中に本当にその指示があったか検証できない。Agent 自身の有用性判断、confidence、反対が無かったことは承認ではない。MCP instructions と運用上の信頼でこの境界を守る。
 
-新規採用は常に明示指示の根拠を伴う `memory_admit` を通る。`memory_nominate` は候補を作るだけで採用せず、replace の後継候補を作るときに使う。MCP 側に会話の真正性を検証する仕組みはない。**Agent が独自に判断した採用・retire・置換・復帰は提案にとどめ、明示指示かサーバーに実装済みの条件が無ければ適用しない。**直接 CLI / TUI 操作は `user_direct` として Agent の実行とは区別する。
+新規採用は常に明示指示の根拠を伴う `memory_admit` を通る。`memory_nominate` は候補を作るだけで採用せず、Agent が自分で出す replace 提案の後継候補を作るときに使う。その本文は User の指示ではないので、kind = `proposed` の `ledger` の行と候補として記録し、似た pending 候補にも合流しない（合流すると提案が固定した本文と違うものが返る）。MCP 側に会話の真正性を検証する仕組みはない。**Agent が独自に判断した採用・retire・置換・復帰は提案にとどめ、明示指示かサーバーに実装済みの条件が無ければ適用しない。**直接 CLI / TUI 操作は `user_direct` として Agent の実行とは区別する。
 
 本文を渡された `memory_admit` は、Agent がまだ読んでいないものがあれば採用せずに止まる。一つは候補が照合によって既存の pending 候補に合流した場合で、Agent はその候補の本文と evidence を見ていない。もう一つは候補が invalidated / legacy の conflict を持ち、その conflict ID と conflict に触れた指示が承認根拠に無い場合である。止まったときは作った `ledger` の行と候補だけを確定し、候補の `version` と conflict を返す。Agent はそれを読み、`nomination_id` と読み取った version を渡して `memory_admit` を呼び直す。この経路では本文・scope・kind・evidence・conflict が読み取り後に変わっていれば適用を拒否する。admission の request ID には初回応答全体を保存し、後から Memory が編集・retire されても再送には同じ応答を返す。
 
@@ -207,7 +210,7 @@ Agent に知識を届ける経路は、すべて存在の push から始まる�
 軸は二つある。**scope は「どこで」を絞り、topic は「何の作業のあいだか」を絞る。**「いつ」は topic の action が受け持つ。
 
 - always と scope の違いは配達先の絞り込みである。目的は `always` の規則を最小に保つことである。押し込む量が増えるほど一行あたりの遵守は薄まるので、領域固有の規則を全セッションに送ることは、その規則のためでなく `always` の規則全体の効力のために有害である
-- bootstrap と guard の違いは提示の時機である。開始時に読んだ規則が数十ターン後の判断の瞬間に効いていない、という失敗は v1 で実測されている。action を持つ topic は、その規則を判断の直前に、呼び出しを一度拒否する形で突きつける
+- bootstrap と guard の違いは提示の時機である。開始時に読んだ規則が数十ターン後の判断の瞬間に効いていない、という失敗は v1 で実測されている。action を持つ topic は、その規則を判断の直前に、呼び出しの文脈へ足す形で示す
 
 - scope と topic の違いは、規則が効く条件の種類である。scope の条件は cwd で決まる場所だが、同じ場所でも作業の種類によって要る規則は変わる。運用すると scope の規則の多くは、特定の作業をしているときだけ効く規則だった。それを scope に置くと、その作業をしないセッションにも毎回本文を押し込むことになる。topic は名前・規則数・発動条件の一行だけを push し、本文は条件に当たる作業に入るときに Agent が読む
 
@@ -247,11 +250,11 @@ topic は本文を pull で届けるが、v1 の検索とは失敗の形が違�
 
 v1 で実際に機能した部品なので、中核に据える。v2.0 はこれを独立した delivery `guard:<action>` として定めたが、これは撤回する。一つの種類の作業に規則を絞るという点で topic と同じことをする第二の方法であり、しかも見出しも一覧も持たないぶん読みにくかったからである。guard は topic の action として残る。
 
-- topic は action を一つ持てる（例 `delegate`）。PreToolUse フックが tool call を action に対応づけ（Agent / Task は組み込みで `delegate`、それ以外はインストールごとの設定）、`mashu guard <action>` でその action に結びついた topic の active な規則を読み、呼び出しを一度拒否して突きつける。拒否の文面は topic の名前を示し、topic に source（6 節）があれば規則の後に `Source: ...` の一行を添える。フックは `mashu guard --json` の各行の本文を一行ずつ並べるので、source は memory を持たない最後の行として返す
+- topic は action を一つ持てる（例 `delegate`）。PreToolUse フックが tool call を action に対応づけ（Agent / Task は組み込みで `delegate`、それ以外はインストールごとの設定）、`mashu guard <action>` でその action に結びついた topic の active な規則を読み、呼び出しの `additionalContext` として足す。呼び出しは止めない。当初は最初の呼び出しを一度拒否していたが、委譲のたびに止まる手間が規則で防げる損より大きかったので、文脈に足す形へ改めた。文面は topic の名前を示し、topic に source（6 節）があれば規則の後に `Source: ...` の一行を添える。フックは `mashu guard --json` の各行の本文を一行ずつ並べるので、source は memory を持たない最後の行として返す
 - 一つの action に結びつく open な topic は一つだけで、DB の部分 unique index が保証する。action は topic の編集でだけ設定し、作成の手順には足さない
 - action を持つ topic も、見出しは他の topic と同じく bootstrap に載る。作業に入るときに読まれる経路はそのまま残り、guard はその上に重なる
 - 発火は 1 セッションにつき行為ごとに一度（compaction のたびに改めて一度）。発火は topic の ID とともに event_log に残る
-- 拒否の次の最初の呼び出しが、拒否された呼び出しと同じ tool_input（キー順を除いた JSON の hash）だったか、変えたかを `guard_followed` に残す。拒否が判断を動かしたかはこの割合でしか観測できない。記録するのは最初の一回だけで、それより後の呼び出しは何もしない。記録に失敗しても呼び出しは通す
+- 拒否していた期間は、拒否の次の最初の呼び出しが同じ tool_input だったか、変えたかを `guard_followed` に残していた。今の hook は呼び出しを止めないので、この記録は書かれない。`mashu status` の変わった割合は、その期間の記録から出る
 - Mashu の DB に届かないときは通す。接続できないことは、いま下そうとしている判断についての証拠ではない
 
 bootstrap は「セッションの前提」を、guard は「判断の直前」を受け持つ。文脈にあることと、判断の前にあることは違う、という v1 の教訓の直接の継承である。
@@ -273,10 +276,10 @@ Memories TUI の `c` は、active な always / scope Memory と Temporary Contex
 | Tool | 役割 |
 |---|---|
 | `session_bootstrap` | 6.1 節の内容を返す。セッション開始時に一度 |
-| `pain_report` | incident を `ledger` へ記録し、類似の `ledger` の行・tombstone・active な記憶を返す。候補を生成する。`rule` の `prevention` は候補の本文になるので 120 字までとし、理由や経緯は `what` に書く。届いていた規則が守られなかったときは `violated_memory_id` でその active Memory を指す（4.1 節の照合 0）。読んだ Task の state にあったのに使わなかったときは `ignored_task_id`（と任意の `ignored_decision_id`）で指し、候補を作らない |
+| `pain_report` | incident を `ledger` へ記録し、類似の `ledger` の行・tombstone・active な記憶を返す。候補を生成する。`rule` の `prevention` は候補の本文になるので 120 字までとし、理由や経緯は `what` に書く。incident は誤った作業が実際に出たことに限る。届いていた規則が守られなかったときは `violated_memory_id` でその active Memory を指す（4.1 節の照合 0）。Task の state にあったときは `ignored_task_id`（と任意の `ignored_decision_id`）、指示ファイルや skill にあったときは `ignored_source` で指し、候補を作らない |
 | `memory_list` | 指定 Scope の active な記憶を列挙する。`always`（または `global`）は全セッションへ push される記憶を返す。`topic` を渡すと、その topic の発動条件・source（vault のノートなら `source_path` と `source_exists`）と規則の本文を返し、読んだことをセッション単位で event_log に残す |
 | `memory_get` | 指定した Memory の本文、revision、evidence、retire の情報を返す。retire された Memory の本文は明示取得でのみ読む |
-| `memory_nominate` | 新規 Memory の pending 候補を作るだけで採用しない。replace の後継候補に使う。本文は 120 字までで、理由は `why` に渡す |
+| `memory_nominate` | Agent 自身の replace 提案の後継を pending 候補として作るだけで採用しない。kind = `proposed` で記録し、他の候補に合流しない。本文は 120 字までで、理由は `why` に渡す |
 | `memory_admit` | 承認根拠を必須にして採用する。本文を渡すと候補の作成と採用を 1 回で行い（本文は 120 字まで、理由は `why`）、合流した既存候補や未対応の invalidated / legacy conflict があれば採用せず候補を返す。候補 ID で採用するときは読み取った nomination version を必須にする。まだ無い topic は発動条件つき（原典を指すなら `topic_source` も）で指定すると記憶とともに作る。実行者 Agent と `user_instruction` の出所を別に保存し、request replay には初回応答を返す |
 | `memory_change_propose` | Agent 自身の retire / replace / restore / redeliver 案を作成・更新する。redeliver は本文を変えずに配信条件だけを変え、まだ無い topic を名前と発動条件つきで指定すると適用時にその topic を作る。replace は後継 nomination version と配信条件を固定する |
 | `memory_change_apply` | proposal version、対象 revision、conflict、承認根拠、request ID を照合して一度だけ適用する |
@@ -301,9 +304,9 @@ v1 の 9 ツールに対し、`memory_search` / `memory_get` / `entity_resolve` 
 | `mashu revise <id>` | 本文の改訂（User のみ） |
 | `mashu show <id>` | 記憶・候補・`ledger` の行・Memory change proposal を 1 件、根拠と履歴つきで表示 |
 | `mashu memories` | 記憶の一覧。既定は active、`--retired` で retire された Memory とその理由 |
-| `mashu pain` | incident の手動記録（CLI から）。`--violated <id>` は守られなかった active Memory を、`--ignored-task <id>` は使われなかった state の Task を指す |
+| `mashu pain` | incident の手動記録（CLI から）。`--violated <id>` は守られなかった active Memory を、`--ignored-task <id>` は使われなかった state の Task を、`--ignored-source <file>` は使われなかった指示ファイルや skill を指す |
 | `mashu ledger` | `ledger` の閲覧 |
-| `mashu guard <action>` | guard の照会。action に結びついた topic の規則を表示し、規則があれば終了コード 2 を返す。PreToolUse フックが読む。`--outcome same\|changed --topic <name>` は拒否の次の呼び出しの結末をフックが記録する |
+| `mashu guard <action>` | guard の照会。action に結びついた topic の規則を表示し、規則があれば終了コード 2 を返す。PreToolUse フックが読み、呼び出しの文脈に足す。`--outcome same\|changed --topic <name>` は guard が呼び出しを止めていた期間の記録の口で、今のフックは呼ばない |
 | `mashu deliver <id> <delivery>` | delivery の変更。topic へは `--topic <name>` で移す |
 | `mashu topic` | topic の一覧・作成・編集・削除（User のみ）。active な規則が無い topic だけを消せる。一度も使われていなければ削除し、retire された規則や提案が参照していれば archive する。`mashu topic show <name>` で規則の本文を読む。`--edit <name> --action <act>` で action に結びつけ、`--no-action` で外す。一覧と show は結びついた action を `before: <act>` と示す。`--source <path>`（`--add` / `--edit`）で原典を指し、`--source -` で外す |
 | `mashu scope` / `mashu route` | Scope の一覧と cwd 対応表（v1 と同じ、User のみ作成） |

@@ -38,7 +38,7 @@ class StatusSnapshot:
     ledger_30d: int
     delivery_failures_30d: int
     delivery_failures_by_route: dict[str, int]
-    task_state_unused_30d: int
+    knowledge_unused_30d: int
     scope_count: int
     scope_rows: list[dict[str, Any]]
     topic_count: int
@@ -140,10 +140,10 @@ def status_snapshot(cur: psycopg.Cursor) -> StatusSnapshot:
     by_route = {row["route"]: row["n"] for row in cur.fetchall()}
     delivery_failures = sum(by_route.values())
     cur.execute(
-        "SELECT count(*) AS n FROM event_log WHERE event_type = 'task_state_unused' "
+        "SELECT count(*) AS n FROM event_log WHERE event_type = 'knowledge_unused' "
         "AND created_at >= now() - interval '30 days'"
     )
-    task_state_unused = cur.fetchone()["n"]
+    knowledge_unused = cur.fetchone()["n"]
     scope_rows = scopes.list_scopes(cur)
     topic_rows = topics.list_topics(cur)
     heaviest = max(topic_rows, key=lambda row: row["body_tokens"], default=None)
@@ -167,7 +167,7 @@ def status_snapshot(cur: psycopg.Cursor) -> StatusSnapshot:
         ledger_30d=ledger_30d,
         delivery_failures_30d=delivery_failures,
         delivery_failures_by_route=by_route,
-        task_state_unused_30d=task_state_unused,
+        knowledge_unused_30d=knowledge_unused,
         scope_count=len(scope_rows),
         scope_rows=scope_rows,
         topic_count=len(topic_rows),

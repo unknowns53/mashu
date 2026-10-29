@@ -25,6 +25,7 @@ from mashu import (
     memory_changes,
     nominations,
     projects,
+    references,
     routing,
     scopes,
     task_history,
@@ -49,34 +50,34 @@ DEFAULT_ACTOR = "agent"
 #: first and per-tool procedure lives in each tool's description instead.
 INSTRUCTIONS_BYTE_LIMIT = 2048
 INSTRUCTIONS = (
-    "Mashu pushes active Memory; call session_bootstrap first in every session. "
-    "Memory is pushed to every session, so it holds only rules whose absence caused wrong "
-    "work. A task's findings and settled decisions go in its decisions, read by task_get "
-    "and never pushed; notes and long material stay in repository docs. "
-    "When the work at hand matches a bootstrap topic's trigger, call memory_list with that "
-    "topic before starting it. "
-    "Before continuing a task from a bootstrap card, call task_get with its full id and "
-    "verify old state against the repository and artifacts. task_checkpoint is the one "
-    "task state write; use it to hand off before stopping, pausing, or compaction and when "
-    "the approach or next actions change, not after each commit, since git log carries "
-    "progress. Put failed tries in its attempts, costly-to-rederive reasons in decisions, "
-    "and external sources in artifacts. Task completion remains the user's decision. "
-    "If work looks done, use task_propose_close with outcome and reason; it changes no "
-    "task state. "
-    "Writes naming people or home paths are refused, so call the user 'the user' and write "
-    "paths from ~ or the repository. "
-    "Use pain_report only when missing or stale knowledge caused an incident; pass "
-    "violated_memory_id when a delivered rule covered it, or ignored_task_id when task state "
-    "you read covered it. Use prevention_kind='work' and task_id for one-time fixes. "
-    "Temporary Context handles expiry. "
-    "Durable Memory changes need an explicit user instruction. For a request to remember, "
-    "call memory_admit with the content. For an existing Memory, a retire, replace, or "
-    "restore the user asked for takes one memory_change_instructed call and a delivery move "
-    "one memory_redeliver call; your own change idea goes to memory_change_propose. Follow "
-    "each tool's description for the required fields. Your own suggestion, confidence, and "
-    "user silence are not approval; your independent change idea stays pending. After "
-    "success, briefly report the target and reason; if it remains pending, say that review "
-    "is needed."
+    "Call session_bootstrap first unless a SessionStart hook already delivered Mashu in this "
+    "session. When the work at hand matches a bootstrap topic's trigger, call memory_list "
+    "with that topic before starting it. "
+    "Memory holds standing rules only, pushed to every session (always), to one place "
+    "(scope), or when one kind of work starts (topic). Project facts, findings, and settled "
+    "decisions go in a task's decisions, which only task_get reads; notes go in project "
+    "docs. "
+    "Before continuing a task from a card, call task_get with its full id and check old "
+    "state against the repository. task_checkpoint is the one task state write: call it "
+    "when a try fails, a costly decision is made, or the approach or next actions change, "
+    "and before you stop; not after each commit. Put failed tries in attempts, reasons in "
+    "decisions, external sources in artifacts. Open a task only for work that spans "
+    "sessions. Completion is the user's call: after your last checkpoint, "
+    "task_propose_close may state the outcome. "
+    "pain_report is only for wrong work that missing or stale knowledge caused. If the "
+    "knowledge was there, name where (violated_memory_id, ignored_task_id, ignored_source) "
+    "and no candidate is made; a one-time fix, such as editing a doc, is "
+    "prevention_kind='work' with task_id. "
+    "Durable Memory changes need the user's explicit instruction. Asked to remember a "
+    "standing rule, call memory_admit; 'remember' can also mean take it to heart, so ask "
+    "before writing when the user named neither Mashu nor a lasting rule. Retire, replace, "
+    "or restore as asked takes memory_change_instructed, a delivery move memory_redeliver; "
+    "a standing proposal they approve memory_change_apply; your own idea goes to "
+    "memory_change_propose and stays pending, and your confidence or their silence is not "
+    "approval. Temporary Context and "
+    "the review queue are the user's. "
+    "Writes naming people or home paths are refused: call the user 'the user' and write "
+    "paths from ~. After a write, report its target and reason."
 )
 
 
@@ -309,6 +310,18 @@ def _record_card_refusal(error: OverLimitError, tool: str, task_id: UUID | None)
     return True
 
 
+def _memory_ref(cur: Any, value: UUID | str) -> UUID:
+    """A Memory by its full id or by the 8-character prefix the SessionStart hook prints."""
+    return references.resolve_id(
+        cur, str(value), table="memory", column="memory_id", label="memory"
+    )
+
+
+def _task_ref(cur: Any, value: UUID | str) -> UUID:
+    """A task by its full id or by the prefix a card shows."""
+    return references.resolve_id(cur, str(value), table="task", column="task_id", label="task")
+
+
 def _scope(cur: Any, name: str | None) -> tuple[UUID | None, str | None, bool]:
     """Resolve an explicit scope or the longest route for the current cwd."""
     if name is not None:
@@ -344,12 +357,9 @@ def build_server() -> Any:
                     routed=routed,
                 )
                 note = (
-                    "Knowledge is pushed, not searched. Call pain_report when forgetting "
-                    "caused an incident; only an explicit user instruction can authorize "
-                    "memory_admit, "
-                    "memory_change_instructed, memory_redeliver, or memory_change_apply in the "
-                    "same session. The Agent executes it, and "
-                    "the stored instruction quote is provenance rather than authentication. "
+                    "Knowledge is pushed, not searched. `pending` counts candidates in the "
+                    "user's review queue (mashu review); leave them to the user. The stored "
+                    "quote of a user instruction is provenance rather than authentication. "
                     + bootstrap.TASK_DETAIL_INSTRUCTION
                 )
                 if answer["schema_pending"]:
@@ -369,16 +379,20 @@ def build_server() -> Any:
         description=(
             "Record an incident that missing or stale knowledge caused, and show related "
             "evidence.\n\n"
-            "Use `rule` for reusable guidance or `work` with `task_id` for a one-time fix; this "
-            "never admits knowledge directly. A `rule` prevention becomes a candidate Memory "
-            f"body, so it is held to {memories.CONTENT_LIMIT} chars and states the rule alone; "
-            "put the reason, measurements, dates, and history in `what`. Pass the rule's "
-            "memory_id as `violated_memory_id` when a rule delivered to this session covered "
-            "what went wrong and was not followed; it must be active, and no candidate is "
-            "created for a rule already in force. Pass `ignored_task_id`, and the decision's id "
-            "as `ignored_decision_id` when one decision held it, when that task's state covered "
-            "it and was read but not used; that knowledge was not missing, so no candidate is "
-            "created and the row counts against how task state is handed over."
+            "An incident is wrong work actually done: a wrong change, a wrong measurement, a "
+            "wrong report to the user. A near miss, a slip of care, or the user's displeasure "
+            "alone is not one, and a rule written to show regret only adds to the user's "
+            "review queue. When the knowledge was there, name where it was and no candidate is "
+            "created: `violated_memory_id` for an active Memory delivered to this session, "
+            "including a topic rule whose topic was listed but not read (the 8-character id "
+            "the hook prints is enough); `ignored_task_id`, with `ignored_decision_id` when one "
+            "decision held it, for task state read or not; `ignored_source` for an instruction "
+            "file or skill, named as a path from ~ or the repository or as `skill <name>`. "
+            "Otherwise use `work` with `task_id` for a one-time fix, such as editing a doc, an "
+            "instruction file, or code, and `rule` only for knowledge every future session "
+            "must carry; this never admits knowledge directly. A `rule` prevention becomes a "
+            f"candidate Memory body, so it is held to {memories.CONTENT_LIMIT} chars and states "
+            "the rule alone; put the reason, measurements, dates, and history in `what`."
         )
     )
     def pain_report(
@@ -388,9 +402,10 @@ def build_server() -> Any:
         scope: str | None = None,
         prevention_kind: str = "rule",
         task_id: UUID | None = None,
-        violated_memory_id: UUID | None = None,
-        ignored_task_id: UUID | None = None,
+        violated_memory_id: UUID | str | None = None,
+        ignored_task_id: UUID | str | None = None,
         ignored_decision_id: UUID | None = None,
+        ignored_source: str | None = None,
     ) -> dict[str, Any]:
         try:
             with db.transaction() as cur:
@@ -407,9 +422,12 @@ def build_server() -> Any:
                     prevention_kind=prevention_kind,
                     task_id=task_id,
                     session=session,
-                    violated_memory_id=violated_memory_id,
-                    ignored_task_id=ignored_task_id,
+                    violated_memory_id=(
+                        _memory_ref(cur, violated_memory_id) if violated_memory_id else None
+                    ),
+                    ignored_task_id=_task_ref(cur, ignored_task_id) if ignored_task_id else None,
                     ignored_decision_id=ignored_decision_id,
+                    ignored_source=ignored_source,
                 )
                 return _plain({"ok": True, **answer})
         except MashuError as error:
@@ -446,11 +464,12 @@ def build_server() -> Any:
 
     @server.tool(
         description=(
-            "Create or update a pending candidate for a new durable Memory without admitting "
-            "it.\n\n"
-            "Use it for the successor of a memory_change_propose replace, or to read the "
-            "current candidate again when memory_admit stopped at the queue. A plain explicit "
-            f"request to remember goes to memory_admit with `content` instead. {body_contract}"
+            "Create a pending candidate for the successor of your own memory_change_propose "
+            "replace, without admitting it.\n\n"
+            "It is recorded as your draft, not as a user instruction, and never joins another "
+            "candidate, so the proposal fixes this exact body for review. A request from the "
+            "user to remember goes to memory_admit with `content`, and a replace the user "
+            f"asked for to memory_change_instructed. {body_contract}"
         )
     )
     def memory_nominate(
@@ -459,7 +478,7 @@ def build_server() -> Any:
         try:
             with db.transaction() as cur:
                 scope_id, _, _ = _scope(cur, scope)
-                answer = nominations.nominate_user_explicit(
+                answer = nominations.nominate_proposed(
                     cur,
                     content=content,
                     actor=actor(),
@@ -471,11 +490,14 @@ def build_server() -> Any:
             return _failure(error)
 
     @server.tool()
-    def memory_get(memory_id: UUID) -> dict[str, Any]:
-        """Read one Memory body, revision, evidence, and its complete retirement record."""
+    def memory_get(memory_id: UUID | str) -> dict[str, Any]:
+        """Read one Memory body, revision, evidence, and its complete retirement record.
+
+        `memory_id` takes the full id or the 8-character prefix the SessionStart hook prints.
+        """
         try:
             with db.transaction() as cur:
-                row = memories.memory_details(cur, memory_id)
+                row = memories.memory_details(cur, _memory_ref(cur, memory_id))
                 if row is None:
                     raise MashuError(f"no memory {memory_id}")
                 return _plain({"ok": True, "memory": row})
@@ -485,7 +507,14 @@ def build_server() -> Any:
     @server.tool(
         description=(
             "Admit a new Memory with explicit instruction provenance.\n\n"
-            "For a plain request to remember, pass `content` (and optional `scope`): the "
+            "Admit only a standing rule the user asked Mashu to keep. A fact about current "
+            "work belongs in the task's decisions, and an expiring condition in the user's "
+            "Temporary Context (`mashu remember --until`); offer those instead. Choose the "
+            "delivery by where forgetting breaks work: `always` anywhere, `scope` in one "
+            "place, `topic` in one kind of work. Left out, delivery is the scope routed from "
+            "the server's working directory, or always when that directory is unrouted, so "
+            "pass it, and tell the user which delivery and scope the answer shows. "
+            "Pass `content` (and optional `scope`): the "
             "nomination and admission happen in one call. If it joins an already pending "
             "candidate or repeats invalidated or legacy retired Memory, it stops with "
             "`admitted: false` and returns the nomination to read; then pass that "
@@ -722,7 +751,7 @@ def build_server() -> Any:
         )
     )
     def memory_redeliver(
-        memory_id: UUID,
+        memory_id: UUID | str,
         delivery: str,
         request_id: UUID,
         instruction: str,
@@ -735,7 +764,7 @@ def build_server() -> Any:
             with capacity.doors("mcp"), db.transaction() as cur:
                 result = memory_changes.redeliver_instructed(
                     cur,
-                    memory_id,
+                    _memory_ref(cur, memory_id),
                     delivery=delivery,
                     scope_id=scopes.require_scope(cur, scope)["scope_id"] if scope else None,
                     topic=topic,
@@ -757,7 +786,8 @@ def build_server() -> Any:
             f"revision itself. {_PROVENANCE} Each `operation` takes only its own fields:\n"
             "- retire (active Memory): `retire_reason` and `retirement_kind`, `invalidated` "
             "(the content is wrong) or `out_of_scope` (the conditions it served ended). A move "
-            "to Temporary Context goes through memory_change_propose.\n"
+            "to Temporary Context is the user's own step (`c` in the Memories TUI); tell them "
+            "so.\n"
             "- replace (active Memory): `content`, the successor rule, and optional `why`; the "
             "successor keeps the old delivery, and `retire_reason` defaults to the instruction. "
             f"{body_contract}\n"
@@ -772,7 +802,7 @@ def build_server() -> Any:
         )
     )
     def memory_change_instructed(
-        memory_id: UUID,
+        memory_id: UUID | str,
         operation: Annotated[str, _Choice(memory_changes.INSTRUCTED_OPERATIONS)],
         instruction: str,
         conversation_ref: str,
@@ -791,7 +821,7 @@ def build_server() -> Any:
             with capacity.doors("mcp"), db.transaction() as cur:
                 result = memory_changes.change_instructed(
                     cur,
-                    memory_id,
+                    _memory_ref(cur, memory_id),
                     operation=operation,
                     request_id=request_id,
                     approval=_instructed(
@@ -839,7 +869,11 @@ def build_server() -> Any:
     @server.tool(
         description=(
             "Create a task; likely duplicates are returned unless `force` is true.\n\n"
-            "`goal` names the outcome and `status_text` says where the task stands; both ride "
+            "Open one only for work expected to span sessions, not for a single request or a "
+            "step of a larger task, and search with task_search first: every open card takes "
+            "a share of the bootstrap budget for its lease. Projects are the user's; when "
+            "none fits, ask the user to run `mashu project create`. `goal` names the outcome "
+            "and `status_text` says where the task stands; both ride "
             "on every bootstrap card, so details go in approach or next_actions. "
             f"{state_contract} {_REFUSALS} Success and duplicate candidates return the card "
             "view with the card and detail budgets; call task_get for the full state."
@@ -931,9 +965,11 @@ def build_server() -> Any:
         description=(
             "Write a task's state: replace the fields given and append the history they rest "
             "on. The only task state write.\n\n"
-            "Hand off to the next session with it: before stopping, pausing, or compaction and "
-            "when the approach or next actions change, not after each commit, since git log "
-            'carries progress. Omitted fields keep their value; "" or [] clears one. Pass the '
+            "Hand off to the next session with it: when a try fails, a costly decision is made, "
+            "or the approach or next actions change, and before you stop, not after each "
+            "commit, since git log carries progress. Compaction comes without warning, so "
+            "these points are the ones that survive it. "
+            'Omitted fields keep their value; "" or [] clears one. Pass the '
             "read state's `updated_at` as `expect_updated_at`. `name` renames the task unless "
             "it reads like another open one. `goal` names the outcome and `status_text` says "
             "where the task stands, so it changes only when that does; both ride on every "
@@ -991,7 +1027,10 @@ def build_server() -> Any:
             "with `mashu task close`.\n\n`outcome` is "
             + ", ".join(f"`{name}` ({tasks.OUTCOME_MEANINGS[name]})" for name in tasks.OUTCOMES)
             + f". `reason` (required, at most {tasks.PROPOSAL_REASON_MAX} chars) gives the "
-            "grounds, such as the merged commit or the task that took over."
+            "grounds, such as the merged commit or the task that took over. Propose only when "
+            "the goal is met as the user judges it, after their merge or acceptance, not when "
+            "your part ends or a branch awaits their check. Checkpoint first and propose last: "
+            "a later state write marks the proposal stale and the user must confirm it apart."
         )
     )
     def task_propose_close(
