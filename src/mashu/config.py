@@ -27,6 +27,9 @@ DEFAULT_TASK_CARD_CAPACITY = 200
 #: Maximum full current state retrieved for one task.
 DEFAULT_TASK_DETAIL_CAPACITY = 800
 
+#: Decisions in force that task_get returns without being asked, newest first (v3 5.4).
+DEFAULT_DECISION_CAPACITY = 800
+
 #: Hard ceiling on the temporary share of the opening (v3 8).
 DEFAULT_TEMPORARY_CAPACITY = 400
 
@@ -64,6 +67,10 @@ def project_capacity() -> int:
 
 def card_overflow_capacity() -> int:
     return int(os.environ.get("MASHU_CARD_OVERFLOW_CAPACITY") or DEFAULT_CARD_OVERFLOW_CAPACITY)
+
+
+def decision_capacity() -> int:
+    return int(os.environ.get("MASHU_DECISION_CAPACITY") or DEFAULT_DECISION_CAPACITY)
 
 
 def task_card_capacity() -> int:

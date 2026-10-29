@@ -384,6 +384,11 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
         answer = application.bootstrap_preview(cur, cwd=os.getcwd(), actor=ACTOR)
         resumed = _resumed_task(cur, args.resume_transcript) if args.resume_transcript else None
+        in_force = (
+            task_history.decisions_in_force(cur, resumed["task_id"])
+            if resumed is not None
+            else None
+        )
     unapplied = answer.get("schema_pending") or []
     if unapplied:
         print(f"schema    {len(unapplied)} MIGRATION(S) PENDING: {', '.join(unapplied)}")
@@ -414,6 +419,15 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             "          This session was working on this task before the compaction. Call "
             "task_get with this task_id before taking that work up again."
         )
+        if in_force and in_force["decisions_in_force"]:
+            print("          decisions in force, newest first; do not propose them again:")
+            for row in in_force["decisions_in_force"]:
+                print(_flow(f"{row['on']:%Y-%m-%d}  {row['decision']}", indent="            "))
+            if in_force["decisions_in_force_more"]:
+                print(
+                    f"            and {in_force['decisions_in_force_more']} older; "
+                    "task_get with decisions=true has them and their reasons"
+                )
     print("temporary")
     for row in answer.get("temporary", []):
         print(f"  {row['content']}  (expires {row['expires_at']})")

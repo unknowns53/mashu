@@ -8,8 +8,9 @@ from uuid import UUID, uuid4
 
 import psycopg
 
-from mashu import approvals, events, redact, tasks
+from mashu import approvals, config, events, redact, tasks
 from mashu.errors import MalformedRequestError, MashuError, OverLimit
+from mashu.tokens import pushed_cost
 
 ArtifactKind = Literal[
     "git_commit",
@@ -394,6 +395,53 @@ def attempt_list(cur: psycopg.Cursor, task_id: UUID) -> list[dict[str, Any]]:
     return cur.fetchall()
 
 
+def decisions_in_force(cur: psycopg.Cursor, task_id: UUID) -> dict[str, Any]:
+    """The decisions no later one superseded, newest first, as far as their share holds.
+
+    They come with every task_get because they are what an earlier session settled, and a
+    session that never asks for history would otherwise propose them again. Reasons stay in
+    the full history, which `decisions=True` returns.
+    """
+    cur.execute(
+        """
+        SELECT d.decision_id, d.decision, d.created_at FROM decision d
+        WHERE d.task_id = %s
+          AND NOT EXISTS (SELECT 1 FROM decision x WHERE x.supersedes_id = d.decision_id)
+        ORDER BY d.created_at DESC, d.decision_id DESC
+        """,
+        (task_id,),
+    )
+    rows = cur.fetchall()
+    shown: list[dict[str, Any]] = []
+    budget = config.decision_capacity()
+    for row in rows:
+        line = {
+            "decision_id": row["decision_id"],
+            "on": row["created_at"].date(),
+            "decision": row["decision"],
+        }
+        if pushed_cost([item["decision"] for item in [*shown, line]]) > budget:
+            break
+        shown.append(line)
+    return {"decisions_in_force": shown, "decisions_in_force_more": len(rows) - len(shown)}
+
+
+def decision_count(cur: psycopg.Cursor, task_ids: list[UUID]) -> dict[UUID, int]:
+    """How many decisions are in force on each task, for the card's details line."""
+    if not task_ids:
+        return {}
+    cur.execute(
+        """
+        SELECT d.task_id, count(*) AS n FROM decision d
+        WHERE d.task_id = ANY(%s)
+          AND NOT EXISTS (SELECT 1 FROM decision x WHERE x.supersedes_id = d.decision_id)
+        GROUP BY d.task_id
+        """,
+        (task_ids,),
+    )
+    return {row["task_id"]: row["n"] for row in cur.fetchall()}
+
+
 def decision_list(cur: psycopg.Cursor, task_id: UUID) -> list[dict[str, Any]]:
     """Return a task's decisions newest first, without reshaping the rows."""
     cur.execute(
@@ -442,8 +490,8 @@ def expanded_task(
     artifacts: bool = False,
     checkpoints: bool = False,
 ) -> dict[str, Any]:
-    """Return the task and only the history explicitly pulled with it."""
-    expanded = tasks.task_get(cur, task_id)
+    """Return the task, its decisions in force, and only the history explicitly pulled with it."""
+    expanded = {**tasks.task_get(cur, task_id), **decisions_in_force(cur, task_id)}
     if attempts:
         expanded["attempts"] = attempt_list(cur, task_id)
     if decisions:

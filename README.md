@@ -306,7 +306,7 @@ Scope ごとの Memory に独立した上限は無い。2000 から always の�
 
 容量で拒否されたときの文面は、書き込み前の空きを示す。always への追加が拒否されたときは、代わりに topic へ置いた場合に `always` の容量から使われる量（Scope を持たない既存 topic ごとの見出しの増分と、新しい topic なら見出し一行ぶん）も添える。空の topic は見出しを出さないので、最初の規則が入ると見出しの行全体が容量に数えられる。topic への追加がこの行で拒否されたときは、行の全文と token 数を示す。容量を空ける方法は、CLI からの書き込みなら `mashu` のコマンドで、MCP からの書き込みなら `memory_change_propose` や `memory_redeliver` の tool 名で示す。
 
-環境変数 MASHU_TOTAL_CAPACITY、MASHU_CAPACITY、MASHU_ALWAYS_CAPACITY、MASHU_PROJECT_CAPACITY、MASHU_CARD_OVERFLOW_CAPACITY、MASHU_TASK_CARD_CAPACITY、MASHU_TASK_DETAIL_CAPACITY、MASHU_TEMPORARY_CAPACITY、MASHU_TOPIC_CAPACITY で変更できる。
+環境変数 MASHU_TOTAL_CAPACITY、MASHU_CAPACITY、MASHU_ALWAYS_CAPACITY、MASHU_PROJECT_CAPACITY、MASHU_CARD_OVERFLOW_CAPACITY、MASHU_DECISION_CAPACITY、MASHU_TASK_CARD_CAPACITY、MASHU_TASK_DETAIL_CAPACITY、MASHU_TEMPORARY_CAPACITY、MASHU_TOPIC_CAPACITY で変更できる。
 
 Task card の予算は書き込みではなく配信で効く。bootstrap は、そのセッションに届く active Task を最後の活動の新しい順に並べ、card を予算（MASHU_PROJECT_CAPACITY）まで載せる。最初に入らなかった card から後ろは、短い id・名前・最後の活動日だけを MASHU_CARD_OVERFLOW_CAPACITY の中で並べ、入りきらない分は件数で示す。書き込みは scope の合計では拒否せず、応答の `card_share.unseated` が card を失った Task を名指す。Scope を持たない Project の card は、全 Scope に共通する分として、それぞれの Scope の配信で競い、unrouted session にはこの共通分だけが届く。`mashu status` の card 使用量は、最も重い Scope の active な card の合計で、配信の予算と並べて表示する。Task detail は配信の予算には含めず、1 Task ごとの上限だけを持つ。
 
@@ -426,8 +426,8 @@ MCP tool は 18 個ある。
 | Knowledge | memory_change_withdraw | 不要になった pending proposal を取り下げる |
 | Project State | project_list | Project と Task 件数を一覧する |
 | Project State | task_create | 類似する open Task を確認して Task を作る |
-| Project State | task_get | Task の Current State 全文を取得し、指定した履歴だけ展開する。着手前に必須 |
-| Project State | task_search | Task 名と Current State を検索する |
+| Project State | task_get | Task の Current State 全文と、有効な決定（supersede されていない decision の文、新しい順に 800 token まで）を取得し、指定した履歴だけ展開する。着手前に必須 |
+| Project State | task_search | Task 名と Current State、および全 Task の decision の本文と理由を検索する。日本語は語をすべて含むかで当てる |
 | Project State | task_checkpoint | Current State の渡したフィールドを置き換える唯一の書き込み。`name` で Task 名も変える。`attempts`（試したことと結果）、`decisions`（判断と理由）、`artifacts`（外部成果物の原典）も同じ transaction で追記する。state のスナップショットは close のときだけ保存する |
 | Project State | task_propose_close | Task の終了案を理由つきで置く |
 | Project State | task_withdraw_close_proposal | close proposal を取り下げる |
