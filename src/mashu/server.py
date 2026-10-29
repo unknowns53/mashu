@@ -37,7 +37,6 @@ from mashu.errors import (
     MalformedRequestError,
     MashuError,
     OverLimitError,
-    ProjectBudgetError,
     RefusedError,
     RetiredConflictError,
     StaleStateError,
@@ -189,6 +188,12 @@ _REFUSALS = (
 )
 
 
+#: What a task write returns about the scope's card budget instead of a refusal (v3 8).
+_CARD_SHARE = (
+    "`card_share`, whose `unseated` names the active tasks beside it that now get no card; "
+    "propose close only for those whose goal the user has met"
+)
+
 #: Names memory_list takes for the layer pushed to every session. Agents guess `global`
 #: for it as often as `always`.
 ALWAYS_LAYER = ("always", "global")
@@ -264,8 +269,6 @@ def _failure(
         answer["candidates"] = [_task_card_view(row) for row in error.candidates]
     elif isinstance(error, StaleStateError):
         answer["current"] = _task_card_view(error.current)
-    elif isinstance(error, ProjectBudgetError):
-        answer["breakdown"] = error.breakdown
     elif isinstance(error, OverLimitError):
         answer.update(
             field=error.field,
@@ -870,13 +873,16 @@ def build_server() -> Any:
         description=(
             "Create a task; likely duplicates are returned unless `force` is true.\n\n"
             "Open one only for work expected to span sessions, not for a single request or a "
-            "step of a larger task, and search with task_search first: every open card takes "
-            "a share of the bootstrap budget for its lease. Projects are the user's; when "
+            "step of a larger task, and search with task_search first. Bootstrap delivers a "
+            "scope's cards newest activity first up to its card budget and only names the "
+            "older ones, so a needless task pushes real ones out of view. Projects are the "
+            "user's; when "
             "none fits, ask the user to run `mashu project create`. `goal` names the outcome "
             "and `status_text` says where the task stands; both ride "
             "on every bootstrap card, so details go in approach or next_actions. "
             f"{state_contract} {_REFUSALS} Success and duplicate candidates return the card "
-            "view with the card and detail budgets; call task_get for the full state."
+            f"view with the card and detail budgets, and {_CARD_SHARE}; call task_get for "
+            "the full state."
         )
     )
     def task_create(
@@ -979,7 +985,7 @@ def build_server() -> Any:
             "`decisions` for reasons costly to re-derive, and `artifacts` for external "
             "sources. No snapshot is frozen per write; closing the task freezes the final "
             f"state. {state_contract} {_history_contract()} {_REFUSALS} Success returns the "
-            "card view with the card and detail budgets."
+            f"card view with the card and detail budgets, and {_CARD_SHARE}."
         )
     )
     def task_checkpoint(

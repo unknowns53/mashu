@@ -10,7 +10,6 @@ from mashu.errors import (
     MalformedRequestError,
     MashuError,
     OverLimitError,
-    ProjectBudgetError,
     RefusedError,
     StaleStateError,
 )
@@ -95,13 +94,18 @@ def test_different_work_or_another_project_is_not_a_duplicate(cur, task_id):
     assert new_task(cur, SCHEMA, "thesis")["task"]["task_id"] != task_id
 
 
-def test_a_banned_or_too_large_first_task_never_reaches_the_table(cur, project, monkeypatch):
+def test_a_banned_first_task_never_reaches_the_table(cur, project):
     with pytest.raises(RefusedError):
         new_task(cur, SCHEMA, "mashu", goal="ask SECRETMARKER9")
-    monkeypatch.setenv("MASHU_PROJECT_CAPACITY", "20")
-    with pytest.raises(ProjectBudgetError):
-        new_task(cur, SCHEMA, "mashu", goal=GOAL + " and the module boundary with it")
     assert count_tasks(cur) == 0
+
+
+def age(cur, task_id, days: int) -> None:
+    """Move a task's last activity back, as an older session's write would have left it."""
+    cur.execute(
+        "UPDATE task SET last_activity_at = now() - make_interval(days => %s) WHERE task_id = %s",
+        (days, task_id),
+    )
 
 
 # the hard limits (5.3)
@@ -169,21 +173,19 @@ def test_unscoped_state_spends_a_seat_in_every_scope_and_is_weighed_against_the_
     new_project(cur, "light project", scope_id=lighter_scope)
     new_project(cur, "global project")
     busy = new_task(cur, "busy work", "busy project", status_text="x" * 120)
+    age(cur, busy["task"]["task_id"], 2)
     busy_cost = tasks.card_cost(busy["task"]["name"], busy["state"])
     # A scope already full leaves another scope's share untouched.
     monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(busy_cost))
     light = new_task(cur, "light work", "light project")
+    assert light["card_share"]["unseated"] == []
 
-    global_cost = tasks.card_cost("global work", {})
-    monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(busy_cost + global_cost - 1))
-    with pytest.raises(ProjectBudgetError) as raised:
-        new_task(cur, "global work", "global project")
-    assert {row["name"] for row in raised.value.breakdown} == {"busy work", "global work"}
-    assert "Project 'global project' has no scope" in raised.value.reason
-    assert "mashu project edit 'global project' --scope" in raised.value.reason
+    global_task = new_task(cur, "global work", "global project")
+    share = global_task["card_share"]
+    assert share["boundary"] == "the busiest scope"
+    assert [row["name"] for row in share["unseated"]] == ["busy work"]
 
     monkeypatch.delenv("MASHU_PROJECT_CAPACITY")
-    global_task = new_task(cur, "global work", "global project")
     global_cost = tasks.card_cost(global_task["task"]["name"], global_task["state"])
     totals = tasks.pushed_totals(cur)
     assert totals["unscoped"] == global_cost
@@ -192,10 +194,11 @@ def test_unscoped_state_spends_a_seat_in_every_scope_and_is_weighed_against_the_
     assert totals["worst"] == global_cost + busy_cost
 
 
-def test_a_state_that_would_overflow_the_share_is_refused_until_another_task_goes_dormant(
+def test_a_write_past_the_share_goes_through_and_names_the_older_card_it_hid(
     cur, task_id, monkeypatch
 ):
     quiet = new_task(cur, OTHER_WORK, "mashu", goal="find the ternary window")
+    age(cur, quiet["task"]["task_id"], 3)
     seated = sum(row["tokens"] for row in tasks.active_state_costs(cur))
     monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(seated))
     grown = {
@@ -204,30 +207,31 @@ def test_a_state_that_would_overflow_the_share_is_refused_until_another_task_goe
         "status_text": "tables written; services and tests still to go before the branch merges",
     }
 
-    with pytest.raises(ProjectBudgetError) as raised:
-        update_task(cur, task_id, **grown)
+    written = update_task(cur, task_id, **grown)
 
-    breakdown = raised.value.breakdown
-    assert {row["name"] for row in breakdown} == {SCHEMA, OTHER_WORK}
-    assert sum(row["tokens"] for row in breakdown) > seated
-    cur.execute("SELECT status_text FROM task_state WHERE task_id = %s", (task_id,))
-    assert cur.fetchone()["status_text"] is None
+    assert written["state"]["status_text"] == grown["status_text"]
+    assert [row["name"] for row in written["card_share"]["unseated"]] == [OTHER_WORK]
+    assert written["card_share"]["tokens"] > seated
 
     expire(cur, quiet["task"]["task_id"])
-    assert update_task(cur, task_id, **grown)["state"]["status_text"] == grown["status_text"]
+    assert update_task(cur, task_id, status_text="tiny")["card_share"]["unseated"] == []
     assert [row["name"] for row in tasks.active_state_costs(cur)] == [SCHEMA]
 
 
-def test_a_store_over_its_ceiling_can_still_be_shrunk_but_not_grown(cur, project, monkeypatch):
-    for n in ("alpha", "beta", "gamma"):
-        new_task(cur, f"task {n}", project["project_id"], status_text="x" * 120)
-    seated = tasks.active_state_costs(cur)
-    monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(min(row["tokens"] for row in seated)))
+def test_cards_are_seated_newest_first_and_the_first_misfit_ends_the_run():
+    from datetime import datetime, timedelta
 
-    target = seated[0]["task_id"]
-    assert update_task(cur, target, status_text="tiny")["state"]["status_text"] == "tiny"
-    with pytest.raises(ProjectBudgetError):
-        update_task(cur, seated[1]["task_id"], status_text="x" * 120, goal="and now a goal")
+    now = datetime(2026, 10, 29)
+    rows = [
+        {"name": "old small", "tokens": 10, "last_activity_at": now - timedelta(days=3)},
+        {"name": "new", "tokens": 60, "last_activity_at": now},
+        {"name": "middle large", "tokens": 50, "last_activity_at": now - timedelta(days=1)},
+    ]
+
+    seated, unseated = tasks.seat_cards(rows, 100)
+
+    assert [row["name"] for row in seated] == ["new"]
+    assert [row["name"] for row in unseated] == ["middle large", "old small"]
 
 
 def test_a_task_over_new_card_and_detail_limits_can_still_be_shrunk(cur, project, monkeypatch):

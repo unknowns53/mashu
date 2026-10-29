@@ -296,7 +296,7 @@ scope は「どこで」、topic は「何の作業のあいだか」を絞る�
 ~~~text
 全体                 4000 token
 Memory               2000 token（always は 800 まで。各 Scope は always と合わせて 2000 まで）
-Task cards           1600 token / scope（1 Task 200）
+Task cards            800 token / session（1 Task 200。超えた古い Task は名前だけを 200 まで）
 Task detail           800 token / Task（常時配信しない）
 Topic body            800 token / topic（常時配信しない）
 Temporary Context     400 token
@@ -306,9 +306,9 @@ Scope ごとの Memory に独立した上限は無い。2000 から always の�
 
 容量で拒否されたときの文面は、書き込み前の空きを示す。always への追加が拒否されたときは、代わりに topic へ置いた場合に `always` の容量から使われる量（Scope を持たない既存 topic ごとの見出しの増分と、新しい topic なら見出し一行ぶん）も添える。空の topic は見出しを出さないので、最初の規則が入ると見出しの行全体が容量に数えられる。topic への追加がこの行で拒否されたときは、行の全文と token 数を示す。容量を空ける方法は、CLI からの書き込みなら `mashu` のコマンドで、MCP からの書き込みなら `memory_change_propose` や `memory_redeliver` の tool 名で示す。
 
-環境変数 MASHU_TOTAL_CAPACITY、MASHU_CAPACITY、MASHU_ALWAYS_CAPACITY、MASHU_PROJECT_CAPACITY、MASHU_TASK_CARD_CAPACITY、MASHU_TASK_DETAIL_CAPACITY、MASHU_TEMPORARY_CAPACITY、MASHU_TOPIC_CAPACITY で変更できる。
+環境変数 MASHU_TOTAL_CAPACITY、MASHU_CAPACITY、MASHU_ALWAYS_CAPACITY、MASHU_PROJECT_CAPACITY、MASHU_CARD_OVERFLOW_CAPACITY、MASHU_TASK_CARD_CAPACITY、MASHU_TASK_DETAIL_CAPACITY、MASHU_TEMPORARY_CAPACITY、MASHU_TOPIC_CAPACITY で変更できる。
 
-Task card の予算は Scope ごとに独立している。Scope を持たない Project の card は、全 Scope に共通する分として、それぞれの Scope の予算に含まれ、unrouted session にはこの共通分だけが届く。共通分への書き込みが予算で拒否されたときは、拒否文が Project に Scope が無いことを示し、`mashu project edit <project> --scope <scope>` での付け直しを案内する。`mashu status` の card 使用量は、最も重い Scope の値である。Task detail は配信の予算には含めず、1 Task ごとの上限だけを持つ。
+Task card の予算は書き込みではなく配信で効く。bootstrap は、そのセッションに届く active Task を最後の活動の新しい順に並べ、card を予算（MASHU_PROJECT_CAPACITY）まで載せる。最初に入らなかった card から後ろは、短い id・名前・最後の活動日だけを MASHU_CARD_OVERFLOW_CAPACITY の中で並べ、入りきらない分は件数で示す。書き込みは scope の合計では拒否せず、応答の `card_share.unseated` が card を失った Task を名指す。Scope を持たない Project の card は、全 Scope に共通する分として、それぞれの Scope の配信で競い、unrouted session にはこの共通分だけが届く。`mashu status` の card 使用量は、最も重い Scope の active な card の合計で、配信の予算と並べて表示する。Task detail は配信の予算には含めず、1 Task ごとの上限だけを持つ。
 
 ## Scope と route
 

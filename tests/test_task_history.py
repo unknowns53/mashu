@@ -12,7 +12,6 @@ from mashu.errors import (
     DuplicateTaskError,
     MalformedRequestError,
     MashuError,
-    ProjectBudgetError,
     RefusedError,
     StaleStateError,
 )
@@ -119,21 +118,9 @@ ITEMS = {
 }
 
 
-def test_a_refused_state_write_leaves_its_history_unwritten(cur, task, monkeypatch):
+def test_a_refused_state_write_leaves_its_history_unwritten(cur, task):
     with pytest.raises(MalformedRequestError):
         checkpoint(cur, task, goal="x" * 301, **ITEMS)
-
-    monkeypatch.setenv("MASHU_PROJECT_CAPACITY", "1")
-    with pytest.raises(ProjectBudgetError):
-        checkpoint(
-            cur,
-            task,
-            goal=task["state"]["goal"],
-            next_actions=task["state"]["next_actions"],
-            status_text="this state cannot fit, and it is larger than the one it replaces",
-            **ITEMS,
-        )
-    monkeypatch.delenv("MASHU_PROJECT_CAPACITY")
 
     update_task(cur, task["task"]["task_id"], actor="other", status_text="the other session won")
     with pytest.raises(StaleStateError):

@@ -15,6 +15,32 @@ TASK_DETAIL_INSTRUCTION = (
     "bootstrap carries an index card, not the full current state."
 )
 
+UNSEATED_INSTRUCTION = (
+    "These active tasks are older than the cards above and are named only; call task_get "
+    "with one's id before continuing it, and task_search finds the rest."
+)
+
+
+def _unseated_lines(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Name as many cardless tasks as the overflow share holds, and count the rest."""
+    named: list[dict[str, Any]] = []
+    budget = config.card_overflow_capacity() - pushed_cost([UNSEATED_INSTRUCTION])
+    for row in rows:
+        line = {
+            "task": str(row["task_id"])[:8],
+            "task_id": row["task_id"],
+            "name": row["name"],
+            "last_activity": row["last_activity_at"].date(),
+        }
+        if pushed_cost([_unseated_text(r) for r in [*named, line]]) > budget:
+            break
+        named.append(line)
+    return named, len(rows) - len(named)
+
+
+def _unseated_text(line: dict[str, Any]) -> str:
+    return f"{line['task']} {line['name']} ({line['last_activity']:%Y-%m-%d})"
+
 
 def active_states(cur: psycopg.Cursor, scope_id: UUID | None = None) -> list[dict[str, Any]]:
     """The active tasks whose state this session is entitled to, in a fixed order."""
@@ -59,16 +85,32 @@ def session_bootstrap(
     # Counted apart because they are refused apart (v3 8). Topic lines sit in the Memory seats.
     topic_tokens = pushed_cost([row["line"] for row in index])
     memory_tokens = pushed_cost([row["content"] for row in always + scoped]) + topic_tokens
-    state_rows = [
+    costed = [
         {
-            "task": str(row["task"]["task_id"])[:8],
             "task_id": row["task"]["task_id"],
-            "heading": row["heading"],
-            "content": tasks.card_text(row["task"]["name"], row["state"]),
+            "name": row["task"]["name"],
+            "last_activity_at": row["task"]["last_activity_at"],
+            "tokens": tasks.card_cost(row["task"]["name"], row["state"]),
+            "row": row,
         }
         for row in states
     ]
-    project_tokens = sum(tasks.card_cost(row["task"]["name"], row["state"]) for row in states)
+    seated, unseated = tasks.seat_cards(costed, config.project_capacity())
+    state_rows = [
+        {
+            "task": str(card["task_id"])[:8],
+            "task_id": card["task_id"],
+            "heading": card["row"]["heading"],
+            "content": tasks.card_text(card["name"], card["row"]["state"]),
+        }
+        for card in seated
+    ]
+    named, unnamed = _unseated_lines(unseated)
+    project_tokens = sum(card["tokens"] for card in seated) + (
+        pushed_cost([UNSEATED_INSTRUCTION, *(_unseated_text(line) for line in named)])
+        if unseated
+        else 0
+    )
     temporary_tokens = pushed_cost([row["content"] for row in contexts])
     total = memory_tokens + project_tokens + temporary_tokens
     ceiling = config.total_capacity()
@@ -84,6 +126,7 @@ def session_bootstrap(
             "topics": topic_tokens,
             "project": project_tokens,
             "cards": project_tokens,
+            "unseated": len(unseated),
             "temporary": temporary_tokens,
             "scope": scope_name,
         },
@@ -120,6 +163,9 @@ def session_bootstrap(
         "routed": routed,
         "states": state_rows,
         "task_instruction": TASK_DETAIL_INSTRUCTION if state_rows else None,
+        "unseated": named,
+        "unseated_more": unnamed,
+        "unseated_instruction": UNSEATED_INSTRUCTION if unseated else None,
         "temporary": [{"content": r["content"], "expires_at": r["expires_at"]} for r in contexts],
         "pending": pending,
         "memory_tokens": memory_tokens,

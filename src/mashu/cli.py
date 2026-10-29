@@ -401,6 +401,13 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     _print_state_rows(answer.get("states", []))
     if answer.get("task_instruction"):
         print(f"          {answer['task_instruction']}")
+    if answer.get("unseated_instruction"):
+        print("older active tasks")
+        for row in answer.get("unseated", []):
+            print(f"  {row['task']}  {row['name']}  ({row['last_activity']:%Y-%m-%d})")
+        if answer.get("unseated_more"):
+            print(f"  and {answer['unseated_more']} more")
+        print(_flow(answer["unseated_instruction"], indent="          "))
     if resumed is not None:
         print(f"resumed   {resumed['task_id']}  {resumed['name']}")
         print(
