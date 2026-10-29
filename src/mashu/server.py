@@ -927,7 +927,10 @@ def build_server() -> Any:
         """Get full current state and requested history; call before working on a task.
 
         The only tool returning full state; it adds card_tokens, card_limit, card_remaining,
-        detail_tokens, and detail_limit.
+        detail_tokens, and detail_limit. `decisions_in_force` always comes with it: what
+        earlier sessions settled and nothing later superseded, newest first, with
+        `decisions_in_force_more` counting the older ones left out. Check a proposal against
+        them before making it. `decisions=true` adds the full history with reasons.
         """
         try:
             with db.transaction() as cur:
@@ -950,9 +953,12 @@ def build_server() -> Any:
         include_closed: bool = False,
         limit: int = 10,
     ) -> dict[str, Any]:
-        """Search task names and current state, including closed tasks on request.
+        """Search tasks and their decisions, including closed tasks on request.
 
-        Results carry the card view; call task_get for a task's full state.
+        `tasks` carry the card view; call task_get for a task's full state. `decisions` are
+        decisions of any task whose text or reason holds every term of the query, those in
+        force first: search them before proposing a change, since another task may have
+        settled it. Japanese matches by containment, so query a short distinctive word.
         """
         try:
             with db.transaction() as cur:
@@ -963,7 +969,20 @@ def build_server() -> Any:
                     include_closed=include_closed,
                     limit=limit,
                 )
-                return _plain({"ok": True, "tasks": [_task_card_view(row) for row in found]})
+                decided = tasks.decision_search(
+                    cur,
+                    query,
+                    project=project,
+                    include_closed=include_closed,
+                    limit=limit,
+                )
+                return _plain(
+                    {
+                        "ok": True,
+                        "tasks": [_task_card_view(row) for row in found],
+                        "decisions": decided,
+                    }
+                )
         except MashuError as error:
             return _failure(error)
 

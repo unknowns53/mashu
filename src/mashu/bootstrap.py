@@ -7,7 +7,17 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import config, events, memories, migrate, projects, tasks, temporary, topics
+from mashu import (
+    config,
+    events,
+    memories,
+    migrate,
+    projects,
+    task_history,
+    tasks,
+    temporary,
+    topics,
+)
 from mashu.tokens import pushed_cost
 
 TASK_DETAIL_INSTRUCTION = (
@@ -85,6 +95,12 @@ def session_bootstrap(
     # Counted apart because they are refused apart (v3 8). Topic lines sit in the Memory seats.
     topic_tokens = pushed_cost([row["line"] for row in index])
     memory_tokens = pushed_cost([row["content"] for row in always + scoped]) + topic_tokens
+    decided = task_history.decision_count(cur, [row["task"]["task_id"] for row in states])
+    for row in states:
+        row["state"] = {
+            **row["state"],
+            "decisions_in_force_count": decided.get(row["task"]["task_id"], 0),
+        }
     costed = [
         {
             "task_id": row["task"]["task_id"],

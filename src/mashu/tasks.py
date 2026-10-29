@@ -288,6 +288,10 @@ def _card_lines(name: str, state: dict[str, Any]) -> list[tuple[str, str]]:
         if count:
             singular, plural = CARD_COUNT_LABELS[field]
             available.append(f"{count} {singular if count == 1 else plural}")
+    # Counted by the reader that has the history at hand; a state row alone carries none.
+    decided = state.get("decisions_in_force_count") or 0
+    if decided:
+        available.append(f"{decided} decision{'' if decided == 1 else 's'} in force")
     if available:
         parts.append(("details", f"details: {', '.join(available)}"))
     return parts
@@ -558,6 +562,13 @@ def _texts(state: dict[str, Any]) -> dict[str, str | None]:
 
 # search (5.2, 13.1)
 
+#: Whether every whitespace-separated term of the query appears in the text. Trigrams score a
+#: short Japanese query against a longer Japanese text near zero, so containment backs them up.
+_HAS_TERMS = (
+    "(SELECT coalesce(bool_and(strpos(lower({text}), lower(term)) > 0), false) "
+    "FROM unnest(%(terms)s::text[]) AS term)"
+)
+
 _SEARCH = f"""
 SELECT * FROM (
     SELECT t.*, p.name AS project_name, {_ACTIVITY} AS activity,
@@ -567,7 +578,13 @@ SELECT * FROM (
            greatest(
                similarity(t.name, %(query)s),
                similarity(coalesce(ts.goal, ''), %(query)s),
-               similarity(coalesce(ts.status_text, ''), %(query)s)
+               similarity(coalesce(ts.status_text, ''), %(query)s),
+               CASE WHEN {
+    _HAS_TERMS.format(
+        text="t.name || ' ' || coalesce(ts.goal, '') || ' ' || coalesce(ts.status_text, '')"
+    )
+}
+                    THEN 1 ELSE 0 END
            ) AS score
     FROM task t
     JOIN project p ON p.project_id = t.project_id
@@ -595,6 +612,7 @@ def task_search(
         _SEARCH,
         {
             "query": query,
+            "terms": search_terms(query),
             "project": project_id,
             "closed": include_closed,
             "floor": _floor(),
@@ -602,6 +620,49 @@ def task_search(
         },
     )
     return [_split(row) for row in cur.fetchall()]
+
+
+def search_terms(query: str) -> list[str]:
+    """The query's whitespace-separated terms, all of which a containment match needs."""
+    return (query or "").split()
+
+
+_DECISION_SEARCH = f"""
+SELECT d.decision_id, d.decision, d.reason, d.created_at, t.task_id, t.name AS task_name,
+       t.status AS task_status, p.name AS project_name,
+       EXISTS (SELECT 1 FROM decision x WHERE x.supersedes_id = d.decision_id) AS superseded
+FROM decision d
+JOIN task t ON t.task_id = d.task_id
+JOIN project p ON p.project_id = t.project_id
+WHERE (%(project)s::uuid IS NULL OR t.project_id = %(project)s::uuid)
+  AND (%(closed)s OR t.status = 'open')
+  AND cardinality(%(terms)s::text[]) > 0
+  AND {_HAS_TERMS.format(text="d.decision || ' ' || coalesce(d.reason, '')")}
+ORDER BY superseded, d.created_at DESC, d.decision_id DESC
+LIMIT %(limit)s
+"""
+
+
+def decision_search(
+    cur: psycopg.Cursor,
+    query: str,
+    *,
+    project: UUID | str | None = None,
+    include_closed: bool = False,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Decisions of any task whose text or reason holds every term, those in force first."""
+    project_id = projects.require_project(cur, project)["project_id"] if project else None
+    cur.execute(
+        _DECISION_SEARCH,
+        {
+            "terms": search_terms(query),
+            "project": project_id,
+            "closed": include_closed,
+            "limit": limit,
+        },
+    )
+    return cur.fetchall()
 
 
 # the budget (5.3, 8)
