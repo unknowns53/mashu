@@ -19,7 +19,7 @@ DEFAULT_ALWAYS_CAPACITY = 800
 DEFAULT_PROJECT_CAPACITY = 800
 
 #: The line naming active tasks that lost their card, in estimated tokens (v3 8).
-DEFAULT_CARD_OVERFLOW_CAPACITY = 400
+DEFAULT_CARD_OVERFLOW_CAPACITY = 200
 
 #: Maximum pushed index card for one active task.
 DEFAULT_TASK_CARD_CAPACITY = 200

@@ -276,7 +276,7 @@ Task card は Task 名・goal・statusをラベルつきで運び、approach / o
 TOTAL            4000 tokens
   Memory         2000（always は 800 まで。各 Scope は always と合わせて 2000 まで。topic の見出しを含む）
   Topic body      800 / topic（非配信）
-  Task cards      800 / session（200 / Task。新しい順に載せ、残りは名前だけを 400 まで）
+  Task cards      800 / session（200 / Task。新しい順に載せ、残りは名前だけを 200 まで）
   Task detail     800 / Task（非配信）
   Temporary       400
 ```

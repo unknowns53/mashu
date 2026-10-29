@@ -296,7 +296,7 @@ scope は「どこで」、topic は「何の作業のあいだか」を絞る�
 ~~~text
 全体                 4000 token
 Memory               2000 token（always は 800 まで。各 Scope は always と合わせて 2000 まで）
-Task cards            800 token / session（1 Task 200。超えた古い Task は名前だけを 400 まで）
+Task cards            800 token / session（1 Task 200。超えた古い Task は名前だけを 200 まで）
 Task detail           800 token / Task（常時配信しない）
 Topic body            800 token / topic（常時配信しない）
 Temporary Context     400 token
