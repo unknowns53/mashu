@@ -7,8 +7,8 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import capacity, config, events, redact
-from mashu.errors import MashuError, RefusedError, UnknownProjectError
+from mashu import capacity, events, redact
+from mashu.errors import MashuError, UnknownProjectError
 
 
 def create_project(
@@ -65,20 +65,11 @@ def update_project(
     if taken is not None and taken["project_id"] != project_id:
         raise MashuError(f"project '{name}' already exists")
 
-    before = tasks.pushed_totals(cur)["worst"]
     cur.execute(
         "UPDATE project SET name = %s, scope_id = %s WHERE project_id = %s RETURNING *",
         (name, scope_id, project_id),
     )
     row = cur.fetchone()
-    after = tasks.pushed_totals(cur)["worst"]
-    ceiling = config.project_capacity()
-    if after > ceiling and after >= before:
-        raise RefusedError(
-            f"the task-card share seats {ceiling} tokens and this project edit "
-            f"would take the busiest scope from {before} to {after}; shorten its active "
-            "task state or move work out of that scope first"
-        )
     events.record(
         cur,
         "project_updated",

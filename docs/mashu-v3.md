@@ -154,7 +154,7 @@ MCP で全文の state を返すのは `task_get` だけである。検索結果
 
 **並行する置換は楽観チェックで受ける。**複数セッションが同じ Task を同時に更新しうる。`task_checkpoint` と User の state 編集は読み取り時の `updated_at` を添えて置換し、不一致なら拒否して現在の state を返す。この照合をせずに last-writer-wins で上書きすると、並行セッションの一方の作業が、何の記録も残さずに消える。
 
-**予算境界の挙動も store が持つ。**Task card の予算は Scope ごとに独立する。state の置換の結果、その Scope に配信される active Task card の合計が予算（8 節）を超えるなら、書き込みを拒否し、現在の内訳と出口を返す。Scope を持たない Project の card は全 Scope 共通分として各 Scope の予算に含め、共通分への書き込みは最も重い Scope に対して判定する。別 Scope の固有 card は競合しない。full detail の本文はこの配信予算を消費せず、1 Task 800-token の上限で別に bound する。予算を超えたぶんを、書き手に知らせないまま切り詰めることはしない。
+**予算境界の挙動も store が持つ。**Task card の予算は Scope ごとに独立し、書き込みではなく配信で効かせる（8 節）。当初は、その Scope の active Task card の合計が予算を超える書き込みを拒否していた。運用すると、Agent は Task を作れるだけ作って予算をほぼ使い切り（一つの Scope で 1600 中 1576）、その 13 本のうち 7 本は 7 日以上動いていなかった。拒否は「Task を close してほしい」という依頼として User に回った。そこで書き込みは拒否せず、bootstrap が最後の活動の新しい順に card を予算まで載せ、残りの Task は短い id・名前・最後の活動日だけを別の小さな予算の中で並べる。書き込みの応答は `card_share` を返し、その `unseated` が card を失った Task を名指す。Scope を持たない Project の card は全 Scope 共通分として各 Scope の配信で競い、書き込みの応答は最も重い Scope で数える。別 Scope の固有 card は競合しない。full detail の本文はこの配信予算を消費せず、1 Task 800-token の上限で別に bound する。1 枚の card の 200-token の上限は、書き込みで拒否する。予算を超えたぶんを、書き手に知らせないまま切り詰めることはしない。
 
 ただし**その Task 自身の card を小さくする書き込みは、予算を超えている状態からでも通す**。予算は設定値であり、card の重さは配信の形から計算されるので、どちらも誰も行を書き換えていないのに変わりうる。つまり書き込みを経ずに予算を超えた状態が成立する。そこで一律に拒否すると、他の active Task だけで予算を超えている場合、対象を空にしても総量が予算を下回らないため拒否される。「他を縮めろ」と言いながらその縮約自体を拒むので、抜け出す手段が無くなる。入口拒否の思想は保ったまま、card を縮めて予算に近づける書き込みだけを通す。
 
@@ -276,12 +276,12 @@ Task card は Task 名・goal・statusをラベルつきで運び、approach / o
 TOTAL            4000 tokens
   Memory         2000（always は 800 まで。各 Scope は always と合わせて 2000 まで。topic の見出しを含む）
   Topic body      800 / topic（非配信）
-  Task cards     1600 / scope（200 / Task）
+  Task cards      800 / session（200 / Task。新しい順に載せ、残りは名前だけを 200 まで）
   Task detail     800 / Task（非配信）
   Temporary       400
 ```
 
-重要なのは、**Agent に押し込まれる総量を Mashu が一元管理し、subsystem が互いの予算を暗黙に借りない**ことである。Task card の予算が余っていても Memory がそれを恒久的に使うことはなく、その逆もしない。Memory の容量の判定は v2 のまま admission 時に、Task card は Scope ごとの配信量を 5.3 節のとおり書き込み時に判定する。`mashu status` は card の全 Scope 合計ではなく、最も重い Scope の配信量を表示する。full detail は「入りきらないため検索へ落とす」のではない。存在と取得先を必ず push したうえで、選んだ Task の既知の IDから決定的に pull する。Memory は存在自体を忘れるため本文 push が必要だが、Work は card が取得契機を運ぶため、この二段構造を取れる。
+重要なのは、**Agent に押し込まれる総量を Mashu が一元管理し、subsystem が互いの予算を暗黙に借りない**ことである。Task card の予算が余っていても Memory がそれを恒久的に使うことはなく、その逆もしない。Memory の容量の判定は v2 のまま admission 時に、Task card は 5.3 節のとおり配信時に判定する。Memory は User が採るものなので入口で絞れるが、Task は Agent が作るので、入口の拒否は User への依頼にしかならないからである。`mashu status` は card の全 Scope 合計ではなく、最も重い Scope の active な card の合計を配信の予算と並べて表示する。full detail は「入りきらないため検索へ落とす」のではない。存在と取得先を必ず push したうえで、選んだ Task の既知の IDから決定的に pull する。Memory は存在自体を忘れるため本文 push が必要だが、Work は card が取得契機を運ぶため、この二段構造を取れる。
 
 guard（v2 6.2 節、action を持つ topic）は Durable Memory の配信機構であり、Project State はそこに使わない。
 

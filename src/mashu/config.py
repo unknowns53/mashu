@@ -14,8 +14,12 @@ DEFAULT_CAPACITY = 2000
 #: Hard ceiling on the always layer alone, inside the whole-opening one above (5.2).
 DEFAULT_ALWAYS_CAPACITY = 800
 
-#: Hard ceiling on each scope's pushed task-card share, in estimated tokens (v3 5.3, 8).
-DEFAULT_PROJECT_CAPACITY = 1600
+#: Task cards delivered to one session, newest activity first, in estimated tokens (v3 8).
+#: Agents fill whatever share they are given, so the cut is made at delivery, not at a write.
+DEFAULT_PROJECT_CAPACITY = 800
+
+#: The line naming active tasks that lost their card, in estimated tokens (v3 8).
+DEFAULT_CARD_OVERFLOW_CAPACITY = 200
 
 #: Maximum pushed index card for one active task.
 DEFAULT_TASK_CARD_CAPACITY = 200
@@ -56,6 +60,10 @@ def always_capacity() -> int:
 
 def project_capacity() -> int:
     return int(os.environ.get("MASHU_PROJECT_CAPACITY") or DEFAULT_PROJECT_CAPACITY)
+
+
+def card_overflow_capacity() -> int:
+    return int(os.environ.get("MASHU_CARD_OVERFLOW_CAPACITY") or DEFAULT_CARD_OVERFLOW_CAPACITY)
 
 
 def task_card_capacity() -> int:

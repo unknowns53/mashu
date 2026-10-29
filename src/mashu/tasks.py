@@ -16,7 +16,6 @@ from mashu.errors import (
     MashuError,
     OverLimit,
     OverLimitError,
-    ProjectBudgetError,
     StaleStateError,
 )
 from mashu.tokens import ROW_OVERHEAD, estimate_tokens, pushed_cost
@@ -509,8 +508,6 @@ def task_create(
             hits,
         )
 
-    _check_budget(cur, task_id=None, name=name, state=state, project=home)
-
     lease = config.task_lease_days()
     cur.execute(
         """
@@ -543,7 +540,12 @@ def task_create(
             "forced_over": [str(c["task"]["task_id"]) for c in hits] or None,
         },
     )
-    return {**task_get(cur, task_id), "candidates": candidates, **_gate_report(verdict)}
+    return {
+        **task_get(cur, task_id),
+        "candidates": candidates,
+        "card_share": card_share(cur, home),
+        **_gate_report(verdict),
+    }
 
 
 def _texts(state: dict[str, Any]) -> dict[str, str | None]:
@@ -605,7 +607,7 @@ def task_search(
 # the budget (5.3, 8)
 
 _ACTIVE_STATES = """
-SELECT t.task_id, t.name, p.scope_id, ts.goal, ts.approach, ts.status_text,
+SELECT t.task_id, t.name, t.last_activity_at, p.scope_id, ts.goal, ts.approach, ts.status_text,
        ts.open_questions, ts.blockers, ts.next_actions
 FROM task t
 JOIN project p ON p.project_id = t.project_id
@@ -622,6 +624,7 @@ def active_state_costs(cur: psycopg.Cursor) -> list[dict[str, Any]]:
             "task_id": row["task_id"],
             "name": row["name"],
             "scope_id": row["scope_id"],
+            "last_activity_at": row["last_activity_at"],
             "tokens": card_cost(row["name"], row),
         }
         for row in cur.fetchall()
@@ -664,55 +667,36 @@ def _budget_competitors(
     return [*unscoped, *heaviest], "the busiest scope"
 
 
-def _check_budget(
-    cur: psycopg.Cursor,
-    *,
-    task_id: UUID | None,
-    name: str,
-    state: dict[str, Any],
-    project: dict[str, Any],
-) -> None:
-    """Refuse a write that would push its scope's task-card share over (5.3)."""
-    cost = card_cost(name, state)
-    seated = active_state_costs(cur)
-    was = next((row["tokens"] for row in seated if row["task_id"] == task_id), None)
-    others, boundary = _budget_competitors(
-        [row for row in seated if row["task_id"] != task_id], scope_id=project["scope_id"]
-    )
-    reported = [
-        {"task_id": row["task_id"], "name": row["name"], "tokens": row["tokens"]} for row in others
-    ]
-    breakdown = sorted(
-        [*reported, {"task_id": task_id, "name": name, "tokens": cost}],
-        key=lambda row: row["tokens"],
-        reverse=True,
-    )
-    total = sum(row["tokens"] for row in breakdown)
-    ceiling = config.project_capacity()
-    if total <= ceiling:
-        return
-    if was is not None and cost < was:
-        return
-    # A card pushed everywhere is weighed against another project's scope, so the
-    # fix the agent can't see from the breakdown is the project's missing scope.
-    unscoped = (
-        ""
-        if project["scope_id"] is not None
-        else f"Project '{project['name']}' has no scope, so its cards are pushed into every "
-        "scope and weighed against the busiest one. If its work belongs to one scope, ask "
-        f"the user to set it (`mashu project edit '{project['name']}' --scope <scope>`) "
-        "and write again; nothing else here changes that. "
-    )
-    raise ProjectBudgetError(
-        f"the task-card share for {boundary} seats {ceiling} tokens and this would "
-        f"take it to {total} "
-        f"({cost} for '{name}' on top of {total - cost} already pushed by "
-        f"{len(others)} active task(s)). {unscoped}A write that makes this task's own card "
-        "smaller is allowed through even from here, so shrink this card; otherwise "
-        "leave a task alone until its lease runs out, or ask the user to close one "
-        "(`mashu task close <id>`).",
-        breakdown,
-    )
+def seat_cards(rows: list[dict[str, Any]], capacity: int) -> tuple[list, list]:
+    """Split cards, newest activity first, into those delivered and those only named (v3 8).
+
+    The first card that does not fit ends the delivered run, so a smaller older card never
+    takes a seat ahead of a newer one.
+    """
+    ordered = sorted(rows, key=lambda row: row["last_activity_at"], reverse=True)
+    spent = 0
+    for at, row in enumerate(ordered):
+        if spent + row["tokens"] > capacity:
+            return ordered[:at], ordered[at:]
+        spent += row["tokens"]
+    return ordered, []
+
+
+def card_share(cur: psycopg.Cursor, project: dict[str, Any]) -> dict[str, Any]:
+    """Which active tasks beside this project's lose their card, after a write (v3 8).
+
+    A write is never refused for the scope's share; the oldest cards fall out of delivery
+    instead, and the writer is told which, so a needless task shows what it hid.
+    """
+    rows, boundary = _budget_competitors(active_state_costs(cur), scope_id=project["scope_id"])
+    capacity = config.project_capacity()
+    _, unseated = seat_cards(rows, capacity)
+    return {
+        "boundary": boundary,
+        "capacity": capacity,
+        "tokens": sum(row["tokens"] for row in rows),
+        "unseated": [{"task_id": row["task_id"], "name": row["name"]} for row in unseated],
+    }
 
 
 # the current state, and the lease (5.3, 7)
@@ -830,8 +814,6 @@ def task_update(
                 hits,
             )
 
-    _check_budget(cur, task_id=task_id, name=new_name, state=state, project=home)
-
     cur.execute(
         "UPDATE task SET name = %s, project_id = %s WHERE task_id = %s",
         (new_name, home["project_id"], task_id),
@@ -869,7 +851,7 @@ def task_update(
             **(history or {}),
         },
     )
-    return {**task_get(cur, task_id), **_gate_report(verdict)}
+    return {**task_get(cur, task_id), "card_share": card_share(cur, home), **_gate_report(verdict)}
 
 
 def append_next_action(
@@ -890,8 +872,6 @@ def append_next_action(
         state, name=task["name"], previous_name=task["name"], previous_state=current["state"]
     )
     verdict = _gate(_texts(state))
-    home = projects.require_project(cur, task["project_id"])
-    _check_budget(cur, task_id=task_id, name=task["name"], state=state, project=home)
 
     cur.execute(
         "UPDATE task_state SET next_actions = %s, updated_at = clock_timestamp(), "

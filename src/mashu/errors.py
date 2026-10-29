@@ -115,15 +115,6 @@ class ChangedSinceReadError(MashuError):
     """A decision made on a reading of rows that have changed since it was read."""
 
 
-class ProjectBudgetError(RefusedError):
-    """A card that would push the active-task share past its ceiling."""
-
-    def __init__(self, reason: str, breakdown: list[dict[str, object]]):
-        super().__init__(reason)
-        self.reason = reason
-        self.breakdown = breakdown
-
-
 class DuplicateTaskError(MashuError):
     """A task that reads like one already open in the same project (v3 5.2)."""
 
