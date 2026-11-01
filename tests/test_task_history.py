@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import datetime as dt
 import re
 from pathlib import Path, PureWindowsPath
+from uuid import uuid4
 
 import pytest
 
@@ -127,6 +129,31 @@ def test_a_refused_state_write_leaves_its_history_unwritten(cur, task):
         checkpoint(cur, task, status_text="still stale", **ITEMS)
 
     assert set(_history_counts(cur).values()) == {0}
+
+
+def test_one_session_writes_a_task_once_per_interval_whatever_the_write_carries(cur, task, task_id):
+    session = uuid4()
+    first = checkpoint(cur, task, status_text="measured once", session=session)
+    assert first["next_write_after"] - first["state"]["updated_at"] == dt.timedelta(minutes=30)
+
+    again = {**task, "state": first["state"]}
+    with pytest.raises(RefusedError, match="at most once every 30 minutes"):
+        checkpoint(cur, again, approach="a new approach", session=session, **ITEMS)
+    assert tasks.task_get(cur, task_id)["state"]["approach"] is None
+    assert set(_history_counts(cur).values()) == {0}
+
+    other = checkpoint(cur, again, status_text="another session", session=uuid4())
+    by_hand = checkpoint(cur, {**task, "state": other["state"]}, status_text="no session")
+    assert "next_write_after" not in by_hand
+
+
+def test_a_zero_interval_lets_every_checkpoint_through(cur, task, monkeypatch):
+    monkeypatch.setenv("MASHU_CHECKPOINT_INTERVAL_MINUTES", "0")
+    session = uuid4()
+    first = checkpoint(cur, task, status_text="one", session=session)
+    second = checkpoint(cur, {**task, "state": first["state"]}, status_text="two", session=session)
+    assert second["state"]["status_text"] == "two"
+    assert "next_write_after" not in second
 
 
 def test_a_checkpoint_renews_the_lease_and_is_refused_once_the_task_is_closed(cur, task, task_id):
