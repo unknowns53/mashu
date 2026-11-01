@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import psycopg
 
 from mashu import approvals, config, events, redact, tasks
-from mashu.errors import MalformedRequestError, MashuError, OverLimit
+from mashu.errors import MalformedRequestError, MashuError, OverLimit, RefusedError
 from mashu.tokens import pushed_cost
 
 ArtifactKind = Literal[
@@ -180,6 +180,44 @@ def _check_supersedes(cur: psycopg.Cursor, task_id: UUID, supersedes_id: UUID | 
         raise MashuError(f"decision {supersedes_id} belongs to another task")
 
 
+def _last_own_write(cur: psycopg.Cursor, task_id: UUID, session: UUID | None) -> Any:
+    """When this session last wrote this task's state inside the checkpoint interval."""
+    minutes = config.checkpoint_interval_minutes()
+    if session is None or minutes <= 0:
+        return None
+    cur.execute(
+        """
+        SELECT max(created_at) AS written_at FROM event_log
+        WHERE event_type = 'task_state_replaced'
+          AND detail->>'task_id' = %s AND detail->>'session' = %s
+          AND created_at > clock_timestamp() - make_interval(mins => %s)
+        """,
+        (str(task_id), str(session), minutes),
+    )
+    return cur.fetchone()["written_at"]
+
+
+def _refuse_within_interval(cur: psycopg.Cursor, task_id: UUID, session: UUID | None) -> None:
+    """Refuse one session's second write to a task inside the interval, whatever it carries.
+
+    Agents measuring or iterating change status and next steps every few minutes and read
+    each change as a reason to write. Any content that let a write through early would be
+    made up to get through, and a made-up decision reaches later sessions as one in force.
+    """
+    written_at = _last_own_write(cur, task_id, session)
+    if written_at is None:
+        return
+    minutes = config.checkpoint_interval_minutes()
+    opens_at = written_at + dt.timedelta(minutes=minutes)
+    raise RefusedError(
+        f"this session wrote this task's state at {written_at:%H:%M}, and one session writes "
+        f"a task at most once every {minutes} minutes, whatever the write carries. Do not "
+        f"resend before {opens_at:%H:%M}. Keep failed tries and decisions in mind and send "
+        "them in that write; progress belongs in commits and the project's documents, and "
+        "the state written last stands meanwhile"
+    )
+
+
 def checkpoint(
     cur: psycopg.Cursor,
     task_id: UUID,
@@ -223,6 +261,7 @@ def checkpoint(
     tasks._lock(cur)
     tasks._require_open(cur, task_id)
     current = tasks.task_get(cur, task_id)["state"]
+    _refuse_within_interval(cur, task_id, session)
     problems = [
         *_what_changed_problems(what_changed),
         *tasks.limit_problems(tasks.replaced_state(current, **given), current),
@@ -278,6 +317,10 @@ def checkpoint(
             for ident, item in zip(reference_ids, artifact_items, strict=True)
         ],
     }
+    minutes = config.checkpoint_interval_minutes()
+    if session is not None and minutes > 0:
+        # Said on success so the agent knows the interval before it next feels like writing.
+        result["next_write_after"] = updated["state"]["updated_at"] + dt.timedelta(minutes=minutes)
     for verdict in verdicts:
         report = _gate_report(verdict)
         result["unchecked"] = bool(result.get("unchecked")) or report["unchecked"]

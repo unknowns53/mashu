@@ -473,28 +473,30 @@ def test_mcp_refuses_a_task_write_carrying_tool_call_markup(mcp, dsn, monkeypatc
         assert tasks.task_get(cur, task_id)["state"]["approach"] is None
 
 
-def test_a_session_writing_state_again_soon_is_answered_like_any_other_write(mcp, dsn):
+def test_a_session_writing_state_again_soon_is_refused_over_mcp(mcp, dsn):
     with db.transaction(dsn) as cur:
         new_project(cur, "mashu")
     made = mcp("task_create", project="mashu", name=SCHEMA, goal=GOAL)
     task_id, at = made["task"]["task_id"], made["state"]["updated_at"]
     first = mcp("task_checkpoint", task_id=task_id, expect_updated_at=at, approach="a")
+    assert first["ok"] is True and "next_write_after" in first
     again = mcp(
         "task_checkpoint",
         task_id=task_id,
         expect_updated_at=first["state"]["updated_at"],
         status_text="written",
         what_changed="wrote it",
+        decisions=[{"decision": "made up to get through"}],
     )
-    assert again["ok"] is True and again["state"]["status_text"] == "written"
-    assert "cadence" not in first and "cadence" not in again
+    assert again["ok"] is False and "at most once every" in again["error"]
     with db.transaction(dsn) as cur:
+        assert tasks.task_get(cur, task_id)["state"]["status_text"] is None
         cur.execute(
             "SELECT detail FROM event_log WHERE event_type = 'task_state_replaced' "
             "ORDER BY created_at"
         )
         sessions = {row["detail"]["session"] for row in cur.fetchall()}
-        cur.execute("SELECT count(*) AS n FROM task_checkpoint")
+        cur.execute("SELECT count(*) AS n FROM decision")
         assert cur.fetchone()["n"] == 0
     assert len(sessions) == 1 and None not in sessions
 
