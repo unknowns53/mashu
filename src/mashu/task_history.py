@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 
-from mashu import approvals, config, events, redact, tasks
+from mashu import approvals, config, events, redact, settings, tasks
 from mashu.errors import MalformedRequestError, MashuError, OverLimit, RefusedError
 from mashu.tokens import pushed_cost
 
@@ -180,9 +180,8 @@ def _check_supersedes(cur: psycopg.Cursor, task_id: UUID, supersedes_id: UUID | 
         raise MashuError(f"decision {supersedes_id} belongs to another task")
 
 
-def _last_own_write(cur: psycopg.Cursor, task_id: UUID, session: UUID | None) -> Any:
+def _last_own_write(cur: psycopg.Cursor, task_id: UUID, session: UUID | None, minutes: int) -> Any:
     """When this session last wrote this task's state inside the checkpoint interval."""
-    minutes = config.checkpoint_interval_minutes()
     if session is None or minutes <= 0:
         return None
     cur.execute(
@@ -204,10 +203,10 @@ def _refuse_within_interval(cur: psycopg.Cursor, task_id: UUID, session: UUID | 
     each change as a reason to write. Any content that let a write through early would be
     made up to get through, and a made-up decision reaches later sessions as one in force.
     """
-    written_at = _last_own_write(cur, task_id, session)
+    minutes = settings.checkpoint_interval_minutes(cur)
+    written_at = _last_own_write(cur, task_id, session, minutes)
     if written_at is None:
         return
-    minutes = config.checkpoint_interval_minutes()
     opens_at = written_at + dt.timedelta(minutes=minutes)
     raise RefusedError(
         f"this session wrote this task's state at {written_at:%H:%M}, and one session writes "
@@ -317,7 +316,7 @@ def checkpoint(
             for ident, item in zip(reference_ids, artifact_items, strict=True)
         ],
     }
-    minutes = config.checkpoint_interval_minutes()
+    minutes = settings.checkpoint_interval_minutes(cur)
     if session is not None and minutes > 0:
         # Said on success so the agent knows the interval before it next feels like writing.
         result["next_write_after"] = updated["state"]["updated_at"] + dt.timedelta(minutes=minutes)

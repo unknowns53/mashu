@@ -14,6 +14,7 @@ from mashu import (
     routing,
     scopes,
     screen,
+    settings,
     topics,
 )
 from mashu import migrate as migration
@@ -31,6 +32,7 @@ _TOP_ITEMS = (
     ("Scopes", "memory homes and their opening cost"),
     ("Topics", "rules read when one kind of work begins"),
     ("Routes", "directory trees mapped to scopes or ignored"),
+    ("Checkpoint interval", "how often one session may write a task's state"),
     ("Schema/migrations", "database version and pending changes"),
 )
 
@@ -41,7 +43,8 @@ _HELP = """
   b/PgUp       go back one screenful
   Home/End     jump to the first or last list item
   n            Scopes, Topics, Routes: add one
-  e            Scopes, Topics, Routes: edit the selected one
+  e            Scopes, Topics, Routes: edit the selected one;
+               Checkpoint interval: change it
   x            Topics, Routes: remove the selected one, after confirmation
   i            Routes: add an ignored path
   m            Schema/migrations: apply pending migrations, after confirmation
@@ -690,6 +693,47 @@ def _routes_page(dsn: str | None) -> None:
                 note = f"  {error}"
 
 
+def _interval_text(minutes: int) -> str:
+    if minutes == 0:
+        return "  One session may write a task's state as often as it likes."
+    return (
+        f"  One session may write a task's state once every {minutes} minutes.\n"
+        "  A second write inside that time is refused whatever it carries,\n"
+        "  and the session's next MCP call reads a changed value."
+    )
+
+
+def _interval_page(dsn: str | None) -> None:
+    note = ""
+    while True:
+        with db.transaction(dsn) as cur:
+            minutes = settings.checkpoint_interval_minutes(cur)
+        body = _interval_text(minutes) + (f"\n\n{note}" if note else "")
+        keys = "  e change   ← back   q quit   ? help"
+        screen.paint(f"{_title('Checkpoint interval')}\n\n{body}\n\n{keys}")
+        key = screen.getkey()
+        note = ""
+        if key == "q":
+            raise screen.Quit()
+        if key == "left":
+            return
+        if key == "?":
+            _help()
+        elif key == "e":
+            answer = screen.editline("  minutes (0 for no limit): ", str(minutes))
+            if isinstance(answer, screen.Cancelled) or not answer.text:
+                note = "  interval unchanged"
+                continue
+            try:
+                with db.transaction(dsn) as cur:
+                    settings.set_checkpoint_interval_minutes(cur, int(answer.text), actor=ACTOR)
+                note = f"  set to {int(answer.text)} minutes"
+            except ValueError:
+                note = f"  {answer.text!r} is not a whole number of minutes"
+            except MashuError as error:
+                note = f"  {error}"
+
+
 def _schema_pending(dsn: str | None) -> list[str]:
     with db.transaction(dsn) as cur:
         return migration.pending(cur)
@@ -754,6 +798,7 @@ _PAGES: tuple[Callable[[str | None], None], ...] = (
     _scopes_page,
     _topics_page,
     _routes_page,
+    _interval_page,
     _schema_page,
 )
 

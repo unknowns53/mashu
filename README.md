@@ -131,7 +131,7 @@ mashu
 | Attention | candidate の review、close proposal の判断、dormant Task の確認 |
 | Memories | active / retired Memory と Temporary Context の閲覧・検索、直接登録、編集、always / scope と Temporary Context の相互変換、retire、delivery / topic の変更 |
 | Work | active / dormant / closed Task と Project の閲覧・検索、Task の履歴・artifact の確認、Task / Current State / Project の作成・編集、touch / close / reopen |
-| Settings & health | 容量と queue の状態、bootstrap preview、Scope と route の作成・編集・削除、Topic の作成・編集（action の結びつけを含む）・削除、migration の確認・適用 |
+| Settings & health | 容量と queue の状態、bootstrap preview、Scope と route の作成・編集・削除、Topic の作成・編集（action の結びつけを含む）・削除、checkpoint の間隔の変更、migration の確認・適用 |
 
 各画面では矢印または j / k で移動し、Enter で開く。`/` のある一覧は部分検索できる。Esc または ← で一段戻り、q はどの画面からでも Mashu を終える。? はどの画面でもその画面のキーの説明を出す。TUI は alternate screen 上で動くため、再描画した画面は terminal の履歴へ残らない。
 
@@ -442,7 +442,7 @@ User が配信先の変更を指示 → memory_redeliver
 次のセッションへ引き継ぐ → task_checkpoint（attempts / decisions / artifacts を添える）
 ~~~
 
-task_checkpoint は、次のセッションが要るものだけを渡す。失敗した試行、後で理由を失うと高くつく判断、外部成果物の原典、goal・approach・blockers の変更、作業を止める前の状態がそれにあたる。進捗、測定の途中結果、次の一手の変更は書かず、commit とプロジェクトの文書に任せる。同じセッションが同じ Task の state を書けるのは 30 分に一度で（`MASHU_CHECKPOINT_INTERVAL_MINUTES`、0 で制限なし）、その間の書き込みは中身にかかわらず拒否する。中身で例外を作ると、通すために試行や判断を作って書く動機が生まれ、作られた decision は有効な判断として次のセッションに届くからだ。成功の応答は次に書ける時刻を `next_write_after` で返す。作業を止める前の書き込みが間隔の中に入ったときは、直前に書いた state がそのまま残る。呼ぶたびに state のスナップショットを保存することはせず、任意の `what_changed` は state 置換の event に残る。スナップショットとしての checkpoint は close のときに一つだけ作られ、close の理由をその what_changed に持つ。status_text は Task がいまどこにいるかが変わったときだけ書き換える。task_checkpoint の `attempts` には失敗した試行の結末、`decisions` には理由を失うと再導出コストが高い判断、`artifacts` には外部成果物の原典を入れる。一つでも拒否されれば state も履歴も書かれない。Agent が独自に考えた Memory 変更は提案に留め、明示指示があった場合だけ MCP から適用する。ユーザーの会話指示の出所は記録されるが、認証されるわけではない。Temporary Context の登録、直接 Memory 操作、proposal review、Task の close / reopen は User の CLI / TUI 操作だ。終わったと思ったら status_text にそう書くのではなく task_propose_close を使う。前者は User に読み直しと打ち直しをさせ、後者は 1 打鍵で決まる。終わったとみなすのは User のマージや受け入れの後で、自分の担当分が終わったときや、ブランチが User の確認を待っているときではない。提案の後に state を書くと提案が stale になり、一括の受け入れから外れるので、checkpoint を先に打ち、提案を最後にする。Task を作るのは複数のセッションにまたがる作業だけで、一つの依頼や大きな Task の一工程には作らない。
+task_checkpoint は、次のセッションが要るものだけを渡す。失敗した試行、後で理由を失うと高くつく判断、外部成果物の原典、goal・approach・blockers の変更、作業を止める前の状態がそれにあたる。進捗、測定の途中結果、次の一手の変更は書かず、commit とプロジェクトの文書に任せる。同じセッションが同じ Task の state を書けるのは間隔ごとに一度で、その間の書き込みは中身にかかわらず拒否する。間隔は既定で 30 分で、TUI の Settings & health にある Checkpoint interval で 0〜1440 分に変えられ、0 にすると制限が外れる。値は database の `setting` テーブルに置き、書き込みのたびに読むので、動いているセッションにも次の呼び出しから効く。中身で例外を作ると、通すために試行や判断を作って書く動機が生まれ、作られた decision は有効な判断として次のセッションに届くからだ。成功の応答は次に書ける時刻を `next_write_after` で返す。作業を止める前の書き込みが間隔の中に入ったときは、直前に書いた state がそのまま残る。呼ぶたびに state のスナップショットを保存することはせず、任意の `what_changed` は state 置換の event に残る。スナップショットとしての checkpoint は close のときに一つだけ作られ、close の理由をその what_changed に持つ。status_text は Task がいまどこにいるかが変わったときだけ書き換える。task_checkpoint の `attempts` には失敗した試行の結末、`decisions` には理由を失うと再導出コストが高い判断、`artifacts` には外部成果物の原典を入れる。一つでも拒否されれば state も履歴も書かれない。Agent が独自に考えた Memory 変更は提案に留め、明示指示があった場合だけ MCP から適用する。ユーザーの会話指示の出所は記録されるが、認証されるわけではない。Temporary Context の登録、直接 Memory 操作、proposal review、Task の close / reopen は User の CLI / TUI 操作だ。終わったと思ったら status_text にそう書くのではなく task_propose_close を使う。前者は User に読み直しと打ち直しをさせ、後者は 1 打鍵で決まる。終わったとみなすのは User のマージや受け入れの後で、自分の担当分が終わったときや、ブランチが User の確認を待っているときではない。提案の後に state を書くと提案が stale になり、一括の受け入れから外れるので、checkpoint を先に打ち、提案を最後にする。Task を作るのは複数のセッションにまたがる作業だけで、一つの依頼や大きな Task の一工程には作らない。
 
 ### PreToolUse hook で action つきの topic を示す
 

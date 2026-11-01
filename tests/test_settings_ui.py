@@ -3,7 +3,17 @@ from __future__ import annotations
 import pytest
 
 from conftest import candidate, expire, getkeys, new_project, new_task, remember
-from mashu import db, nominations, routing, scopes, settings_ui, tasks, temporary, topics
+from mashu import (
+    db,
+    nominations,
+    routing,
+    scopes,
+    settings,
+    settings_ui,
+    tasks,
+    temporary,
+    topics,
+)
 from mashu.errors import RefusedError
 
 pytestmark = pytest.mark.usefixtures("known_screen")
@@ -150,6 +160,21 @@ def test_routes_can_be_edited_added_ignored_and_removed(dsn, monkeypatch):
     kept = [(row["path_prefix"], row["scope_id"]) for row in rows]
     assert kept == [("/tmp/new", None), ("/tmp/i", None)]
     assert rows[0]["route_id"] == route["route_id"]
+
+
+def test_the_checkpoint_interval_is_changed_only_to_whole_minutes_in_range(dsn, monkeypatch):
+    getkeys(monkeypatch, "e", "e", "e", "left")
+    answers(monkeypatch, "15", "soon", "2000")
+
+    settings_ui._interval_page(dsn)
+
+    with db.transaction(dsn) as cur:
+        assert settings.checkpoint_interval_minutes(cur) == 15
+        cur.execute("SELECT actor, detail FROM event_log WHERE event_type = 'setting_changed'")
+        changes = cur.fetchall()
+    assert [(row["actor"], row["detail"]["from"], row["detail"]["to"]) for row in changes] == [
+        ("user", 30, 15)
+    ]
 
 
 def test_schema_apply_is_confirmed_and_reports_a_noop(dsn, monkeypatch, capsys):
