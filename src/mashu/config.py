@@ -39,9 +39,8 @@ DEFAULT_TOPIC_CAPACITY = 800
 #: How long a task's lease runs from its last sign of activity (v3 7).
 DEFAULT_TASK_LEASE_DAYS = 14
 
-#: How long after its own last write one session's task_checkpoint must bring something
-#: the next session needs: a failed try, a reason, a source, or a new goal, approach, or blocker.
-#: Zero lets every checkpoint through.
+#: How long one session waits between two writes of a task's state until the user sets
+#: another value on the Settings screen (settings.py).
 DEFAULT_CHECKPOINT_INTERVAL_MINUTES = 30
 
 #: Similarity at which two pains count as the same hole (4.1).
@@ -96,12 +95,6 @@ def topic_capacity() -> int:
 
 def task_lease_days() -> int:
     return int(os.environ.get("MASHU_TASK_LEASE_DAYS") or DEFAULT_TASK_LEASE_DAYS)
-
-
-def checkpoint_interval_minutes() -> int:
-    return int(
-        os.environ.get("MASHU_CHECKPOINT_INTERVAL_MINUTES") or DEFAULT_CHECKPOINT_INTERVAL_MINUTES
-    )
 
 
 def match_threshold() -> float:

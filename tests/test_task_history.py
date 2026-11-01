@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 
 from conftest import expire, new_project, new_task, update_task
-from mashu import approvals, db, redact, server, task_history, tasks
+from mashu import approvals, db, redact, server, settings, task_history, tasks
 from mashu.errors import (
     ClosedTaskError,
     DuplicateTaskError,
@@ -147,13 +147,26 @@ def test_one_session_writes_a_task_once_per_interval_whatever_the_write_carries(
     assert "next_write_after" not in by_hand
 
 
-def test_a_zero_interval_lets_every_checkpoint_through(cur, task, monkeypatch):
-    monkeypatch.setenv("MASHU_CHECKPOINT_INTERVAL_MINUTES", "0")
+def test_a_zero_interval_lets_every_checkpoint_through(cur, task):
+    settings.set_checkpoint_interval_minutes(cur, 0, actor="user")
     session = uuid4()
     first = checkpoint(cur, task, status_text="one", session=session)
     second = checkpoint(cur, {**task, "state": first["state"]}, status_text="two", session=session)
     assert second["state"]["status_text"] == "two"
     assert "next_write_after" not in second
+
+
+def test_the_interval_set_last_decides_and_a_store_without_it_runs_on_the_default(
+    cur, task, old_store
+):
+    settings.set_checkpoint_interval_minutes(cur, 5, actor="user")
+    written = checkpoint(cur, task, status_text="one", session=uuid4())
+    assert written["next_write_after"] - written["state"]["updated_at"] == dt.timedelta(minutes=5)
+    with pytest.raises(MashuError, match="0 to 1440 minutes"):
+        settings.set_checkpoint_interval_minutes(cur, 1441, actor="user")
+
+    with db.transaction(old_store("0015_setting.sql")) as old:
+        assert settings.checkpoint_interval_minutes(old) == 30
 
 
 def test_a_checkpoint_renews_the_lease_and_is_refused_once_the_task_is_closed(cur, task, task_id):
