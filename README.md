@@ -485,6 +485,8 @@ subject は tool または command。tool は名前全体、command は正規表
 
 tools/sessionstart_guard.py を SessionStart hook に登録すると、startup / resume では bootstrap の内容を配信し、compact では圧縮で落ちた内容を再配信する。compact のときは hook が受け取った transcript_path を `mashu bootstrap --resume-transcript` に渡し、圧縮の前にそのセッションが続けていた open な task を、task_get で読み直すよう促す一行とともに名指しする。続けていた task の決め方は `mashu compactions` と同じである。
 
+tools/sessionstart_said.py を同じ hook の 2 本目に登録すると、compact のときに、そのセッションでユーザーが打ち込んだ発言と AskUserQuestion への回答を transcript から読み、古い順に再掲する。Claude Code の要約は、その回に要約する区間の発言だけを載せ、それより前の発言は前回の要約から書き写された分しか残らない。そのため、何度か前の圧縮より前に出た訂正や却下は、この再掲が無いと失われやすい。Claude Code は hook 1 本の出力が 10,000 字を超えると先頭 2,000 字だけに切り詰めるので、再配信とは別の hook にして、新しい発言から 9,000 字までを載せる。
+
 ~~~json
 {
   "hooks": {
@@ -495,6 +497,10 @@ tools/sessionstart_guard.py を SessionStart hook に登録すると、startup /
           {
             "type": "command",
             "command": "/path/to/mashu/tools/sessionstart_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "/path/to/mashu/tools/sessionstart_said.py"
           }
         ]
       }
@@ -573,6 +579,7 @@ src/mashu/                   実装
 tests/                       実 PostgreSQL に対するテスト
 tools/pretooluse_guard.py    action つき topic 用 PreToolUse hook
 tools/sessionstart_guard.py  SessionStart 用 hook
+tools/sessionstart_said.py   圧縮の後にユーザーの発言を再掲する SessionStart 用 hook
 hooks/                       pre-commit / commit-msg
 tools/release.sh             版を上げてタグと GitHub Release を作る
 .github/workflows/ci.yml     GitHub Actions の CI
