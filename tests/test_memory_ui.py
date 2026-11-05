@@ -159,6 +159,22 @@ def test_temporary_context_can_be_edited_in_place(dsn, monkeypatch):
     assert row["scope_id"] is None
 
 
+@pytest.mark.parametrize(("answer", "standing"), [("n", 1), ("y", 0)])
+def test_temporary_context_ends_now_only_after_explicit_yes(dsn, monkeypatch, answer, standing):
+    with db.transaction(dsn) as cur:
+        temporary.put_temporary(cur, content="the release is frozen", actor="user", days=2)
+    keys(monkeypatch, "3", "r", answer, "q")
+
+    assert memory_ui.run(dsn) == 0
+
+    with db.transaction(dsn) as cur:
+        assert len(temporary.active_temporary(cur)) == standing
+        cur.execute("SELECT count(*) AS n FROM temporary_context")
+        assert cur.fetchone()["n"] == 1
+        cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'temporary_ended'")
+        assert cur.fetchone()["n"] == 1 - standing
+
+
 def test_memory_and_temporary_context_can_be_converted_both_ways(dsn, monkeypatch):
     original = remember(dsn)
     keys(monkeypatch, "c", "2", "c", "y", "q")
