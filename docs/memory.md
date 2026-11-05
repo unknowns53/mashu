@@ -238,6 +238,8 @@ Temporary Context は User だけが CLI / TUI から作る。Agent が書く経
 
 Memories TUI の `c` は、active な always / scope Memory と Temporary Context を相互変換する。Memory からの変換では期限を必須とし、元の Memory を `relocated` として移動先 ID とともに記録してから、本文と Scope を保った Temporary Context を作る。逆変換では Temporary Context をその時点で終了し、同じ本文と Scope の active Memory を作る。無関係な invalidated / legacy conflict は上書きせず、容量の判定が拒否した場合は元の行を有効なまま残す。topic は、発動条件という配送条件を Temporary Context へ移せないため対象外とする。
 
+同じ画面の `r` は、選んだ Temporary Context を確認のうえその時点で終了する。誤って登録した条件を、期限まで配信させ続けないためである。行は削除せず、期限到来と同じく `expires_at` を現在時刻にして配信対象から外し、`temporary_ended` の event を残す。
+
 ## 7. インターフェース
 
 ### 7.1 Memory 関連 MCP Tool
@@ -284,7 +286,7 @@ Review UI は nomination と Memory change proposal の一覧・個別画面を�
 
 まとめて承認するキーは無い。配信の容量に載せるかどうかは、1 件ずつその根拠を見て決める。決めずに退ける保留（`s`、理由必須）だけは別で、status は pending のまま `deferred_at` と理由を持ち、既定の一覧から外れる。決定ではないので pending の件数も短縮 ID での直接操作も変わらず、`mashu review --all` で一覧に戻る。
 
-dashboard の Memories では active / retired Memory と未失効の Temporary Context を閲覧・検索する。Memory の詳細には evidence、revision history、retire の種別、後継または移動先を含める。User は direct remember、Memory と Temporary Context の編集、Temporary Context の登録、kind を選んだ retire、delivery / topic の変更を 1 件ずつ実行できる。delivery を選ぶ画面は三つの経路をそれぞれ一行の説明つきで並べ、topic は番号つきの一覧から選ぶか、名前・Scope・発動条件を入力してその場で作る。提案 review は Attention と `mashu review --changes` から開ける。
+dashboard の Memories では active / retired Memory と未失効の Temporary Context を閲覧・検索する。Memory の詳細には evidence、revision history、retire の種別、後継または移動先を含める。User は direct remember、Memory と Temporary Context の編集、Temporary Context の登録と終了、kind を選んだ retire、delivery / topic の変更を 1 件ずつ実行できる。delivery を選ぶ画面は三つの経路をそれぞれ一行の説明つきで並べ、topic は番号つきの一覧から選ぶか、名前・Scope・発動条件を入力してその場で作る。提案 review は Attention と `mashu review --changes` から開ける。
 
 `mashu gui` は同じ内容をブラウザで見渡す読み取り専用の経路である。Memory、Temporary Context、Task、pending の nomination と Memory change を本文を省略せずに一覧し、Memory と Task には履歴つきの詳細ページがある。書き込みの経路は持たず、GET と HEAD 以外の要求は 405 で拒否し、各ページの transaction は `SET TRANSACTION READ ONLY` で始める。localhost に書き込み口があれば、shell を持つ Agent が User として承認でき、Agent の提案と User の承認の区別（4.1 節）が崩れるからである。待ち受けは 127.0.0.1 に限り、Host header が loopback の名前でない要求も拒否する。
 

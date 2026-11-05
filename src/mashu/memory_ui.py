@@ -14,7 +14,7 @@ ACTOR = "user"
 _VIEWS = {"1": "active", "2": "retired", "3": "temporary"}
 _KEYS = (
     "  ↑↓/jk move   PgUp/PgDn   / search   ⏎ why   ← back   q quit   ? help\n"
-    "  n remember   p temporary   e edit   c convert   r retire   d delivery"
+    "  n remember   p temporary   e edit   c convert   r retire/end   d delivery"
 )
 _ITEM_KEYS = "  space read on   b page back   ← back   q quit   ? help"
 
@@ -31,7 +31,7 @@ _HELP = """
   p            add temporary context
   e            edit the selected memory or temporary context
   c            convert an active memory to temporary context, or the reverse
-  r            retire the selected active memory
+  r            retire the selected active memory, or end the selected temporary context
   d            change where the selected active memory is delivered
   ← or Esc     clear the search; without a search, go back
   ?            show this help
@@ -710,6 +710,14 @@ def _convert_to_temporary(dsn: str | None, row: dict[str, Any]) -> tuple[str, UU
     return note, context["context_id"]
 
 
+def _end_temporary(dsn: str | None, row: dict[str, Any]) -> str:
+    if not _confirm(f"end temporary {_short(row['context_id'])} now?"):
+        return screen.warning("  ! temporary context unchanged")
+    with db.transaction(dsn) as cur:
+        temporary.end(cur, row["context_id"], actor=ACTOR)
+    return screen.success(f"  ✓ ended temporary {_short(row['context_id'])}")
+
+
 def _convert_to_memory(dsn: str | None, row: dict[str, Any]) -> tuple[str, UUID | None]:
     if not _confirm(f"convert temporary {_short(row['context_id'])} to active memory?"):
         return screen.warning("  ! conversion cancelled"), None
@@ -901,9 +909,9 @@ def run(dsn: str | None = None) -> int:
             except MashuError as error:
                 note = screen.danger(f"  ✗ {error}")
             continue
-        if view == "temporary" and key == "e":
+        if view == "temporary" and key in {"e", "r"}:
             try:
-                note = _revise_temporary(dsn, row)
+                note = _revise_temporary(dsn, row) if key == "e" else _end_temporary(dsn, row)
             except MashuError as error:
                 note = screen.danger(f"  ✗ {error}")
             continue

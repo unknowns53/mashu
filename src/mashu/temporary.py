@@ -179,6 +179,22 @@ def revise(
     return {**row, **({"unchecked": True} if verdict.unchecked else {})}
 
 
+def end(cur: psycopg.Cursor, context_id: UUID, *, actor: str) -> dict[str, Any]:
+    """Stop a standing condition now. The row stays, ended the way expiry ends it."""
+    cur.execute(
+        """
+        UPDATE temporary_context SET expires_at = now()
+        WHERE context_id = %s AND expires_at > now() RETURNING *
+        """,
+        (context_id,),
+    )
+    ended = cur.fetchone()
+    if ended is None:
+        raise MashuError(f"no standing temporary context {context_id}")
+    events.record(cur, "temporary_ended", actor, detail={"context_id": str(context_id)})
+    return ended
+
+
 def convert_to_memory(
     cur: psycopg.Cursor,
     context_id: UUID,
