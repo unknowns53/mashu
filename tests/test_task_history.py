@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime as dt
 import re
 from pathlib import Path, PureWindowsPath
 from uuid import uuid4
@@ -134,7 +133,6 @@ def test_a_refused_state_write_leaves_its_history_unwritten(cur, task):
 def test_one_session_writes_a_task_once_per_interval_whatever_the_write_carries(cur, task, task_id):
     session = uuid4()
     first = checkpoint(cur, task, status_text="measured once", session=session)
-    assert first["next_write_after"] - first["state"]["updated_at"] == dt.timedelta(minutes=30)
 
     again = {**task, "state": first["state"]}
     with pytest.raises(RefusedError, match="at most once every 30 minutes"):
@@ -144,7 +142,7 @@ def test_one_session_writes_a_task_once_per_interval_whatever_the_write_carries(
 
     other = checkpoint(cur, again, status_text="another session", session=uuid4())
     by_hand = checkpoint(cur, {**task, "state": other["state"]}, status_text="no session")
-    assert "next_write_after" not in by_hand
+    assert by_hand["state"]["status_text"] == "no session"
 
 
 def test_a_zero_interval_lets_every_checkpoint_through(cur, task):
@@ -153,15 +151,16 @@ def test_a_zero_interval_lets_every_checkpoint_through(cur, task):
     first = checkpoint(cur, task, status_text="one", session=session)
     second = checkpoint(cur, {**task, "state": first["state"]}, status_text="two", session=session)
     assert second["state"]["status_text"] == "two"
-    assert "next_write_after" not in second
 
 
 def test_the_interval_set_last_decides_and_a_store_without_it_runs_on_the_default(
     cur, task, old_store
 ):
     settings.set_checkpoint_interval_minutes(cur, 5, actor="user")
-    written = checkpoint(cur, task, status_text="one", session=uuid4())
-    assert written["next_write_after"] - written["state"]["updated_at"] == dt.timedelta(minutes=5)
+    session = uuid4()
+    written = checkpoint(cur, task, status_text="one", session=session)
+    with pytest.raises(RefusedError, match="at most once every 5 minutes"):
+        checkpoint(cur, {**task, "state": written["state"]}, status_text="two", session=session)
     with pytest.raises(MashuError, match="0 to 1440 minutes"):
         settings.set_checkpoint_interval_minutes(cur, 1441, actor="user")
 

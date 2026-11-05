@@ -207,13 +207,12 @@ def _refuse_within_interval(cur: psycopg.Cursor, task_id: UUID, session: UUID | 
     written_at = _last_own_write(cur, task_id, session, minutes)
     if written_at is None:
         return
-    opens_at = written_at + dt.timedelta(minutes=minutes)
     raise RefusedError(
         f"this session wrote this task's state at {written_at:%H:%M}, and one session writes "
-        f"a task at most once every {minutes} minutes, whatever the write carries. Do not "
-        f"resend before {opens_at:%H:%M}. Keep failed tries and decisions in mind and send "
-        "them in that write; progress belongs in commits and the project's documents, and "
-        "the state written last stands meanwhile"
+        f"a task at most once every {minutes} minutes, whatever the write carries. The state "
+        "written then stands. A checkpoint carries only failed tries, costly decisions, "
+        "sources, and the state before you stop; progress and measurements go in a commit "
+        "or the project's documents now, not into a later write"
     )
 
 
@@ -316,10 +315,6 @@ def checkpoint(
             for ident, item in zip(reference_ids, artifact_items, strict=True)
         ],
     }
-    minutes = settings.checkpoint_interval_minutes(cur)
-    if session is not None and minutes > 0:
-        # Said on success so the agent knows the interval before it next feels like writing.
-        result["next_write_after"] = updated["state"]["updated_at"] + dt.timedelta(minutes=minutes)
     for verdict in verdicts:
         report = _gate_report(verdict)
         result["unchecked"] = bool(result.get("unchecked")) or report["unchecked"]

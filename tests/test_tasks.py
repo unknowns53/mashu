@@ -479,7 +479,7 @@ def test_a_session_writing_state_again_soon_is_refused_over_mcp(mcp, dsn):
     made = mcp("task_create", project="mashu", name=SCHEMA, goal=GOAL)
     task_id, at = made["task"]["task_id"], made["state"]["updated_at"]
     first = mcp("task_checkpoint", task_id=task_id, expect_updated_at=at, approach="a")
-    assert first["ok"] is True and "next_write_after" in first
+    assert first["ok"] is True
     again = mcp(
         "task_checkpoint",
         task_id=task_id,
