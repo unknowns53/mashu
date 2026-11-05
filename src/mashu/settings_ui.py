@@ -43,8 +43,7 @@ _HELP = """
   b/PgUp       go back one screenful
   Home/End     jump to the first or last list item
   n            Scopes, Topics, Routes: add one
-  e            Scopes, Topics, Routes: edit the selected one;
-               Checkpoint interval: change it
+  e            Scopes, Topics, Routes: edit the selected one
   x            Topics, Routes: remove the selected one, after confirmation
   i            Routes: add an ignored path
   m            Schema/migrations: apply pending migrations, after confirmation
@@ -703,35 +702,25 @@ def _interval_text(minutes: int) -> str:
     )
 
 
-def _interval_page(dsn: str | None) -> None:
+def _interval_page(dsn: str | None) -> str:
+    """Ask for the new value as soon as the page opens; the menu shows the outcome."""
     note = ""
     while True:
         with db.transaction(dsn) as cur:
             minutes = settings.checkpoint_interval_minutes(cur)
         body = _interval_text(minutes) + (f"\n\n{note}" if note else "")
-        keys = "  e change   ← back   q quit   ? help"
-        screen.paint(f"{_title('Checkpoint interval')}\n\n{body}\n\n{keys}")
-        key = screen.getkey()
-        note = ""
-        if key == "q":
-            raise screen.Quit()
-        if key == "left":
-            return
-        if key == "?":
-            _help()
-        elif key == "e":
-            answer = screen.editline("  minutes (0 for no limit): ", str(minutes))
-            if isinstance(answer, screen.Cancelled) or not answer.text:
-                note = "  interval unchanged"
-                continue
-            try:
-                with db.transaction(dsn) as cur:
-                    settings.set_checkpoint_interval_minutes(cur, int(answer.text), actor=ACTOR)
-                note = f"  set to {int(answer.text)} minutes"
-            except ValueError:
-                note = f"  {answer.text!r} is not a whole number of minutes"
-            except MashuError as error:
-                note = f"  {error}"
+        screen.paint(f"{_title('Checkpoint interval')}\n\n{body}\n")
+        answer = screen.editline("  minutes (0 for no limit): ", str(minutes))
+        if isinstance(answer, screen.Cancelled) or answer.text in ("", str(minutes)):
+            return f"  checkpoint interval unchanged at {minutes} minutes"
+        try:
+            with db.transaction(dsn) as cur:
+                settings.set_checkpoint_interval_minutes(cur, int(answer.text), actor=ACTOR)
+            return f"  checkpoint interval set to {int(answer.text)} minutes"
+        except ValueError:
+            note = f"  {answer.text!r} is not a whole number of minutes"
+        except MashuError as error:
+            note = f"  {error}"
 
 
 def _schema_pending(dsn: str | None) -> list[str]:
@@ -792,7 +781,7 @@ def _bootstrap_page(dsn: str | None) -> None:
     _read_page("Bootstrap preview", _bootstrap_text(_bootstrap_preview(dsn)))
 
 
-_PAGES: tuple[Callable[[str | None], None], ...] = (
+_PAGES: tuple[Callable[[str | None], str | None], ...] = (
     _health_page,
     _bootstrap_page,
     _scopes_page,
@@ -827,6 +816,6 @@ def run(dsn: str | None = None) -> int:
             at = len(_TOP_ITEMS) - 1
         elif key == "enter":
             try:
-                _PAGES[at](dsn)
+                note = _PAGES[at](dsn) or ""
             except MashuError as error:
                 note = f"  {error}"

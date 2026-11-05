@@ -163,10 +163,9 @@ def test_routes_can_be_edited_added_ignored_and_removed(dsn, monkeypatch):
 
 
 def test_the_checkpoint_interval_is_changed_only_to_whole_minutes_in_range(dsn, monkeypatch):
-    getkeys(monkeypatch, "e", "e", "e", "left")
-    answers(monkeypatch, "15", "soon", "2000")
+    answers(monkeypatch, "soon", "2000", "15")
 
-    settings_ui._interval_page(dsn)
+    assert settings_ui._interval_page(dsn) == "  checkpoint interval set to 15 minutes"
 
     with db.transaction(dsn) as cur:
         assert settings.checkpoint_interval_minutes(cur) == 15
