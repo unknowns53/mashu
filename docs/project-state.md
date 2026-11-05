@@ -168,7 +168,7 @@ task_id / decision / reason / supersedes_id / created_at / created_by
 
 どちらもコード・ログ・長文引用は文字上限が物理的に拒否する。Agent はどちらも `task_checkpoint` の `attempts` / `decisions` として state の置換と一緒に書き、追記だけの Tool は持たない（5.6 節）。どちらも全文は bootstrap に載らず、`task_get` の `attempts` / `decisions` 引数で明示取得する（12.1 節）。
 
-ただし、後の decision に supersede されていない decision（有効な決定）だけは、`task_get` が引数なしでも `decisions_in_force` として返す。決定の文だけを新しい順に 800 token（`MASHU_DECISION_CAPACITY`）まで載せ、入らない古い分は件数で示す。理由は全履歴の側に残す。既定で見えず、見ると巨大、という作りでは、決着済みの案をセッションが出し直すのを防ぐという decision の役目が果たせない。全履歴は上限を持たないので、決定の多い Task では展開すると数万字になる。bootstrap の card は有効な決定の件数を details に出し、圧縮の後の再配信は、続けていた Task の有効な決定を同じ上限で載せる。`task_search` は decision の本文と理由も探す。閉じた Task や別の Task で決着した事項を引くためで、日本語の短い語には pg_trgm の類似度がほぼ 0 になるので、語をすべて含むかどうかで当てる。
+ただし、後の decision に supersede されていない decision（有効な決定）だけは、`task_get` が引数なしでも `decisions_in_force` として返す。決定の文だけを新しい順に 800 token（`MASHU_DECISION_CAPACITY`）まで載せ、入らない古い分は件数で示す。理由は全履歴の側に残す。既定で見えず、見ると巨大、という作りでは、決着済みの案をセッションが出し直すのを防ぐという decision の役目が果たせない。全履歴は上限を持たないので、決定の多い Task では展開すると数万字になる。bootstrap の card は有効な決定の件数を details に出す。`task_search` は decision の本文と理由も探す。閉じた Task や別の Task で決着した事項を引くためで、日本語の短い語には pg_trgm の類似度がほぼ 0 になるので、語をすべて含むかどうかで当てる。
 
 ### 5.5 Artifact Reference
 

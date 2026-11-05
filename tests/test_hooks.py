@@ -12,7 +12,6 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import pretooluse_guard  # noqa: E402
 import sessionstart_guard  # noqa: E402
-import sessionstart_said  # noqa: E402
 
 
 def git(repo, *args, **kwargs):
@@ -202,84 +201,3 @@ def test_a_failed_bootstrap_leaves_the_session_without_output(delivered, stdout,
     out, _ = delivered({"source": "compact"}, stdout=stdout, returncode=returncode)
 
     assert out == ""
-
-
-def test_a_compaction_hands_its_transcript_over_so_the_resumed_task_is_named(delivered, tmp_path):
-    transcript = tmp_path / "session.jsonl"
-    transcript.write_text("{}\n", encoding="utf-8")
-    named = ["bootstrap", "--resume-transcript", str(transcript)]
-
-    _, seen = delivered({"source": "compact", "transcript_path": str(transcript)})
-    assert seen == [(named, None)]
-    for event in (
-        {"source": "startup", "transcript_path": str(transcript)},
-        {"source": "compact", "transcript_path": str(tmp_path / "missing.jsonl")},
-        {"source": "compact"},
-    ):
-        _, seen = delivered(event)
-        assert seen == [(["bootstrap"], None)]
-
-
-def said_after_compaction(monkeypatch, event):
-    monkeypatch.setattr(sessionstart_said.sys, "stdin", io.StringIO(json.dumps(event)))
-    out = io.StringIO()
-    monkeypatch.setattr(sessionstart_said.sys, "stdout", out)
-    assert sessionstart_said.main() == 0
-    return out.getvalue()
-
-
-def test_a_compaction_gets_back_only_what_the_user_typed_or_chose(monkeypatch, tmp_path):
-    def user(content, **extra):
-        return {
-            "type": "user",
-            "timestamp": "2026-10-19T01:39:00Z",
-            **extra,
-            "message": {"role": "user", "content": content},
-        }
-
-    human = {"origin": {"kind": "human"}}
-    rows = [
-        user("4 並列より速いと言うな\n過去の実測値を見ろ", **human),
-        user("4 並列より速いと言うな\n過去の実測値を見ろ", **human),
-        user("<task-notification>done</task-notification>", origin={"kind": "task-notification"}),
-        user("Stop hook feedback: 日本語で返す", isMeta=True),
-        user("subagent", isSidechain=True, **human),
-        user([{"type": "tool_result", "tool_use_id": "t", "content": "ok"}]),
-        user(
-            [{"type": "tool_result", "tool_use_id": "q", "content": "answered"}],
-            toolUseResult={"questions": [], "answers": {"全組を一度に回す？": "回さない"}},
-        ),
-        user([{"type": "text", "text": "戻す"}, {"type": "image", "source": {}}], **human),
-        {"type": "assistant", "message": {"content": [{"type": "text", "text": "了解"}]}},
-    ]
-    transcript = tmp_path / "session.jsonl"
-    transcript.write_text("".join(json.dumps(r) + "\n" for r in rows) + "not json\n")
-
-    texts = [line.split("  ", 1)[1] for line in sessionstart_said.said(transcript)]
-    assert texts == [
-        "4 並列より速いと言うな / 過去の実測値を見ろ",
-        "選択「全組を一度に回す？」→ 回さない",
-        "戻す",
-    ]
-
-    out = said_after_compaction(
-        monkeypatch, {"source": "compact", "transcript_path": str(transcript)}
-    )
-    assert out.startswith(sessionstart_said.PREAMBLE + "\n\n")
-    assert out.rstrip().endswith("戻す")
-    for event in (
-        {"source": "startup", "transcript_path": str(transcript)},
-        {"source": "compact", "transcript_path": str(tmp_path / "missing.jsonl")},
-    ):
-        assert said_after_compaction(monkeypatch, event) == ""
-
-
-def test_a_long_session_keeps_its_newest_messages_under_the_hook_output_cap():
-    lines = [f"10-19 01:{n % 60:02d}  " + "訂正" * 140 + str(n) for n in range(100)]
-
-    out = sessionstart_said.render(lines)
-
-    assert len(out) < 10_000
-    kept = out.splitlines()[3:]
-    assert kept == lines[-len(kept) :]
-    assert f"古い {100 - len(kept)} 件は省いた" in out
