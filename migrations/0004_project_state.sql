@@ -1,4 +1,4 @@
--- Project State schema (docs/mashu-v3.md, sections 5, 7, 14).
+-- Project State schema (docs/project-state.md, sections 5, 7, 13).
 
 CREATE TABLE project (
     project_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),

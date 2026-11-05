@@ -141,7 +141,7 @@ def test_a_candidate_put_off_comes_back_when_the_hole_reopens(cur):
     assert back[0]["defer_reason"] == "wording is not settled"
 
 
-# a prevention that is work, not a rule (v3 9)
+# a prevention that is work, not a rule (project-state 9)
 
 FIX = "have session_bootstrap name the migrations that have not been applied"
 

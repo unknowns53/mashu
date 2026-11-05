@@ -116,7 +116,7 @@ class ChangedSinceReadError(MashuError):
 
 
 class DuplicateTaskError(MashuError):
-    """A task that reads like one already open in the same project (v3 5.2)."""
+    """A task that reads like one already open in the same project (project-state 5.2)."""
 
     def __init__(self, reason: str, candidates: list[dict[str, object]]):
         super().__init__(reason)
@@ -129,4 +129,4 @@ class UnknownProjectError(MashuError):
 
 
 class ClosedTaskError(MashuError):
-    """A write to a task a person has already ended (v3 6)."""
+    """A write to a task a person has already ended (project-state 6)."""

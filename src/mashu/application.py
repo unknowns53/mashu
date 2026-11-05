@@ -118,7 +118,7 @@ def status_snapshot(cur: psycopg.Cursor) -> StatusSnapshot:
     cur.execute("SELECT count(*) AS n FROM ledger WHERE created_at >= now() - interval '30 days'")
     ledger_30d = cur.fetchone()["n"]
     # A topic rule that failed unread points at its trigger; one that failed after being
-    # read points at its wording, so the two are counted apart (v2 12). An unread topic linked
+    # read points at its wording, so the two are counted apart (memory 10). An unread topic linked
     # to an action is the one the PreToolUse hook stands behind, so it counts as guard.
     cur.execute(
         """

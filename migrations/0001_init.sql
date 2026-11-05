@@ -1,4 +1,4 @@
--- Mashu v2 schema (specification docs/mashu-v2.md, section 9).
+-- Memory schema (specification docs/memory.md, section 8).
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 

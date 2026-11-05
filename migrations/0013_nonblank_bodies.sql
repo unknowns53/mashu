@@ -1,5 +1,5 @@
 -- A body with no visible character would be pushed as an empty line every session
--- (docs/mashu-v2.md 5). The services refuse one first; these hold for any other writer.
+-- (docs/memory.md 4). The services refuse one first; these hold for any other writer.
 ALTER TABLE memory
     ADD CONSTRAINT memory_content_nonblank CHECK (content ~ '[^[:space:]]');
 ALTER TABLE memory_revision

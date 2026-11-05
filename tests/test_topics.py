@@ -475,7 +475,7 @@ def test_the_resolver_lands_inside_the_vault_and_refuses_to_leave_it(tmp_path, m
     with pytest.raises(MashuError, match="leads out of the vault"):
         vault.resolve("Projects/away/x.md")
     # A repository path whose first folder the vault does not have is not taken for a note.
-    assert vault.note("docs/mashu-v2.md") is None
+    assert vault.note("docs/memory.md") is None
     assert vault.note("Projects/Game/Placement.md").exists is False
 
 
@@ -494,15 +494,15 @@ def test_a_topic_source_is_set_cleared_and_read_with_where_it_lands(cur, vault_r
     assert read["source_exists"] is False
     assert topics.source_text(read["source"]).endswith("Gone.md (not found)")
 
-    topics.update_topic(cur, subject["topic_id"], actor="user", source="docs/mashu-v2.md#6")
+    topics.update_topic(cur, subject["topic_id"], actor="user", source="docs/memory.md#5")
     read = topics.topic_rules(cur, "difficulty")["topic"]
-    assert read["source"] == "docs/mashu-v2.md#6" and "source_path" not in read
+    assert read["source"] == "docs/memory.md#5" and "source_path" not in read
 
     topics.update_topic(cur, subject["topic_id"], actor="user", clear_source=True)
     assert topics.topic_rules(cur, "difficulty")["topic"]["source"] is None
     cur.execute("SELECT detail FROM event_log WHERE event_type = 'topic_updated' ORDER BY event_id")
     moves = [(row["detail"]["from"]["source"], row["detail"]["to"]["source"]) for row in cur]
-    assert moves[-1] == ("docs/mashu-v2.md#6", None)
+    assert moves[-1] == ("docs/memory.md#5", None)
 
 
 def test_a_topic_source_without_a_vault_is_read_as_written(cur, monkeypatch):

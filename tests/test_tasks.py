@@ -342,7 +342,7 @@ def test_reopening_clears_the_closure_and_leaves_it_in_the_log(cur, task_id):
         tasks.reopen(cur, task_id, actor="user")
 
 
-# what a delivered state says about itself (v3 5.3, 8)
+# what a delivered state says about itself (project-state 5.3, 8)
 def test_full_state_names_every_field_when_explicitly_fetched_and_is_costed_with_labels(cur, task):
     name, state = task["task"]["name"], task["state"]
     text = tasks.state_text(name, state)
@@ -401,7 +401,7 @@ def test_task_card_and_full_detail_have_independent_limits(cur, project, monkeyp
     assert detail_error.value.field == "task detail"
 
 
-# the one append (v3 5.3, and ledger's work path)
+# the one append (project-state 5.3, and ledger's work path)
 def test_an_append_adds_one_new_action_and_meets_what_a_replacement_would(cur, task_id):
     read_at = tasks.task_get(cur, task_id)["state"]["updated_at"]
     got = tasks.append_next_action(cur, task_id, "add the check", actor="agent")

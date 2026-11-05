@@ -92,7 +92,8 @@ def session_bootstrap(
     # Where the schema stands, delivered rather than looked up.
     schema_pending = migrate.pending(cur)
 
-    # Counted apart because they are refused apart (v3 8). Topic lines sit in the Memory seats.
+    # Counted apart because they are refused apart (project-state 8).
+    # Topic lines sit in the Memory seats.
     topic_tokens = pushed_cost([row["line"] for row in index])
     memory_tokens = pushed_cost([row["content"] for row in always + scoped]) + topic_tokens
     decided = task_history.decision_count(cur, [row["task"]["task_id"] for row in states])
@@ -148,7 +149,7 @@ def session_bootstrap(
         },
     )
     if over:
-        # An invariant nobody can observe is not an invariant (v3 15).
+        # An invariant nobody can observe is not an invariant (project-state 14).
         events.record(
             cur,
             "bootstrap_over_capacity",

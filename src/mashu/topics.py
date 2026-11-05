@@ -1,4 +1,4 @@
-"""Group rules needed only while one kind of work is being done (docs/mashu-v2.md 6)."""
+"""Group rules needed only while one kind of work is being done (docs/memory.md 5)."""
 
 from __future__ import annotations
 

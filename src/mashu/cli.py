@@ -1647,7 +1647,7 @@ def _task_project(cur: Any, given: str | None) -> UUID:
 
 
 def cmd_task_create(args: argparse.Namespace) -> int:
-    """Open a task, unless one that reads like it is already open (v3 5.2)."""
+    """Open a task, unless one that reads like it is already open (project-state 5.2)."""
     try:
         with db.transaction(args.dsn) as cur:
             row = tasks.task_create(
@@ -1687,7 +1687,7 @@ def cmd_task_touch(args: argparse.Namespace) -> int:
 
 
 def cmd_task_close(args: argparse.Namespace) -> int:
-    """End a task. Only a person reaches this, and only with an outcome (v3 6)."""
+    """End a task. Only a person reaches this, and only with an outcome (project-state 6)."""
     if not args.ref:
         if args.outcome is not None or args.reason is not None:
             raise MashuError(

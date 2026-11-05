@@ -252,7 +252,7 @@ def _judge(
     """Refuse a write only where it makes a share heavier than its ceiling allows.
 
     A write that leaves a share no heavier passes even when that share is already over,
-    because ceilings and line lengths move without any write (v3 5.3), and refusing the
+    because ceilings and line lengths move without any write (project-state 5.3), and refusing the
     write that makes room would close the only way out. An opening refusal says what was
     free before the write, then the caller's `detail` on what the write adds.
     """

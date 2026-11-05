@@ -143,7 +143,7 @@ def _lock(cur: psycopg.Cursor) -> None:
 
 
 def _gate(fields: dict[str, str | None]) -> redact.Verdict:
-    """The entrance check every project-state write passes (v3 10)."""
+    """The entrance check every project-state write passes (project-state 10)."""
     return redact.gate(fields)
 
 
@@ -729,7 +729,9 @@ def _budget_competitors(
 
 
 def seat_cards(rows: list[dict[str, Any]], capacity: int) -> tuple[list, list]:
-    """Split cards, newest activity first, into those delivered and those only named (v3 8).
+    """Split cards, newest activity first, into those delivered and those only named.
+
+    See project-state 8.
 
     The first card that does not fit ends the delivered run, so a smaller older card never
     takes a seat ahead of a newer one.
@@ -744,7 +746,7 @@ def seat_cards(rows: list[dict[str, Any]], capacity: int) -> tuple[list, list]:
 
 
 def card_share(cur: psycopg.Cursor, project: dict[str, Any]) -> dict[str, Any]:
-    """Which active tasks beside this project's lose their card, after a write (v3 8).
+    """Which active tasks beside this project's lose their card, after a write (project-state 8).
 
     A write is never refused for the scope's share; the oldest cards fall out of delivery
     instead, and the writer is told which, so a needless task shows what it hid.

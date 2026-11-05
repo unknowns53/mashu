@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import pathlib
 
-#: Overall limit for memory, project-state, and temporary-context payloads (v3 8).
+#: Overall limit for memory, project-state, and temporary-context payloads (project-state 8).
 DEFAULT_TOTAL_CAPACITY = 4000
 
 #: Hard ceiling on the memories alone, in estimated tokens (5.2).
@@ -14,11 +14,12 @@ DEFAULT_CAPACITY = 2000
 #: Hard ceiling on the always layer alone, inside the whole-opening one above (5.2).
 DEFAULT_ALWAYS_CAPACITY = 800
 
-#: Task cards delivered to one session, newest activity first, in estimated tokens (v3 8).
+#: Task cards delivered to one session, newest activity first, in estimated tokens
+#: (project-state 8).
 #: Agents fill whatever share they are given, so the cut is made at delivery, not at a write.
 DEFAULT_PROJECT_CAPACITY = 800
 
-#: The line naming active tasks that lost their card, in estimated tokens (v3 8).
+#: The line naming active tasks that lost their card, in estimated tokens (project-state 8).
 DEFAULT_CARD_OVERFLOW_CAPACITY = 200
 
 #: Maximum pushed index card for one active task.
@@ -27,16 +28,16 @@ DEFAULT_TASK_CARD_CAPACITY = 200
 #: Maximum full current state retrieved for one task.
 DEFAULT_TASK_DETAIL_CAPACITY = 800
 
-#: Decisions in force that task_get returns without being asked, newest first (v3 5.4).
+#: Decisions in force that task_get returns without being asked, newest first (project-state 5.4).
 DEFAULT_DECISION_CAPACITY = 800
 
-#: Hard ceiling on the temporary share of the opening (v3 8).
+#: Hard ceiling on the temporary share of the opening (project-state 8).
 DEFAULT_TEMPORARY_CAPACITY = 400
 
 #: Maximum rule bodies one topic holds; they are read on demand, not pushed (5.2).
 DEFAULT_TOPIC_CAPACITY = 800
 
-#: How long a task's lease runs from its last sign of activity (v3 7).
+#: How long a task's lease runs from its last sign of activity (project-state 7).
 DEFAULT_TASK_LEASE_DAYS = 14
 
 #: How long one session waits between two writes of a task's state until the user sets

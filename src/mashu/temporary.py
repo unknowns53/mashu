@@ -112,7 +112,7 @@ def put_temporary(
         raise MashuError("temporary context cannot be empty")
     verdict = redact.gate({"content": content})
 
-    # Pushed, so it is weighed before it is written (v3 8).
+    # Pushed, so it is weighed before it is written (project-state 8).
     _check_room(cur, content=content, scope_id=scope_id)
 
     cur.execute(

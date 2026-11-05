@@ -6,8 +6,8 @@ Mashu には、恒久的な Memory だけでなく、現在の作業状態を扱
 
 設計判断の正本は次の文書にある。
 
-- Memory の仕様: [docs/mashu-v2.md](docs/mashu-v2.md)
-- Project State の仕様: [docs/mashu-v3.md](docs/mashu-v3.md)
+- Memory の仕様: [docs/memory.md](docs/memory.md)
+- Project State の仕様: [docs/project-state.md](docs/project-state.md)
 
 この README は、インストールと日常の使い方に絞る。
 
@@ -561,13 +561,13 @@ main への push と pull request では、GitHub Actions の CI（`.github/work
 
 版は `src/mashu/__init__.py` の `__version__` だけに書き、pyproject.toml はそこから読む。版は PEP 440 の正規形で書き、`3.0.1` のように数字だけなら正式なリリース、`3.1.0b1` のように a、b、rc と番号で終わればプレリリースになる。リリースは main の checkout で `tools/release.sh <版>` を実行して作る。このスクリプトは版を書き換えて main へコミットと push をし、main の CI が通るのを待ってから `v<版>` のタグを push する。タグの CI は、タグの版が `__version__` と一致すること、そのコミットが main にあって main の CI を通っていることを確かめてから、GitHub Release を公開する。
 
-仕様を変えるときは、コードと対応する設計書を一緒に更新する。撤回した設計は削除せず、何を撤回したかと理由を設計書に残す。
+仕様を変えるときは、コードと対応する設計書を一緒に更新する。設計書には今の仕様とその理由だけを書き、撤回した設計と経緯は消して git の履歴に任せる。
 
 ## 主な配置
 
 ~~~text
-docs/mashu-v2.md             Memory の実装仕様書
-docs/mashu-v3.md             Project State の実装仕様書
+docs/memory.md               Memory の実装仕様書
+docs/project-state.md        Project State の実装仕様書
 migrations/                  連番の SQL。mashu admin migrate が順に実行
 src/mashu/                   実装
 tests/                       実 PostgreSQL に対するテスト

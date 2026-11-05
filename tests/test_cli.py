@@ -277,7 +277,7 @@ def test_a_dated_condition_is_written_by_the_command_line_and_nowhere_else(run):
     code, _, err = run("remember", "staging is down", "--until", "2d", "--topic", "missing")
     assert code == 1 and "--topic" in err
 
-    # Its own share of the opening now, apart from the memory seats (v3 8).
+    # Its own share of the opening now, apart from the memory seats (project-state 8).
     code, out, _ = run("status")
     assert code == 0 and out.splitlines()[0] == "schema  up to date"
     line = next(row for row in out.splitlines() if row.startswith("temporary"))
@@ -488,7 +488,7 @@ def test_a_task_is_created_read_back_ended_and_reopened_through_the_command_line
     assert code == 0
     assert out.startswith("active tasks")
     assert short in out and PARSER_TASK in out
-    # The date travels in the line itself, not in the caller's hands (v3 3.1).
+    # The date travels in the line itself, not in the caller's hands (project-state 3.1).
     assert "State as of " in out
 
     code, out, _ = run("task", "show", short)

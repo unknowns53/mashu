@@ -1,4 +1,4 @@
--- Store agent close proposals; only task.close closes a task (docs/mashu-v3.md 6).
+-- Store agent close proposals; only task.close closes a task (docs/project-state.md 6).
 CREATE TABLE task_close_proposal (
     task_id     UUID PRIMARY KEY REFERENCES task(task_id),
     outcome     TEXT NOT NULL CHECK (outcome IN ('completed', 'abandoned', 'superseded')),

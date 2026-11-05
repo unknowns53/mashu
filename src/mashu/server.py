@@ -189,7 +189,7 @@ _REFUSALS = (
 )
 
 
-#: What a task write returns about the scope's card budget instead of a refusal (v3 8).
+#: What a task write returns about the scope's card budget instead of a refusal (project-state 8).
 _CARD_SHARE = (
     "`card_share`, whose `unseated` names the active tasks beside it that now get no card; "
     "propose close only for those whose goal the user has met"
@@ -295,7 +295,7 @@ def _failure(
 
 
 def _record_card_refusal(error: OverLimitError, tool: str, task_id: UUID | None) -> bool:
-    """Log a refused card write after its own transaction rolled back (v3 17)."""
+    """Log a refused card write after its own transaction rolled back (project-state 15)."""
     detail = {
         "tool": tool,
         "task_id": str(task_id) if task_id else None,

@@ -1,4 +1,4 @@
--- Topics: rules read when one kind of work begins (docs/mashu-v2.md 6).
+-- Topics: rules read when one kind of work begins (docs/memory.md 5).
 -- NULL scope lists the topic in every session.
 CREATE TABLE topic (
     topic_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),

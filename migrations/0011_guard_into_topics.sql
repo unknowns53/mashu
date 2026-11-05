@@ -1,4 +1,4 @@
--- Guard rules become a topic linked to the action they stood before (docs/mashu-v2.md 6.2).
+-- Guard rules become a topic linked to the action they stood before (docs/memory.md 5.2).
 -- NULL action links the topic to no tool call.
 ALTER TABLE topic
     ADD COLUMN action TEXT
