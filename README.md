@@ -15,22 +15,22 @@ Mashu は、Claude Code や Codex など複数の AI agent が共有する外部
 
 長い本文は持たない。ドメイン知識、要件定義、設計案などは、たとえば Obsidian の vault やリポジトリを原典とし、Mashu はその場所を指すのみとする。
 
-Memory、pain、review、配信の仕様は [docs/memory.md](docs/memory.md) 、Project State の仕様は [docs/project-state.md](docs/project-state.md) に記載する。
+Memory、pain、review、配信の仕様は [docs/memory.md](docs/memory.md)、Project State の仕様は [docs/project-state.md](docs/project-state.md) に記載する。
 
 ## Mashu が持つ記録
 
 | 種類 | 中身 | 新規セッションへの配信 | 寿命 |
 |---|---|---|---|
-| Memory | 遵守する規則。既定で上限 120 字 | セッション開始時か、特定作業の開始時に配信される | ユーザーが廃止 (retire) するまで |
-| Task | 複数のセッションにまたがる作業の現在地、試した案、判断、成果物の場所 | 名前と goal と status だけの簡潔な card が配信され、全文は agent が `task_get` で読む | ユーザーが終了 (close) するまで。14 日活動が無いと休止 (dormant) になり、配信されなくなる |
+| Memory | 遵守する規則。既定で上限 120 字 | セッション開始時か、特定作業の開始時に配信される | User が廃止（retire）するまで |
+| Task | 複数のセッションにまたがる作業の現在地、試した案、判断、成果物の場所 | 名前と goal と status だけの簡潔な card が配信され、全文は agent が `task_get` で読む | User が終了（close）するまで。14 日活動が無いと休止（dormant）になり、配信されなくなる |
 | Temporary Context | 期限付きの条件 | User が登録したものだけが開始時に配信される | 最長 14 日 |
-| Ledger | エージェントが忘れたことによる事故の記録 | 配信されない | 追記のみで、永久 |
+| Ledger | agent が忘れたことによる事故の記録 | 配信されない | 追記のみで、永久 |
 
 Task は Project にまとめる。仕様書では、この二つを合わせて Project State と呼ぶ。
 
 ## 規則が Memory になるまで
 
-Memory の総量を小さく保つことが、本プロジェクト設計の意義の一つである。総量が小さいから全量を配信でき、「読むべきときに読まれない」問題を低減する。一方、届いた規則を agent が守らない失敗は残る。Mashu はそれを violated_memory_id で記録して数え、守らせたい規則は hook や validator のようなコードの強制へ移すことを先に考える。そのため、Memory ができる経路を次の三つに限定している。
+Memory の総量を小さく保つことが、本プロジェクト設計の意義の一つである。総量が小さいから全量を配信でき、「読むべきときに読まれない」問題を低減する。一方、届いた規則を agent が守らない失敗は残る。Mashu はそれを `violated_memory_id` で記録して数え、守らせたい規則は hook や validator のようなコードの強制へ移すことを先に考える。そのため、Memory ができる経路を次の三つに限定している。
 
 1. agent が事故を報告する。誤った作業が実行されたとき、agent は `pain_report` で、何が起きたかと、防ぐための規則を Ledger に書く。規則がまだ無ければ candidate（採用を待つ候補）ができ、User が review で採用か却下を決定する。
 2. User が会話の中で「覚えて」と言う。agent は `memory_admit` に本文を渡し、その場で Memory にする。指示の原文と会話の参照が、承認の出所として記録される。
@@ -38,7 +38,7 @@ Memory の総量を小さく保つことが、本プロジェクト設計の意�
 
 `pain_report` が candidate を作らないケースもある。一つは、規則が既に届いていたのに遵守しなかった場合である。agent はその Memory を `violated_memory_id` で指し、Mashu はこれを配信の失敗の疑いとして記録する。もう一つは、Task の記録や、CLAUDE.md、skill に書いてあったのに使われなかった場合である。agent はその場所を `ignored_task_id` か `ignored_source` で指し、Mashu は新しい規則を作らずに件数だけを数える。件数は `mashu status` の `unused` の行に出る。いずれの場合も、規則の配信方法に問題があると考える。
 
-既にある Memory の 廃止、置換、復帰、配信先の移動は、ユーザーの明示的な指示があれば agent がその場で適用する。agent が自分で考えた変更は変更案 (proposal) として置き、ユーザーが review で適用か却下を決定する。
+既にある Memory の廃止、置換、復帰、配信先の移動は、User の明示的な指示があれば agent がその場で適用する。agent が自分で考えた変更は変更案（proposal）として置き、User が review で適用か却下を決定する。
 
 ## 導入
 
@@ -55,7 +55,7 @@ GitHub Release には、正式版ごとに Mac（Apple silicon）用の `Mashu_a
 
 Apple と Microsoft について、現時点では未署名である。Mac では、初回に「開発元を確認できない」と表示されるので、システム設定の「プライバシーとセキュリティ」で「このまま開く」をクリックする。Windows では、SmartScreen の警告から実行を許可する。
 
-初回起動時、本アプリは Mashu の本体を検索する。見つからなければ、インストールされている場所を指定するか、アプリにインストールさせるかを選ぶ画面が出現する。インストールさせる場合、アプリは git、uv、PostgreSQL が揃っていて PostgreSQL が動作しているか確認し、不足しているものと導入方法を示す。揃っていれば、空のフォルダに最新の正式版を clone し、`uv sync --extra mcp`、DB `mashu` の作成、`mashu admin migrate`（DB のスキーマを最新にする SQL の適用）を順に実行する。
+初回起動時、本アプリは Mashu の本体を検索する。見つからなければ、インストールされている場所を指定するか、アプリにインストールさせるかを選ぶ画面が表示される。インストールさせる場合、アプリは git、uv、PostgreSQL が揃っていて PostgreSQL が動作しているか確認し、不足しているものと導入方法を示す。揃っていれば、空のフォルダに最新の正式版を clone し、`uv sync --extra mcp`、DB `mashu` の作成、`mashu admin migrate`（DB のスキーマを最新にする SQL の適用）を順に実行する。
 
 agent への接続（MCP server と hook の登録）は、各ツールの設定ファイルを書き換えるので、アプリでは実行しない。[Agent に接続](#agent-に接続) の手順で設定する。
 
@@ -121,7 +121,7 @@ agent の名前は `serve` の `--agent` か、環境変数 `MASHU_AGENT` で指
 }
 ~~~
 
-hook の無い client では、AGENTS.md か CLAUDE.md に次の行を置き、agent に `session_bootstrap` を発火させる。
+hook の無い client では、AGENTS.md か CLAUDE.md に次の行を置き、agent に `session_bootstrap` を呼ばせる。
 
 ~~~markdown
 # Mashu（外部記憶）
@@ -160,7 +160,7 @@ remote-shell command \b(cluster-wrapper|scheduler-cmd)\b
 
 ## 日々の使い方
 
-### ユーザーが操作する三つの画面
+### User が操作する三つの画面
 
 人が Mashu を操作する画面は三つあり、いずれも同じ DB を読み書きする。
 
@@ -335,7 +335,7 @@ mashu remember "Do not change ship stats to set difficulty" --topic 難易度較
 mashu deliver 1a2b3c4d topic --topic 難易度較正
 ~~~
 
-プロジェクトのどの作業でも遵守する規則なら scope を選択し、そのプロジェクトの一部の作業でのみ必要なら topic を選ぶ。特定の操作の直前に必ず目に入れたいなら、その topic に action を結びつけ、[PreToolUse hook](#pretooluse-hook-で特定の操作の前に規則を示す) を利用する。一つの action に結びつく topic は一つだけで、action は topic の編集でだけ設定できる。
+プロジェクトのどの作業でも遵守する規則なら scope を選択し、そのプロジェクトの一部の作業でのみ必要なら topic を選ぶ。特定の操作の直前に必ず目に入れたいなら、その topic に action を結びつけ、[PreToolUse hook](#pretooluse-hook-で特定操作の前に規則を示す) を利用する。一つの action に結びつく topic は一つだけで、action は topic の編集でだけ設定できる。
 
 `--remove` で消せるのは active な規則を持たない topic だけである。一度も使われていない topic は削除され、retire した規則や提案が名前を参照している topic は、履歴を保つために archive されて一覧から消える。topic を作るのは User で、agent が作成できるのは、User の明示的な指示で規則を追加するか移すときのみである。
 
@@ -363,7 +363,7 @@ mashu task create "Add CLI help" --project mashu --goal "Every command explains 
 mashu task touch 1a2b3c4d
 ~~~
 
-`mashu project create` で `--scope` を省くと、今のディレクトリの route が指す Scope を使う。route の無いディレクトリでは拒否するので、すべての Scope に card を配る Project は `--scope -` で作る。`mashu task create` で `--project` を省くと、route から一義的に決まる Project か、open な Project が一つだけならそれを使う。
+`mashu project create` で `--scope` を省くと、今のディレクトリの route が指す Scope を使う。route の無いディレクトリでは拒否するので、すべての Scope に card を配る Project は `--scope -` で作る。`mashu task create` で `--project` を省くと、route から一つに決まる Project か、open な Project が一つだけならそれを使う。
 
 Task の Current State は goal、approach、status、open questions、blockers、next actions からなる。agent が書く attempt（試したことと結果）、decision（判断と理由）、artifact（外部成果物の場所）と、close のときの checkpoint は、履歴として別に残る。
 
@@ -414,8 +414,6 @@ User が配信先の変更を指示した      → memory_redeliver
 - 作業が終わったと思ったら `task_propose_close` で提案する。status に書くと User が読んで close を打ち直すことになるが、提案なら一回のキー操作で受理される。終わったと見なすのは User がマージや受け入れをしたあとである。提案後に state を書くと提案が古くなるので、checkpoint を先に打ち、提案を最後にする
 - agent 自身が考えた Memory の変更は proposal に留める。Temporary Context の登録、Memory の直接の操作、review は原則として User だけが行う
 
-> 個人情報の取り扱いをガチャガチャ書いているのは私の運用の問題であって普遍的な記述ではない
-
 ## コマンド一覧
 
 各コマンドの詳しい使い方は `mashu <コマンド> --help` で読める。ID は一覧が表示する先頭 8 文字か、4 文字以上の一意な前方一致で指定できる。
@@ -450,7 +448,7 @@ User が配信先の変更を指示した      → memory_redeliver
 | `MASHU_DATABASE_URL` | 接続先の PostgreSQL。既定値は `dbname=mashu` |
 | `MASHU_AGENT` | MCP server が記録する agent の名前。`serve --agent` と同様 |
 | `MASHU_VAULT_ROOT` | Obsidian の vault の絶対パス。topic の source の解決に使用 |
-| `MASHU_BANNED_PATTERNS` | 禁止パターンのファイルの場所 |
+| `MASHU_BANNED_PATTERNS` | 書き込みを拒否する禁止パターンのファイルの場所。検査の仕組みは [docs/memory.md](docs/memory.md) に記載 |
 | `MASHU_GUARD_ACTIONS` | PreToolUse hook が action を判定する規則のファイルの場所。既定は `.mashu-guard-actions` |
 | `MASHU_EXE` | デスクトップアプリが起動する `mashu` の実行ファイル |
 | `MASHU_TEST_DB` | テスト用の DB の名前。既定は `mashu_test` |
