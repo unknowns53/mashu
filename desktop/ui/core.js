@@ -76,6 +76,12 @@ function short(id) {
   return String(id || "").slice(0, 8);
 }
 
+/** The start of a long text, for a picker or a reference to another row. */
+function excerpt(text, length = 48) {
+  const chars = [...String(text || "").replace(/\s+/g, " ")];
+  return chars.length > length ? `${chars.slice(0, length).join("")}…` : chars.join("");
+}
+
 function day(value) {
   return String(value || "").slice(0, 10);
 }
@@ -109,11 +115,19 @@ function tilde(path) {
   return String(path || "").replace(/^(\/Users\/[^/]+|\/home\/[^/]+|[A-Za-z]:\\Users\\[^\\]+)(?=$|[/\\])/, "~");
 }
 
-/** Text the backend writes in English for one fixed case, said in the window's language. */
-function evidenceText(row, key) {
-  const text = row[key];
-  if (key === "what" && ["explicit", "claimed", "proposed"].includes(row.kind)) return t(`evidence.text.${row.kind}`);
-  return text;
+/**
+ * The account a ledger row gives. A rule recorded without a reason carries a fixed English
+ * line in its place, said here in the window's language; null when nothing more was written.
+ */
+const FIXED_ACCOUNTS = [
+  ["recorded by the user's own hand", "explicit"],
+  ["a user instruction carried by an agent", "claimed"],
+  ["a successor an agent drafted for its own replace proposal", "proposed"],
+];
+
+function fixedAccount(text) {
+  const found = FIXED_ACCOUNTS.find(([start]) => String(text || "").startsWith(start));
+  return found ? found[1] : null;
 }
 
 function errorText(error) {
@@ -353,6 +367,80 @@ function searchBox(onInput) {
   return h("label", { class: "search" }, icon("search"), input);
 }
 
+/** A per-viewer setting kept in this window's storage; the fallback when there is none. */
+function remembered(key, fallback) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(key));
+    return saved ?? fallback;
+  } catch (error) {
+    return fallback;
+  }
+}
+
+function remember(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (error) {
+    // Kept for this window only.
+  }
+}
+
+/**
+ * A sort picker: which key, and which way. setKeys([[key, label]]) changes the keys a view
+ * offers, keeping the chosen one where it still exists. The choice is kept per `name`.
+ */
+function sortControl(name, onChange) {
+  const state = remembered(`mashu.sort.${name}`, { key: "updated", dir: "desc" });
+  const select = h("select", { class: "sort-key", "aria-label": t("sort.label") });
+  const flip = h("button", { type: "button", class: "btn small sort-dir" });
+  const save = () => {
+    remember(`mashu.sort.${name}`, state);
+    flip.textContent = t(state.dir === "desc" ? "sort.desc" : "sort.asc");
+  };
+  select.addEventListener("change", () => {
+    state.key = select.value;
+    save();
+    onChange();
+  });
+  flip.addEventListener("click", () => {
+    state.dir = state.dir === "desc" ? "asc" : "desc";
+    save();
+    onChange();
+  });
+  const node = h("div", { class: "row sort-row" }, h("span", { class: "sort-label", text: t("sort.label") }), select, flip);
+  node.state = state;
+  node.setKeys = (keys) => {
+    select.replaceChildren(...keys.map(([value, label]) => h("option", { value, text: label })));
+    if (!keys.some(([value]) => value === state.key)) state.key = keys[0][0];
+    select.value = state.key;
+    save();
+  };
+  return node;
+}
+
+/** Keys that hold a time; any other key keeps each of its groups newest first. */
+const DATE_KEYS = ["updated", "created", "until"];
+
+/**
+ * Rows ordered by valueOf(row, key), the way `state` says; empty values go last either way.
+ * Under a key many rows share (delivery, project…), each group stays newest first whichever
+ * way the groups run.
+ */
+function sortRows(rows, state, valueOf) {
+  if (!DATE_KEYS.includes(state.key)) rows = sortRows(rows, { key: "updated", dir: "desc" }, valueOf);
+  const sign = state.dir === "desc" ? -1 : 1;
+  return rows
+    .map((row, index) => ({ row, index, value: valueOf(row, state.key) }))
+    .sort((a, b) => {
+      const blankA = a.value === null || a.value === undefined || a.value === "";
+      const blankB = b.value === null || b.value === undefined || b.value === "";
+      if (blankA !== blankB) return blankA ? 1 : -1;
+      if (!blankA && a.value !== b.value) return (a.value < b.value ? -1 : 1) * sign;
+      return a.index - b.index;
+    })
+    .map((entry) => entry.row);
+}
+
 /** A row of view buttons; the chosen one is aria-pressed. Returns the control. */
 function segmented(views, current, onChange) {
   const buttons = views.map(([value, label]) =>
@@ -422,19 +510,34 @@ function entries(rows, render, { empty = t("common.none"), old } = {}) {
   );
 }
 
-/** Evidence rows; a prevention that only repeats `content` is left out. */
-function evidenceEntries(rows, content) {
-  return entries(rows, (row) => [
-    `${named("evidence.kind", row.kind)} · ${day(row.created_at)}${row.created_by ? ` · ${who(row.created_by)}` : ""}`,
-    evidenceText(row, "what"),
-    [t("evidence.prevention"), row.prevention !== content ? row.prevention : null],
-  ]);
+/** Ledger kinds whose row records who wrote the rule; `prevention` holds its body then. */
+const RECORDING_KINDS = ["explicit", "claimed", "proposed"];
+
+/**
+ * Evidence rows. A row that records who wrote the rule shows the reason written with it, or
+ * one line saying who wrote it when no reason was; its prevention is only the body as first
+ * written, which the revisions already show.
+ */
+function evidenceEntries(rows) {
+  return entries(rows, (row) => {
+    const id = row.ledger_id && short(row.ledger_id);
+    if (RECORDING_KINDS.includes(row.kind)) {
+      const fixed = fixedAccount(row.what);
+      if (fixed) return [[id, day(row.created_at)].filter(Boolean).join(" · "), t(`evidence.text.${fixed}`)];
+      return [[named("evidence.kind", row.kind), id, day(row.created_at)].filter(Boolean).join(" · "), row.what];
+    }
+    return [
+      [named("evidence.kind", row.kind), id, day(row.created_at), row.created_by && who(row.created_by)].filter(Boolean).join(" · "),
+      row.what,
+      [t("evidence.prevention"), row.prevention],
+    ];
+  });
 }
 
 function conflictEntries(rows) {
   return entries(rows, (row) => [
     `${named("retire.kind", row.retirement_kind || "legacy")} · ${day(row.retired_at)}`,
-    row.content || short(row.memory_id),
+    row.content || "",
     [t("retire.reason"), row.retire_reason],
   ]);
 }
@@ -452,8 +555,36 @@ function meterRow(name, n, max) {
   );
 }
 
+/** A metadata line; parts are text or nodes, joined by the language's separator. */
 function meta(...parts) {
-  return h("p", { class: "meta", text: parts.filter(Boolean).join(language === "ja" ? "・" : " · ") });
+  const node = h("p", { class: "meta" });
+  parts.filter(Boolean).forEach((part, index) => {
+    if (index) node.append(language === "ja" ? "・" : " · ");
+    node.append(part);
+  });
+  return node;
+}
+
+/** The short id agents and the CLI use; a click copies the whole id. */
+function idTag(id) {
+  return h("button", {
+    type: "button",
+    class: "id",
+    text: short(id),
+    title: t("common.copy_id"),
+    on: {
+      click: () =>
+        navigator.clipboard
+          .writeText(String(id))
+          .then(() => toast(t("common.copied", { id: short(id) })))
+          .catch(fail),
+    },
+  });
+}
+
+/** A reference to another row: its short id and the start of its text. */
+function reference(id, text, length = 40) {
+  return [short(id), excerpt(text, length)].filter(Boolean).join("  ");
 }
 
 // ---------------------------------------------------------------- forms

@@ -32,6 +32,33 @@ const memNew = button("", () => {
   renderMemoryDetail();
 }, { kind: "icon", title: t("memory.new") });
 memNew.append(icon("plus"));
+const memSort = sortControl("memories", () => {
+  renderMemoryList();
+});
+
+/** The keys each view sorts by: dates it has, and the kind that groups its rows. */
+function memorySortKeys() {
+  if (mem.view === "temporary") {
+    return [["created", t("sort.created")], ["until", t("sort.until")], ["kind", t("delivery.area")]];
+  }
+  return [
+    ["updated", t("sort.updated")],
+    ["created", t("sort.created")],
+    ["kind", mem.view === "retired" ? t("retire.kind") : t("delivery.title")],
+  ];
+}
+
+function memorySortValue(row, key) {
+  if (key === "created") return row.created_at;
+  if (key === "until") return row.expires_at;
+  if (key === "kind") {
+    if (mem.view === "temporary") return row.scope_name || "";
+    if (mem.view === "retired") return named("retire.kind", row.retirement_kind || "legacy");
+    return `${["always", "scope", "topic"].indexOf(row.delivery)} ${row.topic_name || row.scope_name || ""}`;
+  }
+  return row.updated_at || row.created_at;
+}
+
 const memList = listPane(
   memSeg,
   h(
@@ -43,7 +70,8 @@ const memList = listPane(
       loadMemoryDetail().catch(fail);
     }),
     memNew
-  )
+  ),
+  memSort
 );
 const memDetail = detailPane();
 
@@ -56,9 +84,11 @@ function memoryRow() {
 }
 
 function shownMemories() {
-  return mem.rows.filter((row) =>
+  memSort.setKeys(memorySortKeys());
+  const found = mem.rows.filter((row) =>
     matches(mem.query, memoryId(row), row.content, row.scope_name, row.delivery, row.topic_name, row.retire_reason)
   );
+  return sortRows(found, memSort.state, memorySortValue);
 }
 
 function pickMemory(id) {
@@ -71,14 +101,34 @@ function pickMemory(id) {
 async function loadMemoryDetail() {
   const row = memoryRow();
   mem.detail = row && mem.view !== "temporary" ? await call("memory.get", { memory_id: row.memory_id }) : null;
+  if (mem.detail && mem.detail.status === "retired") await nameRetirement(mem.detail);
   renderMemoryList();
   renderMemoryDetail();
+}
+
+/** Where a retired rule went, by the words of what took its place. */
+async function nameRetirement(detail) {
+  if (detail.superseded_by) {
+    const successor = await call("memory.get", { memory_id: detail.superseded_by }).catch(() => null);
+    detail.successor_content = reference(detail.superseded_by, successor ? successor.content : "", 400);
+  }
+  if (detail.relocated_to_id) {
+    const { rows } = await call("memory.list", { view: "temporary" });
+    const note = rows.find((item) => item.context_id === detail.relocated_to_id);
+    detail.destination_content = reference(detail.relocated_to_id, note ? note.content : t("temporary.title"), 400);
+  }
 }
 
 function deliveryShort(row) {
   if (row.delivery === "topic") return `${t("delivery.topic")}: ${row.topic_name}`;
   if (row.delivery === "scope") return row.scope_name || t("delivery.scope");
   return t("delivery.always");
+}
+
+/** The date the list is ordered by: the key's own date, or the update date inside a group. */
+function sortedDay(row) {
+  const key = memSort.state.key;
+  return day(memorySortValue(row, key === "created" ? "created" : "updated"));
 }
 
 function renderMemoryList() {
@@ -97,7 +147,7 @@ function renderMemoryList() {
               ? [row.scope_name || t("common.every_area"), t("temporary.until", { when: day(row.expires_at) })]
               : mem.view === "retired"
                 ? [named("retire.kind", row.retirement_kind || "legacy"), day(row.retired_at)]
-                : [deliveryShort(row), row.delivery !== "scope" ? row.scope_name : null],
+                : [deliveryShort(row), row.delivery !== "scope" ? row.scope_name : null, sortedDay(row)],
         })),
       },
     ],
@@ -128,7 +178,7 @@ function renderMemoryDetail() {
 
 function memoryDetail(detail) {
   const retired = detail.status === "retired";
-  const nodes = [meta(deliveryText(detail), t("memory.created", { when: day(detail.created_at), who: who(detail.created_by) }))];
+  const nodes = [meta(idTag(detail.memory_id), deliveryText(detail), t("memory.created", { when: day(detail.created_at), who: who(detail.created_by) }))];
   if (mem.panel === "edit") {
     nodes.push(
       form({
@@ -161,11 +211,19 @@ function memoryDetail(detail) {
           [t("retire.when"), day(detail.retired_at)],
           [t("retire.kind"), named("retire.kind", detail.retirement_kind || "legacy")],
           [t("retire.reason"), detail.retire_reason],
-          [t("retire.kind.superseded"), detail.superseded_by && short(detail.superseded_by)],
-          [t("change.moved_to"), detail.relocated_to_id && short(detail.relocated_to_id)],
+          [t("retire.successor_label"), detail.successor_content],
+          [t("change.moved_to"), detail.destination_content],
         ])
+      ),
+      h(
+        "div",
+        { class: "actions" },
+        button(t("memory.restore"), () => memTogglePanel("restore"), { kind: "primary" }),
+        button(latestReason(detail) ? t("memory.edit_reason") : t("memory.add_reason"), () => memTogglePanel("reason"))
       )
     );
+    if (mem.panel === "restore") nodes.push(restorePanel(detail));
+    if (mem.panel === "reason") nodes.push(reasonAddPanel(detail));
   } else if (mem.panel !== "edit") {
     nodes.push(
       h(
@@ -177,6 +235,7 @@ function memoryDetail(detail) {
           if (detail.delivery === "topic") toast(t("memory.topic_cannot_be_temporary"), "warn");
           else memTogglePanel("temporary");
         }),
+        button(latestReason(detail) ? t("memory.edit_reason") : t("memory.add_reason"), () => memTogglePanel("reason")),
         h("span", { class: "spacer" }),
         button(t("memory.retire"), () => memTogglePanel("retire"), { kind: "danger quiet" })
       )
@@ -184,10 +243,11 @@ function memoryDetail(detail) {
     if (mem.panel === "delivery") nodes.push(deliveryPanel(detail));
     if (mem.panel === "temporary") nodes.push(toTemporaryPanel(detail));
     if (mem.panel === "retire") nodes.push(retirePanel(detail));
+    if (mem.panel === "reason") nodes.push(reasonAddPanel(detail));
   }
 
   nodes.push(
-    section(t("evidence.title"), (detail.basis || []).length, evidenceEntries(detail.basis, detail.content)),
+    section(t("evidence.title"), (detail.basis || []).length, evidenceEntries(detail.basis)),
     (detail.revisions || []).length < 2
       ? null
       : section(
@@ -241,6 +301,72 @@ function deliveryPanel(detail) {
   return panel;
 }
 
+/** Bring a retired rule back; its retirement stays in the history, the reason is required. */
+function restorePanel(detail) {
+  return h(
+    "div",
+    { class: "inline-panel" },
+    form({
+      fields: [{ name: "reason", label: t("memory.restore_reason"), kind: "area", rows: 2, hint: t("memory.restore_hint") }],
+      submit: t("memory.restore"),
+      onCancel: () => memTogglePanel("restore"),
+      onSubmit: (values) => {
+        if (!values.reason.trim()) {
+          toast(t("common.reason_required"), "warn");
+          return;
+        }
+        acknowledging(
+          (acknowledged) =>
+            call("memory.restore", { memory_id: detail.memory_id, reason: values.reason, acknowledged }).then((result) => {
+              mem.panel = null;
+              mem.view = "active";
+              mem.selected = detail.memory_id;
+              memSeg.select("active");
+              return result;
+            }),
+          t("memory.restored")
+        );
+      },
+    })
+  );
+}
+
+/**
+ * The newest account of why the rule exists, or "" when none was written. An incident or
+ * friction row tells what happened, and a reason written at remember or later tells why;
+ * either is where an edit starts. Evidence comes newest first.
+ */
+function latestReason(detail) {
+  const row = (detail.basis || []).find((item) => item.what && !fixedAccount(item.what));
+  return row ? row.what : "";
+}
+
+/**
+ * Edit the reason starting from the one written last. The ledger only grows, so saving adds
+ * the edited text as the newest evidence row and the earlier reason stays below it.
+ */
+function reasonAddPanel(detail) {
+  const current = latestReason(detail);
+  return h(
+    "div",
+    { class: "inline-panel" },
+    form({
+      fields: [{ name: "why", label: t("memory.why"), kind: "area", rows: 3, max: 500, value: current, hint: t("memory.reason_hint") }],
+      onCancel: () => memTogglePanel("reason"),
+      onSubmit: (values) => {
+        if (values.why.trim() === current.trim()) {
+          memTogglePanel("reason");
+          return;
+        }
+        act(async () => {
+          await call("memory.add_reason", { memory_id: detail.memory_id, why: values.why });
+          mem.panel = null;
+        }, t("memory.reason_added"));
+      },
+    })
+  );
+}
+
 function toTemporaryPanel(detail) {
   return h(
     "div",
@@ -259,44 +385,61 @@ function toTemporaryPanel(detail) {
 }
 
 function retirePanel(detail) {
-  return h(
-    "div",
-    { class: "inline-panel" },
-    form({
-      fields: [
-        {
-          name: "kind",
-          label: t("retire.kind"),
-          kind: "radio",
-          value: "invalidated",
-          options: ["invalidated", "superseded", "out_of_scope", "relocated"].map((kind) => [kind, named("retire.kind", kind)]),
-        },
-        { name: "successor", label: t("retire.successor"), hint: t("retire.id_hint"), show: (v) => v.kind === "superseded" },
-        { name: "destination", label: t("retire.destination"), hint: t("retire.id_hint"), show: (v) => v.kind === "relocated" },
-        { name: "reason", label: t("retire.reason"), kind: "area", rows: 2 },
-      ],
-      submit: t("memory.retire"),
-      kind: "danger solid",
-      onCancel: () => memTogglePanel("retire"),
-      onSubmit: (values) =>
-        act(async () => {
-          await call("memory.retire", {
-            memory_id: detail.memory_id,
-            kind: values.kind,
-            reason: values.reason,
-            successor: values.kind === "superseded" ? values.successor : null,
-            destination: values.kind === "relocated" ? values.destination : null,
-          });
-          mem.panel = null;
-        }, t("memory.retired")),
+  const panel = h("div", { class: "inline-panel" });
+  Promise.all([call("memory.list", { view: "active" }), call("memory.list", { view: "temporary" })])
+    .then(([active, temporary]) => {
+      const pick = (rows, idOf) => [["", t("retire.choose")], ...rows.map((row) => [idOf(row), reference(idOf(row), row.content, 56)])];
+      panel.append(
+        form({
+          fields: [
+            {
+              name: "kind",
+              label: t("retire.kind"),
+              kind: "radio",
+              value: "invalidated",
+              options: ["invalidated", "superseded", "out_of_scope", "relocated"].map((kind) => [kind, named("retire.kind", kind)]),
+            },
+            {
+              name: "successor",
+              label: t("retire.successor"),
+              kind: "select",
+              options: pick(active.rows.filter((row) => row.memory_id !== detail.memory_id), (row) => row.memory_id),
+              show: (v) => v.kind === "superseded",
+            },
+            {
+              name: "destination",
+              label: t("retire.destination"),
+              kind: "select",
+              options: pick(temporary.rows, (row) => row.context_id),
+              show: (v) => v.kind === "relocated",
+            },
+            { name: "reason", label: t("retire.reason"), kind: "area", rows: 2 },
+          ],
+          submit: t("memory.retire"),
+          kind: "danger solid",
+          onCancel: () => memTogglePanel("retire"),
+          onSubmit: (values) =>
+            act(async () => {
+              await call("memory.retire", {
+                memory_id: detail.memory_id,
+                kind: values.kind,
+                reason: values.reason,
+                successor: values.kind === "superseded" ? values.successor || null : null,
+                destination: values.kind === "relocated" ? values.destination || null : null,
+              });
+              mem.panel = null;
+            }, t("memory.retired")),
+        })
+      );
     })
-  );
+    .catch(fail);
+  return panel;
 }
 
 // ---------------------------------------------------------------- one temporary note
 
 function temporaryDetail(row) {
-  const nodes = [meta(row.scope_name || t("common.every_area"), t("temporary.until", { when: day(row.expires_at) }))];
+  const nodes = [meta(idTag(row.context_id), row.scope_name || t("common.every_area"), t("temporary.until", { when: day(row.expires_at) }))];
   if (mem.panel === "edit") {
     nodes.push(h("div", null));
     loadChoices()

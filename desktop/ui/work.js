@@ -38,6 +38,20 @@ const workNew = button("", () => {
   renderWorkDetail();
 }, { kind: "icon" });
 workNew.append(icon("plus"));
+const workSort = sortControl("work", () => renderWork());
+
+function workSortKeys() {
+  if (work.view === "projects") return [["created", t("sort.created")], ["name", t("sort.name")]];
+  return [["updated", t("sort.updated")], ["created", t("sort.created")], ["kind", t("work.project")]];
+}
+
+function workSortValue(row, key) {
+  if (work.view === "projects") return key === "name" ? row.name : row.created_at;
+  if (key === "created") return row.task.created_at;
+  if (key === "kind") return row.task.project_name;
+  return row.task.last_activity_at || row.state.updated_at;
+}
+
 const workList = listPane(
   workSeg,
   h(
@@ -49,7 +63,8 @@ const workList = listPane(
       renderWork();
     }),
     workNew
-  )
+  ),
+  workSort
 );
 const workDetail = detailPane();
 
@@ -62,10 +77,14 @@ function workRow() {
 }
 
 function shownWork() {
-  if (work.view === "projects") return work.rows.filter((row) => matches(work.query, row.project_id, row.name, row.scope_name));
-  return work.rows.filter((row) =>
-    matches(work.query, row.task.task_id, row.task.name, row.task.project_name, row.state, row.decisions, row.attempts, row.artifacts)
-  );
+  workSort.setKeys(workSortKeys());
+  const found =
+    work.view === "projects"
+      ? work.rows.filter((row) => matches(work.query, row.project_id, row.name, row.scope_name))
+      : work.rows.filter((row) =>
+          matches(work.query, row.task.task_id, row.task.name, row.task.project_name, row.state, row.decisions, row.attempts, row.artifacts)
+        );
+  return sortRows(found, workSort.state, workSortValue);
 }
 
 function pickWork(id) {
@@ -104,7 +123,7 @@ function renderWork() {
                   row.proposal ? t("inbox.group.closes") : null,
                   row.task.project_name,
                   row.task.status === "closed" ? named("close.outcome", row.task.outcome) : null,
-                  when(row.task.last_activity_at || row.state.updated_at),
+                  when(workSort.state.key === "created" ? row.task.created_at : row.task.last_activity_at || row.state.updated_at),
                 ],
               }
         ),
@@ -145,7 +164,7 @@ function taskDetail(row) {
   const { task, state, proposal } = row;
   const closed = task.status === "closed";
   const nodes = [
-    meta(task.project_name, named("work.activity", row.activity), t("work.as_of", { date: row.as_of })),
+    meta(idTag(task.task_id), task.project_name, named("work.activity", row.activity), t("work.as_of", { date: row.as_of })),
     h("h1", { class: "title", text: task.name }),
   ];
   if (row.activity === "dormant") nodes.push(h("div", { class: "callout warn" }, h("p", { text: t("work.dormant_note") })));
@@ -241,11 +260,12 @@ function decisionsSection(decisions) {
   const replaced = new Set(decisions.flatMap((item) => item.supersedes_ids || []));
   const inForce = decisions.filter((item) => !replaced.has(item.decision_id));
   const old = decisions.filter((item) => replaced.has(item.decision_id));
+  const words = new Map(decisions.map((item) => [item.decision_id, item.decision]));
   const render = (item) => [
     `${day(item.created_at)} · ${who(item.created_by)}`,
     item.decision,
     [t("work.attempt_reason"), item.reason],
-    [null, (item.supersedes_ids || []).length ? t("work.replaces", { ids: item.supersedes_ids.map(short).join(", ") }) : null],
+    [t("work.replaces"), (item.supersedes_ids || []).map((id) => reference(id, words.get(id))).join("\n")],
   ];
   const rest = inForce.slice(DECISIONS_SHOWN);
   return section(
@@ -326,7 +346,7 @@ function editTaskForm(target, row) {
   loadChoices()
     .then((choices) => {
       target.replaceChildren(
-        meta(task.project_name, t("work.as_of", { date: row.as_of })),
+        meta(idTag(task.task_id), task.project_name, t("work.as_of", { date: row.as_of })),
         form({
           fields: [
             { name: "name", label: t("work.name"), value: task.name, big: true },
@@ -398,7 +418,7 @@ function newTaskForm(target) {
 
 function projectDetail(row) {
   return [
-    meta(row.scope_name || t("work.project_scope_none"), t("work.project_created", { when: day(row.created_at) })),
+    meta(idTag(row.project_id), row.scope_name || t("work.project_scope_none"), t("work.project_created", { when: day(row.created_at) })),
     h("h1", { class: "title", text: row.name }),
     h("p", { class: "sub", text: t("work.project_tasks", { a: row.n_active, d: row.n_dormant, c: row.n_closed }) }),
     h("div", { class: "actions" }, button(t("common.edit"), () => workTogglePanel("edit"))),

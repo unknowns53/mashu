@@ -188,6 +188,10 @@ body {
 .list-note { padding: 10px 18px; color: var(--text-3); font-size: 12px; }
 
 .row { display: flex; gap: 8px; align-items: center; }
+.sort-row { gap: 6px; }
+.sort-label { color: var(--text-3); font-size: 12.5px; white-space: nowrap; }
+.sort-row select.sort-key { flex: 1; width: auto; height: 26px; padding: 0 6px; font-size: 12.5px; }
+.sort-row .sort-dir { min-width: 52px; }
 .search-row .search { flex: 1; }
 
 /* segmented control and search */
@@ -361,6 +365,17 @@ input:focus, textarea:focus, select:focus { outline: none; border-color: var(--a
 .table td.ops { width: 1%; white-space: nowrap; text-align: right; padding-right: 0; }
 .table tr:hover td.ops .btn { opacity: 1; }
 .table td.ops .btn { opacity: 0.7; }
+.meta .id {
+  margin: 0 -3px;
+  padding: 0 3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: 12px var(--mono);
+  cursor: copy;
+}
+.meta .id:hover { background: var(--hover); color: var(--text-2); }
 code, .mono { font-family: var(--mono); font-size: 12.5px; }
 
 /* toast and dialog */

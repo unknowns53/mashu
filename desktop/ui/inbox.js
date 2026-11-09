@@ -129,6 +129,7 @@ function readGate(conflicts, blocking, target) {
 function candidateDetail(row) {
   const nodes = [
     meta(
+      idTag(row.nomination_id),
       row.scope_name
         ? t("candidate.meta_area", { kind: named("candidate.kind", row.kind), area: row.scope_name, when: when(row.created_at) })
         : t("candidate.meta", { kind: named("candidate.kind", row.kind), when: when(row.created_at) })
@@ -195,7 +196,7 @@ function candidateDetail(row) {
   if ((row.conflict_rows || []).length) {
     nodes.push(section(t("conflicts.title"), row.conflict_rows.length, conflictEntries(row.conflict_rows)));
   }
-  nodes.push(section(t("evidence.title"), (row.evidence_rows || []).length, evidenceEntries(row.evidence_rows, row.content)));
+  nodes.push(section(t("evidence.title"), (row.evidence_rows || []).length, evidenceEntries(row.evidence_rows)));
   return nodes;
 }
 
@@ -238,7 +239,7 @@ function admitPanel(row) {
 function changeDetail(row) {
   const target = row.target || {};
   const nodes = [
-    meta(t("change.meta", { op: named("change.op", row.operation), when: when(row.proposed_at) }), who(row.proposed_by)),
+    meta(idTag(row.change_id), t("change.meta", { op: named("change.op", row.operation), when: when(row.proposed_at) }), who(row.proposed_by)),
     h("p", { class: "rule-text", text: target.content }),
     h("p", { class: "sub", text: deliveryText(target) }),
   ];
@@ -331,7 +332,7 @@ function changeDetail(row) {
         fieldList([
           [t("retire.kind"), named("retire.kind", row.retirement_kind)],
           [t("retire.reason"), row.retire_reason],
-          [t("change.moved_to"), row.relocated_to_id ? destination.content || short(row.relocated_to_id) : null],
+          [t("change.moved_to"), row.relocated_to_id ? reference(row.relocated_to_id, destination.content || t("temporary.title"), 80) : null],
           [t("temporary.area"), row.relocated_to_id ? destination.scope_name || t("common.every_area") : null],
           [t("change.until"), destination.expires_at ? day(destination.expires_at) : null],
         ])
@@ -361,7 +362,7 @@ function changeDetail(row) {
       t("evidence.title"),
       row.evidence.length,
       entries(row.evidence, (item) => [
-        `${named("evidence.kind", item.kind || "artifact")}${item.id ? ` · ${short(item.id)}` : ""}${item.ref ? ` · ${item.ref}` : ""}`,
+        [named("evidence.kind", item.kind || "artifact"), item.id && short(item.id), item.ref].filter(Boolean).join(" · "),
         item.observation,
       ])
     )
@@ -381,7 +382,7 @@ function closeDetail(row) {
     { kind: "primary" }
   );
   const nodes = [
-    meta(t("close.meta", { outcome: named("close.outcome", proposal.outcome), when: when(proposal.proposed_at) }), who(proposal.proposed_by)),
+    meta(idTag(task.task_id), t("close.meta", { outcome: named("close.outcome", proposal.outcome), when: when(proposal.proposed_at) }), who(proposal.proposed_by)),
     h("h1", { class: "title", text: task.name }),
     h("p", { class: "sub", text: `${task.project_name}  ·  ${t("work.as_of", { date: row.as_of })}` }),
     h("div", { class: "callout" }, h("p", { text: proposal.reason })),
