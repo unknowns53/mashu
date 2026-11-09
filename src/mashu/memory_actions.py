@@ -94,6 +94,26 @@ def set_delivery(
     )
 
 
+def restore(
+    cur: psycopg.Cursor,
+    memory_id: UUID,
+    *,
+    reason: str,
+    acknowledged: list[UUID] | None,
+    actor: str,
+) -> dict[str, Any]:
+    """Bring a retired rule back on the person's word.
+
+    The person reverses the retirement directly, so the reason they give is the reversal;
+    the former kind and reason stay on the restore event. Retired rules the body repeats are
+    named back with RetiredConflictError until they are acknowledged, as remember does.
+    """
+    approval: dict[str, Any] = {"kind": "user_direct"}
+    if acknowledged:
+        approval["conflict_ids"] = sorted(str(ident) for ident in acknowledged)
+    return memories.restore(cur, memory_id, reason=reason, actor=actor, approval_source=approval)
+
+
 def retire(
     cur: psycopg.Cursor,
     memory_id: UUID,

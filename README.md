@@ -292,6 +292,7 @@ TUI の操作は次のとおり。
 | mashu memories --retired | retire された Memory と retire の理由を表示 |
 | mashu ledger | Ledger を新しい順に表示 |
 | mashu retire REF --kind KIND --reason REASON | `invalidated` / `superseded` / `out_of_scope` / `relocated` の理由を付けて Memory を retire する。`legacy` は既存データと移行専用 |
+| mashu restore REF --reason REASON | retire された Memory を復帰する。retire の記録は履歴に残る。廃止済みの似た規則と衝突すれば理由を示して確認する |
 | mashu review --changes | retire / replace / restore / redeliver の pending proposal を TUI で読む |
 | mashu revise REF | Memory を改訂する。旧本文は revision history に残る |
 | mashu deliver REF always\|scope\|topic | active Memory の配信先を変更する。topic は --topic NAME で指定する |

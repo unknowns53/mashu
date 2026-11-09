@@ -162,7 +162,7 @@ Agent 用の検索は無いので、溢れた分を逃がす先は無い。**容
 
 - `superseded` は後継 Memory ID を、`relocated` は移動先の種類と ID を保存する。自己参照、循環、存在しない参照は拒否する。
 - bootstrap と類似照合結果は retire された Memory の本文を返さない。明示的な `memory_get` と管理画面では、本文・revision・evidence と retired 状態・理由・後継または移動先をまとめて返す。
-- 復帰は通常の本文・容量・重複・conflict 検査を通す。invalidated / legacy の復帰には、retire の判断を覆す明示指示と理由を記録し、過去の retire の event は残す。
+- 復帰は通常の本文・容量・重複・conflict 検査を通す。invalidated / legacy の復帰には、retire の判断を覆す明示指示と理由を記録し、過去の retire の event は残す。User は `mashu restore`、TUI の retired 一覧の `o`、デスクトップアプリの「復元」から直接復帰できる。そのとき入力した理由が覆す理由で、承認の出所は `user_direct` として restore の event に残る。
 - `replace` は一つの transaction で後継の採用と旧 Memory の retire を行う。容量は完了後の active 集合に対して判定し、失敗時は元の active 集合を保つ。
 - Temporary Context への変換は `relocated` と移動先を記録する。逆変換はその移動済み行だけを扱い、無関係な invalidated / legacy の理由を一括上書きしない。本文がそれらに当たるときは、ほかの直接操作と同じく理由を見せて対象 ID の確認を求める。
 - CLI と TUI の retire 操作は `--kind` / 種別選択を必須にする。`legacy` は既存データのためのもので、新しい retire の理由には使わない。
@@ -271,6 +271,7 @@ Project State 系 Tool は `docs/project-state.md` 12.1 節に記す。
 | `mashu review` / `mashu review --changes` | nomination または Memory change proposal を読み、編集・適用・却下・取り下げ |
 | `mashu remember <body>` | User 明示。CLI で即時 active にする経路。本文は 120 字までで、理由は `--why` で evidence に残す。invalidated / legacy conflict は理由を表示して個別 ID を確認する。`--until` を渡すと Temporary Context を作る |
 | `mashu retire <id> --kind K --reason <r>` | retire。kind と理由が必須。`legacy` は既存データのためのもの |
+| `mashu restore <id> --reason <r>` | retire された Memory を User の直接操作で復帰する。理由が必須で、retire の記録は履歴に残る。復帰する本文が invalidated / legacy の Memory と衝突すれば、理由を示して確認する（`--force` で確認済みとして進める） |
 | `mashu revise <id>` | 本文の改訂（User のみ） |
 | `mashu show <id>` | 記憶・候補・`ledger` の行・Memory change proposal を 1 件、根拠と履歴つきで表示 |
 | `mashu memories` | 記憶の一覧。既定は active、`--retired` で retire された Memory とその理由 |

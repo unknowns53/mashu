@@ -330,6 +330,16 @@ def memory_add_reason(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     return memories.add_reason(cur, _uuid(args, "memory_id"), why=_text(args, "why"), actor=ACTOR)
 
 
+def memory_restore(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    return memory_actions.restore(
+        cur,
+        _uuid(args, "memory_id"),
+        reason=_text(args, "reason"),
+        acknowledged=_uuids(args, "acknowledged"),
+        actor=ACTOR,
+    )
+
+
 def memory_retire(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     return memory_actions.retire(
         cur,
@@ -623,6 +633,7 @@ OPERATIONS: dict[str, Operation] = {
     "memory.remember": memory_remember,
     "memory.revise": memory_revise,
     "memory.add_reason": memory_add_reason,
+    "memory.restore": memory_restore,
     "memory.retire": memory_retire,
     "memory.delivery": memory_delivery,
     "memory.to_temporary": memory_to_temporary,

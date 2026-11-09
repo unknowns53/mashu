@@ -22,6 +22,7 @@ from mashu import (
     db,
     events,
     memories,
+    memory_actions,
     memory_changes,
     nominations,
     projects,
@@ -486,6 +487,32 @@ def cmd_retire(args: argparse.Namespace) -> int:
         )
     _gate_warnings(row)
     print(f"retired  {row['memory_id']}")
+    return 0
+
+
+def cmd_restore(args: argparse.Namespace) -> int:
+    with db.transaction(args.dsn) as cur:
+        memory_id = _memory_ref(cur, args.memory_id)
+    acknowledged: list[UUID] | None = None
+    while True:
+        try:
+            with db.transaction(args.dsn) as cur:
+                former = memories.get_memory(cur, memory_id)
+                row = memory_actions.restore(
+                    cur, memory_id, reason=args.reason, acknowledged=acknowledged, actor=ACTOR
+                )
+            break
+        except RetiredConflictError as conflict:
+            if args.force:
+                _print_retirement_conflicts(conflict)
+                acknowledged = [row["memory_id"] for row in conflict.tombstones]
+                continue
+            acknowledged = _confirm_override(conflict)
+            if acknowledged is None:
+                return 1
+    _gate_warnings(row)
+    kind = former["retirement_kind"] or "legacy"
+    print(f"restored  {row['memory_id']}  (was {kind}: {former['retire_reason']})")
     return 0
 
 
@@ -1858,6 +1885,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="destination Temporary Context ID or unique prefix for relocated",
     )
     retire.set_defaults(func=cmd_retire)
+
+    restore = _command(
+        sub,
+        "restore",
+        "bring a retired memory back, keeping its retirement in the history",
+        examples=('mashu restore 1a2b3c4d --reason "The service is back in use"',),
+    )
+    restore.add_argument("memory_id", help=_REF_HELP)
+    restore.add_argument("--reason", required=True, help="why the retirement no longer holds")
+    restore.add_argument(
+        "--force",
+        action="store_true",
+        help="restore over retired rules it repeats whose reasons you have already read",
+    )
+    restore.set_defaults(func=cmd_restore)
 
     revise = _command(
         sub,

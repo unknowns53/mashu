@@ -15,7 +15,7 @@ _VIEWS = {"1": "active", "2": "retired", "3": "temporary"}
 _KEYS = (
     "  ↑↓/jk move   PgUp/PgDn   / search   ⏎ why   ← back   q quit   ? help\n"
     "  n remember   p temporary   e edit   c convert   r retire/end   d delivery\n"
-    "  s sort   v reverse"
+    "  o restore a retired memory   s sort   v reverse"
 )
 _ITEM_KEYS = "  space read on   b page back   ← back   q quit   ? help"
 
@@ -34,6 +34,7 @@ _HELP = """
   c            convert an active memory to temporary context, or the reverse
   r            retire the selected active memory, or end the selected temporary context
   d            change where the selected active memory is delivered
+  o            restore the selected retired memory, after reading why it was retired
   s            sort by the next key: updated, created, delivery or kind, then back to
                the listed order (created, expires, scope for temporary context)
   v            reverse the order
@@ -540,6 +541,30 @@ def _retire(dsn: str | None, row: dict[str, Any]) -> str:
     return screen.success(f"  ✓ retired {_short(row['memory_id'])}")
 
 
+def _restore(dsn: str | None, row: dict[str, Any]) -> tuple[str, bool]:
+    """Restore a retired rule; the note to show, and whether it is active again."""
+    kind = row.get("retirement_kind") or "legacy"
+    print(screen.wrap(f"  retired as {kind}: {row.get('retire_reason') or '-'}", indent="    "))
+    reason = _required("  why the retirement no longer holds [required]: ")
+    if reason is None:
+        return screen.warning("  ! left retired — restoring needs a reason"), False
+    acknowledged: list[UUID] | None = None
+    while True:
+        try:
+            with db.transaction(dsn) as cur:
+                memory_actions.restore(
+                    cur, row["memory_id"], reason=reason, acknowledged=acknowledged, actor=ACTOR
+                )
+            return screen.success(f"  ✓ restored {_short(row['memory_id'])}"), True
+        except RetiredConflictError as conflict:
+            print(_conflict_text(conflict))
+            if not _confirm("restore it after reading these retirement reasons?"):
+                return screen.warning("  ! left retired"), False
+            acknowledged = [tomb["memory_id"] for tomb in conflict.tombstones]
+        except MashuError as refusal:
+            return screen.danger(f"  {refusal}"), False
+
+
 def _set_delivery(dsn: str | None, row: dict[str, Any]) -> str:
     answers = _delivery_answers(
         row["delivery"],
@@ -883,6 +908,11 @@ def run(dsn: str | None = None) -> int:
                     note = screen.warning("  ! retired memories cannot be converted")
             except MashuError as error:
                 note = screen.danger(f"  ✗ {error}")
+            continue
+        if view == "retired" and key == "o":
+            note, restored = _restore(dsn, row)
+            if restored:
+                view, query, selected["active"] = "active", "", row["memory_id"]
             continue
         if view == "temporary" and key in {"e", "r"}:
             try:
