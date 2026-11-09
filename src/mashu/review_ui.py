@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
-from uuid import uuid4
 
-from mashu import db, memory_ui, nominations, screen, tokens
+from mashu import db, memory_ui, nominations, review_actions, screen, tokens
 from mashu.errors import MashuError
 
 # the screens
@@ -261,68 +260,28 @@ def _admit(dsn: str | None, row: dict[str, Any]) -> str:
             return screen.warning("  ! admission cancelled")
         delivery, topic = choice
         with db.transaction(dsn) as cur:
-            cur.execute(
-                "SELECT status, version, content FROM nomination "
-                "WHERE nomination_id = %s FOR UPDATE",
-                (row["nomination_id"],),
-            )
-            current = cur.fetchone()
-            if current is None or current["status"] != "pending":
-                raise MashuError(nominations.NOT_PENDING)
-            if current["version"] != row["version"]:
-                fresh = next(
-                    (
-                        item
-                        for item in nominations.pending_nominations(cur)
-                        if item["nomination_id"] == row["nomination_id"]
-                    ),
-                    None,
-                )
-                if fresh is not None:
-                    row.update(fresh)
-                return screen.warning(
-                    "  ! candidate changed; read the current wording and press y again"
-                )
-            current_conflicts = nominations.current_conflict_ids(cur, current["content"])
-            refreshed = nominations.refresh_conflicts(
-                cur, row["nomination_id"], current_conflicts, actor="user"
-            )
-            if refreshed is None:
-                raise MashuError(nominations.NOT_PENDING)
-            if refreshed["version"] != row["version"]:
-                fresh = next(
-                    (
-                        item
-                        for item in nominations.pending_nominations(cur)
-                        if item["nomination_id"] == row["nomination_id"]
-                    ),
-                    None,
-                )
-                if fresh is not None:
-                    row.update(fresh)
-                return screen.warning(
-                    "  ! retirement conflicts changed; read the updated candidate and press y again"
-                )
-            nominations.admit(
+            outcome = review_actions.admit(
                 cur,
                 row["nomination_id"],
-                actor="user",
-                delivery=delivery,
                 expected_version=row["version"],
-                topic_id=memory_ui.topic_id_for(cur, topic),
-                approval={
-                    "kind": "user_direct",
-                    "conflict_ids": [
-                        item["memory_id"]
-                        for item in row.get("conflict_rows", [])
-                        if item.get("retirement_kind") in ("invalidated", "legacy")
-                    ],
-                },
-                request_id=uuid4(),
+                delivery=delivery,
+                topic=topic,
+                conflict_ids=review_actions.blocking_conflict_ids(row),
+                actor="user",
             )
     except MashuError as refusal:
         # Keep the candidate selected when admission is refused.
         return screen.danger(f"  {refusal}")
+    if isinstance(outcome, review_actions.Changed):
+        if outcome.current is not None:
+            row.update(outcome.current)
+        if outcome.what == "candidate":
+            return screen.warning(
+                "  ! candidate changed; read the current wording and press y again"
+            )
+        return screen.warning(
+            "  ! retirement conflicts changed; read the updated candidate and press y again"
+        )
     return ""
 
 
@@ -582,13 +541,7 @@ def run(dsn: str | None = None, *, show_deferred: bool = False) -> int:
 
         decided = rows[at]
         if key in ("y", "enter"):
-            if (
-                any(
-                    item.get("retirement_kind") in ("invalidated", "legacy")
-                    for item in decided.get("conflict_rows", [])
-                )
-                and not conflicts_seen
-            ):
+            if review_actions.blocking_conflict_ids(decided) and not conflicts_seen:
                 note = screen.warning("  ! read the retirement conflict reasons before admitting")
                 continue
             version = decided["version"]

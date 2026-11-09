@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mashu</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header>
+    <strong>Review</strong>
+    <span id="counts">…</span>
+    <label class="toggle"><input type="checkbox" id="include-deferred"> include deferred</label>
+    <button type="button" id="refresh">Check now</button>
+  </header>
+  <section id="proposals" hidden>
+    <h2>Proposed for closing</h2>
+    <ul id="proposal-list"></ul>
+    <p class="muted">Close or keep these in the terminal UI (<code>mashu</code> → Tasks).</p>
+  </section>
+  <p id="message" role="status" hidden></p>
+  <main>
+    <nav aria-label="candidates">
+      <ul id="queue"></ul>
+      <p id="empty" class="muted" hidden>Nothing waiting for review.</p>
+    </nav>
+    <article id="detail" hidden>
+      <p id="meta" class="muted"></p>
+      <p id="deferred-note" class="warn" hidden></p>
+      <div id="content" class="body"></div>
+      <form id="edit-form" hidden>
+        <textarea id="edit-text" rows="6"></textarea>
+        <div class="row">
+          <button type="submit">Save wording</button>
+          <button type="button" id="edit-cancel">Cancel</button>
+          <span class="muted">Saving keeps it pending; admit afterwards.</span>
+        </div>
+      </form>
+      <section id="conflicts" hidden>
+        <h3>Retired conflicts</h3>
+        <ul id="conflict-list"></ul>
+        <label><input type="checkbox" id="conflicts-read"> I have read why these were retired</label>
+      </section>
+      <section>
+        <h3>Evidence</h3>
+        <ul id="evidence-list"></ul>
+      </section>
+      <section class="actions">
+        <div class="row">
+          <label>delivery
+            <select id="delivery">
+              <option value="always">always — every session, at start</option>
+              <option value="scope">scope — sessions in its Scope, at start</option>
+              <option value="topic">topic — read when its trigger's work begins</option>
+            </select>
+          </label>
+          <select id="topic" hidden></select>
+          <button type="button" id="admit" class="primary">Admit</button>
+          <button type="button" id="edit">Edit wording</button>
+        </div>
+        <div class="row">
+          <input id="reason" type="text" placeholder="why turn it down or put it off">
+          <button type="button" id="decline" class="danger">Turn down</button>
+          <button type="button" id="defer">Put off</button>
+        </div>
+      </section>
+    </article>
+  </main>
+</body>
+</html>

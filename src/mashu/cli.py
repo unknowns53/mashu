@@ -1637,6 +1637,12 @@ def cmd_gui(args: argparse.Namespace) -> int:
     return gui.serve(args.dsn, port=args.port, open_browser=not args.no_open)
 
 
+def cmd_desktop_backend(args: argparse.Namespace) -> int:
+    from mashu import desktop
+
+    return desktop.serve(args.dsn)
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     if args.dsn is not None:
         os.environ[db.DSN_ENV_VAR] = args.dsn
@@ -2412,6 +2418,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gui.add_argument("--no-open", action="store_true", help="do not open a browser window")
     gui.set_defaults(func=cmd_gui)
+
+    desktop_backend = _command(
+        sub,
+        "desktop-backend",
+        "answer the desktop app's requests, one JSON line each, on stdin and stdout",
+        description=(
+            "Run as the desktop app's child process. Each line on stdin is one request, "
+            "answered on one line of stdout, through the same functions as the terminal UI. "
+            "Decisions are recorded as the User's."
+        ),
+        examples=("mashu desktop-backend",),
+    )
+    desktop_backend.set_defaults(func=cmd_desktop_backend)
 
     serve = _command(
         sub,
