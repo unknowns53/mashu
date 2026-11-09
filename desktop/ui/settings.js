@@ -396,11 +396,18 @@ async function versionSection() {
   const [info, place] = await Promise.all([invoke("update_check"), invoke("checkout_get")]);
   showUpdate(info);
   const latest = info.latest ? (info.available ? info.latest : t("update.current", { version: info.latest })) : info.error || t("update.unknown");
+  // A mashu from before 4.0.0 has no version op to answer with.
+  const mashu = info.mashu || (/unknown op/.test(info.mashu_error || "") ? t("update.mashu_old") : info.mashu_error || t("update.unknown"));
   const progress = h("p", { class: "sub" });
+  const check = button(t("update.check"), async () => {
+    check.disabled = true;
+    check.textContent = t("update.checking");
+    await reload().catch(fail);
+  });
   const update = async () => {
     const yes = await confirmDialog({
       title: t("update.confirm", { version: info.latest }),
-      lines: [t("update.confirm_detail", { path: place.path })],
+      lines: [t("update.confirm_detail", { path: info.checkout })],
       confirm: t("update.run"),
     });
     if (!yes) return;
@@ -418,7 +425,7 @@ async function versionSection() {
       }
     }, t("update.done"));
   };
-  const input = h("input", { type: "text", value: place.path || "", placeholder: "~/MyApp/mashu" });
+  const input = h("input", { type: "text", value: place.path || info.checkout || "", placeholder: "~/MyApp/mashu" });
   const savePlace = (event) => {
     event.preventDefault();
     act(() => invoke("checkout_set", { path: input.value }), t("update.place_saved"));
@@ -430,15 +437,17 @@ async function versionSection() {
       { class: "version-rows" },
       fieldList([
         [t("update.app"), info.app],
-        [t("update.mashu"), info.mashu || t("update.unknown")],
+        [t("update.mashu"), mashu],
         [t("update.latest"), latest],
       ]),
       h(
         "div",
         { class: "actions" },
-        info.available && place.path ? button(t("update.run_to", { version: info.latest }), update, { kind: "primary" }) : null,
-        button(t("update.check"), () => reload().catch(fail))
+        info.available && info.checkout ? button(t("update.run_to", { version: info.latest }), update, { kind: "primary" }) : null,
+        check
       ),
+      h("p", { class: "sub", text: t("update.checked", { time: clock(app.updateChecked) }) }),
+      info.checkout ? null : h("p", { class: "sub", text: t("update.no_checkout") }),
       progress,
       info.dev_build ? h("p", { class: "sub", text: t("update.dev_hint") }) : null
     ),

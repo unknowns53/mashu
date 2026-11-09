@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::UpdaterExt;
 
+use crate::setup::repository_url;
 use crate::{drop_process, Backend};
 
 #[derive(Default, Serialize, Deserialize)]
@@ -177,12 +178,24 @@ pub(crate) fn latest_release(
         .map(|(_, version)| version.to_owned()))
 }
 
-fn backend_version(app: &AppHandle) -> Option<String> {
+/// The version the backend runs and the checkout it reports running from.
+fn backend_version(app: &AppHandle) -> Result<(String, Option<PathBuf>), String> {
     let reply = app
         .state::<Backend>()
-        .request(app, "version", json!({}))
-        .ok()?;
-    reply["result"]["version"].as_str().map(str::to_owned)
+        .request(app, "version", json!({}))?;
+    if reply["ok"] != json!(true) {
+        return Err(reply["error"].as_str().unwrap_or("refused").to_owned());
+    }
+    let version = reply["result"]["version"]
+        .as_str()
+        .ok_or("the backend gave no version")?;
+    let root = reply["result"]["checkout"].as_str().map(PathBuf::from);
+    Ok((version.to_owned(), root))
+}
+
+/// The checkout an update moves: the one the app knows, else the one the backend runs from.
+fn update_root(app: &AppHandle) -> Option<PathBuf> {
+    checkout(app).or_else(|| backend_version(app).ok().and_then(|(_, root)| root))
 }
 
 #[tauri::command]
@@ -226,19 +239,27 @@ pub fn checkout_set(app: AppHandle, path: String) -> Result<Value, String> {
 pub async fn update_check(app: AppHandle) -> Result<Value, String> {
     let app_version = app.package_info().version.to_string();
     let local = app.clone();
-    let (mashu, latest) = tauri::async_runtime::spawn_blocking(move || {
-        let mashu = backend_version(&local);
-        let latest = match (tool("git"), checkout(&local)) {
-            (Some(git), Some(root)) => latest_release(&git, &root, "origin"),
-            _ => Ok(None),
+    let (backend, root, latest) = tauri::async_runtime::spawn_blocking(move || {
+        let backend = backend_version(&local);
+        let reported = backend.as_ref().ok().and_then(|(_, root)| root.clone());
+        let root = checkout(&local).or(reported);
+        // Without a checkout, the repository a fresh install would clone still names the releases.
+        let latest = match (tool("git"), &root) {
+            (None, _) => Err("git was not found".to_owned()),
+            (Some(git), Some(root)) => latest_release(&git, root, "origin"),
+            (Some(git), None) => latest_release(&git, &std::env::temp_dir(), &repository_url()),
         };
-        (mashu, latest)
+        (backend, root, latest)
     })
     .await
     .map_err(|error| error.to_string())?;
     // Offline, the versions on this machine are still worth showing.
     let (latest, error) = match latest {
         Ok(latest) => (latest, None),
+        Err(error) => (None, Some(error)),
+    };
+    let (mashu, mashu_error) = match backend {
+        Ok((version, _)) => (Some(version), None),
         Err(error) => (None, Some(error)),
     };
     let newer = |current: Option<&str>| match (&latest, current.and_then(version_key)) {
@@ -250,6 +271,8 @@ pub async fn update_check(app: AppHandle) -> Result<Value, String> {
     Ok(json!({
         "app": app_version,
         "mashu": mashu,
+        "mashu_error": mashu_error,
+        "checkout": root,
         "latest": latest,
         "available": available,
         "dev_build": cfg!(debug_assertions),
@@ -330,7 +353,7 @@ fn update_checkout(app: &AppHandle, root: &Path, version: &str) -> Result<(), St
 /// Every step can run again, so after a failure the same update is simply started again.
 #[tauri::command]
 pub async fn update_install(app: AppHandle, version: String) -> Result<Value, String> {
-    let root = checkout(&app).ok_or("set where the Mashu checkout is first")?;
+    let root = update_root(&app).ok_or("set where the Mashu checkout is first")?;
     let local = app.clone();
     let target = version.clone();
     tauri::async_runtime::spawn_blocking(move || update_checkout(&local, &root, &target))

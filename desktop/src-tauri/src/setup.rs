@@ -13,7 +13,7 @@ use crate::update::{
 };
 
 /// The repository this app was built from, so a fork's app installs the fork.
-fn repository_url() -> String {
+pub(crate) fn repository_url() -> String {
     let repository = option_env!("GITHUB_REPOSITORY").unwrap_or("unknowns53/mashu");
     format!("https://github.com/{repository}.git")
 }

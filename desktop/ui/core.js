@@ -452,6 +452,7 @@ async function reload() {
 /** Remember what update_check found and offer a newer release under the navigation. */
 function showUpdate(info) {
   app.update = info;
+  app.updateChecked = new Date();
   const note = $("update-note");
   note.hidden = !info.available;
   note.textContent = t("update.note", { version: info.latest });
