@@ -484,6 +484,41 @@ def revise(
     return row
 
 
+def add_reason(cur: psycopg.Cursor, memory_id: UUID, *, why: str, actor: str) -> dict[str, Any]:
+    """Add a reason to a rule after the fact, as one more evidence row.
+
+    The ledger is append-only, so a reason left out at remember is written as the same kind
+    of row remember writes, holding the body as it reads now. Neither the body nor the
+    delivery changes, so `updated_at` stays and proposals read against the rule stay current.
+    """
+    memory = get_memory(cur, memory_id)
+    if memory is None:
+        raise MashuError(f"no memory {memory_id}")
+    why = (why or "").strip()
+    if not why:
+        raise MalformedRequestError(["why needs the reason to add"])
+    if len(why) > WHY_LIMIT:
+        raise MalformedRequestError([OverLimit("why", WHY_LIMIT, len(why))])
+    verdict = redact.gate({"why": why})
+    cur.execute(
+        """
+        INSERT INTO ledger (kind, what, prevention, scope_id, created_by)
+        VALUES ('explicit', %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (why, memory["content"], memory["scope_id"], actor),
+    )
+    row = cur.fetchone()
+    cur.execute(
+        "UPDATE memory SET evidence = array_append(evidence, %s) WHERE memory_id = %s",
+        (row["ledger_id"], memory_id),
+    )
+    events.record(
+        cur, "memory_reason_added", actor, memory_id=memory_id, ledger_id=row["ledger_id"]
+    )
+    return {**row, **_gate_report(verdict)}
+
+
 def restore(
     cur: psycopg.Cursor,
     memory_id: UUID,

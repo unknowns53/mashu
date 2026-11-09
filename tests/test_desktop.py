@@ -254,6 +254,24 @@ def test_writing_back_a_retired_rule_waits_until_its_retirement_is_acknowledged(
     assert memory_statuses(dsn) == [(RULE, "retired"), (RULE, "active")]
 
 
+def test_a_reason_added_later_becomes_evidence_and_leaves_the_rule_as_it_was(dsn):
+    with db.transaction(dsn) as cur:
+        rule = remember(cur, RULE)
+        before = memories.memory_details(cur, rule["memory_id"])
+
+    why = "the server failed twice"
+    assert ask(dsn, "memory.add_reason", memory_id=rule["memory_id"], why=why)["ok"]
+    assert not ask(dsn, "memory.add_reason", memory_id=rule["memory_id"], why="  ")["ok"]
+    too_long = ask(dsn, "memory.add_reason", memory_id=rule["memory_id"], why="x" * 501)
+    assert too_long["over_limit"][0]["field"] == "why"
+
+    with db.transaction(dsn) as cur:
+        after = memories.memory_details(cur, rule["memory_id"])
+    assert after["basis"][0]["what"] == "the server failed twice"
+    assert after["basis"][0]["prevention"] == RULE
+    assert (after["content"], after["updated_at"]) == (before["content"], before["updated_at"])
+
+
 def test_a_rule_is_moved_retired_and_its_temporary_context_ended_from_the_app(dsn):
     with db.transaction(dsn) as cur:
         scopes.create_scope(cur, name="lab", actor="user")
