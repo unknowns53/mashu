@@ -18,6 +18,7 @@ from mashu import (
     memories,
     nominations,
     redact,
+    settings,
     topics,
 )
 from mashu.errors import (
@@ -1056,9 +1057,9 @@ INSTRUCTED_OPERATIONS: tuple[str, ...] = tuple(_INSTRUCTED_TAKES)
 
 
 def _instructed_problems(
-    operation: str, approval: dict[str, Any], fields: dict[str, Any]
+    operation: str, approval: dict[str, Any], fields: dict[str, Any], *, content_limit: int
 ) -> list[str | OverLimit]:
-    """Every problem with an instructed change that can be seen without the database."""
+    """Every problem with an instructed change that can be seen without reading any row."""
     problems: list[str | OverLimit] = []
     for key, needs in (
         ("instruction", "a short exact quote of the user's words"),
@@ -1090,7 +1091,9 @@ def _instructed_problems(
         if _blank(fields["content"]):
             problems.append("replace needs content, the successor rule")
         else:
-            problems += memories.body_problems(fields["content"], why=fields["why"])
+            problems += memories.body_problems(
+                fields["content"], limit=content_limit, why=fields["why"]
+            )
     elif _blank(fields["restore_reason"]):
         problems.append("restore needs restore_reason")
     return problems
@@ -1146,7 +1149,9 @@ def change_instructed(
         "why": why,
         "restore_reason": restore_reason,
     }
-    problems = _instructed_problems(operation, approval, fields)
+    problems = _instructed_problems(
+        operation, approval, fields, content_limit=settings.limit(cur, "content_limit")
+    )
     if problems:
         raise MalformedRequestError(problems)
     redact.gate(

@@ -7,7 +7,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import capacity, config, events, match, nominations, redact, topics
+from mashu import capacity, config, events, match, nominations, redact, settings, topics
 from mashu.errors import (
     MalformedRequestError,
     MashuError,
@@ -20,10 +20,6 @@ DELIVERIES = ("always", "scope", "topic")
 
 _EXPLICIT_WHAT = "recorded by the user's own hand"
 
-#: The longest body a caller may write, in characters. Every matching session is handed the
-#: body whole, and capacity bounds what the bodies cost together, not what one of them costs.
-CONTENT_LIMIT = 120
-
 #: The longest reason one write leaves on its evidence row, which is read but never pushed.
 WHY_LIMIT = 500
 
@@ -31,16 +27,19 @@ WHY_LIMIT = 500
 def check_body(
     content: str,
     *,
+    limit: int,
     why: str | None = None,
     field: str = "content",
     rest: str | None = "why",
 ) -> None:
-    """Refuse a new body over its ceiling, naming `rest` as where its reason goes.
+    """Refuse a new body over `limit` characters, naming `rest` as where its reason goes.
 
+    Every matching session is handed a body whole, and capacity bounds what the bodies cost
+    together, not what one of them costs; settings.limit(cur, "content_limit") is the limit.
     Only text a caller writes is held to it. A body carried over unchanged was admitted under
-    the ceiling of its day.
+    the limit of its day.
     """
-    problems = body_problems(content, why=why, field=field, rest=rest)
+    problems = body_problems(content, limit=limit, why=why, field=field, rest=rest)
     if problems:
         raise MalformedRequestError(problems)
 
@@ -48,6 +47,7 @@ def check_body(
 def body_problems(
     content: str,
     *,
+    limit: int,
     why: str | None = None,
     field: str = "content",
     rest: str | None = "why",
@@ -56,7 +56,7 @@ def body_problems(
     problems: list[str | OverLimit] = []
     if not content.strip():
         problems.append(f"{field} is empty; a Memory body states the rule itself")
-    if len(content) > CONTENT_LIMIT:
+    if len(content) > limit:
         where = (
             f"put its reason, measurements, dates, and history in {rest}"
             if rest
@@ -65,7 +65,7 @@ def body_problems(
         advice = (
             f"a Memory body is pushed to every matching session, so keep the rule alone and {where}"
         )
-        problems.append(OverLimit(field, CONTENT_LIMIT, len(content), advice=advice))
+        problems.append(OverLimit(field, limit, len(content), advice=advice))
     if why is not None and len(why) > WHY_LIMIT:
         problems.append(OverLimit("why", WHY_LIMIT, len(why)))
     return problems
@@ -140,7 +140,7 @@ def remember(
     `why` becomes the evidence row's account, where the reason is kept without being pushed.
     """
     why = (why or "").strip() or None
-    check_body(content, why=why)
+    check_body(content, limit=settings.limit(cur, "content_limit"), why=why)
     check_delivery(delivery, scope_id, topic_id)
     if delivery == "topic":
         scope_id = topic_home(cur, delivery, topic_id)
@@ -452,7 +452,7 @@ def revise(
     current = _require_active(cur, memory_id)
     overruled: list[dict[str, Any]] = []
     if content != current["content"]:
-        check_body(content, rest=None)
+        check_body(content, limit=settings.limit(cur, "content_limit"), rest=None)
         _, overruled = _retired_conflicts(cur, content, acknowledged_conflicts)
     elif acknowledged_conflicts:
         raise MashuError("no current withdrawn or legacy conflicts match the acknowledgment")

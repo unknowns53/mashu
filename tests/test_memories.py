@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 
 from conftest import remember, retire
-from mashu import cli, db, match, memories, nominations, server, temporary, topics
+from mashu import cli, config, db, match, memories, nominations, server, temporary, topics
 from mashu.errors import MalformedRequestError, MashuError, RefusedError, RetiredConflictError
 
 RULE = "never report a run as finished without the output that proves it"
@@ -273,7 +273,7 @@ def test_a_new_body_over_its_ceiling_is_refused_on_every_write_path(dsn, mcp, ca
             **arguments,
         )
 
-    body, why = memories.CONTENT_LIMIT, memories.WHY_LIMIT
+    body, why = config.DEFAULT_CONTENT_LIMIT, memories.WHY_LIMIT
     cases = [
         ("memory_admit", instructed(content=STORIED), "content", body, "in why"),
         ("memory_admit why", instructed(content=REVISED, why="w" * 501), "why", why, "reference"),
@@ -347,7 +347,7 @@ def test_a_new_body_over_its_ceiling_is_refused_on_every_write_path(dsn, mcp, ca
 def test_a_long_body_carried_over_unchanged_still_passes(cur, scope_id, monkeypatch):
     def written_before_the_ceiling(write):
         with monkeypatch.context() as before:
-            before.setattr(memories, "CONTENT_LIMIT", 10_000)
+            before.setenv("MASHU_CONTENT_LIMIT", "10000")
             return write()
 
     def admitted_unread(body):
@@ -393,7 +393,7 @@ def test_a_long_body_carried_over_unchanged_still_passes(cur, scope_id, monkeypa
     ]
     for word, carry in cases:
         body = f"{word} " * 30
-        assert len(body) > memories.CONTENT_LIMIT
+        assert len(body) > config.DEFAULT_CONTENT_LIMIT
         row = carry(body)
         assert (row["content"], row["status"]) == (body, "active"), carry.__name__
 
@@ -429,7 +429,7 @@ def test_the_tools_that_take_a_body_publish_its_ceiling(monkeypatch):
         ("memory_nominate", "`why`"),
         ("pain_report", "`what`"),
     ):
-        assert f"{memories.CONTENT_LIMIT} chars" in tools[name].description, name
+        assert f"{config.DEFAULT_CONTENT_LIMIT} chars" in tools[name].description, name
         assert rest in tools[name].description, name
 
 

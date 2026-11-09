@@ -429,6 +429,13 @@ dialog .form-actions { justify-content: flex-end; }
 .preview-total { margin-top: 10px; }
 .preview-row input { flex: 1; }
 .interval-row { margin-top: 16px; }
+.limit-list { display: grid; gap: 14px; }
+.limit-row { display: grid; grid-template-columns: 1fr 170px 96px; gap: 14px; align-items: start; }
+.limit-name .hint { margin-top: 2px; color: var(--text-2); font-size: 12.5px; }
+.limit-input { display: flex; align-items: center; gap: 8px; }
+.limit-input input { width: 100px; }
+.limit-note { font-size: 12.5px; color: var(--text-2); font-variant-numeric: tabular-nums; text-align: right; }
+.limit-note .over { color: var(--danger); }
 .radio-list.narrow { max-width: 320px; }
 .table td { white-space: pre-wrap; word-break: break-word; font-size: 13.5px; }
 .table td.name { white-space: pre; font-weight: 500; }

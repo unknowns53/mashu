@@ -12,7 +12,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import config
+from mashu import settings
 from mashu.errors import MashuError
 from mashu.tokens import ROW_OVERHEAD, pushed_cost
 
@@ -246,6 +246,7 @@ def _judge(
     what: str,
     scope_id: Any,
     everywhere: bool,
+    limits: dict[str, int],
     topic_id: UUID | None = None,
     detail: str = "",
 ) -> dict[str, Any]:
@@ -257,11 +258,11 @@ def _judge(
     free before the write, then the caller's `detail` on what the write adds.
     """
     was, now, rest = _measure(before), _measure(after), _measure(without)
-    ceiling = config.capacity()
+    ceiling = limits["memory_capacity"]
 
     if topic_id is not None:
         body = now["bodies"].get(topic_id, 0)
-        body_ceiling = config.topic_capacity()
+        body_ceiling = limits["topic_capacity"]
         if body > body_ceiling and body > was["bodies"].get(topic_id, 0):
             added = body - rest["bodies"].get(topic_id, 0)
             name = after.topics[topic_id]["name"]
@@ -273,7 +274,7 @@ def _judge(
                 "refusal": _refusal_topic(name, body, added, body_ceiling),
             }
 
-    layer_ceiling = config.always_capacity()
+    layer_ceiling = limits["always_capacity"]
     if now["always"] > layer_ceiling and now["always"] > was["always"]:
         return {
             "ok": False,
@@ -375,6 +376,7 @@ def check_admission(
         what="this topic's index line" if delivery == "topic" else "this content",
         scope_id=scope_id,
         everywhere=delivery == "always" or (delivery == "topic" and scope_id is None),
+        limits=settings.limits(cur),
         topic_id=topic_id if delivery == "topic" else None,
         detail=detail,
     )
@@ -406,5 +408,6 @@ def check_topic_edit(
         what="this topic's index line",
         scope_id=scope_id,
         everywhere=scope_id is None,
+        limits=settings.limits(cur),
         detail=f"The edited index line reads '{line}' ({pushed_cost([line])} tokens). ",
     )

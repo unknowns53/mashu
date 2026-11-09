@@ -8,7 +8,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import capacity, config, events, projects, redact
+from mashu import capacity, config, events, projects, redact, settings
 from mashu.errors import (
     ClosedTaskError,
     DuplicateTaskError,
@@ -183,6 +183,7 @@ def limit_problems(
 def _check_limits(
     state: dict[str, Any],
     *,
+    limits: dict[str, int],
     name: str | None = None,
     previous_name: str | None = None,
     previous_state: dict[str, Any] | None = None,
@@ -199,7 +200,7 @@ def _check_limits(
         else None
     )
     detail_tokens = state_cost(name, state)
-    detail_limit = config.task_detail_capacity()
+    detail_limit = limits["task_detail_capacity"]
     if detail_tokens > detail_limit and not (
         previous_detail is not None and detail_tokens < previous_detail
     ):
@@ -210,7 +211,7 @@ def _check_limits(
         else None
     )
     card_tokens = card_cost(name, state)
-    card_limit = config.task_card_capacity()
+    card_limit = limits["task_card_capacity"]
     if card_tokens > card_limit and not (previous_card is not None and card_tokens < previous_card):
         raise OverLimitError(
             "task bootstrap card",
@@ -324,16 +325,16 @@ def card_breakdown(name: str, state: dict[str, Any]) -> dict[str, int]:
     return breakdown
 
 
-def _budget_report(name: str, state: dict[str, Any]) -> dict[str, int]:
+def _budget_report(name: str, state: dict[str, Any], limits: dict[str, int]) -> dict[str, int]:
     """Where a state stands against the card and full-detail ceilings."""
     card_tokens = card_cost(name, state)
-    card_limit = config.task_card_capacity()
+    card_limit = limits["task_card_capacity"]
     return {
         "card_tokens": card_tokens,
         "card_limit": card_limit,
         "card_remaining": card_limit - card_tokens,
         "detail_tokens": state_cost(name, state),
-        "detail_limit": config.task_detail_capacity(),
+        "detail_limit": limits["task_detail_capacity"],
     }
 
 
@@ -392,7 +393,10 @@ def task_get(cur: psycopg.Cursor, task_id: UUID) -> dict[str, Any]:
     if row is None:
         raise MashuError(f"no task {task_id}")
     result = _split(row)
-    return {**result, **_budget_report(result["task"]["name"], result["state"])}
+    return {
+        **result,
+        **_budget_report(result["task"]["name"], result["state"], settings.limits(cur)),
+    }
 
 
 def task_list(
@@ -493,7 +497,7 @@ def task_create(
         blockers=blockers,
         next_actions=next_actions,
     )
-    _check_limits(state, name=name)
+    _check_limits(state, limits=settings.limits(cur), name=name)
     verdict = _gate({"name": name, **_texts(state)})
 
     # Held from before the match until the insert commits.
@@ -754,7 +758,7 @@ def card_share(cur: psycopg.Cursor, project: dict[str, Any]) -> dict[str, Any]:
     instead, and the writer is told which, so a needless task shows what it hid.
     """
     rows, boundary = _budget_competitors(active_state_costs(cur), scope_id=project["scope_id"])
-    capacity = config.project_capacity()
+    capacity = settings.limit(cur, "project_capacity")
     _, unseated = seat_cards(rows, capacity)
     return {
         "boundary": boundary,
@@ -840,6 +844,7 @@ def task_update(
     )
     _check_limits(
         state,
+        limits=settings.limits(cur),
         name=new_name,
         previous_name=task["name"],
         previous_state=current["state"],
@@ -934,7 +939,11 @@ def append_next_action(
         return {**current, "appended": False, "reason": "this next action is already on the task"}
     state["next_actions"] = [*state["next_actions"], text]
     _check_limits(
-        state, name=task["name"], previous_name=task["name"], previous_state=current["state"]
+        state,
+        limits=settings.limits(cur),
+        name=task["name"],
+        previous_name=task["name"],
+        previous_state=current["state"],
     )
     verdict = _gate(_texts(state))
 

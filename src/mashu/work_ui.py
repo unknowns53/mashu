@@ -7,7 +7,7 @@ import os
 from typing import Any
 from uuid import UUID
 
-from mashu import application, close_ui, config, db, projects, screen, task_actions, tasks
+from mashu import application, close_ui, db, projects, screen, task_actions, tasks
 from mashu.errors import DuplicateTaskError, MashuError
 from mashu.memory_ui import Order, _next_order, _order_text, _ordered
 
@@ -265,8 +265,8 @@ def _task_detail(row: dict[str, Any]) -> str:
         screen.bold(f"  {_short(task['task_id'])}  {task['name']}"),
         f"  {task['project_name']}  ·  {row['heading']}",
         f"  status  {task['status']} / {row['activity']}",
-        f"  size  card {tasks.card_cost(task['name'], state)}/{config.task_card_capacity()}"
-        f"  ·  detail {tasks.state_cost(task['name'], state)}/{config.task_detail_capacity()}",
+        f"  size  card {tasks.card_cost(task['name'], state)}/{row['card_limit']}"
+        f"  ·  detail {tasks.state_cost(task['name'], state)}/{row['detail_limit']}",
     ]
     if task["status"] == "closed":
         lines.extend(_field("outcome", task.get("outcome")))

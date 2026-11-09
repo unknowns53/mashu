@@ -9,7 +9,6 @@ from typing import Any
 
 from mashu import (
     application,
-    config,
     db,
     routing,
     scopes,
@@ -32,6 +31,7 @@ _TOP_ITEMS = (
     ("Scopes", "memory homes and their opening cost"),
     ("Topics", "rules read when one kind of work begins"),
     ("Routes", "directory trees mapped to scopes or ignored"),
+    ("Delivery limits", "how much a session receives and how large one entry may be"),
     ("Checkpoint interval", "how often one session may write a task's state"),
     ("Schema/migrations", "database version and pending changes"),
 )
@@ -43,7 +43,8 @@ _HELP = """
   b/PgUp       go back one screenful
   Home/End     jump to the first or last list item
   n            Scopes, Topics, Routes: add one
-  e            Scopes, Topics, Routes: edit the selected one
+  e            Scopes, Topics, Routes, Delivery limits: edit the selected one
+  d            Delivery limits: return the selected limit to its default
   x            Topics, Routes: remove the selected one, after confirmation
   i            Routes: add an ignored path
   m            Schema/migrations: apply pending migrations, after confirmation
@@ -75,6 +76,7 @@ class Health:
     tasks_active: int
     tasks_dormant: int
     tasks_closed: int
+    limits: dict[str, int]
 
 
 def _health(dsn: str | None) -> Health:
@@ -103,6 +105,7 @@ def _health(dsn: str | None) -> Health:
         tasks_active=snapshot.tasks_active,
         tasks_dormant=snapshot.tasks_dormant,
         tasks_closed=snapshot.tasks_closed,
+        limits=snapshot.limits,
     )
 
 
@@ -128,7 +131,7 @@ def _health_text(value: Health) -> str:
     )
     heaviest = (
         f"  ·  heaviest {value.topic_heaviest_name} "
-        f"{value.topic_heaviest_tokens}/{config.topic_capacity()} tokens"
+        f"{value.topic_heaviest_tokens}/{value.limits['topic_capacity']} tokens"
         if value.topic_heaviest_name
         else ""
     )
@@ -137,12 +140,13 @@ def _health_text(value: Health) -> str:
             f"  Schema             {schema}",
             "",
             f"  Active memories    {deliveries}",
-            f"  Memory capacity    always {value.memory_always_tokens}/{config.always_capacity()}"
-            f"  ·  worst {value.memory_worst_tokens}/{config.capacity()}",
+            f"  Memory capacity    always {value.memory_always_tokens}/"
+            f"{value.limits['always_capacity']}  ·  worst {value.memory_worst_tokens}/"
+            f"{value.limits['memory_capacity']}",
             f"  Task cards         {value.active_states} active"
-            f"  ·  worst {value.state_worst_tokens}/{config.project_capacity()} tokens",
+            f"  ·  worst {value.state_worst_tokens}/{value.limits['project_capacity']} tokens",
             f"  Temporary          {value.temporary_count} standing"
-            f"  ·  {value.temporary_tokens}/{config.temporary_capacity()} tokens",
+            f"  ·  {value.temporary_tokens}/{value.limits['temporary_capacity']} tokens",
             "",
             f"  Review queue       {value.pending_ready} ready"
             f"  ·  {value.pending_deferred} deferred",
@@ -398,7 +402,8 @@ def _scopes_page(dsn: str | None) -> None:
 
 def _topic_rows(dsn: str | None) -> list[dict[str, Any]]:
     with db.transaction(dsn) as cur:
-        return topics.list_topics(cur)
+        ceiling = settings.limit(cur, "topic_capacity")
+        return [{**row, "capacity": ceiling} for row in topics.list_topics(cur)]
 
 
 def _rules(count: int) -> str:
@@ -414,7 +419,7 @@ def _topic_detail(row: dict[str, Any]) -> str:
             screen.wrap(f"trigger: {row['trigger']}", indent="  "),
             screen.wrap(f"source: {topics.source_text(row.get('source')) or '-'}", indent="  "),
             f"  {_rules(row['rules'])} active  ·  body {row['body_tokens']}/"
-            f"{config.topic_capacity()} tokens  ·  index line {row['line_tokens']} tokens",
+            f"{row['capacity']} tokens  ·  index line {row['line_tokens']} tokens",
         )
     )
 
@@ -685,6 +690,105 @@ def _routes_page(dsn: str | None) -> None:
                 note = f"  {error}"
 
 
+_LIMIT_LABELS = {
+    "total_capacity": ("session start, everything", "rules, task cards, and temporary notes"),
+    "memory_capacity": ("session start, memories", "always and scope rules, and the topic index"),
+    "always_capacity": ("always memories", ""),
+    "topic_capacity": ("one topic", "received when the topic is read"),
+    "content_limit": ("one memory body", "its reason is not counted"),
+    "project_capacity": ("task cards", "tasks beyond it are only named"),
+    "task_card_capacity": ("one task card", ""),
+    "card_overflow_capacity": ("cardless task line", ""),
+    "task_detail_capacity": ("one task in full", "what task_get returns"),
+    "decision_capacity": ("decisions in force", "what task_get adds"),
+    "temporary_capacity": ("temporary notes", ""),
+}
+_LIMIT_ORDER = tuple(_LIMIT_LABELS)
+_LIMIT_NOTE = "  d returns a limit to its default. Lowering a limit removes nothing stored."
+
+
+def _limit_rows(dsn: str | None) -> list[dict[str, Any]]:
+    with db.transaction(dsn) as cur:
+        rows = {row["name"]: row for row in settings.limit_rows(cur)}
+    return [rows[name] for name in _LIMIT_ORDER]
+
+
+def _limit_line(row: dict[str, Any]) -> str:
+    unit = "chars" if row["unit"] == "chars" else "tokens"
+    origin = "set" if row["set"] else "default"
+    return (
+        f"    {screen.pad(_LIMIT_LABELS[row['name']][0], 26)} "
+        f"{row['value']:>6} {screen.pad(unit, 6)}  {origin}"
+    )
+
+
+def _limit_detail(row: dict[str, Any]) -> str:
+    label, about = _LIMIT_LABELS[row["name"]]
+    return "\n".join(
+        (
+            f"  ── {label}  ·  {row['name']}",
+            *((f"  {about}",) if about else ()),
+            f"  {row['value']} {row['unit']}  ·  default {row['default']}"
+            f"  ·  allowed {row['low']} to {row['high']}",
+            "",
+            _LIMIT_NOTE,
+        )
+    )
+
+
+def _limits_page(dsn: str | None) -> None:
+    at, note = 0, ""
+    while True:
+        rows = _limit_rows(dsn)
+        lines = []
+        for index, row in enumerate(rows):
+            line = screen.clip(_limit_line(row), screen.terminal_width())
+            lines.append(screen.selected(line) if index == at else line)
+        keys = "  e edit   d default   " + _LIST_KEYS.strip()
+        screen.paint(
+            screen.list_with_preview(
+                _title("Delivery limits"), lines, at, _limit_detail(rows[at]), keys, note, more=""
+            )
+        )
+        key = screen.getkey()
+        note = ""
+        if key == "q":
+            raise screen.Quit()
+        if key == "left":
+            return
+        if key == "?":
+            _help()
+        elif key in ("up", "k"):
+            at = max(0, at - 1)
+        elif key in ("down", "j"):
+            at = min(len(rows) - 1, at + 1)
+        elif key == "home":
+            at = 0
+        elif key == "end":
+            at = len(rows) - 1
+        elif key in ("e", "d"):
+            row = rows[at]
+            label = _LIMIT_LABELS[row["name"]][0]
+            if key == "d":
+                value = None
+            else:
+                answer = screen.editline(f"  {label} [{row['unit']}]: ", str(row["value"]))
+                if isinstance(answer, screen.Cancelled) or answer.text in ("", str(row["value"])):
+                    note = f"  {label} unchanged"
+                    continue
+                try:
+                    value = int(answer.text)
+                except ValueError:
+                    note = f"  {answer.text!r} is not a whole number"
+                    continue
+            try:
+                with db.transaction(dsn) as cur:
+                    after = settings.set_limits(cur, {row["name"]: value}, actor=ACTOR)
+                note = f"  {label} set to {after[row['name']]} {row['unit']}"
+            except MashuError as error:
+                note = f"  {error}"
+
+
 def _interval_text(minutes: int) -> str:
     if minutes == 0:
         return "  One session may write a task's state as often as it likes."
@@ -780,6 +884,7 @@ _PAGES: tuple[Callable[[str | None], str | None], ...] = (
     _scopes_page,
     _topics_page,
     _routes_page,
+    _limits_page,
     _interval_page,
     _schema_page,
 )

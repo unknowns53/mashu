@@ -30,6 +30,7 @@ from mashu import (
     routing,
     scopes,
     screen,
+    settings,
     task_actions,
     task_history,
     tasks,
@@ -254,21 +255,21 @@ def cmd_status(args: argparse.Namespace) -> int:
     active = "  ".join(f"{key}={status.memory_counts.get(key, 0)}" for key in memories.DELIVERIES)
     print(f"active  {active}")
     print(
-        f"tokens  always={status.memory_always_tokens}/{config.always_capacity()}  "
-        f"worst={status.memory_worst_tokens}/{config.capacity()}"
+        f"tokens  always={status.memory_always_tokens}/{status.limits['always_capacity']}  "
+        f"worst={status.memory_worst_tokens}/{status.limits['memory_capacity']}"
     )
     print(
         f"cards   active={status.active_states}  "
-        f"worst={status.state_worst_tokens}/{config.project_capacity()}"
+        f"worst={status.state_worst_tokens}/{status.limits['project_capacity']}"
     )
     heaviest = (
         f"  heaviest={status.topic_heaviest_name} "
-        f"{status.topic_heaviest_tokens}/{config.topic_capacity()}"
+        f"{status.topic_heaviest_tokens}/{status.limits['topic_capacity']}"
         if status.topic_heaviest_name
         else ""
     )
     print(f"topics  count={status.topic_count}{heaviest}")
-    print(f"temporary  tokens={status.temporary_tokens}/{config.temporary_capacity()}")
+    print(f"temporary  tokens={status.temporary_tokens}/{status.limits['temporary_capacity']}")
     print(f"pending {status.pending_ready + status.pending_deferred}")
     print(f"ledger  last_30_days={status.ledger_30d}")
     routes = "  ".join(
@@ -331,7 +332,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         print(f"  {row['content']}  (expires {row['expires_at']})")
     print(
         f"tokens    {answer.get('tokens', 0)}/"
-        f"{answer.get('capacity', config.total_capacity())}  "
+        f"{answer['capacity']}  "
         f"memory={answer.get('memory_tokens', 0)}  "
         f"cards={answer.get('card_tokens', answer.get('project_tokens', 0))}  "
         f"temporary={answer.get('temporary_tokens', 0)}"
@@ -366,8 +367,10 @@ def cmd_remember(args: argparse.Namespace) -> int:
             "omit --scope and --delivery"
         )
     delivery = args.delivery or ("topic" if args.topic else "scope" if args.scope else "always")
-    # memories.remember holds the same ceiling; checked here so the refusal names the flag.
-    memories.check_body(args.body, why=args.why, rest="--why")
+    # memories.remember holds the same limit; checked here so the refusal names the flag.
+    with db.transaction(args.dsn) as cur:
+        limit = settings.limit(cur, "content_limit")
+    memories.check_body(args.body, limit=limit, why=args.why, rest="--why")
     acknowledged: list[UUID] | None = None
     while True:
         try:
@@ -1799,7 +1802,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     remember.add_argument(
         "body",
-        help=f"the rule alone, at most {memories.CONTENT_LIMIT} chars; it reaches every session",
+        help=(
+            f"the rule alone, at most {config.DEFAULT_CONTENT_LIMIT} chars unless the Settings "
+            "screen changed it; it reaches every session"
+        ),
     )
     remember.add_argument(
         "--why",

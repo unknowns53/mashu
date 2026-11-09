@@ -1,8 +1,8 @@
-// Settings: store health, what a session receives, scopes, topics, routes, the checkpoint
-// interval, the schema, and the window's language.
+// Settings: store health, what a session receives, scopes, topics, routes, delivery limits,
+// the checkpoint interval, the schema, and the window's language.
 "use strict";
 
-const SECTIONS = ["health", "bootstrap", "scopes", "topics", "routes", "interval", "schema", "display"];
+const SECTIONS = ["health", "bootstrap", "scopes", "topics", "routes", "limits", "interval", "schema", "display"];
 
 const settings = { section: "health", editing: null, bootstrapCwd: "", bootstrap: null };
 
@@ -278,6 +278,66 @@ async function routesSection() {
   ];
 }
 
+/** The limits in the order a person reads them: what one session opens with, then each share. */
+const LIMIT_GROUPS = [
+  ["opening", ["total_capacity"]],
+  ["memory", ["memory_capacity", "always_capacity", "topic_capacity", "content_limit"]],
+  ["work", ["project_capacity", "task_card_capacity", "card_overflow_capacity", "task_detail_capacity", "decision_capacity"]],
+  ["temporary", ["temporary_capacity"]],
+];
+
+async function limitsSection() {
+  const { limits } = await call("limits.get");
+  const byName = Object.fromEntries(limits.map((row) => [row.name, row]));
+  const inputs = {};
+  const row = (limit) => {
+    const input = h("input", { type: "number", placeholder: String(limit.default) });
+    input.min = String(limit.low);
+    input.max = String(limit.high);
+    if (limit.set) input.value = String(limit.value);
+    inputs[limit.name] = input;
+    const over = limit.used !== null && limit.used > limit.value;
+    return h(
+      "div",
+      { class: "limit-row" },
+      h("div", { class: "limit-name" }, h("div", { text: t(`limit.${limit.name}`) }), t(`limit.${limit.name}.about`) ? h("div", { class: "hint", text: t(`limit.${limit.name}.about`) }) : null),
+      h("div", { class: "limit-input" }, input, h("span", { class: "sub", text: t(`limit.unit.${limit.unit}`) })),
+      h(
+        "div",
+        { class: "limit-note" },
+        limit.used !== null ? h("div", { class: over ? "over" : "", text: t(limit.unit === "chars" ? "limit.longest" : "limit.used", { n: limit.used }) }) : null,
+        h("div", { class: "sub", text: t("limit.default", { n: limit.default }) })
+      )
+    );
+  };
+  const submit = (event) => {
+    event.preventDefault();
+    const changes = {};
+    for (const [name, input] of Object.entries(inputs)) {
+      const limit = byName[name];
+      const text = input.value.trim();
+      const wanted = text === "" ? null : Number(text);
+      if (wanted !== null && !Number.isInteger(wanted)) {
+        toast(t("limit.not_whole"), "warn");
+        return;
+      }
+      if (wanted === null ? limit.set : !limit.set || wanted !== limit.value) changes[name] = wanted;
+    }
+    if (!Object.keys(changes).length) return;
+    act(() => call("limits.set", { changes }), t("limit.saved"));
+  };
+  return [
+    h("h1", { class: "title", text: t("settings.limits") }),
+    h("p", { class: "sub", text: t("limit.lead") }),
+    h(
+      "form",
+      { class: "limits", on: { submit } },
+      LIMIT_GROUPS.map(([group, names]) => section(t(`limit.group.${group}`), null, h("div", { class: "limit-list" }, names.map((name) => row(byName[name]))))),
+      h("div", { class: "form-actions" }, h("button", { type: "submit", class: "btn primary", text: t("common.save") }))
+    ),
+  ];
+}
+
 async function intervalSection() {
   const { minutes, max } = await call("interval.get");
   const input = h("input", { type: "number", value: String(minutes) });
@@ -371,6 +431,7 @@ const SECTION_VIEWS = {
   scopes: scopesSection,
   topics: topicsSection,
   routes: routesSection,
+  limits: limitsSection,
   interval: intervalSection,
   schema: schemaSection,
   display: async () => displaySection(),

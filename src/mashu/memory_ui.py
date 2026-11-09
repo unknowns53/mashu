@@ -6,7 +6,16 @@ import datetime as dt
 from typing import Any
 from uuid import UUID
 
-from mashu import application, db, memories, memory_actions, screen, temporary, topics
+from mashu import (
+    application,
+    db,
+    memories,
+    memory_actions,
+    screen,
+    settings,
+    temporary,
+    topics,
+)
 from mashu.errors import MashuError, RetiredConflictError
 
 ACTOR = "user"
@@ -579,7 +588,9 @@ def _remember(dsn: str | None) -> tuple[str, UUID | None]:
         return screen.warning("  ! nothing remembered"), None
     why = _optional("  why [optional: reason, measurements, dates, history]: ")
     # Refused before the delivery questions, so an over-long body costs no further answers.
-    memories.check_body(content, why=why)
+    with db.transaction(dsn) as cur:
+        limit = settings.limit(cur, "content_limit")
+    memories.check_body(content, limit=limit, why=why)
     answers = _delivery_answers(dsn=dsn)
     if answers is None:
         return screen.warning("  ! nothing remembered"), None

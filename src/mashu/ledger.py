@@ -7,7 +7,18 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import approvals, config, events, match, memories, nominations, redact, tasks, topics
+from mashu import (
+    approvals,
+    config,
+    events,
+    match,
+    memories,
+    nominations,
+    redact,
+    settings,
+    tasks,
+    topics,
+)
 from mashu.capacity import LOCK_NAMESPACE, LOCK_PAIN
 from mashu.errors import MashuError
 
@@ -78,7 +89,12 @@ def report_pain(
     ignored = ignored_task_id is not None or ignored_source is not None
     if prevention_kind == "rule" and violated_memory_id is None and not ignored:
         # A rule's prevention becomes a candidate's body, and the pain's own account is `what`.
-        memories.check_body(prevention, field="prevention", rest="what")
+        memories.check_body(
+            prevention,
+            limit=settings.limit(cur, "content_limit"),
+            field="prevention",
+            rest="what",
+        )
     verdict = redact.gate(
         {"what": what, "prevention": prevention, "ignored_source": ignored_source}
     )

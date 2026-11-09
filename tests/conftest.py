@@ -168,7 +168,7 @@ def getkeys(monkeypatch: pytest.MonkeyPatch, *pressed: str) -> None:
 @pytest.fixture
 def legacy_bodies(monkeypatch: pytest.MonkeyPatch) -> None:
     """Let a test seed bodies over the per-entry ceiling, as stores written before it hold."""
-    monkeypatch.setattr(memories, "CONTENT_LIMIT", 10_000)
+    monkeypatch.setenv("MASHU_CONTENT_LIMIT", "10000")
 
 
 def remember(cur: psycopg.Cursor, content: str, **kwargs):

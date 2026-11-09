@@ -8,7 +8,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Jsonb
 
-from mashu import approvals, capacity, config, events, match, redact, topics
+from mashu import approvals, capacity, config, events, match, redact, settings, topics
 from mashu.errors import MashuError, RefusedError
 
 KINDS = ("incident", "rederivation", "user_explicit", "proposed")
@@ -236,7 +236,7 @@ def _nominate(
     ledger_kind, nomination_kind, default_what = stated
 
     why = (why or "").strip() or None
-    memories.check_body(content, why=why)
+    memories.check_body(content, limit=settings.limit(cur, "content_limit"), why=why)
     verdict = redact.gate({"content": content, "why": why})
 
     cur.execute(
@@ -421,7 +421,7 @@ def revise(
     if not content:
         raise MashuError("a candidate cannot be empty")
     if content != nomination["content"]:
-        memories.check_body(content, rest=None)
+        memories.check_body(content, limit=settings.limit(cur, "content_limit"), rest=None)
     redact.gate({"content": content})
     conflict_ids = current_conflict_ids(cur, content)
     snapshot = _conflict_snapshot(cur, conflict_ids)
@@ -499,7 +499,7 @@ def admit(
 
     final = nomination["content"] if content is None else content
     if final != nomination["content"]:
-        memories.check_body(final, rest=None)
+        memories.check_body(final, limit=settings.limit(cur, "content_limit"), rest=None)
     home = scope_id if scope_override else nomination["scope_id"] if scope_id is None else scope_id
 
     cur.execute(

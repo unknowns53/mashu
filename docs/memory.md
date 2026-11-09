@@ -93,7 +93,7 @@ append-only の記録で、1 エントリが一度の痛みに対応する。
 - 汎用の Entity / Version / Proposal の表は持たない。本文の revision 表と、既存 Memory の retire / replace / restore / redeliver だけを扱う `memory_change` を使う
 - **evidence の無い active な記憶は存在できない**（User 明示の場合は明示の記録そのものが evidence になる）
 - content の改訂は User のみが行い、revision に旧本文が残る
-- **content には 1 件ごとに 120 字（`char_length`）の上限を置く。**規則の理由・測定値・日付・経緯は `why`（500 字まで）に書き、evidence の `ledger` の行の `what` として残す。`why` を渡さなければ `what` は定型文になる。理由はあとからデスクトップアプリで足したり、最新の理由を元に書き直したりできる。どちらも、`mashu remember` が書くのと同じ kind = `explicit` の行（`prevention` はその時点の本文）として evidence に加わり、前の理由も残る。本文・配信・`updated_at` は変わらない。`ledger` の行は追記しかできないので、書き忘れた理由を残す道はこれだけである。`ledger` の行は `memory_get` で読めるが push されない。容量（4.2 節）が縛るのは Active な Memory の総量で、1 件の長さではない。本文に理由や測定値が混ざると、規則そのものが読み取りにくくなる。上限を掛けるのは呼び出し側が新しく書く本文だけで、`mashu remember` / TUI の登録、`memory_admit` と `memory_nominate` の本文、候補と Memory の本文の編集、採用時の書き換え、`pain_report` の `rule` の `prevention`（候補の本文になる）が当たる。Temporary Context からの変換も、新しい Memory の本文を作るので当たる。書き換えずに引き継ぐ本文、つまり本文を変えない候補の採用、復帰、配信の変更、retire には掛けない。上限より前に書かれた本文を、ほかの操作のたびに書き直させないためである。超えた書き込みはフィールド名・上限・実際の長さを添えて拒否し、残りの置き場所（MCP では `why`、CLI では `--why`、`pain_report` では `what`）を文面で示す。空白しか含まない本文は、push すると空行になるだけなので、同じ経路で拒否し、DB の CHECK でも止める
+- **content には 1 件ごとに 120 字（`char_length`。既定値で、設定画面の `content_limit` で変えられる）の上限を置く。**規則の理由・測定値・日付・経緯は `why`（500 字まで）に書き、evidence の `ledger` の行の `what` として残す。`why` を渡さなければ `what` は定型文になる。理由はあとからデスクトップアプリで足したり、最新の理由を元に書き直したりできる。どちらも、`mashu remember` が書くのと同じ kind = `explicit` の行（`prevention` はその時点の本文）として evidence に加わり、前の理由も残る。本文・配信・`updated_at` は変わらない。`ledger` の行は追記しかできないので、書き忘れた理由を残す道はこれだけである。`ledger` の行は `memory_get` で読めるが push されない。容量（4.2 節）が縛るのは Active な Memory の総量で、1 件の長さではない。本文に理由や測定値が混ざると、規則そのものが読み取りにくくなる。上限を掛けるのは呼び出し側が新しく書く本文だけで、`mashu remember` / TUI の登録、`memory_admit` と `memory_nominate` の本文、候補と Memory の本文の編集、採用時の書き換え、`pain_report` の `rule` の `prevention`（候補の本文になる）が当たる。Temporary Context からの変換も、新しい Memory の本文を作るので当たる。書き換えずに引き継ぐ本文、つまり本文を変えない候補の採用、復帰、配信の変更、retire には掛けない。上限より前に書かれた本文を、ほかの操作のたびに書き直させないためである。超えた書き込みはフィールド名・上限・実際の長さを添えて拒否し、残りの置き場所（MCP では `why`、CLI では `--why`、`pain_report` では `what`）を文面で示す。空白しか含まない本文は、push すると空行になるだけなので、同じ経路で拒否し、DB の CHECK でも止める
 - 個人識別情報（本名、所属、学籍番号、ホームディレクトリを含む絶対パス）を含む書き込みは入口で拒否する。パターン一覧はリポジトリ外の既存ファイル（commit hook と共用）を読む。一覧が見つからない、または読めないときは「合格」ではなく「検査できなかった」と報告して書き込みを通す
 - 例外として、参照を持つフィールド（`conversation_ref`、evidence の `ref`、artifact の `locator`）だけはホームディレクトリを `~` に書き換えてから検査する。これらのフィールドに入るホームのパスは禁止パターンによる拒否の大半を占め、参照は誰かが選んだ本文ではないので、書き換えても provenance は崩れない。本文のフィールドは書き換えずに拒否する
 - 拒否には、当たった引数の名前（リストの項目なら `artifacts[0].locator` のように位置まで）と、その本文の中の文字位置とパターンの番号を添える。どこを直せばよいかが分からない拒否は、Agent に関係のない引数を書き直させるだけだからである。当たった文字列とパターンそのものは拒否理由にもログにも載せない。一覧は非公開で、拒否は記録に残るからである
@@ -130,7 +130,7 @@ incident から自動生成した候補と、Agent 自身の追加・変更案�
 
 ### 4.2 容量（配信予算を、溢れた分を逃がす上限ではなく固定の容量として使う）
 
-bootstrap で push される Memory の合計に硬い上限（既定 2000 token、`MASHU_CAPACITY`）を置く。上限に達した状態での昇格は、既存の記憶の retire か scope / topic への格下げとセットでない限り拒否される。
+bootstrap で push される Memory の合計に硬い上限（既定 2000 token、`memory_capacity`）を置く。上限に達した状態での昇格は、既存の記憶の retire か scope / topic への格下げとセットでない限り拒否される。
 
 Agent 用の検索は無いので、溢れた分を逃がす先は無い。**容量は「全量 push が成立する大きさに Active な Memory の総量を保つ」ことそのものを強制する**。容量があるから push が成立し、push が成立するから「読むべきタイミングで読まない」問題が消える。
 
@@ -138,7 +138,7 @@ Agent 用の検索は無いので、溢れた分を逃がす先は無い。**容
 
 この 2000 token が数えるのは memory だけである。Temporary Context は専用の予算（400 token）を持つ（`docs/project-state.md` 8 節）。subsystem が互いの予算を暗黙に借りないためである（2 週間分の期限つき条件が、実証を経た規則の昇格を拒否できてはいけない）。それぞれが自分の入口で拒否され、押し込まれる総量（4000 token）は Mashu が一元管理する。
 
-**delivery が `always` の規則には、全体の容量の内側にもう一段低い上限（既定 800 token、`MASHU_ALWAYS_CAPACITY`）を置く。**always の 1 token は、どの scope も使えない 1 token である。共有の上限だけを持たせると、`always` の規則は決して溢れない。溢れる代わりに、scope が必要とするはずの余地を、大半のセッションには要らなかった規則で静かに使い切る。scope の側は何一つ拒否されないまま予算だけが無くなるので、どこにも失敗が現れない。
+**delivery が `always` の規則には、全体の容量の内側にもう一段低い上限（既定 800 token、`always_capacity`）を置く。**always の 1 token は、どの scope も使えない 1 token である。共有の上限だけを持たせると、`always` の規則は決して溢れない。溢れる代わりに、scope が必要とするはずの余地を、大半のセッションには要らなかった規則で静かに使い切る。scope の側は何一つ拒否されないまま予算だけが無くなるので、どこにも失敗が現れない。
 
 **行数で数える代理指標は使わない。**規則の長さは一定でないので、件数は予算の代理にならない。
 
@@ -146,7 +146,7 @@ Agent 用の検索は無いので、溢れた分を逃がす先は無い。**容
 
 拒否の文面は、書き込み前の空きを示す。always への追加が拒否されたときは、代わりに topic へ置いた場合に `always` の容量から使われる量も添える。Scope を持たない既存 topic ごとの見出しの増分（規則を持つ topic なら規則数の表記が変わる分だけ、空の topic なら行全体）と、新しい topic なら見出し一行ぶんの見積もり方である。topic への追加が見出しの行で拒否されたときは、その行の全文と token 数を示す。空の topic は見出しを出さないので、最初の規則で行全体が容量に載るからである。出口は書き込んだ経路の言葉で示す。CLI からは `mashu` のコマンド、MCP からは `memory_change_propose`（retire）や `memory_redeliver` の tool 名である。
 
-**topic（5 節）の見出しの行も、push される量として数える。**Scope を持たない topic の行は全セッションに届くので `always` の容量に、Scope を持つ topic の行はその Scope に数える。行を数えるのは、その topic に active な規則が 1 件以上あるあいだだけである。topic の本文は bootstrap に載らないので容量を使わない。ただし読んだときに一度に届く量なので、topic ごとに上限（既定 800 token、`MASHU_TOPIC_CAPACITY`）を置く。特定の作業でしか効かない規則は、scope でも always でも topic へ移すことで容量を空けられる（`mashu deliver <id> topic --topic <name>`）。
+**topic（5 節）の見出しの行も、push される量として数える。**Scope を持たない topic の行は全セッションに届くので `always` の容量に、Scope を持つ topic の行はその Scope に数える。行を数えるのは、その topic に active な規則が 1 件以上あるあいだだけである。topic の本文は bootstrap に載らないので容量を使わない。ただし読んだときに一度に届く量なので、topic ごとに上限（既定 800 token、`topic_capacity`）を置く。特定の作業でしか効かない規則は、scope でも always でも topic へ移すことで容量を空けられる（`mashu deliver <id> topic --topic <name>`）。
 
 ### 4.3 retire
 

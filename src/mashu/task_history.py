@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 
-from mashu import approvals, config, events, redact, settings, tasks
+from mashu import approvals, events, redact, settings, tasks
 from mashu.errors import MalformedRequestError, MashuError, OverLimit, OverLimitError, RefusedError
 from mashu.tokens import pushed_cost
 
@@ -529,7 +529,7 @@ def decisions_in_force(cur: psycopg.Cursor, task_id: UUID) -> dict[str, Any]:
     )
     rows = cur.fetchall()
     shown: list[dict[str, Any]] = []
-    budget = config.decision_capacity()
+    budget = settings.limit(cur, "decision_capacity")
     for row in rows:
         line = {
             "decision_id": row["decision_id"],

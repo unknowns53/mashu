@@ -8,6 +8,8 @@ from datetime import date, datetime
 from typing import Annotated, Any, NotRequired
 from uuid import UUID, uuid4
 
+import psycopg
+
 if sys.version_info >= (3, 12):
     from typing import TypedDict
 else:
@@ -28,6 +30,7 @@ from mashu import (
     references,
     routing,
     scopes,
+    settings,
     task_history,
     tasks,
     topics,
@@ -149,14 +152,27 @@ DecisionList = Annotated[list[Any], _ItemSchema(DecisionItem)]
 ArtifactList = Annotated[list[Any], _ItemSchema(ArtifactItem)]
 
 
-def _state_contract() -> str:
+def _limits() -> dict[str, int]:
+    """The limits in force when this session's server starts.
+
+    Each session runs its own server, so a new session reads a changed limit; a refusal names
+    the limit in force at the write either way.
+    """
+    try:
+        with db.transaction() as cur:
+            return settings.limits(cur)
+    except psycopg.Error:
+        return {name: limit.default() for name, limit in settings.LIMITS.items()}
+
+
+def _state_contract(limits: dict[str, int]) -> str:
     """The limits every task state write is held to, taken from the code that enforces them."""
     texts = ", ".join(f"{field} {limit}" for field, limit in tasks.TEXT_LIMITS.items())
     return (
         f"Char limits: {texts}; {', '.join(tasks.LIST_FIELDS)} at most "
         f"{tasks.LIST_MAX_ITEMS} items of {tasks.LIST_MAX_CHARS} each. Budgets in estimated "
-        f"tokens: card {config.task_card_capacity()}, full state "
-        f"{config.task_detail_capacity()}."
+        f"tokens: card {limits['task_card_capacity']}, full state "
+        f"{limits['task_detail_capacity']}."
     )
 
 
@@ -176,11 +192,11 @@ def _history_contract() -> str:
     )
 
 
-def _body_contract() -> str:
+def _body_contract(limits: dict[str, int]) -> str:
     """The ceilings on a new Memory body and its reason, from the code that enforces them."""
     return (
         f"`content` is pushed to every matching session, so it is held to "
-        f"{memories.CONTENT_LIMIT} chars and states the rule alone. Put the reason, "
+        f"{limits['content_limit']} chars and states the rule alone. Put the reason, "
         f"measurements, dates, and history in `why` (at most {memories.WHY_LIMIT} chars): it "
         "is kept on the evidence ledger row that memory_get returns and is never pushed. An "
         "over-limit field is refused with `problems` and `over_limit`."
@@ -350,6 +366,7 @@ def build_server() -> Any:
     from mcp.server import MCPServer
 
     server = MCPServer(name="mashu", instructions=INSTRUCTIONS)
+    limits = _limits()
     # Each client session runs its own stdio server process, so one id per build names it.
     session = uuid4()
 
@@ -401,7 +418,7 @@ def build_server() -> Any:
             "Otherwise use `work` with `task_id` for a one-time fix, such as editing a doc, an "
             "instruction file, or code, and `rule` only for knowledge every future session "
             "must carry; this never admits knowledge directly. A `rule` prevention becomes a "
-            f"candidate Memory body, so it is held to {memories.CONTENT_LIMIT} chars and states "
+            f"candidate Memory body, so it is held to {limits['content_limit']} chars and states "
             "the rule alone; put the reason, measurements, dates, and history in `what`."
         )
     )
@@ -470,7 +487,7 @@ def build_server() -> Any:
         except MashuError as error:
             return _failure(error)
 
-    body_contract = _body_contract()
+    body_contract = _body_contract(limits)
 
     @server.tool(
         description=(
@@ -870,7 +887,7 @@ def build_server() -> Any:
         except MashuError as error:
             return _failure(error)
 
-    state_contract = _state_contract()
+    state_contract = _state_contract(limits)
 
     @server.tool(
         description=(

@@ -406,8 +406,8 @@ def work_tasks(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
     rows = sorted(task_actions.task_view(cur, activity), key=rank)
     for row in rows:
-        row["card_capacity"] = config.task_card_capacity()
-        row["detail_capacity"] = config.task_detail_capacity()
+        row["card_capacity"] = row["card_limit"]
+        row["detail_capacity"] = row["detail_limit"]
     return {"tasks": rows}
 
 
@@ -508,15 +508,16 @@ def health(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
         "AND created_at >= now() - interval '30 days'"
     )
     missed = cur.fetchone()["n"]
+    snapshot = application.status_snapshot(cur)
     return {
-        **dataclasses.asdict(application.status_snapshot(cur)),
+        **dataclasses.asdict(snapshot),
         "missed_30d": missed,
         "capacities": {
-            "always": config.always_capacity(),
-            "worst": config.capacity(),
-            "project": config.project_capacity(),
-            "temporary": config.temporary_capacity(),
-            "topic": config.topic_capacity(),
+            "always": snapshot.limits["always_capacity"],
+            "worst": snapshot.limits["memory_capacity"],
+            "project": snapshot.limits["project_capacity"],
+            "temporary": snapshot.limits["temporary_capacity"],
+            "topic": snapshot.limits["topic_capacity"],
         },
         "failure_routes": list(application.DELIVERY_FAILURE_ROUTES),
     }
@@ -543,7 +544,7 @@ def topic_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     rows = topics.list_topics(cur)
     for row in rows:
         row["source_text"] = topics.source_text(row.get("source"))
-    return {"topics": rows, "capacity": config.topic_capacity()}
+    return {"topics": rows, "capacity": settings.limit(cur, "topic_capacity")}
 
 
 def topic_save(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
@@ -583,6 +584,31 @@ def route_save(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 def route_remove(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     path = _text(args, "path")
     return {"removed": application.remove_route(cur, path_prefix=path, actor=ACTOR)}
+
+
+def limits_get(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    """Every delivery limit, with what its share holds now where one share is measured."""
+    snapshot = application.status_snapshot(cur)
+    cur.execute("SELECT max(char_length(content)) AS n FROM memory WHERE status = 'active'")
+    usage = {
+        "always_capacity": snapshot.memory_always_tokens,
+        "memory_capacity": snapshot.memory_worst_tokens,
+        "topic_capacity": snapshot.topic_heaviest_tokens,
+        "project_capacity": snapshot.state_worst_tokens,
+        "temporary_capacity": snapshot.temporary_tokens,
+        "content_limit": cur.fetchone()["n"] or 0,
+    }
+    return {"limits": [{**row, "used": usage.get(row["name"])} for row in settings.limit_rows(cur)]}
+
+
+def limits_set(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    changes = args.get("changes")
+    if not isinstance(changes, dict) or not all(
+        value is None or (isinstance(value, int) and not isinstance(value, bool))
+        for value in changes.values()
+    ):
+        raise MashuError("changes maps a limit's name to a whole number, or null for its default")
+    return {"limits": settings.set_limits(cur, changes, actor=ACTOR)}
 
 
 def interval_get(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
@@ -656,6 +682,8 @@ OPERATIONS: dict[str, Operation] = {
     "route.remove": route_remove,
     "interval.get": interval_get,
     "interval.set": interval_set,
+    "limits.get": limits_get,
+    "limits.set": limits_set,
     "schema.status": schema_status,
 }
 
@@ -682,6 +710,7 @@ READS = frozenset(
         "topic.list",
         "route.list",
         "interval.get",
+        "limits.get",
         "schema.status",
     }
 )

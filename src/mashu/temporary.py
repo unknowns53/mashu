@@ -7,7 +7,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import capacity, config, events, redact
+from mashu import capacity, config, events, redact, settings
 from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
@@ -80,7 +80,7 @@ def _check_room(
 
     cost = pushed_cost([content])
     projected = _cost(against) + cost
-    ceiling = config.temporary_capacity()
+    ceiling = settings.limit(cur, "temporary_capacity")
     if projected <= ceiling:
         return
 

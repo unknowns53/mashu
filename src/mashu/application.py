@@ -14,6 +14,7 @@ from mashu import (
     migrate,
     routing,
     scopes,
+    settings,
     tasks,
     temporary,
     topics,
@@ -47,6 +48,7 @@ class StatusSnapshot:
     tasks_active: int
     tasks_dormant: int
     tasks_closed: int
+    limits: dict[str, int]
 
 
 def memory_view(cur: psycopg.Cursor, view: str) -> list[dict[str, Any]]:
@@ -228,6 +230,7 @@ def status_snapshot(cur: psycopg.Cursor) -> StatusSnapshot:
         tasks_active=task_counts["active"],
         tasks_dormant=task_counts["dormant"],
         tasks_closed=task_counts["closed"],
+        limits=settings.limits(cur),
     )
 
 
