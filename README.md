@@ -1,87 +1,63 @@
 # Mashu（摩周）
 
-Mashu は、複数の AI agent が共有する外部記憶だ。保存するのは「忘れたことで実際に損害が出た」と確認できたルールだけ。あとで役に立ちそう、という理由だけでは保存しない。
+Mashu は、Claude Code や Codex のような複数の AI agent が共有する外部記憶だ。保存するのは「忘れたことで実際に損害が出た」と確認できたルールだけで、あとで役に立ちそう、という理由だけでは保存しない。覚えるべき情報を推測して溜め込む memory system とは逆に、損害の実証を通ったものだけを常設する evidence-gated persistent instruction system である。
 
-Mashu には、恒久的な Memory だけでなく、現在の作業状態を扱う Project State もある。Memory と Project State は目的も寿命も違うので、同じものとして扱わない。長い本文は Obsidian の vault やリポジトリの文書が持ち、Mashu の topic はその原典の場所を指す。
+扱っているのは、CLAUDE.md や AGENTS.md と同じく「次のセッションの agent に何を読ませるか」だ。指示ファイルは、繰り返された実害から生まれた行だけを持つうちは小さく、毎セッション確実に読まれて機能する。Mashu は、その一行が実害から生まれる過程を、複数の CLI が共有できる形で制度化したもので、指示ファイルには無い次の仕組みを持つ。
 
-設計判断の正本は次の文書にある。
+- 入口の審査。損害の実証が無いものは候補にすらならず、agent が出した案は User が承認するまで有効にならない。
+- 配信先の選択。全セッション、特定のディレクトリ、特定の作業のあいだ、の三段階で、要るセッションにだけ push する。
+- provenance。規則の改訂、誰がどの指示で承認したか、守られなかった記録を append-only で残し、後から書き換えさせない。
+- 作業状態の引き継ぎ。セッションをまたぐ作業の現在地、試して捨てた方法、判断の理由を Task として次のセッションに渡す。
 
-- Memory の仕様: [docs/memory.md](docs/memory.md)
-- Project State の仕様: [docs/project-state.md](docs/project-state.md)
+長い本文は持たない。研究ノートや設計の文書は Obsidian の vault やリポジトリが正本であり続け、Mashu は原典の場所を指すだけである。
 
-この README は、インストールと日常の使い方に絞る。
+設計判断の正本は二つの仕様書にある。Memory、pain、review、配信は [docs/memory.md](docs/memory.md) が、Project State は [docs/project-state.md](docs/project-state.md) が扱う。
 
-## 何を保存するか
+## Mashu が持つ記録
 
-| 種類 | 役割 | 別のセッションに届くか | 寿命 |
+| 種類 | 中身 | 次のセッションへの届き方 | 寿命 |
 |---|---|---|---|
-| Memory | 今後も守る恒久ルール | 直接操作または明示指示の実行後、bootstrap か topic で届く | 原則恒久 |
-| Project State | Project / Task の現在地、試行、判断、成果物の参照先 | active Task の短い card だけ届き、詳細は task_get で読む | close または Activity Lease が切れるまで |
-| Ledger | 忘却によって起きた事故の記録 | 届かない | append-only |
-| Temporary Context | 期限つきの条件 | User が書いたものだけ bootstrap で届く | 最大 14 日 |
+| Memory | 今後も守る規則。本文は 120 字まで | 配信先に応じて、開始時か、その作業に入るときに届く | User が retire（廃止）するまで |
+| Task | 複数のセッションにまたがる作業の現在地、試した方法、判断、成果物の場所 | 名前と goal と status だけの短い card が届き、全文は agent が `task_get` で読む | User が close するまで。14 日活動が無いと dormant になり、届かなくなる |
+| Temporary Context | 期限つきの条件 | User が登録したものだけが開始時に届く | 最長 14 日 |
+| Ledger | 忘れたせいで起きた事故の記録 | 届かない | 追記のみで、消えない |
 
-Memory 以外の記録は、Memory の代わりではない。便利なメモや長い資料は、プロジェクトの文書や Obsidian など正本を置く場所で管理する。
+Task は Project にまとめる。仕様書では、この二つを合わせて Project State と呼ぶ。
 
-### Memory ができるまで
+## 規則が Memory になるまで
 
-記録の入口と、その後の扱いは次のとおり。
+Memory の総量を小さく保つことが、Mashu の設計のほとんどを決めている。総量が小さいから全量を push でき、全量を push できるから「読むべきときに読まれない」問題が起きない。そのため量は入口で絶ち、Memory ができる経路を次の三つに限っている。
 
-~~~text
-実際に困った（誤った作業が出た）
-    └─ pain_report
-         ├─ 防ぐルールがまだ無い → pending candidate
-         ├─ 届いていたルールが守られなかった（violated_memory_id）
-         │    └─ candidate を作らず、配信失敗の疑いとして記録
-         └─ Task の state や指示ファイル・skill にあったのに使わなかった（ignored_task_id / ignored_source）
-              └─ candidate を作らず、有った知識が使われなかった記録として残す
+1. agent が事故を報告する。誤った作業が実際に出たとき、agent は `pain_report` で、何が起きたかと、防ぐための規則を Ledger に書く。防ぐ規則がまだ無ければ candidate（採用を待つ候補）ができ、User が review で採用か却下を決める。
+2. User が会話の中で「覚えて」と言う。agent は `memory_admit` に本文を渡し、その場で Memory にする。指示の原文と会話の参照が、承認の出所として残る。
+3. User が直接登録する。CLI の `mashu remember`、デスクトップアプリ、TUI のどれかで登録すると、review を経ずに Memory になる。
 
-User が会話中に「覚えて」と言った
-    └─ memory_admit（content を渡す）→ active Memory（1 回の呼び出しで完了）
-         └─ 未読の pending candidate に合流した、または withdrawn / legacy と衝突した
-              └─ 採用せず停止 → 返った nomination を読み、memory_admit（nomination_id）
+`pain_report` が candidate を作らない場合が二つある。一つは、規則が既に届いていたのに守られなかった場合である。agent はその Memory を `violated_memory_id` で指し、Mashu はこれを配信の失敗の疑いとして記録する。もう一つは、Task の記録や、CLAUDE.md、skill に書いてあったのに使われなかった場合である。agent はその場所を `ignored_task_id` か `ignored_source` で指し、Mashu は新しい規則を作らずに件数だけを数える。件数は `mashu status` の `unused` の行に出る。どちらの場合も知識はその場所にあったので、同じ規則を Memory に足しても何も直らない。直すべきは届け方のほうである。
 
-Agent が既存 Memory の変更を考えた（retire、置換、復帰、配信先の移動）
-    └─ memory_get → memory_change_propose → pending proposal
-         └─ User の明示指示があれば memory_change_apply
+既にある Memory の retire、置き換え、復帰、配信先の移動は、User の明示的な指示があれば agent がその場で適用する。agent が自分で考えた変更は proposal（変更案）として置き、User が review で適用か却下を決める。agent の確信や User の沈黙は、承認として扱わない。
 
-User が会話中に既存 Memory の retire、置換、復帰を指示した
-    └─ memory_change_instructed → 提案と適用を 1 回の呼び出しで完了
+## 導入
 
-User が会話中に既存 Memory の配信先の変更を指示した
-    └─ memory_redeliver → 提案と適用を 1 回の呼び出しで完了
+### 必要なもの
 
-User が CLI / TUI で Memory を直接登録・変更した
-    └─ active Memory / retired Memory（user_direct として記録）
-
-pending candidate
-    └─ mashu review → active Memory → bootstrap / topic
-~~~
-
-incident から自動生成された candidate と Agent 独自の提案は pending に留まる。ユーザーが会話中に明示した記録・変更指示は `memory_admit` / `memory_change_instructed` / `memory_redeliver`（既にある proposal なら `memory_change_apply`）に渡し、同じセッションで実行できる。実行者は Agent のまま記録し、指示の原文と会話参照を別に保存する。MCP の Tool は承認の種類を引数に取らず、サーバーが `user_instruction` と記録する。これは監査用で、サーバーが会話の真正性を認証するものではない。Agent の有用性判断・confidence・ユーザーの沈黙は承認として扱わない。Project State は別扱いで、Agent が更新した active Task の card は次のセッションへ届く。Current State 全文は常時注入せず、card の完全な task_id から `task_get` で明示取得する。
-
-`memory_admit` に `content` を渡すと、候補の作成と採用を一つの transaction で行う。候補が既存の pending candidate に合流した場合と、withdrawn / legacy として retire された Memory と衝突し、その conflict に触れた指示が無い場合は採用せずに止まり、作った候補と `ledger` の行だけを残して nomination を返す。Agent はその本文と conflict を読み、`nomination_id` と nomination `version` を `nomination_version` として `memory_admit` に渡して続ける。この経路では本文・scope・根拠・conflict が読み取り後に変わっていれば拒否する。同じ request ID の再送は、どちらの経路でも、Memory が後から編集または retire されていても初回の採用応答を返す。replace は後継 nomination の内容と旧 Memory の配信条件を提案に固定し、配信条件を変える場合は `successor_settings` に `delivery` と `scope_id`（topic なら `topic` も）をまとめて proposal に含める。
-
-`memory_admit` の `delivery='topic'` にまだ無い topic 名を渡すときは、いつ読むかの一文を `topic_trigger` に、見出しを載せる Scope を `scope` に添える（省略すると全セッション）。topic は記憶を採用する直前に同じ transaction で作られるので、採用せずに止まった場合や容量で拒否された場合は作られず、空の topic は残らない。`topic_trigger` が無いときは、何を渡せばよいかを示して拒否する。
-
-User が配信先（always / scope / topic）の変更だけを指示したときは、`memory_redeliver` に対象の `memory_id`、新しい `delivery`（必要なら `scope`・`topic`・`topic_trigger`）、`request_id`、指示の引用、`conversation_ref` を渡す。サーバーが現在の revision を読み、指示の引用と会話参照を evidence にした redeliver 提案を作り、同じ transaction で適用する。残る proposal・承認出所・event は `memory_change_propose` と `memory_change_apply` を別々に呼んだ場合と同じで、同じ request ID の再送は初回の結果を返す。
-
-User が既存 Memory の retire、置換、復帰を指示したときは、`memory_change_instructed` に対象の `memory_id`、`operation`（retire / replace / restore）、`request_id`、指示の引用、`conversation_ref` と、operation ごとの引数を渡す。retire は `retire_reason`（Temporary Context への移動は `memory_change_propose` に残す）、replace は後継の `content` と任意の `why`（`retire_reason` を省くと指示の引用から作る）、restore は `restore_reason` を取る。サーバーが対象の現在の revision と更新時刻を読み、replace なら後継の候補もその場で作り、指示の引用と会話参照を evidence にした提案を作って同じ transaction で適用する。残る候補・proposal・承認出所・event は、候補の作成、`memory_change_propose`、`memory_change_apply` を別々に呼んだ場合と同じで、同じ request ID の再送は初回の結果を返す。後継や復帰する本文が withdrawn / legacy として retire された Memory と衝突し、`conflict_ids` と `conflict_instruction` で触れられていなければ、何も書かずに `conflicts` を返す。withdrawn / legacy として retire された Memory の復帰には `reversal_instruction` も要る。形の誤りは一度の拒否で `problems` にまとめて返る。
-
-一度直せば以後は覚えなくてよい変更は、Memory ではなく Task の next_actions に記録する。pain の prevention-kind を work にするとこの扱いになる。
-
-## まず動かす
-
-### 前提
-
-- PostgreSQL と pg_trgm。pg_trgm は PostgreSQL 標準の contrib 拡張で、PostgreSQL 17 で動作確認している
+- PostgreSQL と、その標準の拡張 pg_trgm。PostgreSQL 17 で動作を確かめている。類似の判定には pg_trgm を使い、埋め込みモデルは使わない
 - Python 3.11 以上
 - [uv](https://docs.astral.sh/uv/)
+- git
 
-埋め込みモデルは使わず、類似判定は pg_trgm で行う。
+### デスクトップアプリから入れる
 
-### インストールと初期化
+GitHub Release に、正式版ごとに Mac（Apple silicon）用の `Mashu_aarch64.app.tar.gz` と、Windows 用のインストーラ `Mashu_<版>_x64-setup.exe` を置いている。Mac の配布物は、展開すると `Mashu.app` になる。
 
-PostgreSQL が起動している状態で実行する。
+Apple と Microsoft の署名は受けていない。Mac では、初回に「開発元を確認できない」と表示されるので、システム設定の「プライバシーとセキュリティ」で「このまま開く」を押す。Windows では、SmartScreen の警告から実行を許可する。
+
+初めて起動すると、アプリは Mashu の本体を探す。見つからなければ、入っている場所を指定するか、アプリに入れさせるかを選ぶ画面が出る。入れさせる場合、アプリは git、uv、PostgreSQL がそろっていて PostgreSQL が動いているかを確かめ、足りないものとその入れ方を示す。そろっていれば、空のフォルダに最新の正式版を clone し、`uv sync --extra mcp`、DB `mashu` の作成、`mashu admin migrate`（DB のスキーマを最新にする SQL の適用）を順に実行する。
+
+agent への接続（MCP server と hook の登録）は、各ツールの設定ファイルを書き換えるので、アプリは行わない。[Agent につなぐ](#agent-につなぐ) の手順で設定する。
+
+### コマンドラインから入れる
+
+PostgreSQL が動いている状態で、clone したディレクトリで次を実行する。
 
 ~~~bash
 uv sync --extra mcp
@@ -89,345 +65,26 @@ createdb mashu
 uv run mashu admin migrate
 ~~~
 
-Git の pre-commit / commit-msg hook も使う場合は、次を実行する。これは hook の有効化と、ローカル専用の禁止パターンファイルの雛形作成を行う。禁止パターンファイルは本体の checkout に一つだけ置き、git worktree で切った作業ツリーの hook もそれを読む。
-
-~~~bash
-./hooks/install.sh
-~~~
-
-接続先の既定値は dbname=mashu。別の PostgreSQL に接続するときは MASHU_DATABASE_URL を設定する。
+接続先の既定値は `dbname=mashu` である。別の PostgreSQL を使うときは `MASHU_DATABASE_URL` を設定する。`mashu` をどのディレクトリからでも呼べるようにするには、仮想環境の実行ファイルへ symlink を張る。
 
 ~~~bash
 export MASHU_DATABASE_URL='dbname=mashu host=localhost'
-~~~
-
-PATH の通った場所から mashu を直接呼びたい場合は、仮想環境の実行ファイルへ symlink を張る。
-
-~~~bash
 ln -s /path/to/mashu/.venv/bin/mashu ~/.local/bin/mashu
 ~~~
 
-### 初期化後の確認
+入ったことは次のコマンドで確かめる。`mashu status` の先頭に未適用の migration が出たら、`mashu admin migrate` を実行する。`mashu bootstrap` は、今のディレクトリで開くセッションに届く内容と、その token 数を表示する。
 
 ~~~bash
-uv run mashu status
-uv run mashu bootstrap
+mashu status
+mashu bootstrap
+mashu --version
 ~~~
 
-status の先頭に未適用 migration が表示されたら、uv run mashu admin migrate を実行する。bootstrap は、現在の作業ディレクトリのセッションに配信される内容と token 数を表示する。`uv run mashu --version` は、入っている mashu の版を表示する。
+## Agent につなぐ
 
-## 日常の使い方
+### MCP server を登録する
 
-### 人向けの画面を開く
-
-引数なしの `mashu` は人向け dashboard を開く。
-
-~~~bash
-mashu
-~~~
-
-| 領域 | TUI からできること |
-|---|---|
-| Attention | candidate の review、close proposal の判断、dormant Task の確認 |
-| Memories | active / retired Memory と Temporary Context の閲覧・検索、直接登録、編集、always / scope と Temporary Context の相互変換、retire、delivery / topic の変更 |
-| Work | active / dormant / closed Task と Project の閲覧・検索、Task の履歴・artifact の確認、Task / Current State / Project の作成・編集、touch / close / reopen |
-| Settings & health | 容量と queue の状態、bootstrap preview、Scope と route の作成・編集・削除、Topic の作成・編集（action の結びつけを含む）・削除、checkpoint の間隔の変更、migration の確認・適用 |
-
-各画面では矢印または j / k で移動し、Enter で開く。`/` のある一覧は部分検索できる。Esc または ← で一段戻り、q はどの画面からでも Mashu を終える。? はどの画面でもその画面のキーの説明を出す。TUI は alternate screen 上で動くため、再描画した画面は terminal の履歴へ残らない。
-
-`e` で開く編集入力には現在値が最初から入る。全文を打ち直すのではなく、カーソル移動、Backspace、追記で既存の文章を直接直し、Enter で保存する。Vim などの外部エディタは既定では起動しない。自分で `VISUAL` または `EDITOR` を設定した場合だけ、そのエディタで既存本文を開く。
-
-Agent が使うサブコマンドと MCP は変わらない。引数を付けたコマンドは従来どおり非対話で動作する。人は TUI から現行の本文・設定・Current State を訂正できる。Ledger、Memory revision、Task の checkpoint / attempt / decision / artifact、event_log は履歴なので編集しない。
-
-### ブラウザで一覧を見渡す
-
-`mashu gui` は、Memory、Temporary Context、Task、review を待つ candidate と Memory change proposal の一覧ページを 127.0.0.1 で開く。端末の幅では見渡せない一覧を、本文を省略せず折り返したまま一画面に並べるための経路で、既定ではブラウザも開く。
-
-~~~bash
-mashu gui
-mashu gui --port 8700 --no-open
-~~~
-
-Memories は status、delivery、Scope、topic と本文の部分一致で、Tasks は open / active / dormant / closed と Project で絞り込める。Memory と Task の詳細ページには revision や checkpoint などの履歴も載る。
-
-GUI は読むだけで、採用・却下・編集・close などの操作は TUI、CLI、デスクトップアプリで行う。GET と HEAD 以外の要求は 405 で拒否し、ページを作る DB の transaction は PostgreSQL 側で READ ONLY にする。localhost の HTTP から書き込めると、shell を持つ Agent が curl で User として承認できてしまうためだ。
-
-### デスクトップアプリで操作する
-
-`desktop/` は Tauri 2 で作ったトレイ常駐アプリで、TUI でできる人の操作をすべて窓の中で行える。左の縦のナビから次の四つの画面を開く。
-
-- 判断待ち（Inbox）: candidate、Memory change proposal、close の提案を一つの一覧に並べる。candidate の採用・却下・保留と文面の編集、proposal の適用・理由の編集・却下・取り下げ、close の提案の受け入れと取り下げをここで行う。topic への採用では、その場で新しい topic を作れる
-- メモリ（Memory）: active・retired の Memory と Temporary Context の一覧、検索、根拠と revision の表示。直接の remember、本文の編集、理由の追記と書き直し、delivery の変更、retire と復元、Temporary Context との相互の変換、Temporary Context の登録・編集・終了
-- 作業（Work）: active・dormant・closed の Task と Project。Task の作成・編集・lease の延長・close・reopen、Project の作成と編集
-- 設定（Settings）: 容量と最近の記録、Bootstrap preview、Scope・Topic・Route の追加と編集と削除、checkpoint の間隔、migration の適用、表示の言語
-
-編集は詳細の表示をその場で入力欄に変えて行い、文字数を上限と並べて示す。⌘/Ctrl + Enter で保存し、Esc で取り消す。一覧は ↑↓ か j/k で移り、/ で検索欄へ移る。画面の文言は日本語と英語を設定の「表示」で切り替える。文言は `desktop/ui/i18n.js` の辞書にまとめてあり、キーは store と CLI の名前（`admit`、`dormant` など）である。CLI と TUI の文言は英語のままである。
-
-retire 済みの規則を書き戻す操作や、似た open な Task がある中での作成、削除や migration の適用は、理由や候補を見せて一度確かめてから行う。state が提案より後に書かれた close の提案は、確認のチェックを入れるまで受け入れられない。Bootstrap preview は入力したディレクトリで開くセッションの内容を示し、TUI と同じく配信として記録される。
-
-60 秒ごとに store を見にいき、review 待ちの candidate、Memory change proposal、close の提案が増えると OS の通知を出す。トレイのアイコンに重ねたヒントにはそれぞれの件数が出る。窓を閉じてもトレイに残り、終えるときはトレイのメニューの Quit を使う。
-
-GitHub Release に、正式版ごとの Mac（Apple silicon）の `Mashu_aarch64.app.tar.gz`（展開すると `Mashu.app`） と Windows のインストーラ（`Mashu_<版>_x64-setup.exe`）を置いている。Apple と Microsoft の署名は受けていない。Mac では、初回に開くと「開発元を確認できない」と表示されるので、システム設定の「プライバシーとセキュリティ」で「このまま開く」を押す。Windows では SmartScreen の警告から実行を許可する。Mac の配布物は ad-hoc の署名を .app 全体に掛けている。掛けていないと、ダウンロードしたものは「壊れている」と表示されて開けない。手元でビルドするときは次を実行する。
-
-~~~bash
-cd desktop/src-tauri
-cargo run
-~~~
-
-ビルドには Rust と、Windows では WebView2 が要る。アプリは `mashu desktop-backend` を子プロセスとして起こし、標準入出力の JSON 一行ずつで要求と応答をやりとりする。待ち受けるポートは無い。書き込みは TUI と同じ関数（`review_actions`、`memory_actions`、`task_actions`、`application`）を通るので、楽観チェック、容量の上限、入口の拒否は TUI と同じに掛かる。起こす実行ファイルは、環境変数 `MASHU_EXE`、設定の「バージョン」で指定した checkout の `.venv` にある `mashu`、手元でビルドしたときはその checkout の `mashu`、PATH と `~/.local/bin` の `mashu` の順に探す。最後の `mashu` が checkout の `.venv` へのリンクなら、辿った先の checkout を更新の対象にする。どれも見つからなければ、エラーを出す代わりに最初の画面を出す。そこでは、入っている Mashu の場所を指定するか、アプリに入れさせるかを選べる。入れさせる場合、アプリは git、uv、PostgreSQL がそろっていて PostgreSQL が動いているかを確かめ、足りないものとその入れ方を示す。そろっていれば、空のフォルダに最新の正式版を clone して main をそのタグに合わせ、`uv sync --extra mcp`、DB `mashu` の作成、`mashu admin migrate` を順に実行する。エージェントへの MCP サーバーと hook の登録は各ツールの設定を書き換えるので、アプリは行わず、この README の「Agent から使う」へ案内する。checkout はあるのに DB が無いときは「データベースを作成」を、PostgreSQL に繋がらないときは「再試行」を出す。
-
-アプリは起動時と一日ごとに origin のリリースのタグを確かめ、アプリか checkout より新しい正式版があれば、ナビの下に知らせを出す。設定の「バージョン」の「更新」は、backend を止めたまま、checkout の main をそのタグまで早送りし、`uv sync --extra mcp` と `mashu admin migrate` を実行してから、アプリを GitHub Release の配布物で入れ替えて再起動する。checkout に未コミットの変更があるとき、main 以外にいるとき、main にタグに無いコミットがあるときは、何も変えずに理由を示す。途中で失敗しても、同じ更新をもう一度押せば続きから進む。手元でビルドしたアプリは checkout だけを更新し、アプリは cargo run で起動し直す。Windows では、動いている MCP サーバーが `.venv` の実行ファイルを握っていると `uv sync` が失敗するので、エージェントのセッションを閉じてから更新する。
-
-`mashu desktop-backend` は shell から誰でも起動できるので、User としての承認を Agent から守る強さは CLI と TUI と同じである。Agent に `mashu review` を禁じているなら、`mashu desktop-backend` も同じく禁じる。
-
-### 恒久ルールを直接登録する
-
-User が CLI の `mashu remember` または dashboard の Memories から直接登録した内容は、review を待たずに active Memory になる。会話中に「覚えて」と明示された内容は、Agent が `memory_admit` に本文を渡して 1 回で登録できる。
-
-本文は該当するすべてのセッションに push されるので、規則だけを 120 字以内で書く。理由・測定値・日付・経緯は `--why`（MCP では `why`、500 字まで）に渡すと、evidence として `ledger` の行に残り、`mashu show` や `memory_get` で読めるが push はされない。120 字を超える本文は、どこに書けばよいかを示して拒否される。上限が掛かるのは新しく書く本文だけで、上限より前に書かれた本文は、採用・復帰・配信の変更でそのまま引き継げる。
-
-~~~bash
-mashu remember "Run migrations before restarting the service"
-mashu remember "Run migrations before restarting" --why "a restart against an old schema broke the API"
-mashu remember "Use the deployment scope" --scope deployment
-mashu remember "Keep the win rate between 40 and 60 percent" --topic difficulty
-~~~
-
-配信先を省略したときは、scope も省略すれば always、scope を指定すれば scope、--topic を指定すれば topic になる。
-
-期限つきの条件は --until で登録する。Temporary Context は review 不要で期限に消える。--until は --scope、--delivery、--topic、--force と併用できず、期限は最大 14 日。
-
-Memories TUI では `c` で active な always / scope Memory を Temporary Context に変換できる。日数を入力すると元の Memory は `relocated` と移動先 ID を記録して retire され、同じ本文と Scope の Temporary Context が有効になる。Temporary Context で `c` を押すと、同じ本文と Scope の active Memory に戻る。本文が withdrawn / legacy の Memory に似ているときは、`n` で登録するときと同じく retire の理由を表示し、明示の yes を受けてから戻す。topic の Memory は発動条件を失うため Temporary Context には変換しない。
-
-~~~bash
-mashu remember "The staging host is down" --until 2d
-~~~
-
-### 忘却による損害を記録する
-
-pain は、忘れたことによって起きたことと、その再発を防ぐ内容を一緒に記録する。
-
-記録できる kind は incident（知識が無かったため、誤った作業を実際に行った）だけだ。同じことを調べ直しただけの friction は記録しない。
-
-- prevention-kind rule: 毎回覚えておく必要があるルール。既定値で、candidate の対象になる。prevention がそのまま candidate の本文になるので 120 字までとし、理由や経緯は --what に書く
-- prevention-kind work: 一度だけ行う変更。candidate にはせず、指定した Task の next_actions に入れる
-- --violated MEMORY: 届いていた active な Memory がその事態を扱っていたのに守られなかったときに、その Memory を指す。candidate は作らず、`ledger` の行に Memory を残して配信失敗の疑いとして記録する。retire された Memory は指せない
-- --ignored-task TASK: Task の state（decisions や attempts）がその事態を扱っていたのに使わなかったときに、読んだかどうかによらず、その Task を指す。決定が一つに絞れるときは --ignored-decision でその decision も指す
-- --ignored-source FILE: CLAUDE.md・AGENTS.md・skill のような指示ファイルがその事態を扱っていたのに使わなかったときに、その場所を ~ かリポジトリからのパス、または `skill <name>` で指す
-- --ignored-task と --ignored-source は、知識が無かったのではなく有ったことを示すので、candidate は作らない。`ledger` の行に場所を残し、`knowledge_unused` を event_log に記録する。`mashu status` が直近 30 日の件数を出す。その場所の文面や届き方を直すなら、それは rule ではなく work として Task に積む
-
-~~~bash
-mashu pain \
-  --what "Deployed twice" \
-  --prevention "Check the release ledger"
-
-mashu pain \
-  --what "Deployed twice" \
-  --prevention "Check the release ledger" \
-  --violated 5e6f7a8b
-
-mashu pain \
-  --what "Re-proposed a settled change" \
-  --prevention "Weigh the task decisions" \
-  --ignored-task 1a2b3c4d
-
-mashu pain \
-  --what "Bad export" \
-  --prevention "Validate the manifest" \
-  --prevention-kind work \
-  --task 1a2b3c4d
-~~~
-
-incident は 1 回で candidate になる。prevention が既存の active Memory と類似する場合（pg_trgm で閾値 0.45 以上）も、candidate を作らず配信失敗の疑いとして記録する。日本語の言い換えはこの類似度に掛からないので、守られなかったルールが分かっているときは --violated（MCP では `violated_memory_id`）で明示する。
-
-### candidate を review する
-
-引数なしの mashu review は TUI を開く。候補を一覧だけ表示したり、端末を使わずに 1 件決めたりもできる。
-
-~~~bash
-mashu review
-mashu review --list
-mashu review --list --all
-mashu review --admit 1a2b3c4d --version 3 --delivery scope --scope deployment
-mashu review --decline 1a2b3c4d --reason "Too specific to one run"
-mashu review --changes
-mashu review --changes --list
-mashu review --apply-change 1a2b3c4d --version 2
-~~~
-
-既定では保留中の nomination を表示しない。--all を付けると保留分も一覧に戻る。TUI の一覧では d で保留分の表示を切り替える。変更 proposal は `mashu review --changes` で確認し、対象本文・revision・理由・根拠・後継・conflict を読み、入力済みの理由を編集して適用できる。TUI の `y` は直接操作の承認でもあるため、適用後に同じ確認を重ねない。Agent は明示指示なしに apply しない。
-
-非対話で採用・変更を適用する場合は、一覧や詳細で読んだ version を `--version` に指定する。候補が読み取り後に変わっていれば `--admit` は拒否され、pending のまま残る。出力された request ID を再送時に `--request-id` へ渡すと同じ結果が返る。
-
-TUI の操作は次のとおり。
-
-| キー | 動作 |
-|---|---|
-| ↑ / ↓ または j / k | 候補を移動 |
-| Home / End、PageUp / PageDown | 先頭・末尾または画面単位で移動 |
-| / | ID、kind、scope、本文、evidence を絞り込み。空入力で解除 |
-| Enter | 選択した候補を開く |
-| Esc / ← | 詳細から一覧へ、一覧から前の画面へ戻る。絞り込み中は解除 |
-| d | 一覧で保留分の表示を切り替える |
-| y | 確定。delivery を選ぶ |
-| e | 現在の候補本文をその場で編集し、Enter で保存。確定はせず、続けて y で再試行できる |
-| r | 理由を入力して却下 |
-| s | 理由を入力して保留 |
-| Space | 本文をページ送り |
-| ? | キーの説明 |
-| q | Mashu を終える |
-
-`mashu review --changes` の TUI は提案を一件ずつ開き、`y` で適用、`e` で理由編集、`d` で却下、`w` で取り下げる。対象 Memory の revision や conflict が変わっていれば適用できず、最新情報を読み直して proposal を更新する。
-
-一覧では選択中の本文、evidence 数、retire された Memory との衝突、以前の保留理由を preview できる。保留は却下ではなく、candidate を pending のまま一時的に一覧から隠す操作だ。途中で退出しても、済んだ決定は保存される。
-
-確定が容量超過で拒否された場合も候補は選択されたまま残る。`e` で本文を短くして保存し、`y` で同じ候補の確定をやり直せる。編集しても evidence と pending 状態は変わらず、編集自体も event_log に残る。
-
-## 見る・変更する
-
-| コマンド | 役割 |
-|---|---|
-| mashu status | schema、容量、pending 件数、最近の ledger、配信失敗の疑いとその経路別の内訳、有った知識が使われなかった件数、action つき topic ごとの直近 30 日の guard の発火回数を表示する。拒否の次の呼び出しが変わった割合は、guard が呼び出しを止めていた期間の記録から出る |
-| mashu bootstrap | 現在のディレクトリのセッションへ配信される内容と token 数を表示 |
-| mashu gui | Memory、Temporary Context、Task、review 待ちを読み取り専用のページとしてブラウザに表示 |
-| mashu desktop-backend | デスクトップアプリが子プロセスとして起こす。標準入力の JSON 一行ずつの要求に、標準出力の一行で答える。TUI と同じ人の操作をすべて扱う |
-| mashu show REF | Memory、candidate、Ledger、Memory change proposal の 1 件を根拠・履歴つきで表示 |
-| mashu memories | active Memory の一覧を表示 |
-| mashu memories --retired | retire された Memory と retire の理由を表示 |
-| mashu ledger | Ledger を新しい順に表示 |
-| mashu retire REF --reason REASON | 理由を付けて Memory を retire する。似た規則があとで来ると、この理由を見せて確認を求める |
-| mashu restore REF --reason REASON | retire された Memory を復帰する。retire の記録は履歴に残る。廃止済みの似た規則と衝突すれば理由を示して確認する |
-| mashu review --changes | retire / replace / restore / redeliver の pending proposal を TUI で読む |
-| mashu revise REF | Memory を改訂する。旧本文は revision history に残る |
-| mashu deliver REF always\|scope\|topic | active Memory の配信先を変更する。topic は --topic NAME で指定する |
-| mashu topic | topic の一覧・作成・編集・削除。`mashu topic show NAME` で本文を読む |
-| mashu topic --edit NAME --action ACT | topic を action に結びつける。`--no-action` で外す |
-| mashu topic --edit NAME --source PATH | topic の原典を vault かリポジトリのルートからの相対パス（`#見出し` 可）で指す。`--source -` で外す。`--add` にも渡せる |
-| mashu guard ACTION | ACTION に結びついた topic のルールを表示する。PreToolUse hook がそれを呼び出しの文脈に足す（呼び出しは止めない）。`--outcome same\|changed` は guard が呼び出しを止めていた期間に使っていた記録の口で、今の hook は呼ばない |
-| mashu admin migrate | 未適用の migration を実行する |
-
-ID は list コマンドが表示する先頭 8 文字を使える。4 文字以上の一意な前方一致も受け付ける。複数の候補に一致する場合は拒否される。
-
-## 配信の仕組み
-
-Memory の通常の読み取りは検索ではなく push だ。session_bootstrap がセッション開始時にまとめて配信する。topic は見出しだけを開始時に配信し、本文は Agent がその作業に入るときに読む。action を結びつけた topic は、その行為の直前に PreToolUse hook も本文を示す。Mashu に検索の経路は無い。
-
-| delivery | 届く範囲 | 届くタイミング | 向いているルール |
-|---|---|---|---|
-| always | 全セッション | 開始時の bootstrap | どの作業でも守るルール |
-| scope | route が一致するセッション | 開始時の bootstrap | 特定の領域だけで必要なルール |
-| topic:NAME | 見出しは topic の Scope が一致するセッション（Scope が無ければ全セッション） | 見出しは開始時、本文はその作業に入るとき | 特定の作業のあいだだけ必要なルール |
-
-scope は「どこで」、topic は「何の作業のあいだか」を絞る。scope を受け取る Tool に topic の名前を渡すと、それが topic であることと `memory_list(topic=...)` での読み方を返す。topic に action を結びつけると、その作業に当たる tool call（`delegate` なら Agent / Task による subagent の起動）の直前に、hook がその topic のルールを示して呼び出しを一度止める。hook が発火するのは topic の見出しが載るセッション、つまり topic に Scope があればその Scope のセッションだけだ。
-
-初期の容量は次のとおり。それぞれの上限は独立しており、上限を超える書き込みは、一部を切り捨てて受け付けるのではなく拒否する。
-
-~~~text
-全体                 4000 token
-Memory               2000 token（always は 800 まで。各 Scope は always と合わせて 2000 まで）
-Task cards            800 token / session（1 Task 200。超えた古い Task は名前だけを 200 まで）
-Task detail           800 token / Task（常時配信しない）
-Topic body            800 token / topic（常時配信しない）
-Temporary Context     400 token
-~~~
-
-Scope ごとの Memory に独立した上限は無い。2000 から always の使用量を引いた残りが、各 Scope で使える量になる。topic の見出しの行も、この残りの容量に数える。Scope を持たない topic の行は always に、Scope を持つ topic の行はその Scope に入る。
-
-容量で拒否されたときの文面は、書き込み前の空きを示す。always への追加が拒否されたときは、代わりに topic へ置いた場合に `always` の容量から使われる量（Scope を持たない既存 topic ごとの見出しの増分と、新しい topic なら見出し一行ぶん）も添える。空の topic は見出しを出さないので、最初の規則が入ると見出しの行全体が容量に数えられる。topic への追加がこの行で拒否されたときは、行の全文と token 数を示す。容量を空ける方法は、CLI からの書き込みなら `mashu` のコマンドで、MCP からの書き込みなら `memory_change_propose` や `memory_redeliver` の tool 名で示す。
-
-これらの上限と Memory 本文の字数（既定 120 字）は、デスクトップアプリの設定の「配信量の上限」と、TUI の Settings の Delivery limits で変更できる。値は DB の `setting` テーブルに置き、MCP サーバーは起動のたびに読むので、変更は次に開くセッションから効く。拒否の判定は書き込みのたびに DB の値を読む。今の量より低くしても記録は消えず、超えている間は Memory・Temporary Context・Task 1 件の量を増やす書き込みが拒否され、card と有効な decision は古いものから配信されなくなる。環境変数 MASHU_TOTAL_CAPACITY、MASHU_CAPACITY、MASHU_ALWAYS_CAPACITY、MASHU_PROJECT_CAPACITY、MASHU_CARD_OVERFLOW_CAPACITY、MASHU_DECISION_CAPACITY、MASHU_TASK_CARD_CAPACITY、MASHU_TASK_DETAIL_CAPACITY、MASHU_TEMPORARY_CAPACITY、MASHU_TOPIC_CAPACITY、MASHU_CONTENT_LIMIT は、設定されていない上限の既定値だけを差し替える。
-
-Task card の予算は書き込みではなく配信で効く。bootstrap は、そのセッションに届く active Task を最後の活動の新しい順に並べ、card を予算（`project_capacity`）まで載せる。最初に入らなかった card から後ろは、短い id・名前・最後の活動日だけを `card_overflow_capacity` の中で並べ、入りきらない分は件数で示す。書き込みは scope の合計では拒否せず、応答の `card_share.unseated` が card を失った Task を名指す。Scope を持たない Project の card は、全 Scope に共通する分として、それぞれの Scope の配信で競い、unrouted session にはこの共通分だけが届く。`mashu status` の card 使用量は、最も重い Scope の active な card の合計で、配信の予算と並べて表示する。Task detail は配信の予算には含めず、1 Task ごとの上限だけを持つ。
-
-## Scope と route
-
-Scope は Memory の配信範囲、Project は Task の所属先だ。似ているが別の概念である。
-
-~~~bash
-mashu scope
-mashu scope --add deployment
-mashu scope --add deployment --about "Production releases"
-
-mashu route
-mashu route --add /work/service --scope deployment
-mashu route --ignore /work/scratch
-mashu route --remove /work/service
-~~~
-
-route は作業ディレクトリの path prefix と Scope を対応づける。bootstrap は現在の cwd から Scope を解決する。無関係なディレクトリを --ignore で明示的に unscoped にもできる。
-Scope の summary は任意で、CLI と Settings TUI のどちらでも省略できる。
-
-## Topic
-
-topic は、特定の作業をしているあいだだけ必要なルールの束だ。名前、発動条件の一文、所属する Scope（省略すると全セッション）を持ち、任意で原典の場所（source）を持つ。bootstrap には `難易度較正 (9 rules): Before changing difficulty levers or win rates` のような見出しの一行だけが載り、Agent はその作業に入るときに `memory_list(topic=...)` で本文を読む。
-
-~~~bash
-mashu topic
-mashu topic --add 難易度較正 --scope enrai --trigger "Before changing difficulty levers or win rates"
-mashu topic --edit 難易度較正 --trigger "Before calibrating difficulty"
-mashu topic --edit 難易度較正 --source "Projects/Enrai/難易度.md#レバー"
-mashu topic --edit 委譲 --action delegate
-mashu topic show 難易度較正
-mashu topic --remove 難易度較正
-
-mashu remember "Do not change ship stats to set difficulty" --topic 難易度較正
-mashu deliver 1a2b3c4d topic --topic 難易度較正
-~~~
-
-使い分けの目安は次のとおり。プロジェクトのどの作業でも守るなら scope、そのプロジェクトの一部の作業でだけ効くなら topic を選び、特定の操作の直前に必ず目に入れたいなら、その topic に action を結びつける。action は topic の編集でだけ設定でき、作成時には聞かれない。一つの action に結びつく open な topic は一つだけで、別の topic に移すときは先に元の topic から外す。一覧と `mashu topic show` は結びついた action を `before: delegate` のように示す。remove できるのは active なルールを持たない topic だけだ。一度も使われていない topic は削除され、名前も空く。retire されたルールか、提案が名前を参照している topic は、履歴を保つために archive され、一覧から消える。topic の作成と編集は Settings TUI の Topics からもできる。Agent が topic を作れるのは、User の明示指示で記憶を追加・移動するときだけだ。`memory_admit` と `memory_redeliver` に `topic_trigger` を添えると、その記憶とともに新しい topic が作られ、作成の event に指示の引用が残る。`memory_admit` では `topic_source` で新しい topic の原典も指せる。
-
-### topic の原典（source）
-
-source は、topic のルールが要約している長い本文の置き場所だ。Obsidian vault のルートからの相対パスか、リポジトリのルートからの相対パスで書き、`#見出し` を添えてよい。絶対パス、`~` で始まるパス、`..` で外へ出るパスは拒否し、禁止パターンの検査も本文と同じく通す。source は CLI の `mashu topic --add/--edit ... --source`、Settings TUI の Topics の編集、`memory_admit` の `topic_source` で設定する。
-
-vault の場所は環境変数 MASHU_VAULT_ROOT だけが持ち、DB には保存しない（絶対パスには個人を特定できる名前が含まれるため）。MASHU_VAULT_ROOT が設定されていて、source の最初の要素が vault の直下に存在するとき、source を vault のノートとして扱う。`memory_list(topic=...)` はそのとき `source` に加えて、`#` 以降を除いた絶対パス `source_path` と、そこにファイルがあるか `source_exists` を返す。確かめるのは stat だけで、ノートの中身は読まない。それ以外の source（リポジトリの文書など）は書かれたまま返す。action つきの topic が PreToolUse hook で呼び出しを止めるときは、ルールの後に `Source: ...` の一行で原典を示す。bootstrap の topic の見出しには source を載せない。
-
-## Project と Task
-
-Project は Task をまとめる単位。Scope が知識の配信範囲を決めるのに対し、Project は作業状態の所属を決める。
-
-~~~bash
-mashu project list
-mashu project create website --scope frontend
-mashu project edit website --scope backend
-mashu project show website
-
-mashu task list
-mashu task list --dormant
-mashu task list --closed
-mashu task show 1a2b3c4d
-mashu task create "Add CLI help" --project mashu --goal "Every command explains itself"
-mashu task touch 1a2b3c4d
-mashu task close
-mashu task close 1a2b3c4d --outcome completed --reason "Merged and released"
-mashu task close 1a2b3c4d 5e6f7a8b --outcome superseded
-mashu task reopen 1a2b3c4d
-~~~
-
-`mashu project create` で `--scope` を省くと、cwd の route が指す Scope を使う。route の無いディレクトリでは拒否するので、全 Scope へ card を配る Project は `--scope -` で明示して作る。`mashu project edit` は Project の名前と Scope を、Task を保ったまま変える。`--scope -` で Scope を外す。
-
-`mashu task create` は `--project` を省略できる。cwd の route から一意に決まる Project、または開いている Project が一つだけならそれを使う。候補が複数なら選択を求める。Work TUI でも同じ候補解決を使い、一件だけならその Project を既定値として表示する。
-
-`mashu task close` を引数なしで叩くと決定の画面が開く。open な Task が 1 行ずつ並び、選択中の goal、status、approach、open questions、blockers、next actions と close proposal を一覧の下で読める。↑↓ または j / k で移動し、`/` で ID、Task 名、Project、Current State、proposal の理由を絞り込む。c / a / s で outcome を選ぶ。Agent が終了を提案している Task は先頭に集まり、Enter で表示中の proposal を受理する。Work 画面の `c` も選択中の一件を同じ close 画面で開く。proposal と state が表示後に変わっていたら受理を拒否し、stale proposal の確認は受理するときだけ行う。c / a / s で明示的に選んだ outcome は proposal を暗黙に受理しない。reason 入力の Ctrl+C は close 全体を取り消す。y は一覧にある stale でない proposal（●）をすべて受理する。閉じる Task の件数と ID、Task 名、提案された outcome を一画面に並べて一度だけ確認し、y で一件ずつ Enter と同じ経路で閉じる。stale proposal（◌）は残して一件ずつの判断に回し、途中で一件が失敗したらそこで止めて、閉じた分は残す。検索中は一覧に見えている Task だけが対象になる。
-
-Task の Current State には goal、approach、status、open questions、blockers、next actions が入る。Attempt、Decision、Checkpoint、Artifact Reference は履歴として別に残る。
-
-bootstrap が常時配信するのは、完全な Task ID、Task 名、goal、status、詳細項目の件数、最終確認日からなる短い card だけである。approach、open questions、blockers、next actions の本文は配信しない。Agent は Task に着手する前に、card の完全な Task IDで `task_get` を呼び、Current State 全文を取得する。
-
-- Agent は MCP で Current State と履歴を更新する
-- User は CLI / TUI で Task を作成・touch・close・reopen でき、TUI では Task 名・Project・Current State も訂正できる
-- open Task は活動が 14 日途切れると dormant になり、bootstrap から外れる。履歴は残る
-- dormant は終了ではない。task touch で活動期限を延長して戻せる
-- Task を closed にできるのは User だけ。outcome は completed、abandoned、superseded のいずれか
-- Agent は task_propose_close で「終わったと思う」と根拠つきで提案できる。提案は open / closed を動かさず、lease も延ばさない。User が同じ outcome で理由を書かずに close すると、提案の根拠がそのまま close_reason になる
-
-MCP で Task の state を書くのは task_checkpoint だけで、渡したフィールドだけを置き換える。`name` を渡すと Task 名も変える。省いたフィールドは前の値を保ち、フィールドを空にするときは空文字か空リストを渡す。MCP で Current State 全文を返すのは task_get だけで、他の Task 系 Tool は goal・status・詳細件数からなる card view を返す。task_get と write の成功応答は card と full detail の予算残量を含み、card 上限を超えた write は超過量とフィールドごとの内訳を返して event_log に記録される。フィールドごとの文字数や件数の上限を超えたフィールドと checkpoint の履歴項目の形の誤りは、最初の一つで止めずに一度の拒否で `problems` にまとめて返り、上限を超えたフィールドは `over_limit` に `field`・`limit`・`actual` を持つ。各上限の値は Tool の説明にコードの定数から載る。
-
-## Agent から使う
-
-### MCP server の接続
-
-Mashu は stdio の MCP server として動く。Claude Code から接続する例は次のとおり。
+Mashu は stdio の MCP server として動く。Claude Code には次のように登録する。
 
 ~~~bash
 claude mcp add mashu \
@@ -436,83 +93,11 @@ claude mcp add mashu \
   -- /path/to/mashu/.venv/bin/mashu serve --agent claude
 ~~~
 
-Agent 名は serve の --agent、または MASHU_AGENT で指定する。別の MCP client を使う場合も、同じく mashu serve を stdio server として登録する。
+agent の名前は `serve` の `--agent` か、環境変数 `MASHU_AGENT` で指定する。Codex など別の MCP client でも、同じように `mashu serve` を stdio server として登録する。
 
-MCP tool は 18 個ある。
+### SessionStart hook で開始時の配信を自動にする
 
-| 分類 | Tool | 役割 |
-|---|---|---|
-| Knowledge | session_bootstrap | セッション開始時に一度呼び、Memory・active Task card・Temporary Context を受け取る |
-| Knowledge | pain_report | 事故（incident）を Ledger に記録する。`rule` の `prevention` は 120 字までで、理由や経緯は `what` に書く。incident は誤った作業が実際に出たことに限る。知識が有ったときは、届いていた active Memory を `violated_memory_id`（hook が出す 8 文字の id でよい）、Task の state を `ignored_task_id`、指示ファイルや skill を `ignored_source` で指し、candidate を作らない |
-| Knowledge | memory_list | 指定 Scope の active Memory を一覧する。`scope='always'`（または `global`）は全セッションへ push される Memory を返す。`topic` を渡すと、その topic の本文と原典（source、vault のノートなら `source_path` と `source_exists`）を読み、読んだことを記録する |
-| Knowledge | memory_get | 指定 Memory の本文、revision、evidence、retire の種別、理由、後継を読む |
-| Knowledge | memory_nominate | Agent が自分で出す replace 提案の後継を pending candidate として作る。ユーザーの指示ではなく Agent の案（kind = `proposed`）として記録し、他の候補に合流しない。`content` は 120 字までで、理由は `why` に渡す |
-| Knowledge | memory_admit | 承認根拠を必須にして採用する。採るのはユーザーが残すよう求めた恒久の規則だけで、作業の事実は Task の decisions に置く。`delivery` を省くと、MCP を起動したディレクトリの scope、route に無ければ always になる。`content` を渡せば候補の作成と採用を 1 回で行い（`content` は 120 字まで、理由・測定値・経緯は `why` に渡すと evidence に残る）、読むべき候補や conflict があれば止まる。止まった候補は `nomination_id` と読み取った version で採用する。まだ無い topic は `topic_trigger`（原典を指すなら `topic_source` も）を添えると記憶とともに作る。request replay は初回応答を返す |
-| Knowledge | memory_change_propose | Agent 自身の変更案として retire / replace / restore / redeliver を作成または更新する。redeliver は本文を変えずに配信条件だけを移し、新しい topic も作れる。replace は後継の内容・version と配信条件を固定し、retirement_kind を省略すると superseded になる。形の誤りは一度の拒否で `problems` にまとめて返る |
-| Knowledge | memory_change_apply | 既にある proposal の version と対象・conflict・承認根拠を照合して適用する |
-| Knowledge | memory_redeliver | User が指示した配信先の変更を、redeliver 提案の作成と適用まで 1 回で行う。指示の引用と会話参照が evidence になり、request replay は初回応答を返す |
-| Knowledge | memory_change_instructed | User が指示した retire、置換、復帰を、提案の作成と適用まで 1 回で行う。replace の後継候補もその場で作る。指示の引用と会話参照が evidence になり、request replay は初回応答を返す |
-| Knowledge | memory_change_withdraw | 不要になった pending proposal を取り下げる |
-| Project State | project_list | Project と Task 件数を一覧する |
-| Project State | task_create | 類似する open Task を確認して Task を作る |
-| Project State | task_get | Task の Current State 全文と、有効な決定（supersede されていない decision の文、新しい順に 800 token まで）を取得し、指定した履歴だけ展開する。着手前に必須 |
-| Project State | task_search | Task 名と Current State、および全 Task の decision の本文と理由を検索する。日本語は語をすべて含むかで当てる |
-| Project State | task_checkpoint | Current State の渡したフィールドを置き換える唯一の書き込み。`name` で Task 名も変える。`attempts`（試したことと結果）、`decisions`（判断と理由）、`artifacts`（外部成果物の原典）も同じ transaction で追記する。state のスナップショットは close のときだけ保存する |
-| Project State | task_propose_close | Task の終了案を理由つきで置く |
-| Project State | task_withdraw_close_proposal | close proposal を取り下げる |
-
-Agent が守る基本の動詞は次のとおり。
-
-~~~text
-誤った作業が実際に出た  → pain_report（有った知識は violated_memory_id / ignored_task_id / ignored_source で指す）
-User が「覚えて」と言った → memory_admit（content）
-User が既存 Memory の retire、置換、復帰を指示 → memory_change_instructed
-User が配信先の変更を指示 → memory_redeliver
-次のセッションへ引き継ぐ → task_checkpoint（attempts / decisions / artifacts を添える）
-~~~
-
-task_checkpoint は、次のセッションが要るものだけを渡す。失敗した試行、後で理由を失うと高くつく判断、外部成果物の原典、goal・approach・blockers の変更、作業を止める前の状態がそれにあたる。進捗、測定の途中結果、次の一手の変更は書かず、commit とプロジェクトの文書に任せる。同じセッションが同じ Task の state を書けるのは間隔ごとに一度で、その間の書き込みは中身にかかわらず拒否する。間隔は既定で 30 分で、TUI の Settings & health にある Checkpoint interval で 0〜1440 分に変えられ、0 にすると制限が外れる。値は database の `setting` テーブルに置き、書き込みのたびに読むので、動いているセッションにも次の呼び出しから効く。中身で例外を作ると、通すために試行や判断を作って書く動機が生まれ、作られた decision は有効な判断として次のセッションに届くからだ。成功の応答も拒否も、次に書ける時刻を示さない。示すと、書きたい中身を時刻まで取っておいて送る動機になるからだ。作業を止める前の書き込みが間隔の中に入ったときは、直前に書いた state がそのまま残る。呼ぶたびに state のスナップショットを保存することはせず、任意の `what_changed` は state 置換の event に残る。スナップショットとしての checkpoint は close のときに一つだけ作られ、close の理由をその what_changed に持つ。status_text は Task がいまどこにいるかが変わったときだけ書き換える。task_checkpoint の `attempts` には失敗した試行の結末、`decisions` には理由を失うと再導出コストが高い判断、`artifacts` には外部成果物の原典を入れる。一つでも拒否されれば state も履歴も書かれない。Agent が独自に考えた Memory 変更は提案に留め、明示指示があった場合だけ MCP から適用する。ユーザーの会話指示の出所は記録されるが、認証されるわけではない。Temporary Context の登録、直接 Memory 操作、proposal review、Task の close / reopen は User の CLI / TUI 操作だ。終わったと思ったら status_text にそう書くのではなく task_propose_close を使う。前者は User に読み直しと打ち直しをさせ、後者は 1 打鍵で決まる。終わったとみなすのは User のマージや受け入れの後で、自分の担当分が終わったときや、ブランチが User の確認を待っているときではない。提案の後に state を書くと提案が stale になり、一括の受け入れから外れるので、checkpoint を先に打ち、提案を最後にする。Task を作るのは複数のセッションにまたがる作業だけで、一つの依頼や大きな Task の一工程には作らない。
-
-### PreToolUse hook で action つきの topic を示す
-
-tools/pretooluse_guard.py を PreToolUse hook に登録すると、action を結びつけた topic のルールが、その action に当たる呼び出しに警告として添えられる（`additionalContext`）。呼び出しは止めない。添えるのはセッションごと（compaction をまたぐと改めて）一回だけだ。DB に接続できない場合は何も添えずに通す。topic に source があれば、警告の文面はルールの後に `Source: ...` の一行を添える（vault のノートなら解決した絶対パスと、無ければ `(not found)`）。
-
-以前の delivery `guard` の Memory は、migration `0011_guard_into_topics.sql` が action と同じ名前の topic へ移し、その topic を action に結びつける。
-
-既存の hook 設定がある場合は、次の entry をその設定に追加する。
-
-~~~json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Task|Agent|Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/path/to/mashu/tools/pretooluse_guard.py"
-          }
-        ]
-      }
-    ]
-  }
-}
-~~~
-
-Task と Agent は組み込みの delegate action として扱われる。それ以外の client tool や、Bash の command から action を判定する規則は、インストールごとに異なるのでリポジトリ外に置く。既定のファイルは .mashu-guard-actions、別の場所を使うときは MASHU_GUARD_ACTIONS で指定する。
-
-1 行 1 規則で、形式は judgement、subject、expression。
-
-~~~text
-delegate tool mcp__some-server__start_task
-remote-shell command \b(cluster-wrapper|scheduler-cmd)\b
-~~~
-
-subject は tool または command。tool は名前全体、command は正規表現で照合する。壊れた行はその行だけ無視される。
-
-### SessionStart hook で開始時の配信を自動化する
-
-tools/sessionstart_guard.py を SessionStart hook に登録すると、startup / resume では bootstrap の内容を配信し、compact では圧縮で落ちた内容を再配信する。
+`tools/sessionstart_guard.py` を SessionStart hook に登録すると、セッションの開始時と再開時に bootstrap の内容を配信する。compaction（文脈の要約）のあとには、要約で落ちた内容をもう一度配信する。DB に接続できないときは何も出力せずに終わる。
 
 ~~~json
 {
@@ -532,7 +117,7 @@ tools/sessionstart_guard.py を SessionStart hook に登録すると、startup /
 }
 ~~~
 
-hook が DB に接続できない場合は何も出力せず終了する。フックのない client では、AGENTS.md または CLAUDE.md に次の 2 行を置く。
+hook の無い client では、AGENTS.md か CLAUDE.md に次の行を置き、agent に `session_bootstrap` を呼ばせる。
 
 ~~~markdown
 # Mashu（外部記憶）
@@ -540,30 +125,378 @@ hook が DB に接続できない場合は何も出力せず終了する。フ�
 - Mashu MCP が接続されているセッションでは、開始時に一度 session_bootstrap を呼ぶ。SessionStart hook が既に配信していれば不要
 ~~~
 
-### セッション開始時に返るもの
+### PreToolUse hook で特定の操作の前に規則を示す
 
-session_bootstrap は次の順序で返す。
+`tools/pretooluse_guard.py` を PreToolUse hook に登録すると、action を結びつけた topic（[Topic](#topic) を参照）の規則を、その action に当たる tool call に `additionalContext` として添える。呼び出しは止めない。添えるのはセッションごとに一回で、compaction のあとには改めて添える。topic に source があれば、規則の後に `Source: ...` の一行で原典を示す。DB に接続できないときは何も添えずに通す。
 
-1. always Memory
-2. 現在の Scope の Memory
-3. topic の見出し（名前・ルール数・発動条件）
-4. active Task の card（完全な Task ID・名前・goal・status・詳細件数・最終確認日時）
+~~~json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Task|Agent|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/mashu/tools/pretooluse_guard.py"
+          }
+        ]
+      }
+    ]
+  }
+}
+~~~
+
+Task と Agent の呼び出しは、組み込みの `delegate` action として扱う。それ以外の tool や、Bash のコマンドから action を判定する規則は、インストールごとに違うのでリポジトリの外に置く。既定のファイルは `.mashu-guard-actions` で、別の場所を使うときは `MASHU_GUARD_ACTIONS` で指定する。一行に一つの規則を `action 名`、`subject`、`式` の順に書く。subject が `tool` なら tool の名前全体と照合し、`command` なら正規表現として Bash のコマンドと照合する。壊れた行は、その行だけ無視される。
+
+~~~text
+delegate tool mcp__some-server__start_task
+remote-shell command \b(cluster-wrapper|scheduler-cmd)\b
+~~~
+
+## 日々の使い方
+
+### 人が操作する三つの画面
+
+人が Mashu を操作する画面は三つある。どれも同じ DB を読み書きする。
+
+| 画面 | 起動 | できること |
+|---|---|---|
+| デスクトップアプリ | トレイに常駐するアプリを開く | TUI と同じ操作をすべてウィンドウの中で行う。review を待つものが増えると OS の通知を出す |
+| TUI | 引数なしの `mashu` | review、Memory と Task の閲覧と編集、設定 |
+| ブラウザの一覧 | `mashu gui` | Memory、Task、review を待つものの一覧を読むだけ |
+
+デスクトップアプリは、左のナビゲーションから四つの画面を開く。
+
+| 画面 | できること |
+|---|---|
+| 判断待ち（Inbox） | candidate、Memory change proposal、close の提案を一つの一覧に並べる。candidate の採用、却下、保留と文面の編集、proposal の適用、却下、取り下げ、close の提案の受け入れを行う。topic へ採用するときは、その場で新しい topic を作れる |
+| メモリ（Memory） | active と retired の Memory、Temporary Context の一覧と検索。根拠と revision を表示する。直接の登録、本文と理由の編集、配信先の変更、retire と復元、Temporary Context との相互の変換を行う |
+| 作業（Work） | active、dormant、closed の Task と Project。Task の作成、編集、lease（活動期限）の延長、close、reopen と、Project の作成と編集を行う |
+| 設定（Settings） | 容量と最近の記録、Bootstrap preview、Scope と Topic と Route の編集、checkpoint の間隔、配信量の上限、migration の適用、表示の言語、バージョンと更新 |
+
+編集は、詳細の表示をその場で入力欄に変えて行う。⌘/Ctrl + Enter で保存し、Esc で取り消す。一覧は ↑↓ か j/k で移動し、/ で検索欄へ移る。retire した規則を書き戻す操作、似た Task がある中での Task の作成、削除、migration の適用は、理由や候補を見せて一度確かめてから行う。Bootstrap preview は入力したディレクトリで開くセッションに届く内容を示し、TUI と同じく配信として記録される。ウィンドウを閉じてもトレイに残り、終えるときはトレイのメニューの Quit を使う。表示の言語は日本語と英語を切り替えられる。CLI と TUI の文言は英語だけである。
+
+TUI は四つの領域（Attention、Memories、Work、Settings & health）を持ち、デスクトップアプリとほぼ同じことができる。矢印か j/k で移動し、Enter で開き、Esc か ← で一段戻る。q はどの画面からでも Mashu を終え、? はその画面のキーの説明を出す。`e` で開く編集欄には今の値が入っているので、打ち直さずにその場で直して Enter で保存する。`VISUAL` か `EDITOR` を設定していれば、そのエディタで開く。
+
+ブラウザの一覧は 127.0.0.1 で開き、端末の幅に収まらない一覧を、本文を省略せずに一画面に並べる。Memory は status、配信先、Scope、topic、本文の部分一致で、Task は状態と Project で絞り込める。採用や編集はできない。GET と HEAD 以外の要求は 405 で拒否し、ページを作る DB の transaction も READ ONLY にしている。localhost の HTTP から書き込めると、shell を持つ agent が curl で User として承認できてしまうからである。
+
+~~~bash
+mashu gui
+mashu gui --port 8700 --no-open
+~~~
+
+Ledger、Memory の revision、Task の checkpoint と attempt と decision と artifact、event_log は履歴なので、どの画面からも編集できない。
+
+### 規則を直接登録する
+
+本文は該当するすべてのセッションに届くので、規則だけを 120 字以内で書く。理由、測定値、日付、経緯は `--why`（500 字まで）に渡す。`--why` は Ledger に根拠として残り、`mashu show` で読めるが、セッションには届かない。
+
+~~~bash
+mashu remember "Run migrations before restarting the service"
+mashu remember "Run migrations before restarting" --why "a restart against an old schema broke the API"
+mashu remember "Use the deployment scope" --scope deployment
+mashu remember "Keep the win rate between 40 and 60 percent" --topic difficulty
+~~~
+
+配信先は、何も指定しなければ always、`--scope` を指定すれば scope、`--topic` を指定すれば topic になる。配信先の違いは[配信の仕組み](#配信の仕組み)で説明する。
+
+期限つきの条件は `--until` で Temporary Context として登録する。review は要らず、期限が来ると消える。期限は最長 14 日で、`--until` は `--scope`、`--delivery`、`--topic`、`--force` と一緒には使えない。TUI の Memories で `c` を押すと、always か scope の Memory と Temporary Context を相互に変換できる。topic の Memory は、発動条件を失うので変換できない。
+
+~~~bash
+mashu remember "The staging host is down" --until 2d
+~~~
+
+### 事故を記録する
+
+agent が `pain_report` で書く記録は、CLI の `mashu pain` からも書ける。記録するのは、知識が無かったために誤った作業を実際に行った incident だけである。同じことを調べ直しただけの手間は記録しない。
+
+| オプション | 使う場面 | 結果 |
+|---|---|---|
+| なし（`--prevention-kind rule`） | 毎回覚えておく必要がある規則が無かった | `--prevention` が candidate の本文になる。120 字までで、経緯は `--what` に書く |
+| `--prevention-kind work --task TASK` | 一度直せば済む | candidate を作らず、その Task の next actions に入れる |
+| `--violated MEMORY` | 届いていた Memory が守られなかった | candidate を作らず、配信の失敗の疑いとして記録する |
+| `--ignored-task TASK` | Task の decisions や attempts に書いてあったのに使わなかった。decision が一つに絞れるときは `--ignored-decision` も添える | candidate を作らず、使われなかった知識として数える |
+| `--ignored-source FILE` | CLAUDE.md、AGENTS.md、skill に書いてあったのに使わなかった。場所は `~` かリポジトリからのパス、または `skill <name>` で書く | 同上 |
+
+~~~bash
+mashu pain --what "Deployed twice" --prevention "Check the release ledger"
+mashu pain --what "Deployed twice" --prevention "Check the release ledger" --violated 5e6f7a8b
+mashu pain --what "Re-proposed a settled change" --prevention "Weigh the task decisions" --ignored-task 1a2b3c4d
+mashu pain --what "Bad export" --prevention "Validate the manifest" --prevention-kind work --task 1a2b3c4d
+~~~
+
+`--prevention` が既にある active な Memory と似ている場合（pg_trgm の類似度が 0.45 以上）も、candidate を作らずに配信の失敗の疑いとして記録する。日本語の言い換えはこの類似度では拾えないので、守られなかった規則が分かっているときは `--violated` で明示する。
+
+### candidate を review する
+
+引数なしの `mashu review` は TUI を開く。端末の画面を使わずに一覧を見たり、一件ずつ決めたりもできる。
+
+~~~bash
+mashu review                      # TUI で candidate を一件ずつ判断する
+mashu review --list               # 一覧だけ表示する（--all で保留中のものも出す）
+mashu review --admit 1a2b3c4d --version 3 --delivery scope --scope deployment
+mashu review --decline 1a2b3c4d --reason "Too specific to one run"
+mashu review --changes            # Memory change proposal を TUI で判断する
+mashu review --apply-change 1a2b3c4d --version 2
+~~~
+
+TUI では `y` で採用して配信先を選び、`e` で本文を直し、`r` で却下し、`s` で保留する。保留は candidate を pending のまま一時的に一覧から隠す操作で、隠したものは `d` で表示できる。容量を超えて採用できなかったときは、`e` で本文を短くしてから `y` をやり直す。
+
+コマンドで採用するときは、一覧で読んだ version を `--version` に渡す。読んだあとで candidate が変わっていれば拒否され、pending のまま残る。
+
+### Task を閉じる
+
+Task を close できるのは User だけである。agent は終わったと判断したら `task_propose_close` で理由つきの提案を置き、User がそれを受け入れるか、自分で outcome（completed、abandoned、superseded）を選んで閉じる。
+
+~~~bash
+mashu task close                  # open な Task と close の提案を一覧する画面を開く
+mashu task close 1a2b3c4d --outcome completed --reason "Merged and released"
+mashu task close 1a2b3c4d 5e6f7a8b --outcome superseded
+mashu task reopen 1a2b3c4d
+~~~
+
+引数なしの `mashu task close` の画面では、提案のある Task が先頭に並ぶ。Enter で選択中の提案を受け入れ、`c`、`a`、`s` で outcome を自分で選び、`y` で一覧にあるすべての提案をまとめて受け入れる。提案のあとで Task の state が書き換わっていた提案（◌ の印）は、まとめての受け入れから外れ、一件ずつ確かめてから受け入れる。
+
+## 配信の仕組み
+
+agent は自分が何を知らないかを知らないので、検索に任せた規則は要るときに引かれない。そのため Mashu には Memory を検索する経路が無く、`session_bootstrap` がセッションの開始時に、そのセッションに当てはまる Memory をまとめて push する。
+
+| 配信先 | 届くセッション | 届く時点 | 向いている規則 |
+|---|---|---|---|
+| always | すべて | 開始時 | どの作業でも守る規則 |
+| scope | route が一致するディレクトリで開いたセッション | 開始時 | 特定のプロジェクトだけで要る規則 |
+| topic | topic の Scope が一致するセッション。Scope が無ければすべて | 開始時には見出しの一行だけ。本文は agent がその作業に入るときに読む | 特定の作業のあいだだけ要る規則 |
+
+scope は「どこで」を絞り、topic は「何の作業のあいだか」を絞る。topic は本文を push しないが、見出しと発動条件は毎回届くので、agent は何があっていつ読むべきかを知ったうえで本文を読みにいける。
+
+`session_bootstrap` は次の順に返す。
+
+1. always の Memory
+2. 今の Scope の Memory
+3. topic の見出し（名前、規則の数、発動条件）
+4. active な Task の card（完全な Task ID、名前、goal、status、詳細の件数、最終確認日時）
 5. 有効な Temporary Context
-6. pending candidate の件数
+6. review を待つ candidate の件数
 
-topic の本文、approach、open questions、blockers、next actions の本文、topic の source、および Ledger、Attempt、Decision、Checkpoint、dormant Task、closed Task は bootstrap に載らない。active Task を続ける前に `task_get` で詳細を取得する。
+topic の本文と source、Task の approach、open questions、blockers、next actions の本文、Ledger、dormant と closed の Task は届かない。agent は Task を続ける前に `task_get` で全文を読む。
+
+### 容量
+
+容量は、全量 push が成り立つ大きさに Memory の総量を保つためにある。溢れた分を逃がす検索は無いので、上限を超える書き込みは一部も受け付けずに全体を拒否する。拒否の文面は、空きの量と、容量を空ける方法を示す。
+
+~~~text
+全体                 4000 token
+Memory               2000 token（always は 800 まで。各 Scope は always と合わせて 2000 まで）
+Task cards            800 token / session（1 Task 200。入りきらない Task は名前だけを 200 まで）
+Task detail           800 token / Task（常時は配信しない）
+Topic body            800 token / topic（常時は配信しない）
+Temporary Context     400 token
+~~~
+
+topic の見出しの行も Memory の容量に数える。Scope を持たない topic の行は always に、Scope を持つ topic の行はその Scope に入る。Task の card の予算は配信のときに効き、書き込みは拒否しない。最後の活動が新しい Task から順に card を載せ、入りきらない Task は短い ID、名前、最後の活動日だけを並べる。
+
+上限と Memory 本文の字数（既定 120 字）は、デスクトップアプリの設定の「配信量の上限」か、TUI の Settings の Delivery limits で変えられる。値は DB の `setting` テーブルにあり、MCP server は起動のたびに読むので、変更は次に開くセッションから効く。上限を今の量より下げても記録は消えないが、超えているあいだは量を増やす書き込みが拒否され、Task の card と有効な decision は古いものから配信されなくなる。
+
+## Scope と route
+
+Scope は Memory を配る範囲で、route は作業ディレクトリの path prefix を Scope に対応づける。`mashu bootstrap` と `session_bootstrap` は、今のディレクトリから route をたどって Scope を決める。無関係なディレクトリは `--ignore` で、どの Scope にも属さないと明示できる。
+
+~~~bash
+mashu scope
+mashu scope --add deployment --about "Production releases"
+
+mashu route
+mashu route --add /work/service --scope deployment
+mashu route --ignore /work/scratch
+mashu route --remove /work/service
+~~~
+
+Project は Task の所属先で、Scope とは別の概念である。Project が Scope を持つと、その Task の card はその Scope のセッションにだけ届く。
+
+## Topic
+
+topic は、特定の作業をしているあいだだけ要る規則のまとまりである。名前、発動条件の一文、Scope を持ち、任意で action と原典（source）を持つ。セッションの開始時には `難易度較正 (9 rules): Before changing difficulty levers or win rates` のような見出しの一行だけが届き、agent はその作業に入るときに `memory_list(topic=...)` で本文を読む。
+
+~~~bash
+mashu topic
+mashu topic --add 難易度較正 --scope enrai --trigger "Before changing difficulty levers or win rates"
+mashu topic --edit 難易度較正 --source "Projects/Enrai/難易度.md#レバー"
+mashu topic --edit 委譲 --action delegate
+mashu topic show 難易度較正
+mashu topic --remove 難易度較正
+
+mashu remember "Do not change ship stats to set difficulty" --topic 難易度較正
+mashu deliver 1a2b3c4d topic --topic 難易度較正
+~~~
+
+プロジェクトのどの作業でも守る規則なら scope を選び、そのプロジェクトの一部の作業でだけ効くなら topic を選ぶ。特定の操作の直前に必ず目に入れたいなら、その topic に action を結びつけ、[PreToolUse hook](#pretooluse-hook-で特定の操作の前に規則を示す) に示させる。一つの action に結びつく topic は一つだけで、action は topic の編集でだけ設定できる。
+
+`--remove` で消せるのは active な規則を持たない topic だけである。一度も使われていない topic は削除され、retire した規則や提案が名前を参照している topic は、履歴を保つために archive されて一覧から消える。topic を作るのは User で、agent が作れるのは、User の明示的な指示で規則を追加するか移すときだけである。
+
+### topic の原典（source）
+
+source は、topic の規則が要約している長い本文の場所である。Obsidian の vault のルートか、リポジトリのルートからの相対パスで書き、`#見出し` を添えてよい。絶対パス、`~` で始まるパス、`..` で外へ出るパスは拒否する。
+
+vault の場所は環境変数 `MASHU_VAULT_ROOT` だけが持ち、DB には保存しない。絶対パスには個人を特定できる名前が含まれるからである。`MASHU_VAULT_ROOT` が設定されていて、source の最初の要素が vault の直下にあれば、`memory_list(topic=...)` は source に加えて、絶対パス `source_path` と、そこにファイルがあるか `source_exists` を返す。確かめるのはファイルの有無だけで、ノートの中身は読まない。bootstrap の見出しには source を載せない。
+
+## Project と Task
+
+Project State は、セッションを開き直すたびに現在地を拾い直す手間を無くすためにある。どこまで進んだか、何を試して駄目だったか、なぜ今の方針なのかは、放っておくと git の履歴、リポジトリの文書、Obsidian、過去の会話に散らばり、agent が一か所から復元できなくなる。かといって作業の現況を Memory に入れると、古くならないことを前提にした Memory の容量を、やがて古くなる事実が使ってしまう。
+
+Project は Task をまとめる単位である。Task は複数のセッションにまたがる作業だけに作り、一つの依頼や、大きな作業の一工程には作らない。
+
+~~~bash
+mashu project list
+mashu project create website --scope frontend
+mashu project edit website --scope backend
+mashu project show website
+
+mashu task list                   # --dormant、--closed で状態を変える
+mashu task show 1a2b3c4d
+mashu task create "Add CLI help" --project mashu --goal "Every command explains itself"
+mashu task touch 1a2b3c4d
+~~~
+
+`mashu project create` で `--scope` を省くと、今のディレクトリの route が指す Scope を使う。route の無いディレクトリでは拒否するので、すべての Scope に card を配る Project は `--scope -` で作る。`mashu task create` で `--project` を省くと、route から一つに決まる Project か、open な Project が一つだけならそれを使う。
+
+Task の Current State は goal、approach、status、open questions、blockers、next actions からなる。agent が書く attempt（試したことと結果）、decision（判断と理由）、artifact（外部成果物の場所）と、close のときの checkpoint は、履歴として別に残る。
+
+- open な Task は、活動が 14 日途切れると dormant になり、bootstrap から外れる。`mashu task touch` で活動期限を延ばすと戻る
+- User は CLI、TUI、デスクトップアプリで Task を作り、touch し、close し、reopen し、Current State を直せる
+- agent は MCP で Current State と履歴を書く
+
+## Agent の使い方
+
+### MCP tool
+
+MCP tool は 18 個ある。引数と制限は各 tool の説明に載っている。
+
+| 分類 | Tool | 役割 |
+|---|---|---|
+| Memory | `session_bootstrap` | 開始時に一度呼び、Memory、Task の card、Temporary Context を受け取る |
+| Memory | `pain_report` | 事故を Ledger に記録し、必要なら candidate を作る |
+| Memory | `memory_list` | Scope の Memory を一覧する。`topic` を渡すと、その topic の本文と source を読む |
+| Memory | `memory_get` | Memory の本文、revision、根拠、retire の理由を読む |
+| Memory | `memory_admit` | User が残すよう求めた規則を採用する。本文を渡せば候補の作成と採用を一回で行う |
+| Memory | `memory_nominate` | agent 自身の置き換え案の後継を candidate として作る |
+| Memory | `memory_change_propose` | agent 自身の変更案（retire、replace、restore、redeliver）を proposal として置く |
+| Memory | `memory_change_apply` | User が承認した proposal を適用する |
+| Memory | `memory_change_instructed` | User が指示した retire、置き換え、復帰を、提案から適用まで一回で行う |
+| Memory | `memory_redeliver` | User が指示した配信先の変更を、提案から適用まで一回で行う |
+| Memory | `memory_change_withdraw` | 要らなくなった proposal を取り下げる |
+| Project State | `project_list` | Project と Task の件数を一覧する |
+| Project State | `task_create` | 似た open な Task が無いか確かめてから Task を作る |
+| Project State | `task_get` | Current State の全文と有効な decision を読む。Task を続ける前に必ず呼ぶ |
+| Project State | `task_search` | Task の名前、Current State、decision を検索する |
+| Project State | `task_checkpoint` | Current State を書き換え、attempt、decision、artifact を追記する。agent が Task を書く唯一の tool |
+| Project State | `task_propose_close` | Task の終了を理由つきで提案する |
+| Project State | `task_withdraw_close_proposal` | 終了の提案を取り下げる |
+
+### agent が守ること
+
+~~~text
+誤った作業が実際に出た           → pain_report（あった知識は violated_memory_id / ignored_task_id / ignored_source で指す）
+User が「覚えて」と言った          → memory_admit
+User が Memory の retire、置き換え、復帰を指示した → memory_change_instructed
+User が配信先の変更を指示した      → memory_redeliver
+次のセッションへ作業を引き継ぐ     → task_checkpoint
+作業が終わったと判断した           → task_propose_close
+~~~
+
+- `task_checkpoint` には、次のセッションが要るものだけを渡す。失敗した試行、理由を失うと調べ直しが高くつく判断、外部成果物の場所、goal と approach と blockers の変更、作業を止める前の状態がそれにあたる。進捗と測定の途中結果は commit とプロジェクトの文書に書く
+- 同じセッションが同じ Task を書けるのは、一定の間隔ごとに一回である。間隔は既定で 30 分で、TUI の Settings & health の Checkpoint interval で 0〜1440 分に変えられ、0 にすると制限が外れる
+- 作業が終わったと思ったら `task_propose_close` で提案する。status に書くと User が読んで close を打ち直すことになるが、提案なら一回のキー操作で受け入れられる。終わったとみなすのは User がマージや受け入れをしたあとである。提案のあとで state を書くと提案が古くなるので、checkpoint を先に打ち、提案を最後にする
+- agent 自身が考えた Memory の変更は proposal に留める。Temporary Context の登録、Memory の直接の操作、review は User だけが行う
+- 会話の中の指示は出所として記録されるが、Mashu はそれが本当に User の発言かを認証しない
 
 ## 書き込みの安全規則
 
-- 本名、所属、学籍番号、ホームディレクトリを含む絶対パスなど、個人識別情報を含む書き込みは入口で拒否される。ただし参照のフィールド（MCP の `conversation_ref`、evidence の `ref`、artifact の `locator`）は、ホームディレクトリを `~` に書き換えてから検査し、保存する。本文のフィールドは書き換えずに拒否する
-- 禁止パターンはリポジトリ外の .git-banned-patterns に置く。MASHU_BANNED_PATTERNS で場所を変更できる
-- 禁止パターンの一覧が見つからない場合は、検査を通すのではなく「検査できない」として扱う
-- エージェントのツール呼び出しの記法（`<parameter name=...>` など）を含む書き込みも入口で拒否される。ある引数の本文に次の引数が入り込んだ状態で保存されるのを防ぐためで、禁止パターンの一覧が無くても検査される
-- 拒否の応答は、当たった引数を `artifacts[0].locator` のように位置まで含めて `field` に、その本文の何文字目から何文字目かを `span` に返す。当たった文字列とパターンそのものは応答にもログにも出さない
-- 拒否の理由は書き直し方も示す。当たった位置がホームディレクトリのパスの中（Claude Code が `/` を `-` に置き換えたディレクトリ名を含む）なら、パスを `~` かリポジトリから書くよう示し、それ以外なら人を名前でなく役割で呼ぶよう示す
-- commit hook は staged path と blob、commit message を検査し、禁止パターンの構文エラーや staged blob の取得失敗でも commit を拒否する
-- Ledger、Memory の revision history、event_log は append-only で、DB の trigger が書き換えを拒否する
-- bootstrap と類似照合結果はretire された Memory の本文を返さない。明示的な `memory_get` / `mashu show` では管理判断のため全文・revision・evidence とretire の種別、理由、後継または移動先を返す。withdrawn / legacy conflict を採用するには理由を踏まえた明示指示が要る
+Mashu に入った記録は毎回のセッションに push され、複数の agent が読む。一度入った個人情報はそこから広がるので、書き込みの時点で止める。
+
+- 本名、所属、学籍番号、ホームディレクトリを含む絶対パスのような個人を特定できる情報を含む書き込みは、書き込みの時点で拒否する。参照のフィールド（`conversation_ref`、根拠の `ref`、artifact の `locator`）だけは、ホームディレクトリを `~` に書き換えてから検査して保存する
+- 禁止パターンは、リポジトリの外の `.git-banned-patterns` に置く。場所は `MASHU_BANNED_PATTERNS` で変えられる。一覧が見つからないときは、検査を通ったことにはせず、何も検査していないという警告を出したうえで書き込みを通す
+- agent の tool call の記法（`<parameter name=...>` など）を含む書き込みも拒否する。ある引数の本文に次の引数が入り込んだまま保存されるのを防ぐためで、禁止パターンの一覧が無くても検査する
+- 拒否の応答は、当たった引数の位置を `field` に、本文の何文字目から何文字目かを `span` に返し、書き直し方も示す。当たった文字列とパターンは、応答にもログにも出さない
+- Ledger、Memory の revision、event_log は追記のみで、DB の trigger が書き換えを拒否する
+- bootstrap と類似の照合結果は、retire した Memory の本文を返さない。`memory_get` と `mashu show` だけが、管理の判断のために全文と retire の理由を返す
+- `mashu desktop-backend` は shell から誰でも起動できるので、User としての承認を agent から守る強さは CLI と TUI と同じである。agent に `mashu review` を禁じているなら、`mashu desktop-backend` も禁じる
+
+## コマンド一覧
+
+各コマンドの詳しい使い方は `mashu <コマンド> --help` で読める。ID は一覧が表示する先頭 8 文字か、4 文字以上の一意な前方一致で指定できる。
+
+| コマンド | 役割 |
+|---|---|
+| `mashu` | TUI を開く |
+| `mashu status` | スキーマ、容量、review 待ちの件数、最近の Ledger、配信の失敗の疑い、使われなかった知識の件数、action つき topic の発火回数を表示する |
+| `mashu bootstrap` | 今のディレクトリで開くセッションに届く内容と token 数を表示する |
+| `mashu gui` | 読み取り専用の一覧をブラウザで開く |
+| `mashu remember` | Memory か Temporary Context を直接登録する |
+| `mashu pain` | 事故を記録する |
+| `mashu review` | candidate と proposal を判断する |
+| `mashu show REF` | Memory、candidate、Ledger、proposal の一件を、根拠と履歴つきで表示する |
+| `mashu memories` | active な Memory を一覧する。`--retired` で retire したものと理由を出す |
+| `mashu ledger` | Ledger を新しい順に表示する |
+| `mashu revise REF` | Memory を改訂する。前の本文は revision として残る |
+| `mashu deliver REF always\|scope\|topic` | Memory の配信先を変える |
+| `mashu retire REF --reason REASON` | Memory を retire する。似た規則があとで来ると、この理由を見せて確認を求める |
+| `mashu restore REF --reason REASON` | retire した Memory を戻す |
+| `mashu scope`、`mashu route`、`mashu topic` | Scope、route、topic を一覧し、編集する |
+| `mashu project`、`mashu task` | Project と Task を一覧し、編集する |
+| `mashu guard ACTION` | ACTION に結びついた topic の規則を表示する。PreToolUse hook が呼ぶ |
+| `mashu serve` | MCP server を起動する |
+| `mashu desktop-backend` | デスクトップアプリが子プロセスとして起動する |
+| `mashu admin migrate` | 未適用の migration を実行する |
+
+## 環境変数
+
+| 変数 | 役割 |
+|---|---|
+| `MASHU_DATABASE_URL` | 接続先の PostgreSQL。既定値は `dbname=mashu` |
+| `MASHU_AGENT` | MCP server が記録する agent の名前。`serve --agent` と同じ |
+| `MASHU_VAULT_ROOT` | Obsidian の vault の絶対パス。topic の source を解決するのに使う |
+| `MASHU_BANNED_PATTERNS` | 禁止パターンのファイルの場所 |
+| `MASHU_GUARD_ACTIONS` | PreToolUse hook が action を判定する規則のファイルの場所。既定は `.mashu-guard-actions` |
+| `MASHU_EXE` | デスクトップアプリが起動する `mashu` の実行ファイル |
+| `MASHU_TEST_DB` | テスト用の DB の名前。既定は `mashu_test` |
+| `MASHU_TOTAL_CAPACITY`、`MASHU_CAPACITY`、`MASHU_ALWAYS_CAPACITY`、`MASHU_PROJECT_CAPACITY`、`MASHU_CARD_OVERFLOW_CAPACITY`、`MASHU_DECISION_CAPACITY`、`MASHU_TASK_CARD_CAPACITY`、`MASHU_TASK_DETAIL_CAPACITY`、`MASHU_TEMPORARY_CAPACITY`、`MASHU_TOPIC_CAPACITY`、`MASHU_CONTENT_LIMIT` | 容量と本文の字数の既定値を差し替える。DB の `setting` テーブルに値がある上限には効かない |
+
+## デスクトップアプリの仕組み
+
+`desktop/` は Tauri 2 で作ったアプリである。アプリは `mashu desktop-backend` を子プロセスとして起動し、標準入出力に JSON を一行ずつ流して要求と応答をやりとりする。待ち受けるポートは無い。書き込みは TUI と同じ関数（`review_actions`、`memory_actions`、`task_actions`、`application`）を通るので、version の照合、容量の上限、個人情報の検査は TUI と同じに掛かる。
+
+起動する `mashu` は次の順に探す。
+
+1. 環境変数 `MASHU_EXE`
+2. 設定の「バージョン」で指定した checkout の `.venv` にある `mashu`
+3. 手元でビルドしたときは、そのアプリがある checkout の `mashu`
+4. PATH と `~/.local/bin` にある `mashu`。checkout の `.venv` への symlink なら、その checkout を更新の対象にする
+
+どれも見つからなければ、[デスクトップアプリから入れる](#デスクトップアプリから入れる)で説明した最初の画面を出す。checkout はあるのに DB が無いときは「データベースを作成」を、PostgreSQL に接続できないときは「再試行」を出す。
+
+60 秒ごとに DB を読み、review を待つ candidate、proposal、close の提案が増えると OS の通知を出す。トレイのアイコンのツールチップに、それぞれの件数を出す。画面の文言は `desktop/ui/i18n.js` の辞書にまとめてあり、キーは DB と CLI で使う名前（`admit`、`dormant` など）である。
+
+### 更新
+
+アプリは起動時と一日ごとに origin のリリースのタグを確かめ、アプリか checkout より新しい正式版があれば、ナビゲーションの下に知らせを出す。設定の「バージョン」の「更新」を押すと、backend を止めたまま次を順に行う。
+
+1. checkout の main をそのタグまで fast-forward する
+2. `uv sync --extra mcp` と `mashu admin migrate` を実行する
+3. アプリを GitHub Release の配布物で入れ替えて、再起動する
+
+checkout に commit していない変更があるとき、main 以外のブランチにいるとき、main にタグに無いコミットがあるときは、何も変えずに理由を示す。途中で失敗しても、もう一度「更新」を押せば続きから進む。手元でビルドしたアプリは checkout だけを更新するので、アプリは `cargo run` で起動し直す。Windows では、動いている MCP server が `.venv` の実行ファイルを開いたままだと `uv sync` が失敗するので、agent のセッションを閉じてから更新する。
+
+### 手元でビルドする
+
+Rust と、Windows では WebView2 が要る。
+
+~~~bash
+cd desktop/src-tauri
+cargo run
+~~~
+
+Mac の配布物には、.app 全体に ad-hoc 署名を掛けている。掛けていないと、ダウンロードしたものが「壊れている」と表示されて開けない。
 
 ## 開発
 
@@ -573,30 +506,49 @@ uv run ruff check
 uv run ruff format
 ~~~
 
-テストは実 PostgreSQL に対して実行し、テスト用データベースは実行ごとに作り直す。既定値は mashu_test、変更には MASHU_TEST_DB を使う。commit するテストは一つのデータベースを共有し、各テストの前に TRUNCATE で空にする。追記専用の表の trigger を `session_replication_role = replica` で外すので、テストを走らせる role には superuser が要る。
+個人を特定できる情報が commit に入るのを止める git hook（pre-commit と commit-msg）は、`./hooks/install.sh` で有効にする。このスクリプトは `core.hooksPath` を設定し、禁止パターンのファイル `.git-banned-patterns` の雛形を作る。このファイルは git に入れず、本体の checkout に一つだけ置き、git worktree で切った作業ツリーの hook もそれを読む。hook は staged のパスと内容と commit message を検査し、パターンの構文が壊れているときや内容を取り出せないときも commit を拒否する。
 
-main への push と pull request では、GitHub Actions の CI（`.github/workflows/ci.yml`）が ruff の lint と format の確認とテストを実行する。テストは Ubuntu の Python 3.11 と 3.13、Windows の Python 3.13 で、それぞれ PostgreSQL 17 に対して走る。
+### テスト
 
-テストを足すときは、先に既存のテストを広げること、conftest の共有 fixture で状態を作ること、一つの不変条件を一つの層でだけ確かめること、画面や CLI の文言ではなく状態を確かめることを優先する。実際の呼び出し元（MCP の tool、CLI、TUI、git hook）が作らない入力や状態のテストは足さない。TUI の見た目（列幅、カーソル位置、端末の高さ、ANSI の有無）やキー移動だけを確かめるテストも置かない。
+テストは実際の PostgreSQL に対して実行し、テスト用の DB を実行ごとに作り直す。DB の名前の既定は `mashu_test` で、`MASHU_TEST_DB` で変えられる。テストは一つの DB を共有し、各テストの前に TRUNCATE で空にする。追記のみの表の trigger を `session_replication_role = replica` で外すので、テストを実行する role には superuser の権限が要る。
 
-版は `src/mashu/__init__.py` の `__version__` だけに書き、pyproject.toml はそこから読む。版は PEP 440 の正規形で書き、`3.0.1` のように数字だけなら正式なリリース、`3.1.0b1` のように a、b、rc と番号で終わればプレリリースになる。リリースは main の checkout で `tools/release.sh <版>` を実行して作る。このスクリプトは版を書き換えて main へコミットと push をし、main の CI が通るのを待ってから `v<版>` のタグを push する。タグの CI は、タグの版が `__version__` と一致すること、そのコミットが main にあって main の CI を通っていることを確かめてから、GitHub Release を下書きで作る。続いて Mac と Windows のデスクトップアプリを一つずつビルドし、更新用の配布物とその署名、両方を載せた `latest.json` を下書きに加えてから公開する。アプリの updater は `tauri.conf.json` の公開鍵で配布物の署名を確かめる。秘密鍵はリポジトリの secret `TAURI_SIGNING_PRIVATE_KEY`（合言葉を付けたときは `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` も）に置き、無いとアプリのビルドが失敗する。
+main への push と pull request では、GitHub Actions の CI（`.github/workflows/ci.yml`）が ruff の検査とテストを実行する。テストは Ubuntu の Python 3.11 と 3.13、Windows の Python 3.13 で、それぞれ PostgreSQL 17 に対して走る。
 
-仕様を変えるときは、コードと対応する設計書を一緒に更新する。設計書には今の仕様とその理由だけを書き、撤回した設計と経緯は消して git の履歴に任せる。
+テストを足すときは、次を優先する。
+
+- 新しいテストを書く前に、既存のテストを広げる
+- 状態は conftest の共有 fixture で作る
+- 一つの不変条件は、MCP、service、DB のうち一か所でだけ確かめる
+- 画面や CLI の文言ではなく、DB の状態を確かめる
+
+実際の呼び出し元（MCP の tool、CLI、TUI、git hook）が作らない入力や状態のテストは足さない。TUI の見た目（列幅、カーソル位置、端末の高さ、ANSI の有無）やキーの移動だけを確かめるテストも置かない。
+
+### リリース
+
+版は `src/mashu/__init__.py` の `__version__` だけに書き、pyproject.toml はそこから読む。版は PEP 440 の正規形で書く。`3.0.1` のように数字だけなら正式なリリースで、`3.1.0b1` のように a、b、rc と番号で終わればプレリリースである。
+
+リリースは、main の checkout で `tools/release.sh <版>` を実行して作る。スクリプトは版を書き換えて main へ commit と push をし、main の CI が通るのを待ってから `v<版>` のタグを push する。タグの CI は、タグの版が `__version__` と一致すること、そのコミットが main にあって CI を通っていることを確かめてから、GitHub Release を下書きで作る。続いて Mac と Windows のアプリをビルドし、更新用の配布物、その署名、両方を載せた `latest.json` を下書きに加えてから公開する。
+
+アプリの updater は、`tauri.conf.json` の公開鍵で配布物の署名を確かめる。秘密鍵はリポジトリの secret `TAURI_SIGNING_PRIVATE_KEY` に置き、パスフレーズを付けたときは `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` にも置く。無いとアプリのビルドが失敗する。
+
+### 仕様を変えるとき
+
+コードと、対応する仕様書（`docs/`）を同じコミットで直す。仕様書には今の仕様とその理由だけを書き、撤回した設計と経緯は消して git の履歴に任せる。
 
 ## 主な配置
 
 ~~~text
-docs/memory.md               Memory の実装仕様書
-docs/project-state.md        Project State の実装仕様書
-migrations/                  連番の SQL。mashu admin migrate が順に実行
+docs/memory.md               Memory の仕様書
+docs/project-state.md        Project State の仕様書
+migrations/                  連番の SQL。mashu admin migrate が順に実行する
 src/mashu/                   実装
 desktop/                     Tauri のデスクトップアプリ（src-tauri/ が Rust、ui/ が画面）
-tests/                       実 PostgreSQL に対するテスト
-tools/pretooluse_guard.py    action つき topic 用 PreToolUse hook
-tools/sessionstart_guard.py  SessionStart 用 hook
-hooks/                       pre-commit / commit-msg
+tests/                       実際の PostgreSQL に対するテスト
+tools/sessionstart_guard.py  SessionStart hook
+tools/pretooluse_guard.py    action つき topic を示す PreToolUse hook
 tools/release.sh             版を上げてタグと GitHub Release を作る
+hooks/                       pre-commit と commit-msg
 .github/workflows/ci.yml     GitHub Actions の CI
 ~~~
 
-*摩周湖は世界最高クラスの透明度が観測されたことで知られており、どこまでも遡って追跡できる Knowledge State を目指して命名された。摩周湖の流入する川も流出する川もなく、外部の流れに属さない閉じた水盆という地形は、特定の Agent に依存しない独立の Knowledge Layer という設計思想に対応する。摩周湖は霧で見えないことで有名であり、本プロジェクトの意義は霧を晴らして何を信頼してよいかを人が判断できる状態にすることである。*
+*摩周湖は世界最高クラスの透明度が観測されたことで知られており、どこまでも遡って追跡できる knowledge state を目指して命名した。摩周湖には流れ込む川も流れ出る川も無く、外の流れに属さない閉じた湖という地形は、特定の agent に依存しない独立した knowledge layer という設計思想に対応する。摩周湖は霧で見えないことでも有名であり、本プロジェクトの意義は、霧を晴らして何を信頼してよいかを人が判断できる状態にすることにある。*
