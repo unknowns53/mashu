@@ -397,6 +397,7 @@ def test_the_checkpoint_interval_keeps_to_its_bounds_and_health_reads_without_wr
 
     health = ask(dsn, "settings.health")["result"]
     assert health["capacities"]["always"] > 0
+    assert health["missed_30d"] == 0
     assert ask(dsn, "schema.status")["result"]["pending"] == []
     preview = ask(dsn, "settings.bootstrap", cwd="/nowhere/in/particular")
     assert preview["ok"] and preview["result"]["scope"] is None

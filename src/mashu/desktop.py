@@ -493,8 +493,17 @@ def project_save(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 
 def health(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    # A rule that did not prevent a pain and a task or file whose knowledge went unused are
+    # one kind of failure, and one report can name both, so the pains are counted once.
+    cur.execute(
+        "SELECT count(DISTINCT ledger_id) AS n FROM event_log "
+        "WHERE event_type IN ('delivery_failure_suspected', 'knowledge_unused') "
+        "AND created_at >= now() - interval '30 days'"
+    )
+    missed = cur.fetchone()["n"]
     return {
         **dataclasses.asdict(application.status_snapshot(cur)),
+        "missed_30d": missed,
         "capacities": {
             "always": config.always_capacity(),
             "worst": config.capacity(),

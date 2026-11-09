@@ -77,13 +77,22 @@ function sectionHead(title, ...actions) {
 
 // ---------------------------------------------------------------- sections
 
+/** The pains knowledge already held should have prevented, with where that knowledge was. */
+function missedText(health) {
+  const routes = health.failure_routes
+    .filter((route) => health.delivery_failures_by_route[route])
+    .map((route) => `${named("health.route", route)} ${health.delivery_failures_by_route[route]}`);
+  const parts = [];
+  if (health.delivery_failures_30d) parts.push(t("health.missed_memory", { n: health.delivery_failures_30d, routes: routes.join(", ") }));
+  if (health.knowledge_unused_30d) parts.push(t("health.missed_elsewhere", { n: health.knowledge_unused_30d }));
+  const total = t("health.n", { n: health.missed_30d });
+  return parts.length ? `${total}\n${parts.join("\n")}` : total;
+}
+
 async function healthSection() {
   const health = await call("settings.health");
   const caps = health.capacities;
   const counts = health.memory_counts;
-  const failures = health.failure_routes
-    .filter((route) => health.delivery_failures_by_route[route])
-    .map((route) => `${route} ${health.delivery_failures_by_route[route]}`);
   return [
     h("h1", { class: "title", text: t("settings.health") }),
     section(
@@ -116,8 +125,7 @@ async function healthSection() {
       null,
       fieldList([
         [t("health.ledger"), t("health.n", { n: health.ledger_30d })],
-        [t("health.failures"), t("health.n", { n: health.delivery_failures_30d }) + (failures.length ? `（${failures.join(", ")}）` : "")],
-        [t("health.unused"), t("health.n", { n: health.knowledge_unused_30d })],
+        [t("health.missed"), missedText(health)],
       ])
     ),
   ];
