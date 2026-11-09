@@ -47,16 +47,11 @@ function selected() {
 }
 
 function showStatus(status) {
-  $("counts").textContent =
-    `${status.pending_ready} waiting` +
-    (status.pending_deferred ? ` · ${status.pending_deferred} deferred` : "");
-  const list = $("proposal-list");
-  list.replaceChildren(
-    ...status.close_proposals.map((row) =>
-      element("li", `${row.name} (${row.project}) — ${row.outcome}`)
-    )
-  );
-  $("proposals").hidden = status.close_proposals.length === 0;
+  $("review-count").textContent =
+    `(${status.pending_ready}` +
+    (status.pending_deferred ? ` · ${status.pending_deferred} deferred)` : ")");
+  const proposed = status.close_proposals.length;
+  $("task-count").textContent = proposed ? `(${proposed} proposed)` : "";
   if (status.schema_pending.length) {
     say(`The store is behind the code; run 'mashu admin migrate'.`, "warn");
   }
@@ -146,22 +141,128 @@ function updateButtons() {
   const needsTopic = $("delivery").value === "topic" && !$("topic").value;
   $("admit").disabled = busy || !row || blocked || needsTopic;
   for (const id of ["edit", "decline", "defer"]) $(id).disabled = busy || !row;
+
+  const task = selectedTask();
+  const proposal = task && task.proposal;
+  $("accept").disabled = busy || !proposal || (proposal.stale && !$("stale-ok").checked);
+  for (const id of ["keep", "close", "renew"]) $(id).disabled = busy || !task;
 }
 
 async function load(keepMessage = false) {
   const include = $("include-deferred").checked;
-  const [queue, status] = await Promise.all([
+  const [queue, open, status] = await Promise.all([
     call("review.list", { include_deferred: include }),
+    call("task.list"),
     call("status"),
   ]);
   candidates = queue.candidates;
   if (!candidates.some((row) => row.nomination_id === selectedId)) {
     selectedId = candidates.length ? candidates[0].nomination_id : null;
   }
+  taskRows = open.tasks;
+  if (!$("outcome").options.length) {
+    $("outcome").replaceChildren(...open.outcomes.map((outcome) => element("option", outcome)));
+  }
+  if (!taskRows.some((row) => row.task.task_id === selectedTaskId)) {
+    selectedTaskId = taskRows.length ? taskRows[0].task.task_id : null;
+  }
   if (!keepMessage) say("");
   showStatus(status);
   renderQueue();
   renderDetail();
+  renderTasks();
+  renderTaskDetail();
+}
+
+// Tasks
+
+let taskRows = [];
+let selectedTaskId = null;
+
+function selectedTask() {
+  return taskRows.find((row) => row.task.task_id === selectedTaskId) || null;
+}
+
+function showTab(name) {
+  const tasks = name === "tasks";
+  $("tab-review").setAttribute("aria-selected", String(!tasks));
+  $("tab-tasks").setAttribute("aria-selected", String(tasks));
+  $("review-pane").hidden = tasks;
+  $("tasks-pane").hidden = !tasks;
+  $("deferred-toggle").hidden = tasks;
+}
+
+function renderTasks() {
+  $("task-list").replaceChildren(
+    ...taskRows.map((row) => {
+      const item = element("li");
+      item.setAttribute("aria-selected", String(row.task.task_id === selectedTaskId));
+      const line = element("span", undefined, "line");
+      if (row.proposal) {
+        line.append(element("span", row.proposal.stale ? "◌ " : "● ", row.proposal.stale ? "mark stale" : "mark"));
+      }
+      line.append(row.task.name);
+      item.append(
+        line,
+        element(
+          "span",
+          `${short(row.task.task_id)} · ${row.task.project_name} · ${row.activity} · ` +
+            `${row.age_days}d`,
+          "sub"
+        )
+      );
+      item.addEventListener("click", () => {
+        selectedTaskId = row.task.task_id;
+        renderTasks();
+        renderTaskDetail();
+      });
+      return item;
+    })
+  );
+  $("no-tasks").hidden = taskRows.length > 0;
+}
+
+function renderTaskDetail() {
+  const row = selectedTask();
+  $("task-detail").hidden = !row;
+  if (!row) return;
+  $("task-name").textContent = row.task.name;
+  $("task-meta").textContent =
+    `${short(row.task.task_id)} · ${row.task.project_name} · ${row.activity} · ${row.heading}`;
+
+  const proposal = row.proposal;
+  $("proposal").hidden = !proposal;
+  if (proposal) {
+    $("proposal-said").textContent =
+      `Proposed ${proposal.outcome} by ${proposal.proposed_by} on ${proposal.on_date}`;
+    $("proposal-reason").textContent = `reason: ${proposal.reason}`;
+    $("proposal-stale").hidden = !proposal.stale;
+    $("proposal-stale").textContent =
+      `The task state was written after this proposal, as of ${row.as_of}.`;
+    $("stale-confirm").hidden = !proposal.stale;
+    $("stale-ok").checked = false;
+  }
+
+  const state = row.state;
+  const fields = [
+    ["goal", state.goal],
+    ["status", state.status_text],
+    ["approach", state.approach],
+    ["open questions", state.open_questions],
+    ["blockers", state.blockers],
+    ["next actions", state.next_actions],
+  ].filter(([, value]) => value && (!Array.isArray(value) || value.length));
+  $("state").replaceChildren(
+    ...fields.flatMap(([label, value]) => [
+      element("dt", label),
+      element("dd", Array.isArray(value) ? value.map((item) => `• ${item}`).join("\n") : value),
+    ])
+  );
+  if (!fields.length) $("state").replaceChildren(element("dd", "(no state written)", "muted"));
+
+  $("outcome").value = proposal ? proposal.outcome : "completed";
+  $("close-reason").value = "";
+  updateButtons();
 }
 
 async function act(work, done) {
@@ -269,6 +370,47 @@ for (const [id, op, word] of [
     }, `${word} ${short(row.nomination_id)}.`);
   });
 }
+
+$("tab-review").addEventListener("click", () => showTab("review"));
+$("tab-tasks").addEventListener("click", () => showTab("tasks"));
+$("stale-ok").addEventListener("change", updateButtons);
+
+$("accept").addEventListener("click", () => {
+  const row = selectedTask();
+  act(async () => {
+    await call("task.accept", {
+      task_id: row.task.task_id,
+      proposal: row.proposal,
+      state_at: row.state.updated_at,
+    });
+  }, `Closed ${row.task.name} as ${row.proposal.outcome}, on its proposal.`);
+});
+
+$("keep").addEventListener("click", () => {
+  const row = selectedTask();
+  act(async () => {
+    await call("task.keep", { task_id: row.task.task_id });
+  }, `${row.task.name} is still live; the proposal is gone and the lease renewed.`);
+});
+
+$("renew").addEventListener("click", () => {
+  const row = selectedTask();
+  act(async () => {
+    await call("task.renew", { task_id: row.task.task_id });
+  }, `Renewed ${row.task.name}; nothing said about whether it is finished.`);
+});
+
+$("close").addEventListener("click", () => {
+  const row = selectedTask();
+  const outcome = $("outcome").value;
+  const typed = $("close-reason").value.trim();
+  // An empty reason keeps the proposal's grounds when it names this same outcome.
+  const reason =
+    typed || (row.proposal && row.proposal.outcome === outcome ? row.proposal.reason : "");
+  act(async () => {
+    await call("task.close", { task_id: row.task.task_id, outcome, reason });
+  }, `Closed ${row.task.name} as ${outcome}.`);
+});
 
 listen("status", (event) => showStatus(event.payload));
 load().catch((error) => say(String(error.message || error), "error"));

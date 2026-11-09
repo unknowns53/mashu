@@ -555,8 +555,7 @@ def _decide(dsn: str | None, row: dict[str, Any], key: str) -> str:
         if not proposal:
             return screen.warning("  ! left open — nothing is proposed for this one")
         with db.transaction(dsn) as cur:
-            tasks.withdraw_proposal(cur, task_id, actor=ACTOR)
-            tasks.touch(cur, task_id, actor=ACTOR)
+            task_actions.keep_open(cur, task_id, actor=ACTOR)
         return screen.success(
             f"  ✓ {_short(task_id)} is still live; the proposal is gone and the lease renewed"
         )

@@ -154,16 +154,16 @@ GUI は読むだけで、採用・却下・編集・close などの操作は TUI
 
 ### デスクトップアプリで review する
 
-`desktop/` は Tauri 2 で作ったトレイ常駐アプリで、review 待ちの candidate を採用・却下・保留し、文面を直せる。60 秒ごとに store を見にいき、review 待ちの candidate や close の提案が増えると OS の通知を出す。トレイのアイコンに重ねたヒントには、review 待ちと close 提案の件数が出る。窓を閉じてもトレイに残り、終えるときはトレイのメニューの Quit を使う。
+`desktop/` は Tauri 2 で作ったトレイ常駐アプリで、Review タブでは review 待ちの candidate を採用・却下・保留し、文面を直せる。Tasks タブでは open な Task を close の提案があるものから並べ、提案どおりの close、outcome と理由を選んでの close、提案を退けて開いたままにすること、lease の更新ができる。state が提案より後に書かれた提案は、確認のチェックを入れるまで受け入れられない。60 秒ごとに store を見にいき、review 待ちの candidate や close の提案が増えると OS の通知を出す。トレイのアイコンに重ねたヒントには、review 待ちと close 提案の件数が出る。窓を閉じてもトレイに残り、終えるときはトレイのメニューの Quit を使う。
 
 ~~~bash
 cd desktop/src-tauri
 cargo run
 ~~~
 
-ビルドには Rust と、Windows では WebView2 が要る。アプリは `mashu desktop-backend` を子プロセスとして起こし、標準入出力の JSON 一行ずつで要求と応答をやりとりする。待ち受けるポートは無い。採用の判定は TUI と同じ関数（`review_actions.admit`）を通るので、楽観チェック、容量の上限、入口の拒否は TUI と同じに掛かる。起こす実行ファイルは、環境変数 `MASHU_EXE`、この checkout の `.venv` にある `mashu`、PATH の `mashu` の順に探す。
+ビルドには Rust と、Windows では WebView2 が要る。アプリは `mashu desktop-backend` を子プロセスとして起こし、標準入出力の JSON 一行ずつで要求と応答をやりとりする。待ち受けるポートは無い。採用と close は TUI と同じ関数（`review_actions` と `task_actions`）を通るので、楽観チェック、容量の上限、入口の拒否は TUI と同じに掛かる。起こす実行ファイルは、環境変数 `MASHU_EXE`、この checkout の `.venv` にある `mashu`、PATH の `mashu` の順に探す。
 
-`mashu desktop-backend` は shell から誰でも起動できるので、User としての承認を Agent から守る強さは CLI と TUI と同じである。Agent に `mashu review` を禁じているなら、`mashu desktop-backend` も同じく禁じる。close の提案は一覧に出すだけで、close そのものは TUI で行う。
+`mashu desktop-backend` は shell から誰でも起動できるので、User としての承認を Agent から守る強さは CLI と TUI と同じである。Agent に `mashu review` を禁じているなら、`mashu desktop-backend` も同じく禁じる。
 
 ### 恒久ルールを直接登録する
 
@@ -275,7 +275,7 @@ TUI の操作は次のとおり。
 | mashu status | schema、容量、pending 件数、最近の ledger、配信失敗の疑いとその経路別の内訳、有った知識が使われなかった件数、action つき topic ごとの直近 30 日の guard の発火回数を表示する。拒否の次の呼び出しが変わった割合は、guard が呼び出しを止めていた期間の記録から出る |
 | mashu bootstrap | 現在のディレクトリのセッションへ配信される内容と token 数を表示 |
 | mashu gui | Memory、Temporary Context、Task、review 待ちを読み取り専用のページとしてブラウザに表示 |
-| mashu desktop-backend | デスクトップアプリが子プロセスとして起こす。標準入力の JSON 一行ずつの要求に、標準出力の一行で答える |
+| mashu desktop-backend | デスクトップアプリが子プロセスとして起こす。標準入力の JSON 一行ずつの要求に、標準出力の一行で答える。review の決定と Task の close・lease 更新を扱う |
 | mashu show REF | Memory、candidate、Ledger、Memory change proposal の 1 件を根拠・履歴つきで表示 |
 | mashu memories | active Memory の一覧を表示 |
 | mashu memories --retired | retire された Memory と retire の理由を表示 |

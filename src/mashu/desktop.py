@@ -14,12 +14,13 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any, TextIO
 from uuid import UUID
 
 import psycopg
 
-from mashu import application, db, nominations, review_actions, tasks, topics
+from mashu import application, db, nominations, review_actions, task_actions, tasks, topics
 from mashu.errors import MashuError
 from mashu.server import _failure, _plain
 
@@ -113,6 +114,62 @@ def review_defer(cur: psycopg.Cursor, args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _when(value: Any, name: str) -> datetime:
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError as error:
+        raise MashuError(f"{name} must be an ISO timestamp") from error
+
+
+def task_list(cur: psycopg.Cursor, args: dict[str, Any]) -> dict[str, Any]:
+    """Open tasks, standing proposals first, then overtaken ones, then the rest."""
+
+    def rank(row: dict[str, Any]) -> int:
+        proposal = row["proposal"]
+        return 2 if proposal is None else int(proposal["stale"])
+
+    rows = sorted(tasks.task_list(cur, activity="open"), key=rank)
+    return {"tasks": rows, "outcomes": list(tasks.OUTCOMES)}
+
+
+def task_accept(cur: psycopg.Cursor, args: dict[str, Any]) -> dict[str, Any]:
+    """Close on exactly the proposal, and against exactly the state, that were shown."""
+    shown = args.get("proposal")
+    if not isinstance(shown, dict):
+        raise MashuError("proposal must be the proposal as it was shown")
+    expected = {
+        **shown,
+        "state_at": _when(shown.get("state_at"), "proposal.state_at"),
+        "proposed_at": _when(shown.get("proposed_at"), "proposal.proposed_at"),
+    }
+    return task_actions.accept_close_proposal(
+        cur,
+        _uuid(args, "task_id"),
+        expected_proposal=expected,
+        expected_state=_when(args.get("state_at"), "state_at"),
+        actor=ACTOR,
+    )
+
+
+def task_close(cur: psycopg.Cursor, args: dict[str, Any]) -> dict[str, Any]:
+    reason = args.get("reason")
+    return task_actions.close_task(
+        cur,
+        _uuid(args, "task_id"),
+        outcome=args.get("outcome"),
+        reason=reason.strip() if isinstance(reason, str) and reason.strip() else None,
+        actor=ACTOR,
+    )
+
+
+def task_keep(cur: psycopg.Cursor, args: dict[str, Any]) -> dict[str, Any]:
+    return task_actions.keep_open(cur, _uuid(args, "task_id"), actor=ACTOR)
+
+
+def task_renew(cur: psycopg.Cursor, args: dict[str, Any]) -> dict[str, Any]:
+    return tasks.touch(cur, _uuid(args, "task_id"), actor=ACTOR)
+
+
 def topic_list(cur: psycopg.Cursor, args: dict[str, Any]) -> dict[str, Any]:
     return {
         "topics": [
@@ -129,11 +186,16 @@ OPERATIONS: dict[str, Callable[[psycopg.Cursor, dict[str, Any]], dict[str, Any]]
     "review.revise": review_revise,
     "review.decline": review_decline,
     "review.defer": review_defer,
+    "task.list": task_list,
+    "task.accept": task_accept,
+    "task.close": task_close,
+    "task.keep": task_keep,
+    "task.renew": task_renew,
     "topic.list": topic_list,
 }
 
 #: The operations that only read, run in a READ ONLY transaction.
-READS = frozenset({"status", "review.list", "topic.list"})
+READS = frozenset({"status", "review.list", "task.list", "topic.list"})
 
 
 def answer(dsn: str | None, line: str) -> dict[str, Any]:

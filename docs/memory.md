@@ -266,7 +266,7 @@ Project State 系 Tool は `docs/project-state.md` 12.1 節に記す。
 |---|---|
 | `mashu` | 人向け dashboard。Attention / Memories / Work / Settings & health を開く |
 | `mashu gui` | 読み取り専用の一覧ページを 127.0.0.1 で配信する。書き込みの経路を持たない |
-| `mashu desktop-backend` | デスクトップアプリの子プロセス。標準入出力の JSON 一行ずつで review の決定と状態の照会に答える |
+| `mashu desktop-backend` | デスクトップアプリの子プロセス。標準入出力の JSON 一行ずつで、review の決定、Task の close と lease 更新、状態の照会に答える |
 | `mashu status` | Active な Memory の総量と容量の使用量（`always` の規則が使う量と、最も重い開き方の二つ）、pending 件数、`ledger` の直近、配信失敗の疑い件数とその経路別の内訳（push された規則、読まれなかった topic、読まれた topic、guard、不明）、action を持つ topic ごとの直近 30 日の発火回数、記録された次の呼び出しの件数と、そのうち変わった割合 |
 | `mashu review` / `mashu review --changes` | nomination または Memory change proposal を読み、編集・適用・却下・取り下げ |
 | `mashu remember <body>` | User 明示。CLI で即時 active にする経路。本文は 120 字までで、理由は `--why` で evidence に残す。invalidated / legacy conflict は理由を表示して個別 ID を確認する。`--until` を渡すと Temporary Context を作る |
@@ -291,7 +291,7 @@ dashboard の Memories では active / retired Memory と未失効の Temporary 
 
 `mashu gui` は同じ内容をブラウザで見渡す読み取り専用の経路である。Memory、Temporary Context、Task、pending の nomination と Memory change を本文を省略せずに一覧し、Memory と Task には履歴つきの詳細ページがある。書き込みの経路は持たず、GET と HEAD 以外の要求は 405 で拒否し、各ページの transaction は `SET TRANSACTION READ ONLY` で始める。localhost に書き込み口があれば、shell を持つ Agent が User として承認でき、Agent の提案と User の承認の区別（4.1 節）が崩れるからである。待ち受けは 127.0.0.1 に限り、Host header が loopback の名前でない要求も拒否する。
 
-デスクトップアプリ（`desktop/`）は nomination の採用・却下・保留・文面の編集を行う経路で、review 待ちと close 提案の増加を OS の通知で知らせる。アプリは `mashu desktop-backend` を子プロセスとして起こし、標準入出力でだけ話す。ポートを開かないので、`mashu gui` が避けた localhost の書き込み口はできない。採用は TUI と同じ `review_actions.admit` を通り、表示した version と一致しなければ採用せず最新の候補を返す。conflict の更新はそのときも commit する。読むだけの要求は READ ONLY の transaction で処理する。`mashu desktop-backend` 自体は shell から起動できるので、Agent に対する守りは CLI と TUI と同じ強さであり、それより強くも弱くもない。
+デスクトップアプリ（`desktop/`）は nomination の採用・却下・保留・文面の編集と、Task の close・提案の取り下げ・lease の更新を行う経路で、review 待ちと close 提案の増加を OS の通知で知らせる。Task の操作は close 画面と同じ `task_actions` を通り、提案の受け入れは表示した提案と state の時刻が今と一致するときだけ通る。アプリは `mashu desktop-backend` を子プロセスとして起こし、標準入出力でだけ話す。ポートを開かないので、`mashu gui` が避けた localhost の書き込み口はできない。採用は TUI と同じ `review_actions.admit` を通り、表示した version と一致しなければ採用せず最新の候補を返す。conflict の更新はそのときも commit する。読むだけの要求は READ ONLY の transaction で処理する。`mashu desktop-backend` 自体は shell から起動できるので、Agent に対する守りは CLI と TUI と同じ強さであり、それより強くも弱くもない。
 
 id を取る引数は、表示される短縮 ID（先頭 8 文字）の前方一致で解決する。一覧が短縮 ID しか出さない以上、完全 UUID しか受け付けない引数は、人に画面外の値を打たせることになる。4 文字未満の前置きと、複数行に当たる前置きは、候補を挙げて拒否する。
 

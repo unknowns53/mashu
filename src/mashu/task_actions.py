@@ -59,6 +59,12 @@ def accept_close_proposal(
     )
 
 
+def keep_open(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, Any]:
+    """Turn a close proposal down: the work is still live, so its lease is renewed too."""
+    tasks.withdraw_proposal(cur, task_id, actor=actor)
+    return tasks.touch(cur, task_id, actor=actor)
+
+
 def task_project_choices(cur: psycopg.Cursor, *, cwd: str | None) -> ProjectChoices:
     """List open projects in the routed scope, or all open projects as a fallback."""
     scope_id, _ = routing.resolve(cur, cwd)

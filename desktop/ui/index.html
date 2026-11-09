@@ -9,22 +9,20 @@
 </head>
 <body>
   <header>
-    <strong>Review</strong>
-    <span id="counts">…</span>
-    <label class="toggle"><input type="checkbox" id="include-deferred"> include deferred</label>
+    <nav class="tabs" role="tablist">
+      <button type="button" role="tab" id="tab-review" aria-selected="true">Review <span id="review-count"></span></button>
+      <button type="button" role="tab" id="tab-tasks" aria-selected="false">Tasks <span id="task-count"></span></button>
+    </nav>
+    <label class="toggle" id="deferred-toggle"><input type="checkbox" id="include-deferred"> include deferred</label>
     <button type="button" id="refresh">Check now</button>
   </header>
-  <section id="proposals" hidden>
-    <h2>Proposed for closing</h2>
-    <ul id="proposal-list"></ul>
-    <p class="muted">Close or keep these in the terminal UI (<code>mashu</code> → Tasks).</p>
-  </section>
   <p id="message" role="status" hidden></p>
-  <main>
-    <nav aria-label="candidates">
-      <ul id="queue"></ul>
+
+  <main id="review-pane">
+    <aside aria-label="candidates">
+      <ul id="queue" class="list"></ul>
       <p id="empty" class="muted" hidden>Nothing waiting for review.</p>
-    </nav>
+    </aside>
     <article id="detail" hidden>
       <p id="meta" class="muted"></p>
       <p id="deferred-note" class="warn" hidden></p>
@@ -63,6 +61,40 @@
           <input id="reason" type="text" placeholder="why turn it down or put it off">
           <button type="button" id="decline" class="danger">Turn down</button>
           <button type="button" id="defer">Put off</button>
+        </div>
+      </section>
+    </article>
+  </main>
+
+  <main id="tasks-pane" hidden>
+    <aside aria-label="open tasks">
+      <ul id="task-list" class="list"></ul>
+      <p id="no-tasks" class="muted" hidden>No open tasks.</p>
+    </aside>
+    <article id="task-detail" hidden>
+      <h2 id="task-name"></h2>
+      <p id="task-meta" class="muted"></p>
+      <section id="proposal" class="proposal" hidden>
+        <p id="proposal-said"></p>
+        <p id="proposal-reason"></p>
+        <p id="proposal-stale" class="warn" hidden></p>
+        <div class="row">
+          <label id="stale-confirm" hidden><input type="checkbox" id="stale-ok"> close on it anyway</label>
+          <button type="button" id="accept" class="primary">Accept proposal</button>
+          <button type="button" id="keep">Keep open (drop proposal)</button>
+        </div>
+      </section>
+      <dl id="state"></dl>
+      <section class="actions">
+        <h3>Decide yourself</h3>
+        <div class="row">
+          <select id="outcome"></select>
+          <input id="close-reason" type="text" placeholder="reason (may be empty)">
+          <button type="button" id="close" class="danger">Close</button>
+        </div>
+        <div class="row">
+          <button type="button" id="renew">Renew lease</button>
+          <span class="muted">Says the work is still current; decides nothing about whether it is finished.</span>
         </div>
       </section>
     </article>
