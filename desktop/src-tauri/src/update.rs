@@ -16,8 +16,8 @@ use tauri_plugin_updater::UpdaterExt;
 use crate::{drop_process, Backend};
 
 #[derive(Default, Serialize, Deserialize)]
-struct Config {
-    checkout: Option<PathBuf>,
+pub(crate) struct Config {
+    pub(crate) checkout: Option<PathBuf>,
 }
 
 fn config_file(app: &AppHandle) -> Result<PathBuf, String> {
@@ -36,7 +36,7 @@ fn read_config(app: &AppHandle) -> Config {
         .unwrap_or_default()
 }
 
-fn write_config(app: &AppHandle, config: &Config) -> Result<(), String> {
+pub(crate) fn write_config(app: &AppHandle, config: &Config) -> Result<(), String> {
     let path = config_file(app)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
@@ -54,7 +54,20 @@ pub fn venv_mashu(root: &Path) -> PathBuf {
     }
 }
 
-/// The checkout set on the Settings screen, else the one a local build was made from.
+/// The checkout that holds a mashu executable, found by following it out of `.venv`.
+/// The README links ~/.local/bin/mashu to a checkout's environment, so a release build
+/// finds the checkout without being told.
+fn checkout_of(executable: &Path) -> Option<PathBuf> {
+    let real = executable.canonicalize().ok()?;
+    let venv = real
+        .ancestors()
+        .find(|dir| dir.file_name() == Some(".venv".as_ref()))?;
+    let root = venv.parent()?;
+    root.join(".git").exists().then(|| root.to_path_buf())
+}
+
+/// The checkout set on the Settings screen, else the one a local build was made from, else
+/// the one the mashu on PATH runs from.
 pub fn checkout(app: &AppHandle) -> Option<PathBuf> {
     if let Some(root) = read_config(app).checkout {
         return Some(root);
@@ -62,24 +75,34 @@ pub fn checkout(app: &AppHandle) -> Option<PathBuf> {
     let built = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..");
-    built
-        .join(".git")
-        .exists()
-        .then(|| built.canonicalize().unwrap_or(built))
+    if built.join(".git").exists() {
+        return Some(built.canonicalize().unwrap_or(built));
+    }
+    tool("mashu").and_then(|found| checkout_of(&found))
 }
 
 /// The mashu executable: MASHU_EXE, then the checkout's virtual environment, then PATH.
-pub fn executable(app: &AppHandle) -> PathBuf {
+/// None when there is none to start.
+pub fn executable(app: &AppHandle) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("MASHU_EXE") {
-        return PathBuf::from(path);
+        return Some(PathBuf::from(path));
     }
     match checkout(app).map(|root| venv_mashu(&root)) {
-        Some(local) if local.is_file() => local,
-        _ => PathBuf::from("mashu"),
+        Some(local) if local.is_file() => Some(local),
+        _ => tool("mashu"),
     }
 }
 
-fn home() -> Option<PathBuf> {
+/// A path as typed, with a leading ~/ read as the home directory.
+pub(crate) fn expand(path: &str) -> PathBuf {
+    let path = path.trim();
+    match (path.strip_prefix("~/"), home()) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => PathBuf::from(path),
+    }
+}
+
+pub(crate) fn home() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
@@ -87,7 +110,7 @@ fn home() -> Option<PathBuf> {
 
 /// A program by name, from PATH or where its installer puts it. An app started from the
 /// Dock or the Start menu gets a short PATH without ~/.local/bin or ~/.cargo/bin.
-fn tool(name: &str) -> Option<PathBuf> {
+pub(crate) fn tool(name: &str) -> Option<PathBuf> {
     let file = if cfg!(windows) {
         format!("{name}.exe")
     } else {
@@ -106,7 +129,7 @@ fn tool(name: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-fn run(program: &Path, args: &[&str], root: &Path) -> Result<String, String> {
+pub(crate) fn run(program: &Path, args: &[&str], root: &Path) -> Result<String, String> {
     let mut command = Command::new(program);
     command.args(args).current_dir(root);
     #[cfg(windows)]
@@ -138,13 +161,13 @@ fn version_key(text: &str) -> Option<(u64, u64, u64, bool)> {
     Some((major, minor, patch, end == text.len()))
 }
 
-/// The newest release tag the checkout's origin has; prereleases are never offered.
-fn latest_release(git: &Path, root: &Path) -> Result<Option<String>, String> {
-    let refs = run(
-        git,
-        &["ls-remote", "--tags", "--refs", "origin", "v*"],
-        root,
-    )?;
+/// The newest release tag a remote has; prereleases are never offered.
+pub(crate) fn latest_release(
+    git: &Path,
+    dir: &Path,
+    remote: &str,
+) -> Result<Option<String>, String> {
+    let refs = run(git, &["ls-remote", "--tags", "--refs", remote, "v*"], dir)?;
     Ok(refs
         .lines()
         .filter_map(|line| line.rsplit('/').next())
@@ -164,10 +187,12 @@ fn backend_version(app: &AppHandle) -> Option<String> {
 
 #[tauri::command]
 pub fn checkout_get(app: AppHandle) -> Value {
+    let executable = executable(&app);
     json!({
         "path": checkout(&app),
         "set": read_config(&app).checkout.is_some(),
-        "executable": executable(&app),
+        "ready": executable.as_ref().is_some_and(|path| path.is_file()),
+        "executable": executable,
         "from_env": std::env::var_os("MASHU_EXE").is_some(),
     })
 }
@@ -175,11 +200,7 @@ pub fn checkout_get(app: AppHandle) -> Value {
 /// Point the app at a checkout; the backend restarts from it on the next request.
 #[tauri::command]
 pub fn checkout_set(app: AppHandle, path: String) -> Result<Value, String> {
-    let path = path.trim();
-    let root = match (path.strip_prefix("~/"), home()) {
-        (Some(rest), Some(home)) => home.join(rest),
-        _ => PathBuf::from(path),
-    };
+    let root = expand(&path);
     if !root.join(".git").exists() {
         return Err(format!("{} is not a git checkout of Mashu", root.display()));
     }
@@ -196,12 +217,7 @@ pub fn checkout_set(app: AppHandle, path: String) -> Result<Value, String> {
             checkout: Some(root.canonicalize().unwrap_or(root)),
         },
     )?;
-    let backend = app.state::<Backend>();
-    let mut connection = backend
-        .0
-        .lock()
-        .map_err(|_| "the backend lock was poisoned")?;
-    drop_process(&mut connection);
+    restart_backend(&app)?;
     Ok(checkout_get(app.clone()))
 }
 
@@ -213,7 +229,7 @@ pub async fn update_check(app: AppHandle) -> Result<Value, String> {
     let (mashu, latest) = tauri::async_runtime::spawn_blocking(move || {
         let mashu = backend_version(&local);
         let latest = match (tool("git"), checkout(&local)) {
-            (Some(git), Some(root)) => latest_release(&git, &root),
+            (Some(git), Some(root)) => latest_release(&git, &root, "origin"),
             _ => Ok(None),
         };
         (mashu, latest)
@@ -243,6 +259,17 @@ pub async fn update_check(app: AppHandle) -> Result<Value, String> {
 
 fn step(app: &AppHandle, name: &str) {
     let _ = app.emit("update-step", name);
+}
+
+/// Stop the backend so the next request starts it from the checkout now configured.
+pub(crate) fn restart_backend(app: &AppHandle) -> Result<(), String> {
+    let backend = app.state::<Backend>();
+    let mut connection = backend
+        .0
+        .lock()
+        .map_err(|_| "the backend lock was poisoned")?;
+    drop_process(&mut connection);
+    Ok(())
 }
 
 /// Move the checkout to the release, holding the backend stopped so nothing runs half updated.

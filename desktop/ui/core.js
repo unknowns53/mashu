@@ -48,6 +48,7 @@ const ICONS = {
   search: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-3.5-3.5",
   plus: "M12 5v14M5 12h14",
   close: "M6 6l12 12M18 6 6 18",
+  check: "M5 12.5l4.5 4.5L19 7.5",
 };
 
 function icon(name) {
@@ -160,9 +161,18 @@ function loadChoices() {
 
 // ---------------------------------------------------------------- feedback
 
-/** A note in the corner: success fades on its own, a warning or error stays until closed. */
+/** How many notes the corner holds at once; older ones give way. */
+const TOAST_LIMIT = 3;
+
+/**
+ * A note in the corner: success fades on its own, a warning or error stays until closed.
+ * A note already showing is not shown twice, so one failure repeated by several calls is one note.
+ */
 function toast(text, kind = "ok") {
   if (!text) return;
+  const shown = [...$("toasts").children];
+  if (shown.some((note) => note.querySelector(".text").textContent === text)) return;
+  for (const old of shown.slice(0, Math.max(0, shown.length - TOAST_LIMIT + 1))) old.remove();
   const node = h("div", { class: `toast ${kind}`, role: kind === "error" ? "alert" : "status" }, h("div", { class: "text", text }));
   const close = () => node.remove();
   node.append(h("button", { type: "button", class: "btn quiet icon small", title: t("common.close"), on: { click: close } }, icon("close")));
@@ -172,7 +182,171 @@ function toast(text, kind = "ok") {
 
 function fail(error) {
   const text = errorText(error);
-  toast(/could not start/.test(text) ? `${text}\n${t("update.no_backend")}` : text, "error");
+  const missing = /could not start/.test(text)
+    ? "checkout"
+    : /database ".*" does not exist/.test(text)
+      ? "database"
+      : /Is the server running|connection refused/i.test(text)
+        ? "server"
+        : null;
+  if (missing) {
+    showSetup(missing);
+    return;
+  }
+  toast(text, "error");
+}
+
+// ---------------------------------------------------------------- first run
+
+/** The note left for the window that opens after an install, read once. */
+const SETUP_NOTE = "mashu.setup.done";
+
+/**
+ * In place of every page while Mashu cannot answer: install it or point at it when there is
+ * no checkout, create its database, or wait for PostgreSQL. Each way out reloads the window.
+ */
+async function showSetup(missing) {
+  if (app.setup === missing) return;
+  app.setup = missing;
+  document.body.classList.add("setup");
+  const page = h("div", { class: "setup-page" });
+  $("page").replaceChildren(page);
+  if (missing === "database") {
+    append(page, [
+      h("h1", { class: "title", text: t("setup.database_title") }),
+      h("p", { class: "sub", text: t("setup.database_lead") }),
+      h("div", { class: "actions" }, setupButton(t("setup.database_create"), () => invoke("setup_database"))),
+    ]);
+    return;
+  }
+  if (missing === "server") {
+    append(page, [
+      h("h1", { class: "title", text: t("setup.server_title") }),
+      h("p", { class: "sub", text: t("setup.server_lead") }),
+      h("div", { class: "actions" }, button(t("setup.retry"), () => location.reload(), { kind: "primary" })),
+    ]);
+    return;
+  }
+  append(page, [
+    h("h1", { class: "title", text: t("setup.title") }),
+    h("p", { class: "sub", text: t("setup.lead") }),
+    await installSection(),
+    usePlaceSection(await invoke("checkout_get").catch(() => ({}))),
+  ]);
+}
+
+/** A primary button that runs one setup step and reloads into the app when it is done. */
+function setupButton(label, work, progress) {
+  const node = button(
+    label,
+    async () => {
+      node.disabled = true;
+      const stop = await listen("setup-step", (event) => {
+        if (progress) progress.textContent = t(`setup.step.${event.payload}`);
+      });
+      try {
+        await work();
+        location.reload();
+      } catch (error) {
+        toast(errorText(error), "error");
+        if (progress) progress.textContent = "";
+        node.disabled = false;
+      } finally {
+        stop();
+      }
+    },
+    { kind: "primary" }
+  );
+  return node;
+}
+
+async function installSection() {
+  const body = h("div");
+  const input = h("input", { type: "text" });
+  const render = async () => {
+    const check = await invoke("setup_check", { path: input.value });
+    if (!input.value) input.value = check.path;
+    const needs = [
+      ["git", check.git],
+      ["uv", check.uv],
+      ["postgres", check.postgres],
+      ["postgres_running", check.postgres_running],
+      ["free", check.free],
+    ];
+    const ready = needs.every(([, ok]) => ok);
+    const progress = h("p", { class: "sub" });
+    body.replaceChildren(
+      h(
+        "ul",
+        { class: "checklist" },
+        needs.map(([name, ok]) =>
+          h(
+            "li",
+            { class: ok ? "ok" : "missing" },
+            icon(ok ? "check" : "close"),
+            h("span", { text: t(`setup.need.${name}`) }),
+            ok ? null : h("span", { class: "sub", text: t(`setup.need.${name}.how`) })
+          )
+        )
+      ),
+      h(
+        "div",
+        { class: "actions" },
+        ready
+          ? setupButton(t("setup.install"), () => {
+              try {
+                localStorage.setItem(SETUP_NOTE, "1");
+              } catch {
+                // Without storage the note on registering agents is simply not shown.
+              }
+              return invoke("setup_install", { path: input.value });
+            }, progress)
+          : null,
+        button(t("setup.recheck"), () => render().catch(fail))
+      ),
+      progress
+    );
+  };
+  input.addEventListener("change", () => render().catch(fail));
+  await render();
+  return section(t("setup.install_title"), null, h("label", { class: "field" }, h("span", { class: "label", text: t("setup.folder") }), input), body);
+}
+
+function usePlaceSection(place) {
+  const input = h("input", { type: "text", value: place.path || "", placeholder: "~/MyApp/mashu" });
+  const save = async (event) => {
+    event.preventDefault();
+    try {
+      await invoke("checkout_set", { path: input.value });
+      location.reload();
+    } catch (error) {
+      const text = errorText(error);
+      toast(/not a git checkout/.test(text) ? t("setup.not_checkout") : /has no/.test(text) ? t("setup.no_venv") : text, "error");
+    }
+  };
+  return section(
+    t("setup.use_title"),
+    null,
+    h(
+      "form",
+      { class: "row interval-row", on: { submit: save } },
+      input,
+      h("button", { type: "submit", class: "btn", text: t("setup.save") })
+    ),
+    h("p", { class: "sub", text: t("setup.hint") })
+  );
+}
+
+/** After an install, say once that agents are registered by hand. */
+function noteAfterSetup() {
+  try {
+    if (localStorage.getItem(SETUP_NOTE)) {
+      localStorage.removeItem(SETUP_NOTE);
+      toast(t("setup.agents"), "warn");
+    }
+  } catch {
+    // Storage is a convenience here.
+  }
 }
 
 /** Ask before something that cannot be taken back. Resolves true on the confirming button. */

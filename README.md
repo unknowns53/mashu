@@ -174,7 +174,7 @@ cd desktop/src-tauri
 cargo run
 ~~~
 
-ビルドには Rust と、Windows では WebView2 が要る。アプリは `mashu desktop-backend` を子プロセスとして起こし、標準入出力の JSON 一行ずつで要求と応答をやりとりする。待ち受けるポートは無い。書き込みは TUI と同じ関数（`review_actions`、`memory_actions`、`task_actions`、`application`）を通るので、楽観チェック、容量の上限、入口の拒否は TUI と同じに掛かる。起こす実行ファイルは、環境変数 `MASHU_EXE`、設定の「バージョン」で指定した checkout の `.venv` にある `mashu`、手元でビルドしたときはその checkout の `mashu`、PATH の `mashu` の順に探す。
+ビルドには Rust と、Windows では WebView2 が要る。アプリは `mashu desktop-backend` を子プロセスとして起こし、標準入出力の JSON 一行ずつで要求と応答をやりとりする。待ち受けるポートは無い。書き込みは TUI と同じ関数（`review_actions`、`memory_actions`、`task_actions`、`application`）を通るので、楽観チェック、容量の上限、入口の拒否は TUI と同じに掛かる。起こす実行ファイルは、環境変数 `MASHU_EXE`、設定の「バージョン」で指定した checkout の `.venv` にある `mashu`、手元でビルドしたときはその checkout の `mashu`、PATH と `~/.local/bin` の `mashu` の順に探す。最後の `mashu` が checkout の `.venv` へのリンクなら、辿った先の checkout を更新の対象にする。どれも見つからなければ、エラーを出す代わりに最初の画面を出す。そこでは、入っている Mashu の場所を指定するか、アプリに入れさせるかを選べる。入れさせる場合、アプリは git、uv、PostgreSQL がそろっていて PostgreSQL が動いているかを確かめ、足りないものとその入れ方を示す。そろっていれば、空のフォルダに最新の正式版を clone して main をそのタグに合わせ、`uv sync --extra mcp`、DB `mashu` の作成、`mashu admin migrate` を順に実行する。エージェントへの MCP サーバーと hook の登録は各ツールの設定を書き換えるので、アプリは行わず、この README の「Agent から使う」へ案内する。checkout はあるのに DB が無いときは「データベースを作成」を、PostgreSQL に繋がらないときは「再試行」を出す。
 
 アプリは起動時と一日ごとに origin のリリースのタグを確かめ、アプリか checkout より新しい正式版があれば、ナビの下に知らせを出す。設定の「バージョン」の「更新」は、backend を止めたまま、checkout の main をそのタグまで早送りし、`uv sync --extra mcp` と `mashu admin migrate` を実行してから、アプリを GitHub Release の配布物で入れ替えて再起動する。checkout に未コミットの変更があるとき、main 以外にいるとき、main にタグに無いコミットがあるときは、何も変えずに理由を示す。途中で失敗しても、同じ更新をもう一度押せば続きから進む。手元でビルドしたアプリは checkout だけを更新し、アプリは cargo run で起動し直す。Windows では、動いている MCP サーバーが `.venv` の実行ファイルを握っていると `uv sync` が失敗するので、エージェントのセッションを閉じてから更新する。
 
