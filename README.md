@@ -167,12 +167,16 @@ retire 済みの規則を書き戻す操作や、似た open な Task がある�
 
 60 秒ごとに store を見にいき、review 待ちの candidate、Memory change proposal、close の提案が増えると OS の通知を出す。トレイのアイコンに重ねたヒントにはそれぞれの件数が出る。窓を閉じてもトレイに残り、終えるときはトレイのメニューの Quit を使う。
 
+GitHub Release に、正式版ごとの Mac（Apple silicon）の `Mashu.app.tar.gz` と Windows のインストーラ（`Mashu_<版>_x64-setup.exe`）を置いている。署名していないので、初回は Mac では Finder の右クリックから開き、Windows では SmartScreen の警告から実行を許可する。手元でビルドするときは次を実行する。
+
 ~~~bash
 cd desktop/src-tauri
 cargo run
 ~~~
 
-ビルドには Rust と、Windows では WebView2 が要る。アプリは `mashu desktop-backend` を子プロセスとして起こし、標準入出力の JSON 一行ずつで要求と応答をやりとりする。待ち受けるポートは無い。書き込みは TUI と同じ関数（`review_actions`、`memory_actions`、`task_actions`、`application`）を通るので、楽観チェック、容量の上限、入口の拒否は TUI と同じに掛かる。起こす実行ファイルは、環境変数 `MASHU_EXE`、この checkout の `.venv` にある `mashu`、PATH の `mashu` の順に探す。
+ビルドには Rust と、Windows では WebView2 が要る。アプリは `mashu desktop-backend` を子プロセスとして起こし、標準入出力の JSON 一行ずつで要求と応答をやりとりする。待ち受けるポートは無い。書き込みは TUI と同じ関数（`review_actions`、`memory_actions`、`task_actions`、`application`）を通るので、楽観チェック、容量の上限、入口の拒否は TUI と同じに掛かる。起こす実行ファイルは、環境変数 `MASHU_EXE`、設定の「バージョン」で指定した checkout の `.venv` にある `mashu`、手元でビルドしたときはその checkout の `mashu`、PATH の `mashu` の順に探す。
+
+アプリは起動時と一日ごとに origin のリリースのタグを確かめ、アプリか checkout より新しい正式版があれば、ナビの下に知らせを出す。設定の「バージョン」の「更新」は、backend を止めたまま、checkout の main をそのタグまで早送りし、`uv sync --extra mcp` と `mashu admin migrate` を実行してから、アプリを GitHub Release の配布物で入れ替えて再起動する。checkout に未コミットの変更があるとき、main 以外にいるとき、main にタグに無いコミットがあるときは、何も変えずに理由を示す。途中で失敗しても、同じ更新をもう一度押せば続きから進む。手元でビルドしたアプリは checkout だけを更新し、アプリは cargo run で起動し直す。Windows では、動いている MCP サーバーが `.venv` の実行ファイルを握っていると `uv sync` が失敗するので、エージェントのセッションを閉じてから更新する。
 
 `mashu desktop-backend` は shell から誰でも起動できるので、User としての承認を Agent から守る強さは CLI と TUI と同じである。Agent に `mashu review` を禁じているなら、`mashu desktop-backend` も同じく禁じる。
 
@@ -575,7 +579,7 @@ main への push と pull request では、GitHub Actions の CI（`.github/work
 
 テストを足すときは、先に既存のテストを広げること、conftest の共有 fixture で状態を作ること、一つの不変条件を一つの層でだけ確かめること、画面や CLI の文言ではなく状態を確かめることを優先する。実際の呼び出し元（MCP の tool、CLI、TUI、git hook）が作らない入力や状態のテストは足さない。TUI の見た目（列幅、カーソル位置、端末の高さ、ANSI の有無）やキー移動だけを確かめるテストも置かない。
 
-版は `src/mashu/__init__.py` の `__version__` だけに書き、pyproject.toml はそこから読む。版は PEP 440 の正規形で書き、`3.0.1` のように数字だけなら正式なリリース、`3.1.0b1` のように a、b、rc と番号で終わればプレリリースになる。リリースは main の checkout で `tools/release.sh <版>` を実行して作る。このスクリプトは版を書き換えて main へコミットと push をし、main の CI が通るのを待ってから `v<版>` のタグを push する。タグの CI は、タグの版が `__version__` と一致すること、そのコミットが main にあって main の CI を通っていることを確かめてから、GitHub Release を公開する。
+版は `src/mashu/__init__.py` の `__version__` だけに書き、pyproject.toml はそこから読む。版は PEP 440 の正規形で書き、`3.0.1` のように数字だけなら正式なリリース、`3.1.0b1` のように a、b、rc と番号で終わればプレリリースになる。リリースは main の checkout で `tools/release.sh <版>` を実行して作る。このスクリプトは版を書き換えて main へコミットと push をし、main の CI が通るのを待ってから `v<版>` のタグを push する。タグの CI は、タグの版が `__version__` と一致すること、そのコミットが main にあって main の CI を通っていることを確かめてから、GitHub Release を下書きで作る。続いて Mac と Windows のデスクトップアプリを一つずつビルドし、更新用の配布物とその署名、両方を載せた `latest.json` を下書きに加えてから公開する。アプリの updater は `tauri.conf.json` の公開鍵で配布物の署名を確かめる。秘密鍵はリポジトリの secret `TAURI_SIGNING_PRIVATE_KEY`（合言葉を付けたときは `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` も）に置き、無いとアプリのビルドが失敗する。
 
 仕様を変えるときは、コードと対応する設計書を一緒に更新する。設計書には今の仕様とその理由だけを書き、撤回した設計と経緯は消して git の履歴に任せる。
 

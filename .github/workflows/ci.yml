@@ -91,6 +91,8 @@ jobs:
     permissions:
       contents: write
       actions: read
+    outputs:
+      id: ${{ steps.draft.outputs.id }}
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.ref_name }}
@@ -119,6 +121,71 @@ jobs:
             exit 1
           fi
 
+      # A draft until both apps are on it, so the latest release always carries its latest.json.
+      - name: Draft the release
+        id: draft
+        run: |
+          if [[ "${TAG#v}" =~ [a-z] ]]; then
+            kind=(--prerelease)
+          else
+            kind=()
+          fi
+          gh release create "$TAG" --verify-tag --draft "${kind[@]}" --title "mashu $TAG" --generate-notes
+          echo "id=$(gh release view "$TAG" --json databaseId --jq .databaseId)" >> "$GITHUB_OUTPUT"
+
+  desktop:
+    if: github.ref_type == 'tag'
+    needs: release
+    name: desktop (${{ matrix.os }})
+    strategy:
+      # One at a time, since each build adds its platform to the same latest.json.
+      max-parallel: 1
+      matrix:
+        include:
+          - os: macos-latest
+            bundles: app
+          - os: windows-latest
+            bundles: nsis
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The app reports the release's version; semver writes the PEP 440 prerelease 4.1.0b1 as 4.1.0-b1.
+      - name: Version the app from the tag
+        shell: bash
+        run: |
+          semver="$(sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)((a|b|rc)[0-9]+)$/\1-\2/' <<< "${TAG#v}")"
+          node -e 'const fs = require("fs"); const path = "desktop/src-tauri/tauri.conf.json"; const conf = JSON.parse(fs.readFileSync(path, "utf8")); conf.version = process.argv.at(-1); fs.writeFileSync(path, JSON.stringify(conf, null, 2) + "\n");' "$semver"
+
+      # The updater checks each download against the public key in tauri.conf.json.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: desktop
+          tauriScript: npx --yes @tauri-apps/cli@2.12.4
+          releaseId: ${{ needs.release.outputs.id }}
+          includeUpdaterJson: true
+          args: --bundles ${{ matrix.bundles }}
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: desktop
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
       # PEP 440 marks a prerelease with a letter (a, b or rc) after the release numbers.
       - name: Publish the release
         run: |
@@ -127,4 +194,4 @@ jobs:
           else
             kind=(--latest)
           fi
-          gh release create "$TAG" --verify-tag "${kind[@]}" --title "mashu $TAG" --generate-notes
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false "${kind[@]}"

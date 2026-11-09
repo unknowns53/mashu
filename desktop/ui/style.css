@@ -108,6 +108,10 @@ body {
   text-align: center;
 }
 @media (prefers-color-scheme: dark) { .badge { color: #10131c; } }
+.version-rows { margin: 16px 0 28px; }
+.update-note { margin: auto 4px 8px; padding: 7px 10px; border: 0; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer; }
+.update-note[hidden] { display: none; }
+.update-note:not([hidden]) + .nav-foot { margin-top: 0; }
 .nav-foot { margin-top: auto; display: flex; align-items: center; gap: 6px; padding: 6px 4px 0; color: var(--text-3); font-size: 12px; }
 .nav-foot .checked { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

@@ -171,7 +171,8 @@ function toast(text, kind = "ok") {
 }
 
 function fail(error) {
-  toast(errorText(error), "error");
+  const text = errorText(error);
+  toast(/could not start/.test(text) ? `${text}\n${t("update.no_backend")}` : text, "error");
 }
 
 /** Ask before something that cannot be taken back. Resolves true on the confirming button. */
@@ -272,6 +273,14 @@ async function reload() {
   const spec = app.pages.get(app.current);
   const [status] = await Promise.all([call("status"), spec.load ? spec.load() : null]);
   showStatus(status);
+}
+
+/** Remember what update_check found and offer a newer release under the navigation. */
+function showUpdate(info) {
+  app.update = info;
+  const note = $("update-note");
+  note.hidden = !info.available;
+  note.textContent = t("update.note", { version: info.latest });
 }
 
 function showStatus(status) {

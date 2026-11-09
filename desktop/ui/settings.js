@@ -1,8 +1,8 @@
 // Settings: store health, what a session receives, scopes, topics, routes, delivery limits,
-// the checkpoint interval, the schema, and the window's language.
+// the checkpoint interval, the schema, versions and updates, and the window's language.
 "use strict";
 
-const SECTIONS = ["health", "bootstrap", "scopes", "topics", "routes", "limits", "interval", "schema", "display"];
+const SECTIONS = ["health", "bootstrap", "scopes", "topics", "routes", "limits", "interval", "schema", "version", "display"];
 
 const settings = { section: "health", editing: null, bootstrapCwd: "", bootstrap: null };
 
@@ -392,6 +392,70 @@ async function schemaSection() {
   ];
 }
 
+async function versionSection() {
+  const [info, place] = await Promise.all([invoke("update_check"), invoke("checkout_get")]);
+  showUpdate(info);
+  const latest = info.latest ? (info.available ? info.latest : t("update.current", { version: info.latest })) : info.error || t("update.unknown");
+  const progress = h("p", { class: "sub" });
+  const update = async () => {
+    const yes = await confirmDialog({
+      title: t("update.confirm", { version: info.latest }),
+      lines: [t("update.confirm_detail", { path: place.path })],
+      confirm: t("update.run"),
+    });
+    if (!yes) return;
+    const stop = await listen("update-step", (event) => {
+      progress.textContent = t(`update.step.${event.payload}`);
+    });
+    act(async () => {
+      try {
+        const result = await invoke("update_install", { version: info.latest });
+        if (result.app === "dev_build") return t("update.dev_done");
+        if (result.app === "not_published") return t("update.app_pending");
+        return "";
+      } finally {
+        stop();
+      }
+    }, t("update.done"));
+  };
+  const input = h("input", { type: "text", value: place.path || "", placeholder: "~/MyApp/mashu" });
+  const savePlace = (event) => {
+    event.preventDefault();
+    act(() => invoke("checkout_set", { path: input.value }), t("update.place_saved"));
+  };
+  return [
+    h("h1", { class: "title", text: t("settings.version") }),
+    h(
+      "div",
+      { class: "version-rows" },
+      fieldList([
+        [t("update.app"), info.app],
+        [t("update.mashu"), info.mashu || t("update.unknown")],
+        [t("update.latest"), latest],
+      ]),
+      h(
+        "div",
+        { class: "actions" },
+        info.available && place.path ? button(t("update.run_to", { version: info.latest }), update, { kind: "primary" }) : null,
+        button(t("update.check"), () => reload().catch(fail))
+      ),
+      progress,
+      info.dev_build ? h("p", { class: "sub", text: t("update.dev_hint") }) : null
+    ),
+    section(
+      t("update.place"),
+      null,
+      h(
+        "form",
+        { class: "row interval-row", on: { submit: savePlace } },
+        input,
+        h("button", { type: "submit", class: "btn primary", text: t("common.save") })
+      ),
+      h("p", { class: "sub", text: place.from_env ? t("update.from_env") : t("update.place_hint") })
+    ),
+  ];
+}
+
 function displaySection() {
   return [
     h("h1", { class: "title", text: t("settings.display") }),
@@ -432,6 +496,7 @@ const SECTION_VIEWS = {
   topics: topicsSection,
   routes: routesSection,
   limits: limitsSection,
+  version: versionSection,
   interval: intervalSection,
   schema: schemaSection,
   display: async () => displaySection(),

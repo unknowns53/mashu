@@ -22,6 +22,7 @@ from uuid import UUID
 import psycopg
 
 from mashu import (
+    __version__,
     application,
     config,
     db,
@@ -611,6 +612,11 @@ def limits_set(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     return {"limits": settings.set_limits(cur, changes, actor=ACTOR)}
 
 
+def version(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    """The version of the checkout the app runs, which an update moves with the app."""
+    return {"version": __version__}
+
+
 def interval_get(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     return {
         "minutes": settings.checkpoint_interval_minutes(cur),
@@ -683,6 +689,7 @@ OPERATIONS: dict[str, Operation] = {
     "interval.get": interval_get,
     "interval.set": interval_set,
     "limits.get": limits_get,
+    "version": version,
     "limits.set": limits_set,
     "schema.status": schema_status,
 }
@@ -711,6 +718,7 @@ READS = frozenset(
         "route.list",
         "interval.get",
         "limits.get",
+        "version",
         "schema.status",
     }
 )
