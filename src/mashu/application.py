@@ -76,6 +76,58 @@ def memory_view(cur: psycopg.Cursor, view: str) -> list[dict[str, Any]]:
     return cur.fetchall()
 
 
+#: The orders each list can be put in, the default first. Shared by the terminal screens and
+#: the desktop app so both offer the same keys.
+MEMORY_SORTS = {
+    "active": ("updated", "created", "delivery"),
+    "retired": ("updated", "created", "kind"),
+    "temporary": ("created", "expires", "scope"),
+}
+TASK_SORTS = ("updated", "created", "project")
+PROJECT_SORTS = ("created", "name")
+#: Keys that hold a time; they start newest first, and the rest start A to Z.
+DATE_SORTS = frozenset({"updated", "created", "expires"})
+_DELIVERY_ORDER = ("always", "scope", "topic")
+
+
+def sort_value(row: dict[str, Any], key: str) -> Any:
+    """What one Memory, temporary context, task view, or project row is ordered by."""
+    task = row.get("task")
+    if task is not None:
+        if key == "created":
+            return task["created_at"]
+        if key == "project":
+            return task["project_name"]
+        return task.get("last_activity_at") or row["state"]["updated_at"]
+    if key == "updated":
+        return row.get("updated_at") or row.get("created_at")
+    if key == "expires":
+        return row.get("expires_at")
+    if key == "delivery":
+        place = row.get("topic_name") or row.get("scope_name") or ""
+        return (_DELIVERY_ORDER.index(row["delivery"]), place)
+    if key == "kind":
+        return row.get("retirement_kind") or "legacy"
+    if key == "scope":
+        return row.get("scope_name") or ""
+    return row.get(key if key == "name" else "created_at")
+
+
+def sort_rows(rows: list[dict[str, Any]], key: str, *, descending: bool) -> list[dict[str, Any]]:
+    """Rows in order of `key`, rows without a value last either way.
+
+    A key many rows share, such as delivery or project, keeps each group newest first, whichever
+    way the groups run, since the latest change is what a person looks for inside one.
+    """
+    if key not in DATE_SORTS:
+        rows = sort_rows(rows, "updated", descending=True)
+    keyed = [(sort_value(row, key), row) for row in rows]
+    present = [pair for pair in keyed if pair[0] not in (None, "")]
+    blank = [row for value, row in keyed if value in (None, "")]
+    present.sort(key=lambda pair: pair[0], reverse=descending)
+    return [row for _, row in present] + blank
+
+
 def routed_scope(cur: psycopg.Cursor, cwd: str | None) -> tuple[UUID | None, str | None, bool]:
     """Resolve a directory route to the scope identity and name shown to a person."""
     scope_id, routed = routing.resolve(cur, cwd)

@@ -14,7 +14,8 @@ ACTOR = "user"
 _VIEWS = {"1": "active", "2": "retired", "3": "temporary"}
 _KEYS = (
     "  ↑↓/jk move   PgUp/PgDn   / search   ⏎ why   ← back   q quit   ? help\n"
-    "  n remember   p temporary   e edit   c convert   r retire/end   d delivery"
+    "  n remember   p temporary   e edit   c convert   r retire/end   d delivery\n"
+    "  s sort   v reverse"
 )
 _ITEM_KEYS = "  space read on   b page back   ← back   q quit   ? help"
 
@@ -33,6 +34,9 @@ _HELP = """
   c            convert an active memory to temporary context, or the reverse
   r            retire the selected active memory, or end the selected temporary context
   d            change where the selected active memory is delivered
+  s            sort by the next key: updated, created, delivery or kind, then back to
+               the listed order (created, expires, scope for temporary context)
+  v            reverse the order
   ← or Esc     clear the search; without a search, go back
   ?            show this help
   q            quit Mashu
@@ -228,10 +232,29 @@ def _tabs(view: str) -> str:
     return "  " + "   ".join(tabs)
 
 
-def _heading(view: str, shown: int, total: int, query: str) -> str:
+Order = tuple[str, bool] | None
+
+
+def _order_text(order: Order) -> str:
+    if order is None:
+        return ""
+    key, descending = order
+    return f"  ·  sorted by {key} {'↓' if descending else '↑'}"
+
+
+def _ordered(rows: list[dict[str, Any]], order: Order) -> list[dict[str, Any]]:
+    """Rows in the order chosen with s and v; None keeps the order the store lists them in."""
+    if order is None:
+        return rows
+    key, descending = order
+    return application.sort_rows(rows, key, descending=descending)
+
+
+def _heading(view: str, shown: int, total: int, query: str, order: Order = None) -> str:
     name = "temporary context" if view == "temporary" else f"{view} memories"
     count = f"{shown}/{total}" if query else str(total)
     suffix = f"  ·  search {screen.accent(repr(query))}" if query else ""
+    suffix += _order_text(order)
     title = screen.bold(screen.accent("Memories"))
     return f"{title}\n{_tabs(view)}\n\n  {screen.bold(name)}  {count}{suffix}"
 
@@ -259,8 +282,9 @@ def _screen_text(
     *,
     total: int,
     query: str,
+    order: Order = None,
 ) -> str:
-    head = _heading(view, len(rows), total, query)
+    head = _heading(view, len(rows), total, query, order)
     width = screen.terminal_width() - 1
     columns = _columns(rows, width)
     rendered = [_line(row, view, width, columns) for row in rows]
@@ -691,6 +715,20 @@ def _move(at: int, total: int, key: str, page: int) -> int:
     return at
 
 
+def _next_order(current: Order, keys: tuple[str, ...], key: str) -> Order:
+    """s moves to the next key in its own default direction, and from the last back to the
+    listed order; v reverses the current key, starting from the first when none is chosen."""
+    if key == "v":
+        name, descending = current or (keys[0], keys[0] in application.DATE_SORTS)
+        return name, not descending
+    if current is None:
+        return keys[0], keys[0] in application.DATE_SORTS
+    at = keys.index(current[0]) + 1
+    if at == len(keys):
+        return None
+    return keys[at], keys[at] in application.DATE_SORTS
+
+
 @screen.fullscreen
 def run(dsn: str | None = None) -> int:
     """Browse what Mashu remembers and carry out one explicit change at a time."""
@@ -702,6 +740,7 @@ def run(dsn: str | None = None) -> int:
     reading = False
     scroll = 0
     back: list[int] = []
+    order: dict[str, Order] = {name: None for name in _VIEWS.values()}
 
     while True:
         try:
@@ -710,7 +749,7 @@ def run(dsn: str | None = None) -> int:
         except MashuError as error:
             print(error)
             return 1
-        rows = _filtered(all_rows, view, query)
+        rows = _ordered(_filtered(all_rows, view, query), order[view])
         wanted = selected[view]
         kept = next(
             (number for number, row in enumerate(rows) if _row_id(row, view) == wanted), None
@@ -747,6 +786,7 @@ def run(dsn: str | None = None) -> int:
                     note,
                     total=len(all_rows),
                     query=query,
+                    order=order[view],
                 )
             )
         key = screen.getkey()
@@ -778,6 +818,9 @@ def run(dsn: str | None = None) -> int:
             if searched is not None:
                 query = searched
                 at[view] = 0
+            continue
+        if key in ("s", "v"):
+            order[view] = _next_order(order[view], application.MEMORY_SORTS[view], key)
             continue
         if key == "left":
             if query:
