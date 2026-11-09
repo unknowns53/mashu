@@ -19,6 +19,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
 
+mod setup;
 mod update;
 
 /// How often the store is asked whether anything new is waiting.
@@ -45,7 +46,8 @@ struct Backend(Mutex<Connection>);
 struct Wake(Sender<()>);
 
 fn spawn(app: &AppHandle) -> Result<Process, String> {
-    let program = update::executable(app);
+    let program =
+        update::executable(app).ok_or("could not start mashu: set where the Mashu checkout is")?;
     let mut command = Command::new(&program);
     command
         .arg("desktop-backend")
@@ -280,7 +282,10 @@ fn main() {
             update::checkout_get,
             update::checkout_set,
             update::update_check,
-            update::update_install
+            update::update_install,
+            setup::setup_check,
+            setup::setup_install,
+            setup::setup_database
         ])
         .setup(move |app| {
             let open = MenuItem::with_id(app, "open", "Open Mashu", true, None::<&str>)?;

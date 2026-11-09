@@ -25,6 +25,13 @@ updateNote.addEventListener("click", () => {
   settings.section = "version";
   show("settings").catch(fail);
 });
-setTimeout(checkUpdate, 3000);
-setInterval(checkUpdate, 24 * 60 * 60 * 1000);
-show("inbox").catch(fail);
+invoke("checkout_get").then((place) => {
+  if (!place.ready) {
+    showSetup("checkout");
+    return;
+  }
+  noteAfterSetup();
+  setTimeout(checkUpdate, 3000);
+  setInterval(checkUpdate, 24 * 60 * 60 * 1000);
+  show("inbox").catch(fail);
+});
