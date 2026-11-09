@@ -7,7 +7,6 @@
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::Mutex;
@@ -19,6 +18,8 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
+
+mod update;
 
 /// How often the store is asked whether anything new is waiting.
 const POLL: Duration = Duration::from_secs(60);
@@ -43,28 +44,8 @@ struct Backend(Mutex<Connection>);
 /// Wakes the poller before its interval is up.
 struct Wake(Sender<()>);
 
-/// The mashu executable: MASHU_EXE, then this checkout's virtual environment, then PATH.
-fn executable() -> PathBuf {
-    if let Some(path) = std::env::var_os("MASHU_EXE") {
-        return PathBuf::from(path);
-    }
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..");
-    let local = if cfg!(windows) {
-        root.join(".venv").join("Scripts").join("mashu.exe")
-    } else {
-        root.join(".venv").join("bin").join("mashu")
-    };
-    if local.is_file() {
-        local
-    } else {
-        PathBuf::from("mashu")
-    }
-}
-
-fn spawn() -> Result<Process, String> {
-    let program = executable();
+fn spawn(app: &AppHandle) -> Result<Process, String> {
+    let program = update::executable(app);
     let mut command = Command::new(&program);
     command
         .arg("desktop-backend")
@@ -94,11 +75,11 @@ impl Backend {
     ///
     /// A request that could not be sent is sent once more to a fresh process. One that was
     /// sent but got no answer is not, since it may already have been carried out.
-    fn request(&self, op: &str, args: Value) -> Result<Value, String> {
+    fn request(&self, app: &AppHandle, op: &str, args: Value) -> Result<Value, String> {
         let mut connection = self.0.lock().map_err(|_| "the backend lock was poisoned")?;
         for attempt in 0..2 {
             if connection.process.is_none() {
-                connection.process = Some(spawn()?);
+                connection.process = Some(spawn(app)?);
             }
             connection.next_id += 1;
             let id = connection.next_id;
@@ -148,7 +129,7 @@ fn drop_process(connection: &mut Connection) {
 async fn backend(app: AppHandle, op: String, args: Option<Value>) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         app.state::<Backend>()
-            .request(&op, args.unwrap_or_else(|| json!({})))
+            .request(&app, &op, args.unwrap_or_else(|| json!({})))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -191,7 +172,7 @@ struct Seen {
 }
 
 fn check(app: &AppHandle, seen: &mut Seen) {
-    let reply = match app.state::<Backend>().request("status", json!({})) {
+    let reply = match app.state::<Backend>().request(app, "status", json!({})) {
         Ok(reply) if reply["ok"] == json!(true) => reply,
         Ok(reply) => {
             let error = reply["error"].as_str().unwrap_or("unknown error");
@@ -290,9 +271,17 @@ fn main() {
     let wake_from_tray = wake.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Backend::default())
         .manage(Wake(wake))
-        .invoke_handler(tauri::generate_handler![backend, check_now])
+        .invoke_handler(tauri::generate_handler![
+            backend,
+            check_now,
+            update::checkout_get,
+            update::checkout_set,
+            update::update_check,
+            update::update_install
+        ])
         .setup(move |app| {
             let open = MenuItem::with_id(app, "open", "Open Mashu", true, None::<&str>)?;
             let check = MenuItem::with_id(app, "check", "Check now", true, None::<&str>)?;
