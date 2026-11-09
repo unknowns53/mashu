@@ -1,10 +1,13 @@
-// Start-up, once every tab has registered itself.
+// Start-up, once every page has registered itself.
 "use strict";
 
-$("refresh").addEventListener("click", () => {
+const refresh = $("refresh");
+refresh.title = t("nav.refresh");
+refresh.append(icon("refresh"));
+refresh.addEventListener("click", () => {
   invoke("check_now");
-  reload().catch((error) => say(errorText(error), "error"));
+  reload().catch(fail);
 });
 
 listen("status", (event) => showStatus(event.payload));
-show("home").catch((error) => say(errorText(error), "error"));
+show("inbox").catch(fail);

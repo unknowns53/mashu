@@ -154,14 +154,14 @@ GUI は読むだけで、採用・却下・編集・close などの操作は TUI
 
 ### デスクトップアプリで操作する
 
-`desktop/` は Tauri 2 で作ったトレイ常駐アプリで、TUI でできる人の操作をすべて窓の中で行える。タブは次の六つである。
+`desktop/` は Tauri 2 で作ったトレイ常駐アプリで、TUI でできる人の操作をすべて窓の中で行える。左の縦のナビから次の四つの画面を開く。
 
-- Home: 決定を待つもの（review、Memory change、close の提案、dormant な Task）と、store の各部の件数。押すとそのタブへ移る
-- Review: candidate の採用・却下・保留と文面の編集。topic への採用では、その場で新しい topic を作れる
-- Changes: Memory change proposal の適用・理由の編集・却下・取り下げ
-- Memories: active・retired の Memory と Temporary Context の一覧、検索、根拠と revision の表示。直接の remember、本文の編集、delivery の変更、retire、Temporary Context との相互の変換、Temporary Context の登録・編集・終了
-- Work: active・dormant・closed の Task と Project。Task の作成・編集・lease の更新・close・reopen、close 提案の受け入れと取り下げ、Project の作成と編集
-- Settings: Health/status、Bootstrap preview、Scope・Topic・Route の追加と編集と削除、checkpoint の間隔、migration の適用
+- 判断待ち（Inbox）: candidate、Memory change proposal、close の提案を一つの一覧に並べる。candidate の採用・却下・保留と文面の編集、proposal の適用・理由の編集・却下・取り下げ、close の提案の受け入れと取り下げをここで行う。topic への採用では、その場で新しい topic を作れる
+- メモリ（Memory）: active・retired の Memory と Temporary Context の一覧、検索、根拠と revision の表示。直接の remember、本文の編集、delivery の変更、retire、Temporary Context との相互の変換、Temporary Context の登録・編集・終了
+- 作業（Work）: active・dormant・closed の Task と Project。Task の作成・編集・lease の延長・close・reopen、Project の作成と編集
+- 設定（Settings）: 容量と最近の記録、Bootstrap preview、Scope・Topic・Route の追加と編集と削除、checkpoint の間隔、migration の適用、表示の言語
+
+編集は詳細の表示をその場で入力欄に変えて行い、文字数を上限と並べて示す。⌘/Ctrl + Enter で保存し、Esc で取り消す。一覧は ↑↓ か j/k で移り、/ で検索欄へ移る。画面の文言は日本語と英語を設定の「表示」で切り替える。文言は `desktop/ui/i18n.js` の辞書にまとめてあり、キーは store と CLI の名前（`admit`、`dormant` など）である。CLI と TUI の文言は英語のままである。
 
 retire 済みの規則を書き戻す操作や、似た open な Task がある中での作成、削除や migration の適用は、理由や候補を見せて一度確かめてから行う。state が提案より後に書かれた close の提案は、確認のチェックを入れるまで受け入れられない。Bootstrap preview は入力したディレクトリで開くセッションの内容を示し、TUI と同じく配信として記録される。
 

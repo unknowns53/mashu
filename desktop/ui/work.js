@@ -1,7 +1,57 @@
-// Work: tasks by lease and status, with their history, and the projects that hold them.
+// Work: tasks by activity and status, with their history, and the projects that hold them.
 "use strict";
 
-const work = { view: "active", rows: [], selected: null };
+const work = {
+  view: "active",
+  rows: [],
+  query: "",
+  selected: null,
+  panel: null, // "edit" or "close"
+  creating: null, // "task" or "project" while the new form is shown
+};
+
+/** How many attempts show before the rest fold away. */
+const ATTEMPTS_SHOWN = 5;
+
+/** How many decisions in force show before the rest fold away. */
+const DECISIONS_SHOWN = 10;
+
+const workSeg = segmented(
+  [
+    ["active", t("work.view.active")],
+    ["dormant", t("work.view.dormant")],
+    ["closed", t("work.view.closed")],
+    ["projects", t("work.view.projects")],
+  ],
+  work.view,
+  (view) => {
+    work.view = view;
+    work.selected = null;
+    work.panel = null;
+    work.creating = null;
+    reload().catch(fail);
+  }
+);
+const workNew = button("", () => {
+  work.creating = work.view === "projects" ? "project" : "task";
+  work.panel = null;
+  renderWorkDetail();
+}, { kind: "icon" });
+workNew.append(icon("plus"));
+const workList = listPane(
+  workSeg,
+  h(
+    "div",
+    { class: "row search-row" },
+    searchBox((query) => {
+      work.query = query;
+      work.selected = keepSelection(shownWork().map(workId), work.selected);
+      renderWork();
+    }),
+    workNew
+  )
+);
+const workDetail = detailPane();
 
 function workId(row) {
   return work.view === "projects" ? row.project_id : row.task.task_id;
@@ -12,371 +62,401 @@ function workRow() {
 }
 
 function shownWork() {
-  const query = $("work-search").value.trim();
-  if (work.view === "projects") {
-    return work.rows.filter((row) => matches(query, row.project_id, row.name, row.scope_name));
-  }
+  if (work.view === "projects") return work.rows.filter((row) => matches(work.query, row.project_id, row.name, row.scope_name));
   return work.rows.filter((row) =>
-    matches(
-      query,
-      row.task.task_id,
-      row.task.name,
-      row.task.project_name,
-      row.activity,
-      row.state,
-      row.proposal && [row.proposal.outcome, row.proposal.reason],
-      row.attempts,
-      row.decisions,
-      row.checkpoints,
-      row.artifacts
-    )
+    matches(work.query, row.task.task_id, row.task.name, row.task.project_name, row.state, row.decisions, row.attempts, row.artifacts)
   );
 }
 
-/** Switch to a view from elsewhere, such as the home screen. */
-async function openWork(view) {
-  for (const button of $("work-views").querySelectorAll("button[data-view]")) {
-    button.setAttribute("aria-pressed", String(button.dataset.view === view));
-  }
+function pickWork(id) {
+  work.selected = id;
+  work.panel = null;
+  work.creating = null;
+  renderWork();
+}
+
+/** Open a task from elsewhere, such as a task card in another page. */
+async function openTask(taskId, view = "active") {
   work.view = view;
-  work.selected = null;
+  workSeg.select(view);
+  work.selected = taskId;
   await show("work");
 }
 
 function renderWork() {
-  const rows = shownWork();
   const projects = work.view === "projects";
-  fillList("work-list", rows, {
-    idOf: workId,
-    selected: work.selected,
-    text: (row) => (projects ? row.name : row.task.name),
-    sub: (row) =>
-      projects
-        ? `${short(row.project_id)} · ${row.n_active} active · ${row.n_dormant} dormant · ${row.n_closed} closed`
-        : `${short(row.task.task_id)} · ${row.task.project_name} · ${row.activity} · ${row.age_days}d` +
-          (row.task.status === "closed" ? ` · ${row.task.outcome}` : ""),
-    mark: (row) =>
-      !projects && row.proposal
-        ? row.proposal.stale
-          ? { text: "◌", className: "mark stale" }
-          : { text: "●", className: "mark" }
-        : null,
-    pick: (id) => {
-      work.selected = id;
-      closeForms();
-      renderWork();
-    },
-  });
-  $("no-work").hidden = rows.length > 0;
+  workNew.title = projects ? t("work.project_new") : t("work.task_new");
+  fillList(
+    workList.list,
+    [
+      {
+        rows: shownWork().map((row) =>
+          projects
+            ? {
+                id: row.project_id,
+                primary: row.name,
+                secondary: [row.scope_name, t("work.project_tasks", { a: row.n_active, d: row.n_dormant, c: row.n_closed })],
+              }
+            : {
+                id: row.task.task_id,
+                primary: row.task.name,
+                secondary: [
+                  row.proposal ? t("inbox.group.closes") : null,
+                  row.task.project_name,
+                  row.task.status === "closed" ? named("close.outcome", row.task.outcome) : null,
+                  when(row.task.last_activity_at || row.state.updated_at),
+                ],
+              }
+        ),
+      },
+    ],
+    { selected: work.selected, onPick: pickWork, empty: t("work.empty") }
+  );
+  renderWorkDetail();
+}
 
+function workTogglePanel(name) {
+  work.panel = work.panel === name ? null : name;
+  renderWorkDetail();
+}
+
+function renderWorkDetail() {
+  const target = workDetail.inner;
+  workDetail.mark(`${work.view}:${work.creating || work.selected}:${work.panel === "edit"}`);
+  if (work.creating === "task") return newTaskForm(target);
+  if (work.creating === "project") return projectForm(target, null);
   const row = workRow();
   if (!row) {
-    $("work-body").replaceChildren();
-    $("work-actions").replaceChildren();
-  } else if (projects) {
-    renderProject(row);
-  } else {
-    renderTask(row);
+    target.replaceChildren(h("p", { class: "placeholder", text: work.rows.length ? t("common.nothing_selected") : "" }));
+    return;
   }
-  updateButtons();
+  if (work.view === "projects") {
+    if (work.panel === "edit") return projectForm(target, row);
+    target.replaceChildren(...projectDetail(row));
+    return;
+  }
+  if (work.panel === "edit") return editTaskForm(target, row);
+  target.replaceChildren(...taskDetail(row).filter(Boolean));
 }
 
-function renderProject(row) {
-  $("work-body").replaceChildren(
-    element("h2", row.name, "title"),
-    element("p", short(row.project_id), "muted"),
-    pairs([
-      ["scope", row.scope_name || "- (its cards go to every scope)"],
-      ["tasks", `${row.n_active} active · ${row.n_dormant} dormant · ${row.n_closed} closed`],
-      ["created", day(row.created_at)],
-    ])
-  );
-  $("work-actions").replaceChildren(
-    button("Edit…", () => editProject(row).catch((error) => say(errorText(error), "error")))
-  );
-}
+// ---------------------------------------------------------------- one task
 
-function renderTask(row) {
+function taskDetail(row) {
   const { task, state, proposal } = row;
+  const closed = task.status === "closed";
   const nodes = [
-    element("h2", task.name, "title"),
-    element("p", `${short(task.task_id)} · ${task.project_name} · ${row.heading}`, "muted"),
-    pairs([
-      ["status", `${task.status} / ${row.activity}`],
-      ["size", `card ${row.card_tokens}/${row.card_capacity} · detail ${row.detail_tokens}/${row.detail_capacity}`],
-      ["outcome", task.outcome],
-      ["close reason", task.close_reason],
-    ]),
+    meta(task.project_name, named("work.activity", row.activity), t("work.as_of", { date: row.as_of })),
+    h("h1", { class: "title", text: task.name }),
   ];
+  if (row.activity === "dormant") nodes.push(h("div", { class: "callout warn" }, h("p", { text: t("work.dormant_note") })));
+  if (closed) {
+    nodes.push(
+      h(
+        "div",
+        { class: "callout" },
+        h("p", { text: `${named("close.outcome", task.outcome)}${task.close_reason ? ` — ${task.close_reason}` : ""}` })
+      )
+    );
+  }
   if (proposal) {
-    const box = element("section", undefined, "proposal");
-    box.append(
-      element("p", `Proposed ${proposal.outcome} by ${proposal.proposed_by} on ${proposal.on_date}`),
-      element("p", `reason: ${proposal.reason}`)
+    nodes.push(
+      h(
+        "div",
+        { class: `callout${proposal.stale ? " warn" : ""}` },
+        h("p", { text: t("close.meta", { outcome: named("close.outcome", proposal.outcome), when: when(proposal.proposed_at) }) }),
+        h("p", { text: proposal.reason }),
+        h(
+          "div",
+          { class: "actions" },
+          button(t("nav.open_inbox"), () => {
+            inbox.selected = `t:${task.task_id}`;
+            show("inbox").catch(fail);
+          }, { kind: "small" })
+        )
+      )
     );
-    if (proposal.stale) {
-      box.append(element("p", `The task state was written after this proposal, as of ${row.as_of}.`, "warn"));
-    }
-    const confirm = element("label");
-    const staleOk = element("input");
-    staleOk.type = "checkbox";
-    staleOk.id = "stale-ok";
-    confirm.append(staleOk, " close on it anyway");
-    confirm.hidden = !proposal.stale;
-    const accept = button("Accept proposal", () => acceptProposal(row), "primary");
-    accept.id = "accept";
-    const keep = button("Keep open (drop proposal)", () =>
-      act(() => call("task.keep", { task_id: task.task_id }), `${task.name} is still live; the proposal is gone and the lease renewed.`)
-    );
-    keep.id = "keep";
-    staleOk.addEventListener("change", updateButtons);
-    box.append(rowOf(confirm, accept, keep));
-    nodes.push(box);
   }
+
   nodes.push(
-    block(
-      "State",
-      pairs([
-        ["goal", state.goal],
-        ["approach", state.approach],
-        ["status", state.status_text],
-        ["open questions", state.open_questions],
-        ["blockers", state.blockers],
-        ["next actions", state.next_actions],
+    h(
+      "div",
+      { class: "actions" },
+      closed
+        ? button(t("work.reopen"), () => act(() => call("task.reopen", { task_id: task.task_id }), t("work.reopened")))
+        : [
+            button(t("common.edit"), () => workTogglePanel("edit")),
+            button(t("work.renew"), () => act(() => call("task.renew", { task_id: task.task_id }), t("work.renewed")), { title: t("work.renew_title") }),
+            h("span", { class: "spacer" }),
+            button(t("work.close"), () => workTogglePanel("close"), { kind: "danger quiet" }),
+          ]
+    )
+  );
+  if (work.panel === "close") nodes.push(closePanel(row));
+
+  nodes.push(
+    h(
+      "div",
+      { class: "size-line" },
+      meterRow(t("work.card"), row.card_tokens, row.card_capacity),
+      meterRow(t("work.detail"), row.detail_tokens, row.detail_capacity)
+    ),
+    section(
+      t("work.state"),
+      null,
+      fieldList(
+        [
+          [t("work.goal"), state.goal],
+          [t("work.approach"), state.approach],
+          [t("work.status"), state.status_text],
+          [t("work.open_questions"), state.open_questions],
+          [t("work.blockers"), state.blockers],
+          [t("work.next_actions"), state.next_actions],
+        ],
+        { showEmpty: true }
+      )
+    ),
+    decisionsSection(row.decisions || []),
+    attemptsSection(row.attempts || []),
+    section(
+      t("work.artifacts"),
+      (row.artifacts || []).length,
+      entries(row.artifacts, (item) => [
+        `${item.kind || "other"} · ${day(item.created_at)}`,
+        tilde(item.locator),
+        [null, item.label && tilde(item.label)],
       ])
-    )
+    ),
+    (row.checkpoints || []).length
+      ? section(
+          t("work.checkpoints"),
+          row.checkpoints.length,
+          entries(row.checkpoints, (item) => [`${day(item.created_at)} · ${who(item.created_by)}`, item.what_changed])
+        )
+      : null
   );
-  const artifacts = new Map((row.artifacts || []).map((item) => [item.reference_id, item]));
-  nodes.push(
-    block(
-      "Artifacts",
-      bullets(row.artifacts, (item) =>
-        `${short(item.reference_id)} · ${day(item.created_at)} · ${item.kind || "other"} ${item.locator}` +
-          (item.label ? ` (${item.label})` : "")
-      )
-    ),
-    block(
-      "Checkpoints",
-      bullets(row.checkpoints, (item) => {
-        const evidence = (item.evidence || []).map((id) => {
-          const found = artifacts.get(id);
-          return found ? `${found.kind} ${found.locator}` : short(id);
-        });
-        return `${day(item.created_at)} · ${item.created_by}: ${item.what_changed}` +
-          (evidence.length ? ` [${evidence.join(", ")}]` : "");
-      })
-    ),
-    block(
-      "Attempts",
-      bullets(row.attempts, (item) =>
-        `${day(item.created_at)} · ${item.created_by}: ${item.attempt} → ${item.result}` +
-          (item.reason ? `; ${item.reason}` : "") +
-          (item.next ? `; next: ${item.next}` : "")
-      )
-    ),
-    block(
-      "Decisions",
-      bullets(row.decisions, (item) =>
-        `${day(item.created_at)} · ${item.created_by}: ${item.decision}` +
-          (item.reason ? ` (${item.reason})` : "") +
-          ((item.supersedes_ids || []).length ? ` replaces ${item.supersedes_ids.map(short).join(", ")}` : "")
-      )
-    )
-  );
-  $("work-body").replaceChildren(...nodes);
+  return nodes;
+}
 
-  if (task.status === "closed") {
-    $("work-actions").replaceChildren(
-      button("Reopen", () => act(() => call("task.reopen", { task_id: task.task_id }), `Reopened ${task.name}.`))
-    );
-    return;
-  }
-  $("work-actions").replaceChildren(
-    block(
-      "Decide",
-      rowOf(
-        button("Edit…", () => editTask(row).catch((error) => say(errorText(error), "error"))),
-        button("Renew lease", () =>
-          act(() => call("task.renew", { task_id: task.task_id }), `Renewed ${task.name}; nothing said about whether it is finished.`)
-        ),
-        button("Close…", () => closeTask(row).catch((error) => say(errorText(error), "error")), "danger")
-      )
-    )
+function decisionsSection(decisions) {
+  const replaced = new Set(decisions.flatMap((item) => item.supersedes_ids || []));
+  const inForce = decisions.filter((item) => !replaced.has(item.decision_id));
+  const old = decisions.filter((item) => replaced.has(item.decision_id));
+  const render = (item) => [
+    `${day(item.created_at)} · ${who(item.created_by)}`,
+    item.decision,
+    [t("work.attempt_reason"), item.reason],
+    [null, (item.supersedes_ids || []).length ? t("work.replaces", { ids: item.supersedes_ids.map(short).join(", ") }) : null],
+  ];
+  const rest = inForce.slice(DECISIONS_SHOWN);
+  return section(
+    t("work.decisions"),
+    inForce.length,
+    entries(inForce.slice(0, DECISIONS_SHOWN), render),
+    rest.length ? h("details", { class: "more" }, h("summary", { text: `+ ${rest.length}` }), entries(rest, render)) : null,
+    old.length
+      ? h(
+          "details",
+          { class: "more" },
+          h("summary", { text: t("work.decisions_superseded", { n: old.length }) }),
+          entries(old, render, { old: () => true })
+        )
+      : null
   );
 }
 
-function acceptProposal(row) {
-  act(
-    () =>
-      call("task.accept", {
-        task_id: row.task.task_id,
-        proposal: row.proposal,
-        state_at: row.state.updated_at,
-      }),
-    `Closed ${row.task.name} as ${row.proposal.outcome}, on its proposal.`
+function attemptsSection(attempts) {
+  const render = (item) => [
+    `${day(item.created_at)} · ${who(item.created_by)}`,
+    item.attempt,
+    [t("work.attempt_result"), item.result],
+    [t("work.attempt_reason"), item.reason],
+    [t("work.attempt_next"), item.next],
+  ];
+  const first = attempts.slice(0, ATTEMPTS_SHOWN);
+  const rest = attempts.slice(ATTEMPTS_SHOWN);
+  return section(
+    t("work.attempts"),
+    attempts.length,
+    entries(first, render),
+    rest.length
+      ? h("details", { class: "more" }, h("summary", { text: `+ ${rest.length}` }), entries(rest, render))
+      : null
   );
 }
 
-async function closeTask(row) {
-  const choices = await loadChoices();
+function closePanel(row) {
   const proposal = row.proposal;
-  showForm("form-work", {
-    title: `Close ${row.task.name}`,
-    fields: [
-      {
-        name: "outcome",
-        label: "outcome",
-        kind: "select",
-        options: choices.outcomes.map((outcome) => [outcome, outcome]),
-        value: proposal ? proposal.outcome : "completed",
+  return h(
+    "div",
+    { class: "inline-panel" },
+    form({
+      fields: [
+        {
+          name: "outcome",
+          label: t("close.outcome"),
+          kind: "radio",
+          value: proposal ? proposal.outcome : "completed",
+          options: ["completed", "abandoned", "superseded"].map((outcome) => [outcome, named("close.outcome", outcome)]),
+        },
+        {
+          name: "reason",
+          label: t("common.reason"),
+          kind: "area",
+          rows: 2,
+          hint: proposal ? t("work.close_reason_hint_proposal") : t("work.close_reason_hint"),
+        },
+      ],
+      submit: t("work.close"),
+      kind: "danger solid",
+      onCancel: () => workTogglePanel("close"),
+      onSubmit: (values) => {
+        const reason = values.reason.trim() || (proposal && proposal.outcome === values.outcome ? proposal.reason : "");
+        act(async () => {
+          await call("task.close", { task_id: row.task.task_id, outcome: values.outcome, reason });
+          work.panel = null;
+        }, t("work.closed"));
       },
-      {
-        name: "reason",
-        label: "reason",
-        kind: "area",
-        rows: 3,
-        hint: proposal
-          ? "Left empty with the proposal's outcome, the proposal's grounds are kept."
-          : "may be empty",
-      },
-    ],
-    submit: "Close",
-    onSubmit: (values) => {
-      const reason =
-        values.reason.trim() || (proposal && proposal.outcome === values.outcome ? proposal.reason : "");
-      act(
-        () => call("task.close", { task_id: row.task.task_id, outcome: values.outcome, reason }),
-        `Closed ${row.task.name} as ${values.outcome}.`
-      );
-    },
-  });
+    })
+  );
 }
 
-async function editTask(row) {
-  const choices = await loadChoices();
+function editTaskForm(target, row) {
   const { task, state } = row;
-  showForm("form-work", {
-    title: `Edit ${task.name}`,
-    fields: [
-      { name: "name", label: "task name", value: task.name },
-      {
-        name: "project",
-        label: "project",
-        kind: "select",
-        options: choices.projects.map((name) => [name, name]),
-        value: task.project_name,
-      },
-      { name: "goal", label: "goal", value: state.goal, hint: "at most 80 characters; empty clears it" },
-      { name: "approach", label: "approach", kind: "area", rows: 3, value: state.approach },
-      { name: "status_text", label: "status", value: state.status_text, hint: "at most 120 characters" },
-      { name: "open_questions", label: "open questions", kind: "lines", value: state.open_questions, hint: "one per line, at most 5" },
-      { name: "blockers", label: "blockers", kind: "lines", value: state.blockers, hint: "one per line, at most 5" },
-      { name: "next_actions", label: "next actions", kind: "lines", value: state.next_actions, hint: "one per line, at most 5" },
-    ],
-    onSubmit: (values) =>
-      act(
-        () => call("task.update", { task_id: task.task_id, expect_updated_at: state.updated_at, ...values }),
-        `Edited ${values.name}.`
-      ),
-  });
+  target.replaceChildren();
+  loadChoices()
+    .then((choices) => {
+      target.replaceChildren(
+        meta(task.project_name, t("work.as_of", { date: row.as_of })),
+        form({
+          fields: [
+            { name: "name", label: t("work.name"), value: task.name, big: true },
+            { name: "project", label: t("work.project"), kind: "select", options: choices.projects.map((name) => [name, name]), value: task.project_name },
+            { name: "goal", label: t("work.goal"), kind: "area", rows: 1, value: state.goal, max: 80 },
+            { name: "approach", label: t("work.approach"), kind: "area", rows: 4, value: state.approach, max: 500 },
+            { name: "status_text", label: t("work.status"), kind: "area", rows: 2, value: state.status_text, max: 120 },
+            { name: "open_questions", label: t("work.open_questions"), kind: "lines", value: state.open_questions, maxItems: 5, hint: t("work.one_per_line") },
+            { name: "blockers", label: t("work.blockers"), kind: "lines", value: state.blockers, maxItems: 5, hint: t("work.one_per_line") },
+            { name: "next_actions", label: t("work.next_actions"), kind: "lines", value: state.next_actions, maxItems: 5, hint: t("work.one_per_line") },
+          ],
+          onCancel: () => workTogglePanel("edit"),
+          onSubmit: (values) =>
+            act(async () => {
+              await call("task.update", { task_id: task.task_id, expect_updated_at: state.updated_at, ...values });
+              work.panel = null;
+            }, t("work.saved")),
+        })
+      );
+    })
+    .catch(fail);
 }
 
-async function newTask() {
-  const choices = await loadChoices();
-  if (!choices.projects.length) {
-    say("There are no open projects yet; create one first.", "warn");
-    return;
-  }
-  showForm("form-work", {
-    title: "New task",
-    fields: [
-      { name: "name", label: "task name" },
-      {
-        name: "project",
-        label: "project",
-        kind: "select",
-        options: choices.projects.map((name) => [name, name]),
-      },
-      { name: "goal", label: "goal", hint: "optional, at most 80 characters" },
-    ],
-    submit: "Create",
-    onSubmit: (values) => {
-      const create = (force) => call("task.create", { ...values, force });
-      const done = `Created ${values.name}.`;
-      act(() => create(false), done, (error) => {
-        const candidates = error.reply && error.reply.candidates;
-        if (!candidates) return false;
-        say(errorText(error), "warn");
-        confirmBox(
-          "Similar open tasks already exist:",
-          candidates.map((item) => `${short(item.task.task_id)} · ${item.task.name} [${item.activity}]`),
-          "Create it anyway",
-          () => act(() => create(true), done)
-        );
-        return true;
-      });
-    },
-  });
+function newTaskForm(target) {
+  target.replaceChildren();
+  loadChoices()
+    .then((choices) => {
+      if (!choices.projects.length) {
+        target.replaceChildren(h("p", { class: "placeholder", text: t("work.no_projects") }));
+        return;
+      }
+      target.replaceChildren(
+        form({
+          title: t("work.task_new"),
+          fields: [
+            { name: "name", label: t("work.name") },
+            { name: "project", label: t("work.project"), kind: "select", options: choices.projects.map((name) => [name, name]) },
+            { name: "goal", label: t("work.goal"), max: 80 },
+          ],
+          submit: t("common.create"),
+          onCancel: () => {
+            work.creating = null;
+            renderWorkDetail();
+          },
+          onSubmit: (values) => {
+            const create = (force) =>
+              call("task.create", { ...values, force }).then((result) => {
+                work.creating = null;
+                return result;
+              });
+            act(() => create(false), t("work.created"), (error) => {
+              const candidates = error.reply && error.reply.candidates;
+              if (!candidates) return false;
+              confirmDialog({
+                title: t("work.similar"),
+                list: candidates.map((item) => `${item.task.name}（${named("work.activity", item.activity)}）`),
+                confirm: t("work.create_anyway"),
+              }).then((yes) => yes && act(() => create(true), t("work.created")));
+              return true;
+            });
+          },
+        })
+      );
+    })
+    .catch(fail);
 }
 
-async function projectForm(row) {
-  const choices = await loadChoices();
-  showForm("form-work", {
-    title: row ? `Edit ${row.name}` : "New project",
-    fields: [
-      { name: "name", label: "project name", value: row ? row.name : "" },
-      {
-        name: "scope",
-        label: "scope",
-        kind: "select",
-        options: [["", "none — its cards go to every scope"], ...choices.scopes.map((name) => [name, name])],
-        value: row ? row.scope_name || "" : "",
-      },
-    ],
-    submit: row ? "Save" : "Create",
-    onSubmit: (values) =>
-      act(
-        () => call("project.save", { project_id: row ? row.project_id : null, name: values.name, scope: values.scope || null }),
-        row ? `Edited ${values.name}.` : `Created ${values.name}.`
-      ),
-  });
+// ---------------------------------------------------------------- one project
+
+function projectDetail(row) {
+  return [
+    meta(row.scope_name || t("work.project_scope_none"), t("work.project_created", { when: day(row.created_at) })),
+    h("h1", { class: "title", text: row.name }),
+    h("p", { class: "sub", text: t("work.project_tasks", { a: row.n_active, d: row.n_dormant, c: row.n_closed }) }),
+    h("div", { class: "actions" }, button(t("common.edit"), () => workTogglePanel("edit"))),
+  ];
 }
 
-function editProject(row) {
-  return projectForm(row);
+function projectForm(target, row) {
+  target.replaceChildren();
+  loadChoices()
+    .then((choices) => {
+      target.replaceChildren(
+        form({
+          title: row ? null : t("work.project_new"),
+          fields: [
+            { name: "name", label: t("work.project_name"), value: row ? row.name : "" },
+            {
+              name: "scope",
+              label: t("work.project_scope"),
+              kind: "select",
+              options: areaOptions(choices, t("work.project_scope_none")),
+              value: row ? row.scope_name || "" : "",
+            },
+          ],
+          submit: row ? t("common.save") : t("common.create"),
+          onCancel: () => {
+            work.creating = null;
+            work.panel = null;
+            renderWorkDetail();
+          },
+          onSubmit: (values) =>
+            act(async () => {
+              await call("project.save", { project_id: row ? row.project_id : null, name: values.name, scope: values.scope || null });
+              work.creating = null;
+              work.panel = null;
+            }, row ? t("work.saved") : t("work.created")),
+        })
+      );
+    })
+    .catch(fail);
 }
 
-tab("work", {
+page("work", {
+  nav: "nav.work",
+  icon: "work",
+  root: h("div", { class: "page" }, workList.pane, workDetail.pane),
+  list: workList.list,
+  selected: () => work.selected,
+  pick: pickWork,
   async load() {
     work.rows =
       work.view === "projects"
         ? (await call("work.projects")).projects
         : (await call("work.tasks", { activity: work.view })).tasks;
-    work.selected = keepSelection(shownWork(), workId, work.selected);
+    work.selected = keepSelection(shownWork().map(workId), work.selected);
     renderWork();
   },
-  buttons() {
-    const row = work.view === "projects" ? null : workRow();
-    const accept = $("accept");
-    if (accept && row && row.proposal) {
-      accept.disabled = app.busy || (row.proposal.stale && !$("stale-ok").checked);
-    }
-  },
-  status(status) {
-    const proposed = status.close_proposals.length;
-    $("work-count").textContent = proposed ? `(${proposed} proposed)` : "";
+  keys: {
+    e: () => workRow() && work.view !== "closed" && workTogglePanel("edit"),
+    n: () => workNew.click(),
   },
 });
-
-viewButtons("work-views", (view) => {
-  work.view = view;
-  work.selected = null;
-  closeForms();
-  reload().catch((error) => say(errorText(error), "error"));
-});
-$("work-search").addEventListener("input", () => {
-  work.selected = keepSelection(shownWork(), workId, work.selected);
-  renderWork();
-});
-$("task-new").addEventListener("click", () => newTask().catch((error) => say(errorText(error), "error")));
-$("project-new").addEventListener("click", () => projectForm(null).catch((error) => say(errorText(error), "error")));

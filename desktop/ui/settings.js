@@ -1,336 +1,359 @@
-// Settings: store health, what a session receives, scopes, topics, routes, and the schema.
+// Settings: store health, what a session receives, scopes, topics, routes, the checkpoint
+// interval, the schema, and the window's language.
 "use strict";
 
-const SECTIONS = [
-  ["health", "Health/status", "capacity, queues, recent evidence, and work"],
-  ["bootstrap", "Bootstrap preview", "what a session opened in a directory receives"],
-  ["scopes", "Scopes", "memory homes and their opening cost"],
-  ["topics", "Topics", "rules read when one kind of work begins"],
-  ["routes", "Routes", "directory trees mapped to scopes or ignored"],
-  ["interval", "Checkpoint interval", "how often one session may write a task's state"],
-  ["schema", "Schema/migrations", "database version and pending changes"],
-];
+const SECTIONS = ["health", "bootstrap", "scopes", "topics", "routes", "interval", "schema", "display"];
 
-const settingsTab = { section: "health", bootstrapCwd: "" };
+const settings = { section: "health", editing: null, bootstrapCwd: "", bootstrap: null };
+
+const settingsList = listPane();
+settingsList.pane.classList.add("narrow");
+const settingsDetail = detailPane();
+
+function pickSection(id) {
+  settings.section = id;
+  settings.editing = null;
+  reload().catch(fail);
+}
 
 function renderSections() {
-  fillList("settings-list", SECTIONS, {
-    idOf: ([id]) => id,
-    selected: settingsTab.section,
-    text: ([, title]) => title,
-    sub: ([, , about]) => about,
-    pick: (id) => {
-      settingsTab.section = id;
-      closeForms();
-      reload().catch((error) => say(errorText(error), "error"));
-    },
-  });
+  fillList(
+    settingsList.list,
+    [{ rows: SECTIONS.map((id) => ({ id, primary: t(`settings.${id}`), secondary: [t(`settings.${id}.about`)] })) }],
+    { selected: settings.section, onPick: pickSection }
+  );
 }
 
-/** A table of rows, each with buttons from actions(row). */
-function table(headings, rows, cells, actions) {
-  const node = element("table");
-  const head = element("tr");
-  head.append(...headings.map((heading) => element("th", heading)), element("th"));
-  node.append(head);
-  for (const row of rows) {
-    const line = element("tr");
-    line.append(...cells(row).map((cell) => element("td", cell)));
-    const buttons = element("td", undefined, "buttons");
-    buttons.append(...actions(row));
-    line.append(buttons);
-    node.append(line);
-  }
-  return node;
+/** A form in place of the section, closed by saving or cancelling. */
+function editInSection(formSpec) {
+  settings.editing = formSpec;
+  renderEditing();
 }
 
-function failureRoutes(health) {
-  const parts = health.failure_routes
-    .filter((route) => health.delivery_failures_by_route[route])
-    .map((route) => `${route} ${health.delivery_failures_by_route[route]}`);
-  return parts.length ? ` (${parts.join(", ")})` : "";
+function renderEditing() {
+  const spec = settings.editing;
+  settingsDetail.mark(`${settings.section}:edit`);
+  settingsDetail.inner.replaceChildren(
+    form({
+      ...spec,
+      onCancel: () => {
+        settings.editing = null;
+        reload().catch(fail);
+      },
+      onSubmit: (values) =>
+        act(async () => {
+          const note = await spec.onSubmit(values);
+          settings.editing = null;
+          return note;
+        }, spec.done),
+    })
+  );
 }
+
+/** A table whose rows each end in buttons from ops(row). */
+function table(headings, rows, cells, ops) {
+  return h(
+    "table",
+    { class: "table" },
+    h("thead", null, h("tr", null, headings.map((heading) => h("th", { text: heading })), h("th"))),
+    h(
+      "tbody",
+      null,
+      rows.map((row) =>
+        h(
+          "tr",
+          null,
+          cells(row).map(([text, kind]) => h("td", { class: kind || "", text })),
+          h("td", { class: "ops" }, ops(row))
+        )
+      )
+    )
+  );
+}
+
+function sectionHead(title, ...actions) {
+  return h("div", { class: "row heading-row" }, h("h1", { class: "title", text: title }), h("span", { class: "spacer" }), actions);
+}
+
+// ---------------------------------------------------------------- sections
 
 async function healthSection() {
   const health = await call("settings.health");
   const caps = health.capacities;
   const counts = health.memory_counts;
+  const failures = health.failure_routes
+    .filter((route) => health.delivery_failures_by_route[route])
+    .map((route) => `${route} ${health.delivery_failures_by_route[route]}`);
   return [
-    pairs([
-      [
-        "schema",
-        health.schema_pending.length
-          ? `${health.schema_pending.length} pending: ${health.schema_pending.join(", ")}`
-          : "up to date",
-      ],
-      ["active memories", `always ${counts.always || 0} · scope ${counts.scope || 0} · topic ${counts.topic || 0}`],
-      ["memory capacity", `always ${health.memory_always_tokens}/${caps.always} · worst ${health.memory_worst_tokens}/${caps.worst}`],
-      ["task cards", `${health.active_states} active · worst ${health.state_worst_tokens}/${caps.project} tokens`],
-      ["temporary", `${health.temporary_count} standing · ${health.temporary_tokens}/${caps.temporary} tokens`],
-      ["review queue", `${health.pending_ready} ready · ${health.pending_deferred} deferred`],
-      ["evidence", `${health.ledger_30d} ledger entries in 30 days`],
-      ["delivery health", `${health.delivery_failures_30d} suspected failures in 30 days${failureRoutes(health)}`],
-      ["knowledge unused", `${health.knowledge_unused_30d} in 30 days`],
-      ["scopes", String(health.scope_count)],
-      [
-        "topics",
-        `${health.topic_count}` +
-          (health.topic_heaviest_name
-            ? ` · heaviest ${health.topic_heaviest_name} ${health.topic_heaviest_tokens}/${caps.topic} tokens`
-            : ""),
-      ],
-      ["tasks", `${health.tasks_active} active · ${health.tasks_dormant} dormant · ${health.tasks_closed} closed`],
-    ]),
+    h("h1", { class: "title", text: t("settings.health") }),
+    section(
+      t("health.capacity"),
+      null,
+      h(
+        "div",
+        { class: "meters" },
+        meterRow(t("health.always"), health.memory_always_tokens, caps.always),
+        meterRow(t("health.worst"), health.memory_worst_tokens, caps.worst),
+        meterRow(t("health.cards"), health.state_worst_tokens, caps.project),
+        meterRow(t("health.temporary"), health.temporary_tokens, caps.temporary),
+        health.topic_heaviest_name ? meterRow(t("health.topic", { name: health.topic_heaviest_name }), health.topic_heaviest_tokens, caps.topic) : null
+      )
+    ),
+    section(
+      t("health.counts"),
+      null,
+      fieldList([
+        [t("settings.schema"), health.schema_pending.length ? t("schema.pending", { n: health.schema_pending.length }) : t("health.schema_ok")],
+        [t("health.rules"), t("health.rules_value", { always: counts.always || 0, scope: counts.scope || 0, topic: counts.topic || 0 })],
+        [t("health.queue"), t("health.queue_value", { ready: health.pending_ready, deferred: health.pending_deferred })],
+        [t("health.tasks"), t("health.tasks_value", { a: health.tasks_active, d: health.tasks_dormant, c: health.tasks_closed })],
+        [t("settings.scopes"), String(health.scope_count)],
+        [t("settings.topics"), String(health.topic_count)],
+      ])
+    ),
+    section(
+      t("health.recent"),
+      null,
+      fieldList([
+        [t("health.ledger"), t("health.n", { n: health.ledger_30d })],
+        [t("health.failures"), t("health.n", { n: health.delivery_failures_30d }) + (failures.length ? `（${failures.join(", ")}）` : "")],
+        [t("health.unused"), t("health.n", { n: health.knowledge_unused_30d })],
+      ])
+    ),
   ];
 }
 
 function bootstrapSection() {
-  const form = element("form", undefined, "row");
-  const input = element("input");
-  input.type = "text";
-  input.placeholder = "a directory, as a session would open in it";
-  input.value = settingsTab.bootstrapCwd;
-  const go = element("button", "Preview", "primary");
-  go.type = "submit";
-  form.append(input, go);
-  const result = element("div");
-  form.addEventListener("submit", async (event) => {
+  const input = h("input", { type: "text", placeholder: t("bootstrap.placeholder"), value: settings.bootstrapCwd });
+  const result = h("div");
+  const run = async (event) => {
     event.preventDefault();
-    settingsTab.bootstrapCwd = input.value.trim();
-    if (!settingsTab.bootstrapCwd) return;
+    settings.bootstrapCwd = input.value.trim();
+    if (!settings.bootstrapCwd) return;
     try {
-      result.replaceChildren(...bootstrapView(await call("settings.bootstrap", { cwd: settingsTab.bootstrapCwd })));
+      settings.bootstrap = await call("settings.bootstrap", { cwd: settings.bootstrapCwd });
+      result.replaceChildren(...bootstrapView(settings.bootstrap));
     } catch (error) {
-      say(errorText(error), "error");
+      fail(error);
     }
-  });
+  };
+  if (settings.bootstrap) result.append(...bootstrapView(settings.bootstrap));
   return [
-    element("p", "Building a preview records it as served, as an opening session would be.", "muted"),
-    form,
+    h("h1", { class: "title", text: t("settings.bootstrap") }),
+    h("p", { class: "sub", text: t("bootstrap.note") }),
+    h("form", { class: "row preview-row", on: { submit: run } }, input, h("button", { type: "submit", class: "btn primary", text: t("bootstrap.run") })),
     result,
   ];
 }
 
 function bootstrapView(answer) {
-  const memoriesOf = (rows) => bullets(rows, (row) => `${short(row.memory_id)} ${row.content}`);
+  const rules = (rows) => entries(rows, (row) => [null, row.content]);
   return [
-    pairs([
-      ["scope", `${answer.scope || "—"} · routed ${answer.routed ? "yes" : "no"}`],
-      ["schema", answer.schema_pending && answer.schema_pending.length ? `${answer.schema_pending.length} migration(s) pending` : null],
-      ["review candidates", `${answer.pending} pending`],
-      [
-        "tokens",
-        `memory ${answer.memory_tokens} · cards ${answer.card_tokens ?? answer.project_tokens} · ` +
-          `temporary ${answer.temporary_tokens}`,
-      ],
-      ["total", `${answer.tokens}/${answer.capacity}${answer.over_budget ? " · OVER CAPACITY" : ""}`],
-    ]),
-    block(`Always memories (${answer.always.length})`, memoriesOf(answer.always)),
-    block(`Scoped memories (${answer.scoped.length})`, memoriesOf(answer.scoped)),
-    block(
-      `Topics (${answer.topics.length})`,
-      bullets(answer.topics, (row) => row.line),
-      answer.topic_instruction && element("p", answer.topic_instruction, "muted")
+    h("p", { class: "sub", text: `${t("bootstrap.area")}: ${answer.scope || t("bootstrap.unrouted")}` }),
+    h(
+      "div",
+      { class: "meters preview-total" },
+      meterRow(`${t("bootstrap.total")}${answer.over_budget ? `（${t("bootstrap.over")}）` : ""}`, answer.tokens, answer.capacity)
     ),
-    block(
-      `Active task cards (${answer.states.length})`,
-      bullets(answer.states, (row) => [element("div", `${row.task}  ${row.heading}`, "muted"), element("div", row.content)]),
-      answer.task_instruction && element("p", answer.task_instruction, "muted")
-    ),
-    block(
-      `Temporary context (${answer.temporary.length})`,
-      bullets(answer.temporary, (row) => `until ${row.expires_at}  ${row.content}`)
-    ),
+    section(t("bootstrap.always"), answer.always.length, rules(answer.always)),
+    section(t("bootstrap.scoped"), answer.scoped.length, rules(answer.scoped)),
+    section(t("bootstrap.topics"), answer.topics.length, entries(answer.topics, (row) => [null, row.line])),
+    section(t("bootstrap.cards"), answer.states.length, entries(answer.states, (row) => [row.heading, row.content])),
+    section(t("bootstrap.temporary"), answer.temporary.length, entries(answer.temporary, (row) => [t("temporary.until", { when: day(row.expires_at) }), row.content])),
   ];
 }
 
 async function scopesSection() {
   const { scopes } = await call("scope.list");
   const edit = (row) =>
-    showForm("form-settings", {
-      title: row ? `Edit scope ${row.name}` : "New scope",
+    editInSection({
+      title: row ? row.name : t("scope.new"),
       fields: [
-        { name: "name", label: "scope name", value: row ? row.name : "" },
-        { name: "summary", label: "about", kind: "area", rows: 2, value: row ? row.summary : "", hint: "optional" },
+        { name: "name", label: t("scope.name"), value: row ? row.name : "" },
+        { name: "summary", label: t("scope.summary"), kind: "area", rows: 2, value: row ? row.summary : "" },
       ],
-      submit: row ? "Save" : "Create",
-      onSubmit: (values) =>
-        act(
-          async () => {
-            const saved = await call("scope.save", { scope_id: row ? row.scope_id : null, ...values });
-            if (saved.unchecked) return `Saved ${values.name}; the banned-pattern list was unavailable, so nothing was checked.`;
-            if (saved.malformed && saved.malformed.length) return `Saved ${values.name}; some banned-pattern lines could not be compiled.`;
-            return "";
-          },
-          `Saved scope ${values.name}.`
-        ),
+      submit: row ? t("common.save") : t("common.create"),
+      done: t("scope.saved"),
+      onSubmit: async (values) => {
+        const saved = await call("scope.save", { scope_id: row ? row.scope_id : null, ...values });
+        if (saved.unchecked) return t("scope.unchecked");
+        if (saved.malformed && saved.malformed.length) return t("scope.malformed");
+        return "";
+      },
     });
   return [
-    rowOf(button("New scope…", () => edit(null))),
-    scopes.length
-      ? table(
-          ["scope", "memories", "pushed tokens", "about"],
-          scopes,
-          (row) => [row.name, String(row.n_active), String(row.push_tokens), row.summary || "—"],
-          (row) => [button("Edit…", () => edit(row))]
-        )
-      : element("p", "No scopes yet.", "muted"),
+    sectionHead(t("settings.scopes"), button(t("scope.new"), () => edit(null))),
+    table(
+      [t("scope.name"), t("scope.rules"), t("scope.tokens"), t("scope.summary")],
+      scopes,
+      (row) => [
+        [row.name, "name"],
+        [String(row.n_active), row.n_active ? "num" : "num zero"],
+        [`${row.push_tokens} token`, row.push_tokens ? "num" : "num zero"],
+        [row.summary || "", "muted"],
+      ],
+      (row) => [button(t("common.edit"), () => edit(row), { kind: "quiet small" })]
+    ),
   ];
 }
 
 async function topicsSection() {
   const [{ topics, capacity }, choices] = await Promise.all([call("topic.list"), loadChoices()]);
-  const scopeChoices = [["", "every session"], ...choices.scopes.map((name) => [name, name])];
   const edit = (row) =>
-    showForm("form-settings", {
-      title: row ? `Edit topic ${row.name}` : "New topic",
+    editInSection({
+      title: row ? row.name : t("topic.new"),
       fields: [
-        { name: "name", label: "topic name", value: row ? row.name : "", hint: "at most 40 characters" },
-        { name: "trigger", label: "when to read it", value: row ? row.trigger : "", hint: "one sentence, at most 160 characters" },
-        { name: "scope", label: "listed in scope", kind: "select", options: scopeChoices, value: row ? row.scope_name || "" : "" },
+        { name: "name", label: t("topic.name"), value: row ? row.name : "", max: 40 },
+        { name: "trigger", label: t("topic.trigger"), value: row ? row.trigger : "", hint: t("topic.trigger_hint"), max: 160 },
+        { name: "scope", label: t("topic.area"), kind: "select", options: areaOptions(choices, t("topic.area_all")), value: row ? row.scope_name || "" : "" },
         ...(row
           ? [
-              {
-                name: "action",
-                label: "action",
-                value: row.action || "",
-                hint: "the tool calls whose start shows its rules (delegate = Agent / Task subagent calls); empty removes it",
-              },
-              {
-                name: "source",
-                label: "source",
-                value: row.source || "",
-                hint: "the note or document it comes from, from the vault or repository root; empty removes it",
-              },
+              { name: "action", label: t("topic.action"), value: row.action || "", hint: t("topic.action_hint") },
+              { name: "source", label: t("topic.source"), value: row.source || "", hint: t("topic.source_hint") },
             ]
           : []),
       ],
-      submit: row ? "Save" : "Create",
-      onSubmit: (values) =>
-        act(
-          () => call("topic.save", { topic_id: row ? row.topic_id : null, ...values, scope: values.scope || null }),
-          `Saved topic ${values.name}.`
-        ),
+      submit: row ? t("common.save") : t("common.create"),
+      done: t("topic.saved"),
+      onSubmit: (values) => call("topic.save", { topic_id: row ? row.topic_id : null, ...values, scope: values.scope || null }).then(() => ""),
     });
-  const remove = (row) =>
-    confirmBox(
-      `Remove topic ${row.name}?`,
-      ["A topic past rules or proposals name is archived instead of deleted."],
-      "Remove",
-      () =>
-        act(async () => {
-          const removed = await call("topic.remove", { topic_id: row.topic_id });
-          return removed.removed === "archived" ? `Archived topic ${row.name}; past rules or proposals name it.` : "";
-        }, `Deleted topic ${row.name}.`)
-    );
+  const remove = async (row) => {
+    const yes = await confirmDialog({ title: t("topic.remove_confirm"), lines: [row.name, t("topic.remove_note")], confirm: t("common.remove"), danger: true });
+    if (!yes) return;
+    act(async () => {
+      const removed = await call("topic.remove", { topic_id: row.topic_id });
+      return removed.removed === "archived" ? t("topic.archived") : "";
+    }, t("topic.removed"));
+  };
   return [
-    rowOf(button("New topic…", () => edit(null))),
-    topics.length
-      ? table(
-          ["topic", "listed in", "rules", "tokens", "trigger", "source"],
-          topics,
-          (row) => [
-            row.name + (row.action ? ` · before: ${row.action}` : ""),
-            row.scope_name || "every session",
-            String(row.rules),
-            `body ${row.body_tokens}/${capacity} · line ${row.line_tokens}`,
-            row.trigger,
-            row.source_text || "—",
-          ],
-          (row) => [button("Edit…", () => edit(row)), button("Remove", () => remove(row), "danger")]
-        )
-      : element("p", "No topics yet.", "muted"),
+    sectionHead(t("settings.topics"), button(t("topic.new"), () => edit(null))),
+    table(
+      [t("topic.name"), t("topic.trigger"), t("topic.rules"), t("topic.tokens")],
+      topics,
+      (row) => [
+        [row.name + (row.scope_name ? `\n${row.scope_name}` : ""), "name"],
+        [row.trigger, "muted"],
+        [String(row.rules), "num"],
+        [`${row.body_tokens} / ${capacity}`, "num"],
+      ],
+      (row) => [button(t("common.edit"), () => edit(row), { kind: "quiet small" }), button(t("common.remove"), () => remove(row), { kind: "quiet small danger" })]
+    ),
   ];
 }
 
 async function routesSection() {
   const [{ routes }, choices] = await Promise.all([call("route.list"), loadChoices()]);
   const edit = (row) =>
-    showForm("form-settings", {
-      title: row ? `Edit route ${row.path_prefix}` : "New route",
+    editInSection({
+      title: row ? tilde(row.path_prefix) : t("route.new"),
       fields: [
-        { name: "path", label: "directory path", value: row ? row.path_prefix : "" },
-        {
-          name: "scope",
-          label: "scope",
-          kind: "select",
-          options: [["", "ignored on purpose"], ...choices.scopes.map((name) => [name, name])],
-          value: row ? row.scope_name || "" : "",
-        },
+        { name: "path", label: t("route.path"), value: row ? row.path_prefix : "" },
+        { name: "scope", label: t("route.area"), kind: "select", options: areaOptions(choices, t("route.ignored")), value: row ? row.scope_name || "" : "" },
       ],
-      submit: row ? "Save" : "Add",
-      onSubmit: (values) =>
-        act(
-          () => call("route.save", { route_id: row ? row.route_id : null, path: values.path, scope: values.scope || null }),
-          `Routed ${values.path} to ${values.scope || "nothing (ignored)"}.`
-        ),
+      submit: row ? t("common.save") : t("common.add"),
+      done: t("route.saved"),
+      onSubmit: (values) => call("route.save", { route_id: row ? row.route_id : null, path: values.path, scope: values.scope || null }).then(() => ""),
     });
-  const remove = (row) =>
-    confirmBox(`Remove route ${row.path_prefix}?`, [], "Remove", () =>
-      act(() => call("route.remove", { path: row.path_prefix }), `Removed ${row.path_prefix}.`)
-    );
+  const remove = async (row) => {
+    const yes = await confirmDialog({ title: t("route.remove_confirm"), lines: [tilde(row.path_prefix)], confirm: t("common.remove"), danger: true });
+    if (yes) act(() => call("route.remove", { path: row.path_prefix }), t("route.removed"));
+  };
+  const sorted = [...routes].sort((a, b) => a.path_prefix.localeCompare(b.path_prefix));
   return [
-    rowOf(button("New route…", () => edit(null))),
-    routes.length
-      ? table(
-          ["directory", "scope"],
-          routes,
-          (row) => [row.path_prefix, row.scope_name || "ignored"],
-          (row) => [button("Edit…", () => edit(row)), button("Remove", () => remove(row), "danger")]
-        )
-      : element("p", "No routes yet.", "muted"),
+    sectionHead(t("settings.routes"), button(t("route.new"), () => edit(null))),
+    table(
+      [t("route.path"), t("route.area")],
+      sorted,
+      (row) => [[tilde(row.path_prefix), "mono"], row.scope_name ? [row.scope_name, "name"] : [t("route.ignored"), "muted"]],
+      (row) => [button(t("common.edit"), () => edit(row), { kind: "quiet small" }), button(t("common.remove"), () => remove(row), { kind: "quiet small danger" })]
+    ),
   ];
 }
 
 async function intervalSection() {
   const { minutes, max } = await call("interval.get");
-  const form = element("form", undefined, "row");
-  const input = element("input");
-  input.type = "number";
+  const input = h("input", { type: "number", value: String(minutes) });
   input.min = "0";
   input.max = String(max);
-  input.value = String(minutes);
-  const save = element("button", "Save", "primary");
-  save.type = "submit";
-  form.append(input, element("span", "minutes (0 for no limit)", "muted"), save);
-  form.addEventListener("submit", (event) => {
+  const submit = (event) => {
     event.preventDefault();
     const wanted = Number(input.value);
     if (!Number.isInteger(wanted)) {
-      say(`${input.value} is not a whole number of minutes.`, "warn");
+      toast(t("interval.not_whole"), "warn");
       return;
     }
-    act(() => call("interval.set", { minutes: wanted }), `Checkpoint interval set to ${wanted} minutes.`);
-  });
+    act(() => call("interval.set", { minutes: wanted }), t("interval.saved", { n: wanted }));
+  };
   return [
-    element(
-      "p",
-      minutes === 0
-        ? "One session may write a task's state as often as it likes."
-        : `Once every ${minutes} minutes. A second write inside that time is refused whatever it carries, ` +
-            "and the session's next MCP call reads a changed value."
+    h("h1", { class: "title", text: t("settings.interval") }),
+    h("p", { class: "sub", text: minutes === 0 ? t("interval.none") : t("interval.every", { n: minutes }) }),
+    h(
+      "form",
+      { class: "row interval-row", on: { submit } },
+      input,
+      h("span", { class: "sub", text: t("interval.minutes") }),
+      h("button", { type: "submit", class: "btn primary", text: t("common.save") })
     ),
-    form,
   ];
 }
 
 async function schemaSection() {
   const { pending } = await call("schema.status");
-  if (!pending.length) return [element("p", "Schema is up to date.")];
+  const nodes = [h("h1", { class: "title", text: t("settings.schema") })];
+  if (!pending.length) return [...nodes, h("p", { class: "sub", text: t("schema.ok") })];
   return [
-    element("p", `${pending.length} migration(s) pending`, "warn"),
-    bullets(pending, (name) => name),
-    rowOf(button(
-        "Apply migrations…",
-        () =>
-          confirmBox(`Apply ${pending.length} pending migration(s)?`, pending, "Apply", () =>
-            act(async () => {
-              const { applied } = await call("schema.migrate");
-              return applied.length ? "" : "The schema was already up to date.";
-            }, "Applied the pending migrations.")
-          ),
-        "primary"
-      )),
+    ...nodes,
+    h("div", { class: "callout warn" }, h("p", { text: t("schema.pending", { n: pending.length }) })),
+    entries(pending, (name) => [null, name]),
+    h(
+      "div",
+      { class: "actions" },
+      button(
+        t("schema.apply"),
+        async () => {
+          const yes = await confirmDialog({ title: t("schema.apply_confirm"), list: pending, confirm: t("schema.apply") });
+          if (!yes) return;
+          act(async () => {
+            const { applied } = await call("schema.migrate");
+            return applied.length ? "" : t("schema.ok");
+          }, t("schema.applied"));
+        },
+        { kind: "primary" }
+      )
+    ),
+  ];
+}
+
+function displaySection() {
+  return [
+    h("h1", { class: "title", text: t("settings.display") }),
+    section(
+      t("display.language"),
+      null,
+      h(
+        "div",
+        { class: "radio-list narrow" },
+        LANGUAGES.map(([value, label]) =>
+          h(
+            "label",
+            null,
+            h("input", {
+              type: "radio",
+              name: "language",
+              value,
+              checked: value === language,
+              on: {
+                change: () => {
+                  setLanguage(value);
+                  location.reload();
+                },
+              },
+            }),
+            h("span", null, h("div", { class: "what", text: label }))
+          )
+        )
+      )
+    ),
   ];
 }
 
@@ -342,12 +365,20 @@ const SECTION_VIEWS = {
   routes: routesSection,
   interval: intervalSection,
   schema: schemaSection,
+  display: async () => displaySection(),
 };
 
-tab("settings", {
+page("settings", {
+  nav: "nav.settings",
+  icon: "settings",
+  root: h("div", { class: "page" }, settingsList.pane, settingsDetail.pane),
+  list: settingsList.list,
+  selected: () => settings.section,
+  pick: pickSection,
   async load() {
     renderSections();
-    const [, title] = SECTIONS.find(([id]) => id === settingsTab.section);
-    $("settings-body").replaceChildren(element("h2", title, "title"), ...(await SECTION_VIEWS[settingsTab.section]()));
+    if (settings.editing) return renderEditing();
+    settingsDetail.mark(settings.section);
+    settingsDetail.inner.replaceChildren(...(await SECTION_VIEWS[settings.section]()).filter(Boolean));
   },
 });

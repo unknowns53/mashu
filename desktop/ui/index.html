@@ -1,164 +1,28 @@
 <!doctype html>
-<html lang="en">
+<html lang="ja">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mashu</title>
   <link rel="stylesheet" href="style.css">
+  <script src="i18n.js" defer></script>
   <script src="core.js" defer></script>
-  <script src="home.js" defer></script>
-  <script src="review.js" defer></script>
-  <script src="changes.js" defer></script>
+  <script src="inbox.js" defer></script>
   <script src="memories.js" defer></script>
   <script src="work.js" defer></script>
   <script src="settings.js" defer></script>
   <script src="main.js" defer></script>
 </head>
 <body>
-  <header>
-    <nav class="tabs" role="tablist">
-      <button type="button" role="tab" id="tab-home">Home</button>
-      <button type="button" role="tab" id="tab-review">Review <span id="review-count"></span></button>
-      <button type="button" role="tab" id="tab-changes">Changes <span id="change-count"></span></button>
-      <button type="button" role="tab" id="tab-memories">Memories</button>
-      <button type="button" role="tab" id="tab-work">Work <span id="work-count"></span></button>
-      <button type="button" role="tab" id="tab-settings">Settings</button>
-    </nav>
-    <button type="button" id="refresh">Check now</button>
-  </header>
-  <p id="message" role="status" hidden></p>
-  <div id="prompt" class="prompt" hidden></div>
-
-  <main id="pane-home" hidden>
-    <article class="wide">
-      <div id="home-cards"></div>
-    </article>
-  </main>
-
-  <main id="pane-review" hidden>
-    <aside aria-label="candidates">
-      <div class="toolbar">
-        <label class="toggle"><input type="checkbox" id="include-deferred"> include deferred</label>
-      </div>
-      <ul id="queue" class="list"></ul>
-      <p id="empty" class="muted" hidden>Nothing waiting for review.</p>
-    </aside>
-    <article id="detail" hidden>
-      <p id="meta" class="muted"></p>
-      <p id="deferred-note" class="warn" hidden></p>
-      <div id="content" class="body"></div>
-      <form id="edit-form" hidden>
-        <textarea id="edit-text" rows="6"></textarea>
-        <div class="row">
-          <button type="submit">Save wording</button>
-          <button type="button" id="edit-cancel">Cancel</button>
-          <span class="muted">Saving keeps it pending; admit afterwards.</span>
-        </div>
-      </form>
-      <section id="conflicts" hidden>
-        <h3>Retired conflicts</h3>
-        <ul id="conflict-list"></ul>
-        <label><input type="checkbox" id="conflicts-read"> I have read why these were retired</label>
-      </section>
-      <section>
-        <h3>Evidence</h3>
-        <ul id="evidence-list"></ul>
-      </section>
-      <div id="form-review" class="form-host" hidden></div>
-      <section class="actions">
-        <div class="row">
-          <button type="button" id="admit" class="primary">Admit…</button>
-          <button type="button" id="edit">Edit wording</button>
-        </div>
-        <div class="row">
-          <input id="reason" type="text" placeholder="why turn it down or put it off">
-          <button type="button" id="decline" class="danger">Turn down</button>
-          <button type="button" id="defer">Put off</button>
-        </div>
-      </section>
-    </article>
-  </main>
-
-  <main id="pane-changes" hidden>
-    <aside aria-label="proposed Memory changes">
-      <ul id="change-list" class="list"></ul>
-      <p id="no-changes" class="muted" hidden>No proposed Memory changes.</p>
-    </aside>
-    <article id="change-detail" hidden>
-      <div id="change-body"></div>
-      <section class="actions">
-        <label id="change-read-row" hidden><input type="checkbox" id="change-read"> I have read why these were retired</label>
-        <div class="row">
-          <button type="button" id="change-apply" class="primary">Apply</button>
-          <button type="button" id="change-edit">Edit reason</button>
-        </div>
-        <div class="row">
-          <input id="change-reason" type="text" placeholder="why decline or withdraw it">
-          <button type="button" id="change-decline" class="danger">Decline</button>
-          <button type="button" id="change-withdraw">Withdraw</button>
-        </div>
-      </section>
-      <div id="form-changes" class="form-host" hidden></div>
-    </article>
-  </main>
-
-  <main id="pane-memories" hidden>
-    <aside aria-label="memories">
-      <div class="toolbar">
-        <div class="views" id="memory-views">
-          <button type="button" data-view="active" aria-pressed="true">Active</button>
-          <button type="button" data-view="retired" aria-pressed="false">Retired</button>
-          <button type="button" data-view="temporary" aria-pressed="false">Temporary</button>
-        </div>
-        <input id="memory-search" type="search" placeholder="search">
-        <div class="row">
-          <button type="button" id="memory-new">Remember…</button>
-          <button type="button" id="temporary-new">Temporary…</button>
-        </div>
-      </div>
-      <ul id="memory-list" class="list"></ul>
-      <p id="no-memories" class="muted" hidden>Nothing here.</p>
-    </aside>
-    <article>
-      <div id="form-memories" class="form-host" hidden></div>
-      <div id="memory-body"></div>
-      <div id="memory-actions" class="actions row"></div>
-    </article>
-  </main>
-
-  <main id="pane-work" hidden>
-    <aside aria-label="tasks and projects">
-      <div class="toolbar">
-        <div class="views" id="work-views">
-          <button type="button" data-view="active" aria-pressed="true">Active</button>
-          <button type="button" data-view="dormant" aria-pressed="false">Dormant</button>
-          <button type="button" data-view="closed" aria-pressed="false">Closed</button>
-          <button type="button" data-view="projects" aria-pressed="false">Projects</button>
-        </div>
-        <input id="work-search" type="search" placeholder="search">
-        <div class="row">
-          <button type="button" id="task-new">New task…</button>
-          <button type="button" id="project-new">New project…</button>
-        </div>
-      </div>
-      <ul id="work-list" class="list"></ul>
-      <p id="no-work" class="muted" hidden>Nothing here.</p>
-    </aside>
-    <article>
-      <div id="form-work" class="form-host" hidden></div>
-      <div id="work-body"></div>
-      <div id="work-actions" class="actions"></div>
-    </article>
-  </main>
-
-  <main id="pane-settings" hidden>
-    <aside aria-label="settings">
-      <ul id="settings-list" class="list"></ul>
-    </aside>
-    <article>
-      <div id="form-settings" class="form-host" hidden></div>
-      <div id="settings-body"></div>
-    </article>
-  </main>
+  <nav class="nav" aria-label="Mashu">
+    <div class="nav-items" id="nav-items"></div>
+    <div class="nav-foot">
+      <span class="checked" id="checked"></span>
+      <button type="button" class="btn quiet icon" id="refresh"></button>
+    </div>
+  </nav>
+  <div class="page" id="page"></div>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <dialog id="dialog"></dialog>
 </body>
 </html>

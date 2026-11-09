@@ -1,4 +1,4 @@
-// What every tab shares. Every change goes through `mashu desktop-backend`; nothing is
+// What every page shares. Every change goes through `mashu desktop-backend`; nothing is
 // decided here. Stored text is only ever set as textContent, never parsed as markup.
 "use strict";
 
@@ -7,7 +7,127 @@ const { listen } = window.__TAURI__.event;
 
 const $ = (id) => document.getElementById(id);
 
-const app = { busy: false, current: null, tabs: new Map() };
+const app = { busy: false, current: null, pages: new Map(), status: null, schemaWarned: false };
+
+// ---------------------------------------------------------------- elements
+
+/**
+ * An element. `props` sets class, text, title, type, value, checked, disabled, hidden, for,
+ * placeholder, and on (event handlers); anything else becomes an attribute. Null and false
+ * children are skipped; strings become text.
+ */
+function h(tag, props, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props || {})) {
+    if (value === undefined || value === null || value === false) continue;
+    if (key === "class") node.className = value;
+    else if (key === "text") node.textContent = value;
+    else if (key === "on") for (const [type, fn] of Object.entries(value)) node.addEventListener(type, fn);
+    else if (["value", "checked", "disabled", "hidden", "title", "type", "placeholder", "rows"].includes(key)) node[key] = value;
+    else node.setAttribute(key, value === true ? "" : String(value));
+  }
+  append(node, children);
+  return node;
+}
+
+function append(node, children) {
+  for (const child of children.flat(Infinity)) {
+    if (child === null || child === undefined || child === false || child === "") continue;
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+  }
+  return node;
+}
+
+const ICONS = {
+  inbox: "M4 13h4l1.5 3h5L16 13h4M4 13l2.5-7.5A2 2 0 0 1 8.4 4h7.2a2 2 0 0 1 1.9 1.5L20 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z",
+  rules: "M6 4h11a1 1 0 0 1 1 1v15l-6-3.5L6 20V5a1 1 0 0 1 0-1z",
+  work: "M9 6h11M9 12h11M9 18h11M4.5 6l1 1 2-2M4.5 12l1 1 2-2M4.5 18l1 1 2-2",
+  settings:
+    "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z",
+  refresh: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7",
+  search: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-3.5-3.5",
+  plus: "M12 5v14M5 12h14",
+  close: "M6 6l12 12M18 6 6 18",
+};
+
+function icon(name) {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.8");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(ns, "path");
+  path.setAttribute("d", ICONS[name]);
+  svg.append(path);
+  return svg;
+}
+
+function button(text, onClick, { kind = "", title, disabled, id } = {}) {
+  return h("button", { type: "button", class: `btn ${kind}`.trim(), text, title, disabled, id, on: { click: onClick } });
+}
+
+// ---------------------------------------------------------------- values
+
+function short(id) {
+  return String(id || "").slice(0, 8);
+}
+
+function day(value) {
+  return String(value || "").slice(0, 10);
+}
+
+/** Today, yesterday, n days ago, or the date when it is further back than a month. */
+function when(value) {
+  const at = Date.parse(value);
+  if (Number.isNaN(at)) return day(value);
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const days = Math.ceil((start.getTime() - at) / 86400000);
+  if (days <= 0) return t("common.today");
+  if (days === 1) return t("common.yesterday");
+  if (days <= 30) return t("common.days_ago", { n: days });
+  return day(value);
+}
+
+function clock(date = new Date()) {
+  return date.toLocaleTimeString(language === "ja" ? "ja-JP" : "en-US", { hour: "2-digit", minute: "2-digit" });
+}
+
+/** Who wrote something, with the user named as such. */
+function who(actor) {
+  if (actor === "user") return t("common.by_user");
+  if (actor === "agent") return t("common.by_agent");
+  return actor || "-";
+}
+
+/** A path from the home directory written from ~, as the store writes them. */
+function tilde(path) {
+  return String(path || "").replace(/^(\/Users\/[^/]+|\/home\/[^/]+|[A-Za-z]:\\Users\\[^\\]+)(?=$|[/\\])/, "~");
+}
+
+/** Text the backend writes in English for one fixed case, said in the window's language. */
+function evidenceText(row, key) {
+  const text = row[key];
+  if (key === "what" && ["explicit", "claimed", "proposed"].includes(row.kind)) return t(`evidence.text.${row.kind}`);
+  return text;
+}
+
+function errorText(error) {
+  return String((error && error.message) || error);
+}
+
+/** Whether a search occurs, ignoring case, in any of the values given. */
+function matches(query, ...values) {
+  if (!query) return true;
+  const needle = query.toLowerCase();
+  return values.some((value) => JSON.stringify(value ?? "").toLowerCase().includes(needle));
+}
+
+// ---------------------------------------------------------------- the store
 
 /** The result, or an Error whose `reply` carries the refusal's details (conflicts, candidates…). */
 async function call(op, args = {}) {
@@ -20,360 +140,475 @@ async function call(op, args = {}) {
   return reply.result;
 }
 
-function errorText(error) {
-  return String((error && error.message) || error);
+function loadChoices() {
+  return call("choices");
 }
 
-function say(text, kind = "") {
-  const message = $("message");
-  message.textContent = text;
-  message.className = kind;
-  message.hidden = !text;
+// ---------------------------------------------------------------- feedback
+
+/** A note in the corner: success fades on its own, a warning or error stays until closed. */
+function toast(text, kind = "ok") {
+  if (!text) return;
+  const node = h("div", { class: `toast ${kind}`, role: kind === "error" ? "alert" : "status" }, h("div", { class: "text", text }));
+  const close = () => node.remove();
+  node.append(h("button", { type: "button", class: "btn quiet icon small", title: t("common.close"), on: { click: close } }, icon("close")));
+  $("toasts").append(node);
+  if (kind === "ok") setTimeout(close, 3500);
 }
 
-function element(tag, text, className) {
-  const node = document.createElement(tag);
-  if (text !== undefined && text !== null) node.textContent = text;
-  if (className) node.className = className;
-  return node;
+function fail(error) {
+  toast(errorText(error), "error");
 }
 
-function short(id) {
-  return String(id).slice(0, 8);
-}
-
-function day(value) {
-  return String(value || "").slice(0, 10);
-}
-
-function ageDays(value) {
-  const at = Date.parse(value);
-  return Number.isNaN(at) ? 0 : Math.max(0, Math.floor((Date.now() - at) / 86400000));
-}
-
-/** The id still on screen if it is, otherwise the first row's. */
-function keepSelection(rows, idOf, current) {
-  if (rows.some((row) => idOf(row) === current)) return current;
-  return rows.length ? idOf(rows[0]) : null;
-}
-
-/**
- * Fill a clickable list. `text` and `sub` give each row's two lines; `mark` may give a
- * leading {text, className}; `dim` greys a row out.
- */
-function fillList(listId, rows, { idOf, selected, text, sub, mark, dim, pick }) {
-  $(listId).replaceChildren(
-    ...rows.map((row) => {
-      const item = element("li");
-      item.setAttribute("aria-selected", String(idOf(row) === selected));
-      if (dim && dim(row)) item.classList.add("dim");
-      const line = element("span", undefined, "line");
-      const leading = mark && mark(row);
-      if (leading) line.append(element("span", `${leading.text} `, leading.className));
-      line.append(text(row));
-      item.append(line, element("span", sub(row), "sub"));
-      item.addEventListener("click", () => pick(idOf(row)));
-      return item;
-    })
-  );
-}
-
-/** Label and value pairs as a definition list, lists shown one item per line. */
-function fillFields(listId, pairs, empty = "(nothing written)") {
-  const shown = pairs.filter(
-    ([, value]) => value !== null && value !== undefined && value !== "" &&
-      (!Array.isArray(value) || value.length)
-  );
-  const list = $(listId);
-  list.replaceChildren(
-    ...shown.flatMap(([label, value]) => [
-      element("dt", label),
-      element("dd", Array.isArray(value) ? value.map((item) => `• ${item}`).join("\n") : String(value)),
-    ])
-  );
-  if (!shown.length) list.replaceChildren(element("dd", empty, "muted"));
-}
-
-/** A titled section around the nodes given; null and false children are skipped. */
-function block(title, ...children) {
-  const node = element("section");
-  if (title) node.append(element("h3", title));
-  node.append(...children.filter(Boolean));
-  return node;
-}
-
-/** Label and value pairs as a definition list node, leaving out the empty ones. */
-function pairs(list) {
-  const node = element("dl");
-  for (const [label, value] of list) {
-    if (value === null || value === undefined || value === "") continue;
-    if (Array.isArray(value) && !value.length) continue;
-    node.append(
-      element("dt", label),
-      element("dd", Array.isArray(value) ? value.map((item) => `• ${item}`).join("\n") : String(value))
-    );
-  }
-  return node;
-}
-
-/** A list whose items are render(item): a string or an array of nodes and strings. */
-function bullets(list, render, empty = "none") {
-  if (!list || !list.length) return element("p", empty, "muted");
-  const node = element("ul");
-  for (const entry of list) {
-    const item = element("li");
-    const shown = render(entry);
-    item.append(...(Array.isArray(shown) ? shown : [shown]));
-    node.append(item);
-  }
-  return node;
-}
-
-function rowOf(...nodes) {
-  const node = element("div", undefined, "row");
-  node.append(...nodes);
-  return node;
-}
-
-function button(text, onClick, className) {
-  const node = element("button", text, className);
-  node.type = "button";
-  node.addEventListener("click", onClick);
-  return node;
-}
-
-/** Fill a select with [value, label] pairs, keeping the chosen value where it still exists. */
-function fillSelect(selectId, options, chosen) {
-  const select = $(selectId);
-  select.replaceChildren(
-    ...options.map(([value, label]) => {
-      const option = element("option", label);
-      option.value = value;
-      return option;
-    })
-  );
-  if (chosen !== undefined && options.some(([value]) => value === chosen)) select.value = chosen;
+/** Ask before something that cannot be taken back. Resolves true on the confirming button. */
+function confirmDialog({ title, lines = [], list = [], confirm, danger = false }) {
+  const dialog = $("dialog");
+  return new Promise((resolve) => {
+    const finish = (answer) => {
+      dialog.close();
+      resolve(answer);
+    };
+    const yes = button(confirm, () => finish(true), { kind: danger ? "danger solid" : "primary" });
+    dialog.replaceChildren();
+    append(dialog, [
+      h("h1", { text: title }),
+      lines.map((line) => h("p", { text: line })),
+      list.length ? h("ul", null, list.map((line) => h("li", { text: line }))) : null,
+      h("div", { class: "form-actions" }, button(t("common.cancel"), () => finish(false)), yes),
+    ]);
+    dialog.onclose = () => resolve(false);
+    dialog.showModal();
+    yes.focus();
+  });
 }
 
 /**
- * Register a tab. A tab may define load() to read what it shows, buttons() to set which
- * of its controls can be used, and status(s) to show its count on the tab.
- */
-function tab(name, spec) {
-  app.tabs.set(name, spec);
-  $(`tab-${name}`).addEventListener("click", () => show(name).catch((e) => say(errorText(e), "error")));
-}
-
-async function show(name) {
-  app.current = name;
-  $("prompt").hidden = true;
-  closeForms();
-  for (const other of app.tabs.keys()) {
-    $(`tab-${other}`).setAttribute("aria-selected", String(other === name));
-    $(`pane-${other}`).hidden = other !== name;
-  }
-  await reload();
-}
-
-function updateButtons() {
-  for (const spec of app.tabs.values()) if (spec.buttons) spec.buttons();
-}
-
-function showStatus(status) {
-  for (const spec of app.tabs.values()) if (spec.status) spec.status(status);
-  if (status.schema_pending.length) {
-    say("The store is behind the code; run 'mashu admin migrate'.", "warn");
-  }
-}
-
-async function reload(keepMessage = false) {
-  const spec = app.tabs.get(app.current);
-  const [status] = await Promise.all([call("status"), spec.load ? spec.load() : null]);
-  if (!keepMessage) say("");
-  showStatus(status);
-  updateButtons();
-}
-
-/**
- * Carry one decision to the store, then read everything again. work() may return a
- * warning string to show instead of `done`; anything else it returns is ignored.
- * handle(error) may take a refusal over, returning true.
+ * Carry one decision to the store, then read everything again. work() may return a warning
+ * string to show instead of `done`. handle(error) may take a refusal over, returning true.
  */
 async function act(work, done, handle) {
   if (app.busy) return;
   app.busy = true;
-  $("prompt").hidden = true;
-  updateButtons();
+  document.body.dataset.busy = "";
   try {
     const returned = await work();
     const note = typeof returned === "string" ? returned : "";
-    closeForms();
-    await reload(true);
-    say(note || done, note ? "warn" : "");
+    await reload();
+    toast(note || done, note ? "warn" : "ok");
   } catch (error) {
-    if (!(handle && handle(error))) say(errorText(error), "error");
+    if (!(handle && handle(error))) fail(error);
   } finally {
     app.busy = false;
-    updateButtons();
+    delete document.body.dataset.busy;
   }
 }
 
-/** Ask once before something that cannot be taken back; nothing happens on Cancel. */
-function confirmBox(text, lines, yesLabel, onYes) {
-  const box = $("prompt");
-  const yes = element("button", yesLabel, "primary");
-  const no = element("button", "Cancel");
-  yes.type = no.type = "button";
-  yes.addEventListener("click", () => {
-    box.hidden = true;
-    onYes();
-  });
-  no.addEventListener("click", () => {
-    box.hidden = true;
-  });
-  const row = element("div", undefined, "row");
-  row.append(yes, no);
-  box.replaceChildren(element("p", text), ...lines.map((line) => element("p", line, "muted")), row);
-  box.hidden = false;
-  yes.focus();
-}
-
 /**
- * Send a write that may repeat retired rules. When it does, show why they were retired
- * and offer to send it again acknowledging exactly those.
+ * Send a write that may repeat retired rules. When it does, show why they were retired and
+ * offer to send it again acknowledging exactly those.
  */
 function acknowledging(send, done) {
-  act(() => send(undefined), done, (error) => {
+  return act(() => send(undefined), done, (error) => {
     const conflicts = error.reply && error.reply.conflicts;
     if (!conflicts) return false;
-    say(errorText(error), "warn");
-    confirmBox(
-      "This repeats rules that were retired. Read why before writing it back.",
-      conflicts.map(
-        (row) =>
-          `${short(row.memory_id)} · ${row.retirement_kind || "legacy"} · ${day(row.retired_at)}: ` +
-          `${row.retire_reason}`
+    confirmDialog({
+      title: t("conflicts.prompt"),
+      list: conflicts.map(
+        (row) => `${named("retire.kind", row.retirement_kind || "legacy")} · ${day(row.retired_at)} — ${row.retire_reason}`
       ),
-      "Write it anyway",
-      () => act(() => send(conflicts.map((row) => row.memory_id)), done)
-    );
+      confirm: t("conflicts.write_anyway"),
+      danger: true,
+    }).then((yes) => {
+      if (yes) act(() => send(conflicts.map((row) => row.memory_id)), done);
+    });
     return true;
   });
 }
 
+// ---------------------------------------------------------------- pages
+
 /**
- * Show a form in the host element. Each field is {name, label, kind, value, options,
- * hint, placeholder, show}: kind is text, area, lines (one item per line), select, or
- * number; show(values) hides the field while it returns false.
+ * Register a page. `spec` gives nav (the nav key and icon), root (built once), load() to read
+ * what it shows, badge(status) for the number on its nav item, and keys for shortcuts.
  */
-function showForm(hostId, { title, fields, submit = "Save", onSubmit }) {
-  const host = $(hostId);
-  const form = element("form", undefined, "editor");
-  form.append(element("h3", title));
+function page(name, spec) {
+  app.pages.set(name, spec);
+  const item = h(
+    "button",
+    { type: "button", class: "nav-item", id: `nav-${name}`, on: { click: () => show(name).catch(fail) } },
+    icon(spec.icon),
+    h("span", { class: "label", text: t(spec.nav) }),
+    h("span", { class: "badge", hidden: true })
+  );
+  $("nav-items").append(item);
+}
+
+async function show(name) {
+  app.current = name;
+  for (const other of app.pages.keys()) {
+    const item = $(`nav-${other}`);
+    if (other === name) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  }
+  $("page").replaceChildren(app.pages.get(name).root);
+  await reload();
+}
+
+async function reload() {
+  const spec = app.pages.get(app.current);
+  const [status] = await Promise.all([call("status"), spec.load ? spec.load() : null]);
+  showStatus(status);
+}
+
+function showStatus(status) {
+  app.status = status;
+  for (const [name, spec] of app.pages) {
+    const badge = $(`nav-${name}`).querySelector(".badge");
+    const n = spec.badge ? spec.badge(status) : 0;
+    badge.hidden = !n;
+    badge.textContent = String(n);
+  }
+  $("checked").textContent = t("nav.checked", { time: clock() });
+  if (status.schema_pending.length && !app.schemaWarned) {
+    app.schemaWarned = true;
+    toast(t("common.schema_behind"), "warn");
+  }
+}
+
+// ---------------------------------------------------------------- the list pane
+
+/** A list pane: a head (controls) over a scrolling list. */
+function listPane(...head) {
+  const list = h("div", { class: "list-scroll" });
+  const pane = h("div", { class: "list-pane" }, head.length ? h("div", { class: "list-head" }, head) : null, list);
+  return { pane, list };
+}
+
+function detailPane() {
+  const inner = h("div", { class: "detail" });
+  const pane = h("div", { class: "detail-pane" }, inner);
+  let shown = null;
+  /** Say what the pane now shows; it scrolls back to the top when that changed. */
+  const mark = (key) => {
+    if (key !== shown) pane.scrollTop = 0;
+    shown = key;
+  };
+  return { pane, inner, mark };
+}
+
+/**
+ * Fill a list. Each group is {title, count, rows}; each row is {id, primary, secondary
+ * (strings), dim, flag}. The row with `selected` is marked; picking one calls onPick(id).
+ */
+function fillList(container, groups, { selected, onPick, empty, note }) {
+  const total = groups.reduce((sum, group) => sum + group.rows.length, 0);
+  const nodes = [];
+  for (const group of groups) {
+    if (!group.rows.length && group.title) continue;
+    if (group.title) nodes.push(h("div", { class: "list-group" }, group.title, h("span", { class: "count", text: String(group.rows.length) })));
+    nodes.push(
+      h(
+        "ul",
+        { class: "list", role: "listbox" },
+        group.rows.map((row) =>
+          h(
+            "li",
+            {
+              class: `item${row.dim ? " dim" : ""}`,
+              role: "option",
+              "aria-selected": String(row.id === selected),
+              "data-id": row.id,
+              on: { click: () => onPick(row.id) },
+            },
+            h("div", { class: "primary" }, row.flag ? h("span", { class: "flag", text: `${row.flag} ` }) : null, row.primary),
+            row.secondary && row.secondary.filter(Boolean).length
+              ? h("div", { class: "secondary" }, row.secondary.filter(Boolean).map((text) => h("span", { text })))
+              : null
+          )
+        )
+      )
+    );
+  }
+  if (!total) nodes.push(h("p", { class: "list-empty", text: empty }));
+  if (note) nodes.push(h("p", { class: "list-note", text: note }));
+  container.replaceChildren(...nodes);
+  const picked = container.querySelector('[aria-selected="true"]');
+  if (picked) picked.scrollIntoView({ block: "nearest" });
+}
+
+/** Rows in display order, for moving the selection with the keyboard. */
+function listIds(container) {
+  return [...container.querySelectorAll(".item")].map((node) => node.dataset.id);
+}
+
+/** The id still listed if it is, otherwise the first one's. */
+function keepSelection(ids, current) {
+  if (ids.includes(current)) return current;
+  return ids.length ? ids[0] : null;
+}
+
+function searchBox(onInput) {
+  const input = h("input", { type: "search", placeholder: t("common.search"), on: { input: () => onInput(input.value.trim()) } });
+  input.dataset.search = "";
+  return h("label", { class: "search" }, icon("search"), input);
+}
+
+/** A row of view buttons; the chosen one is aria-pressed. Returns the control. */
+function segmented(views, current, onChange) {
+  const buttons = views.map(([value, label]) =>
+    h("button", {
+      type: "button",
+      text: label,
+      "aria-pressed": String(value === current),
+      on: {
+        click: () => {
+          for (const other of buttons) other.setAttribute("aria-pressed", String(other === buttons[views.findIndex(([v]) => v === value)]));
+          onChange(value);
+        },
+      },
+    })
+  );
+  const control = h("div", { class: "seg" }, buttons);
+  control.select = (value) => {
+    buttons.forEach((node, index) => node.setAttribute("aria-pressed", String(views[index][0] === value)));
+  };
+  return control;
+}
+
+// ---------------------------------------------------------------- detail content
+
+function section(title, count, ...children) {
+  return h(
+    "section",
+    null,
+    h("h2", null, title, count !== undefined && count !== null ? h("span", { class: "count", text: String(count) }) : null),
+    children
+  );
+}
+
+/** Label and value pairs. Empty values are left out, unless showEmpty marks them unwritten. */
+function fieldList(pairs, { showEmpty = false } = {}) {
+  const node = h("dl", { class: "fields" });
+  for (const [label, value] of pairs) {
+    const blank = value === null || value === undefined || value === "" || (Array.isArray(value) && !value.length);
+    if (blank && !showEmpty) continue;
+    let shown;
+    if (blank) shown = h("dd", { class: "empty", text: t("common.empty_field") });
+    else if (Array.isArray(value)) shown = h("dd", null, h("ul", null, value.map((item) => h("li", { text: item }))));
+    else shown = h("dd", null, value instanceof Node ? value : String(value));
+    node.append(h("dt", { text: label }), shown);
+  }
+  return node;
+}
+
+/** A list of entries, each rendered as [when, text, ...notes]; notes are [label, text]. */
+function entries(rows, render, { empty = t("common.none"), old } = {}) {
+  if (!rows || !rows.length) return h("p", { class: "empty-note", text: empty });
+  return h(
+    "ul",
+    { class: "entries" },
+    rows.map((row) => {
+      const [whenText, text, ...notes] = render(row);
+      return h(
+        "li",
+        { class: `entry${old && old(row) ? " old" : ""}` },
+        whenText ? h("div", { class: "when", text: whenText }) : null,
+        h("div", { class: "text", text }),
+        notes
+          .filter((note) => note && note[1])
+          .map(([label, value]) => h("div", { class: "note" }, label ? h("b", { text: label }) : null, value))
+      );
+    })
+  );
+}
+
+/** Evidence rows; a prevention that only repeats `content` is left out. */
+function evidenceEntries(rows, content) {
+  return entries(rows, (row) => [
+    `${named("evidence.kind", row.kind)} · ${day(row.created_at)}${row.created_by ? ` · ${who(row.created_by)}` : ""}`,
+    evidenceText(row, "what"),
+    [t("evidence.prevention"), row.prevention !== content ? row.prevention : null],
+  ]);
+}
+
+function conflictEntries(rows) {
+  return entries(rows, (row) => [
+    `${named("retire.kind", row.retirement_kind || "legacy")} · ${day(row.retired_at)}`,
+    row.content || short(row.memory_id),
+    [t("retire.reason"), row.retire_reason],
+  ]);
+}
+
+function meterRow(name, n, max) {
+  const fill = h("span");
+  const ratio = max ? n / max : 0;
+  fill.style.width = `${Math.min(100, Math.round(ratio * 100))}%`;
+  return h(
+    "div",
+    { class: "meter-row" },
+    h("span", { class: "name", text: name }),
+    h("div", { class: `meter${ratio > 1 ? " over" : ratio > 0.85 ? " high" : ""}` }, fill),
+    h("span", { class: "value", text: `${n} / ${max}` })
+  );
+}
+
+function meta(...parts) {
+  return h("p", { class: "meta", text: parts.filter(Boolean).join(language === "ja" ? "・" : " · ") });
+}
+
+// ---------------------------------------------------------------- forms
+
+/**
+ * A form in place of what a pane showed. Each field is {name, label, kind, value, options,
+ * hint, max, maxItems, rows, show, big}: kind is text, area, lines (one item per line),
+ * select, radio, or number; show(values) hides the field while it returns false; options
+ * are [value, label, description]. Returns the form node.
+ */
+function form({ title, fields, submit, onSubmit, onCancel, kind = "primary" }) {
+  const node = h("form", { class: "form" });
+  if (title) node.append(h("h1", { class: "title", text: title }));
   const inputs = [];
   for (const field of fields) {
-    const label = element("label", undefined, "field");
-    label.append(element("span", field.label));
+    const counter = h("span", { class: "counter" });
     let input;
     if (field.kind === "area" || field.kind === "lines") {
-      input = element("textarea");
-      input.rows = field.rows || (field.kind === "lines" ? 4 : 5);
+      input = h("textarea", { rows: field.rows || (field.kind === "lines" ? 4 : 3), class: field.big ? "big" : "" });
       input.value = field.kind === "lines" ? (field.value || []).join("\n") : field.value || "";
     } else if (field.kind === "select") {
-      input = element("select");
-      for (const [value, text] of field.options) {
-        const option = element("option", text);
-        option.value = value;
-        input.append(option);
-      }
+      input = h("select", null, field.options.map(([value, label]) => h("option", { value, text: label })));
       if (field.value !== undefined && field.value !== null) input.value = field.value;
+    } else if (field.kind === "radio") {
+      input = h(
+        "div",
+        { class: "radio-list" },
+        field.options.map(([value, label, description]) =>
+          h(
+            "label",
+            null,
+            h("input", { type: "radio", name: `f-${field.name}`, value, checked: value === field.value }),
+            h("span", null, h("div", { class: "what", text: label }), description ? h("div", { class: "why", text: description }) : null)
+          )
+        )
+      );
     } else {
-      input = element("input");
-      input.type = field.kind === "number" ? "number" : "text";
+      input = h("input", { type: field.kind === "number" ? "number" : "text", placeholder: field.placeholder });
       if (field.step) input.step = field.step;
       input.value = field.value ?? "";
     }
-    if (field.placeholder) input.placeholder = field.placeholder;
-    label.append(input);
-    if (field.hint) label.append(element("small", field.hint, "muted"));
-    inputs.push({ field, input, label });
-    form.append(label);
-  }
-  const values = () =>
-    Object.fromEntries(
-      inputs.map(({ field, input }) => [
-        field.name,
-        field.kind === "lines"
-          ? input.value.split("\n").map((line) => line.trim()).filter(Boolean)
-          : field.kind === "number"
-            ? Number(input.value)
-            : input.value,
-      ])
+    const label = h(
+      "label",
+      { class: "field" },
+      h("span", { class: "label" }, h("span", { text: field.label }), field.max || field.maxItems ? counter : null),
+      input,
+      field.hint ? h("div", { class: "hint", text: field.hint }) : null
     );
+    inputs.push({ field, input, label, counter });
+    node.append(label);
+  }
+  const valueOf = ({ field, input }) => {
+    if (field.kind === "radio") {
+      const chosen = input.querySelector("input:checked");
+      return chosen ? chosen.value : "";
+    }
+    if (field.kind === "lines") return input.value.split("\n").map((line) => line.trim()).filter(Boolean);
+    if (field.kind === "number") return Number(input.value);
+    return input.value;
+  };
+  const values = () => Object.fromEntries(inputs.map((entry) => [entry.field.name, valueOf(entry)]));
   const refresh = () => {
     const current = values();
-    for (const { field, label } of inputs) if (field.show) label.hidden = !field.show(current);
+    for (const entry of inputs) {
+      const { field, label, counter } = entry;
+      if (field.show) label.hidden = !field.show(current);
+      if (field.maxItems) {
+        const n = current[field.name].length;
+        counter.textContent = t("common.items", { n, max: field.maxItems });
+        counter.classList.toggle("over", n > field.maxItems);
+      } else if (field.max) {
+        const n = [...String(current[field.name])].length;
+        counter.textContent = t("common.chars", { n, max: field.max });
+        counter.classList.toggle("over", n > field.max);
+      }
+    }
   };
-  form.addEventListener("input", refresh);
-  form.addEventListener("change", refresh);
+  const grow = (area) => {
+    area.style.height = "auto";
+    area.style.height = `${area.scrollHeight + 2}px`;
+  };
+  node.addEventListener("input", (event) => {
+    if (event.target.tagName === "TEXTAREA") grow(event.target);
+    refresh();
+  });
+  node.addEventListener("change", refresh);
   refresh();
 
-  const save = element("button", submit, "primary");
-  save.type = "submit";
-  const cancel = element("button", "Cancel");
-  cancel.type = "button";
-  cancel.addEventListener("click", closeForms);
-  const row = element("div", undefined, "row");
-  row.append(save, cancel);
-  form.append(row);
-  form.addEventListener("submit", (event) => {
+  const save = h("button", { type: "submit", class: `btn ${kind}`, text: submit || t("common.save") });
+  node.append(
+    h(
+      "div",
+      { class: "form-actions" },
+      save,
+      button(t("common.cancel"), () => onCancel && onCancel()),
+      h("span", { class: "hint", text: t("common.save_hint") })
+    )
+  );
+  node.addEventListener("submit", (event) => {
     event.preventDefault();
     onSubmit(values());
   });
-  host.replaceChildren(form);
-  host.hidden = false;
-  const first = form.querySelector("input, textarea, select");
-  if (first) first.focus();
+  node.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      node.requestSubmit();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      if (onCancel) onCancel();
+    }
+  });
+  requestAnimationFrame(() => {
+    for (const area of node.querySelectorAll("textarea")) grow(area);
+    const first = node.querySelector("textarea, input:not([type=radio]), select");
+    if (first) {
+      first.focus();
+      if (first.setSelectionRange && first.value) first.setSelectionRange(first.value.length, first.value.length);
+    }
+  });
+  return node;
 }
 
-function closeForms() {
-  for (const host of document.querySelectorAll(".form-host")) {
-    host.hidden = true;
-    host.replaceChildren();
-  }
+/** A small panel asking for a reason before a decision; the reason is required. */
+function reasonPanel({ label, confirm, danger, onConfirm, onCancel }) {
+  const panel = h("div", { class: "inline-panel" });
+  const formNode = form({
+    fields: [{ name: "reason", label, kind: "area", rows: 2 }],
+    submit: confirm,
+    kind: danger ? "danger solid" : "primary",
+    onCancel,
+    onSubmit: (values) => {
+      const reason = values.reason.trim();
+      if (!reason) {
+        toast(t("common.reason_required"), "warn");
+        return;
+      }
+      onConfirm(reason);
+    },
+  });
+  panel.append(formNode);
+  return panel;
 }
 
-/** Whether a search occurs, ignoring case, in any of the values given. */
-function matches(query, ...values) {
-  if (!query) return true;
-  const needle = query.toLowerCase();
-  return values.some((value) => JSON.stringify(value ?? "").toLowerCase().includes(needle));
-}
+// ---------------------------------------------------------------- delivery fields
 
-/** Wire a row of view buttons: each has data-view, and the chosen one is aria-pressed. */
-function viewButtons(groupId, onChange) {
-  const buttons = [...$(groupId).querySelectorAll("button[data-view]")];
-  for (const button of buttons) {
-    button.addEventListener("click", () => {
-      for (const other of buttons) other.setAttribute("aria-pressed", String(other === button));
-      onChange(button.dataset.view);
-    });
-  }
+function deliveryOptions() {
+  return ["always", "scope", "topic"].map((value) => [value, t(`delivery.${value}`), t(`delivery.${value}_long`).replace(/^[^（—]*[（—]\s*/, "").replace(/）$/, "")]);
 }
-
-/** The three deliveries, each in one plain line. */
-const DELIVERIES = [
-  ["always", "always — every session, at start"],
-  ["scope", "scope — sessions in one Scope, at start"],
-  ["topic", "topic — its trigger is listed; read when that work begins"],
-];
 
 /** Options for a topic picker: none, each open topic, and a new one described in place. */
-function topicOptions(topics, { none = "choose a topic…" } = {}) {
+function topicOptions(topics) {
   return [
-    ["", none],
+    ["", t("delivery.topic_choose")],
     ...topics.map((topic) => [topic.topic_id, `${topic.name} — ${topic.trigger}`]),
-    ["__new", "a new topic…"],
+    ["__new", t("delivery.topic_new")],
   ];
 }
 
@@ -391,34 +626,66 @@ function topicArgs(values) {
   return values.topic ? { topic_id: values.topic } : {};
 }
 
-/** The fields that choose a topic, shown while the delivery field says topic. */
+/** The fields that choose a topic, shown while isTopic(values). */
 function topicFields(choices, current, isTopic) {
   const isNew = (values) => isTopic(values) && values.topic === "__new";
   return [
-    { name: "topic", label: "topic", kind: "select", options: topicOptions(choices.topics), value: current || "", show: isTopic },
-    { name: "new_topic_name", label: "new topic name", show: isNew },
-    { name: "new_topic_trigger", label: "when to read it", hint: "one sentence", show: isNew },
+    { name: "topic", label: t("delivery.topic_pick"), kind: "select", options: topicOptions(choices.topics), value: current || "", show: isTopic },
+    { name: "new_topic_name", label: t("delivery.topic_new_name"), show: isNew, max: 40 },
+    { name: "new_topic_trigger", label: t("delivery.topic_new_trigger"), hint: t("delivery.topic_new_trigger_hint"), show: isNew, max: 160 },
     {
       name: "new_topic_scope",
-      label: "listed in scope",
+      label: t("delivery.topic_new_area"),
       kind: "select",
-      options: [["", "every session"], ...choices.scopes.map((name) => [name, name])],
+      options: [["", t("topic.area_all")], ...choices.scopes.map((name) => [name, name])],
       show: isNew,
     },
   ];
 }
 
-/** Scope, project, and topic names for the forms, read fresh each time a form opens. */
-function loadChoices() {
-  return call("choices");
+function areaOptions(choices, none) {
+  return [["", none], ...choices.scopes.map((name) => [name, name])];
 }
 
-/** A typed reason, or a warning and focus on its box when it is empty. */
-function required(inputId, what) {
-  const value = $(inputId).value.trim();
-  if (!value) {
-    say(`Write ${what} first.`, "warn");
-    $(inputId).focus();
-  }
-  return value;
+function deliveryText(row) {
+  if (row.delivery === "topic") return `${t("delivery.topic")}: ${row.topic_name}`;
+  if (row.delivery === "scope") return `${t("delivery.scope")}: ${row.scope_name || "-"}`;
+  return t("delivery.always") + (row.scope_name ? ` (${row.scope_name})` : "");
 }
+
+// ---------------------------------------------------------------- keyboard
+
+/** Up and down (or j and k) move through the list; / searches; a page may add its own keys. */
+document.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented || $("dialog").open || event.metaKey || event.ctrlKey || event.altKey) return;
+  const target = event.target;
+  const typing = target.closest && target.closest("input, textarea, select");
+  if (typing) {
+    if (event.key === "Escape" && target.dataset.search !== undefined) target.blur();
+    return;
+  }
+  const spec = app.pages.get(app.current);
+  if (!spec) return;
+  if (event.key === "/") {
+    const search = spec.root.querySelector("[data-search]");
+    if (search) {
+      event.preventDefault();
+      search.focus();
+    }
+    return;
+  }
+  const step = { ArrowDown: 1, j: 1, ArrowUp: -1, k: -1 }[event.key];
+  if (step && spec.list && spec.pick) {
+    const ids = listIds(spec.list);
+    if (!ids.length) return;
+    event.preventDefault();
+    const at = ids.indexOf(spec.selected());
+    spec.pick(ids[Math.max(0, Math.min(ids.length - 1, at < 0 ? 0 : at + step))]);
+    return;
+  }
+  const handler = spec.keys && spec.keys[event.key];
+  if (handler) {
+    event.preventDefault();
+    handler();
+  }
+});
