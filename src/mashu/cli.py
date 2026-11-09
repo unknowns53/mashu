@@ -1533,8 +1533,9 @@ def cmd_task_show(args: argparse.Namespace) -> int:
         )
         if decision["reason"]:
             print(f"    reason      {decision['reason']}")
-        if decision["supersedes_id"]:
-            print(f"    supersedes  {_short(decision['supersedes_id'])}")
+        if decision["supersedes_ids"]:
+            superseded = ", ".join(_short(ident) for ident in decision["supersedes_ids"])
+            print(f"    supersedes  {superseded}")
     return 0
 
 

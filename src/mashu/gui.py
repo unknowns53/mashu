@@ -612,7 +612,7 @@ def _task_detail(cur: psycopg.Cursor, task_id: UUID) -> tuple[str, str]:
                 _td(_e(item["created_by"]), "nowrap"),
                 _td(_e(item["decision"]), "text"),
                 _td(_e(item["reason"]), "text"),
-                _td(_short(item["supersedes_id"]) if item["supersedes_id"] else "-", "mono"),
+                _td(", ".join(_short(i) for i in item["supersedes_ids"]) or "-", "mono"),
             ]
             for item in row["decisions"]
         ),

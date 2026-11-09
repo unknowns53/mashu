@@ -160,13 +160,18 @@ MCP で全文の state を返すのは `task_get` だけである。検索結果
 task_id / attempt (300) / result (500) / reason (500) / next (300) / created_at / created_by
 ```
 
-**Decision** は「なぜそうしたか」を後から失うと再導出コストが高い判断だけを残す。append-only で、変更は `supersedes_id` を張った新 Decision で行い、過去の行を書き換えない。
+**Decision** は「なぜそうしたか」を後から失うと再導出コストが高い判断だけを残す。append-only で、変更は置き換える Decision を `supersedes_ids` に並べた新 Decision で行い、過去の行を書き換えない。一つの Decision は複数の Decision を置き換えられる。一つの論点に散らばった決定を一つにまとめるためである。置き換えの関係は `decision_supersession` に一対ずつ置く。
 
 ```text
-task_id / decision / reason / supersedes_id / created_at / created_by
+decision:              task_id / decision / reason / created_at / created_by
+decision_supersession: decision_id / supersedes_id
 ```
 
-どちらもコード・ログ・長文引用は文字上限が物理的に拒否する。Agent はどちらも `task_checkpoint` の `attempts` / `decisions` として state の置換と一緒に書き、追記だけの Tool は持たない（5.6 節）。どちらも全文は bootstrap に載らず、`task_get` の `attempts` / `decisions` 引数で明示取得する（12.1 節）。
+どちらもコード・ログ・長文引用は文字上限が物理的に拒否する。
+
+**件数にも上限を store が掛ける。**一回の `task_checkpoint` が運べるのは attempts と decisions それぞれ 2 件まで（`CHECKPOINT_ITEM_MAX`）で、一つの Task が持てる有効な decision は 15 件まで（`DECISIONS_IN_FORCE_MAX`）である。文字上限と書き込みの間隔だけでは件数が抑えられず、Agent は確認作業や測定値を attempt に、コミットの言い直しやユーザーの恒久的な指示を decision に書き続け、一つの Task の履歴が数日で数十件に積もる。「選んで書け」という指示は情報量制御にならないので、文字数と同じく件数を拒否で制御する。有効な decision の上限を超える書き込みは、置き換える decision を `supersedes_ids` に並べて、増やす数が置き換える数を超えないときだけ通す。上限は書き込み後の件数に掛け、件数を増やさない書き込みは上限を超えた状態からでも通す。上限を入れる前に書かれた Task が、統合する書き込みまで拒否されて縮められなくなるのを避けるためである（5.3 節の card と同じ考え方）。拒否は `field`（`decisions in force`）・`limit`・`actual` と、統合のしかたを示す文面を返す。
+
+Agent はどちらも `task_checkpoint` の `attempts` / `decisions` として state の置換と一緒に書き、追記だけの Tool は持たない（5.6 節）。どちらも全文は bootstrap に載らず、`task_get` の `attempts` / `decisions` 引数で明示取得する（12.1 節）。
 
 ただし、後の decision に supersede されていない decision（有効な決定）だけは、`task_get` が引数なしでも `decisions_in_force` として返す。決定の文だけを新しい順に 800 token（`MASHU_DECISION_CAPACITY`）まで載せ、入らない古い分は件数で示す。理由は全履歴の側に残す。既定で見えず、見ると巨大、という作りでは、決着済みの案をセッションが出し直すのを防ぐという decision の役目が果たせない。全履歴は上限を持たないので、決定の多い Task では展開すると数万字になる。bootstrap の card は有効な決定の件数を details に出す。`task_search` は decision の本文と理由も探す。閉じた Task や別の Task で決着した事項を引くためで、日本語の短い語には pg_trgm の類似度がほぼ 0 になるので、語をすべて含むかどうかで当てる。
 
@@ -186,7 +191,7 @@ Agent が次のセッションへ作業を引き継ぐために打つ。渡す�
 
 **一つのセッションが一つの Task に書くのは、間隔（既定 30 分）に一度までとする。**測定を回す Agent は数分ごとに status と次の一手を変え、そのたびに書く理由があると読んで、進捗の報告を checkpoint に書き続ける。間隔の中の書き込みは中身にかかわらず拒否し、試行や判断を添えた書き込みも例外にしない。例外があると、通すために試行や判断を作って書く動機が生まれ、作られた decision は有効な判断として次のセッションに届く。成功の応答も拒否も、次に書ける時刻を示さない。時刻を示すと、Agent は書きたい中身をその時刻まで取っておいて送るので、書き込みは減らずに遅れるだけになる。拒否の文面は、送り直しを促す代わりに、進捗や測定ならその場で commit か文書へ置くよう伝える。止める前の書き込みが間隔の中に入れば、直前に書いた state が残る。次のセッションは state を repository と照らしてから使うので（3.1 節）、失うのは最大で間隔一つ分の進み具合である。セッションの区別は MCP server のプロセスごとの id で行い、CLI と User の編集には間隔をかけない。間隔は User が Settings 画面で 0〜1440 分に変え、0 で制限を外す。MCP server は起動したときの環境を持ち続けるので、値は環境変数でなく `setting` テーブルに置き、書き込みのたびに読む。
 
-失敗した試行・判断・外部成果物の原典は同じ呼び出しの `attempts` / `decisions` / `artifacts` で渡す。state の置換とそれらの追記は一つの transaction で行い、文字上限・入口拒否・kind・supersedes・楽観チェック・予算の検査は最初の行を書く前にすべてかけ、形の誤りと上限の超過は行とフィールドをまたいで一度の拒否にまとめて返す。一行でも拒否されれば state も履歴も書かない。履歴を書くための動詞を別に覚えさせずに済む。
+失敗した試行・判断・外部成果物の原典は同じ呼び出しの `attempts` / `decisions` / `artifacts` で渡す。state の置換とそれらの追記は一つの transaction で行い、文字上限・件数の上限・入口拒否・kind・supersedes・楽観チェック・予算の検査は最初の行を書く前にすべてかけ、形の誤りと上限の超過は行とフィールドをまたいで一度の拒否にまとめて返す。一行でも拒否されれば state も履歴も書かない。履歴を書くための動詞を別に覚えさせずに済む。
 
 **呼び出しのたびに state のスナップショットを保存しない。**写しはほとんど読まれず、添える what_changed は commit log の言い直しになるからである。代わりに、任意の `what_changed` と、同じ呼び出しで書いた attempt / decision / artifact の id を `task_state_replaced` の event に残す。Attempt・Decision・Artifact Reference はもともと Task に結びついているので、それで足りる。
 
@@ -370,14 +375,14 @@ Work の `c` は選択中の Task だけを同じ close decision screen で開�
 
 ## 13. スキーマ
 
-Memory の 11 表に Project State の 7 表を加えて 18 表。
+Memory の 11 表に Project State の 8 表を加えて 19 表。
 
 ```text
 Memory:        scope route ledger trace memory memory_revision topic
                nomination memory_change temporary_context event_log
 
 Project State: project task task_state task_checkpoint
-               attempt decision artifact_reference
+               attempt decision decision_supersession artifact_reference
 ```
 
 `ledger` は `prevention_kind` と `filed_task` を持ち（9 節）、CHECK が両者を結ぶ（`filed_task` が非 NULL なら `prevention_kind='work'`）。`ledger` の行は append-only なので、**提出先は行が書かれる前に決まり、後から書き込むことはできない**。矛盾した行を後から直す手段が無いことが、規約ではなく制約で持つ理由である。`ledger` の `ignored_task_id`、`ignored_decision_id`、`ignored_source`（有ったのに使われなかった知識の場所、15 節）は、decision だけを指す行を CHECK で拒む。`memory`、`memory_revision`、`nomination`、`temporary_context` の本文は、空白しか含まない値を CHECK で拒む。

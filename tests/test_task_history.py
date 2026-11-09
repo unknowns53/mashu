@@ -13,6 +13,7 @@ from mashu.errors import (
     DuplicateTaskError,
     MalformedRequestError,
     MashuError,
+    OverLimitError,
     RefusedError,
     StaleStateError,
 )
@@ -184,7 +185,7 @@ def test_a_checkpoint_renews_the_lease_and_is_refused_once_the_task_is_closed(cu
 
 def test_decisions_form_a_same_task_supersedes_chain(cur, task, task_id):
     first = checkpoint(cur, task, decisions=[{"decision": "use one module"}])["decisions"][0]
-    later = {"decision": "keep the module boundary", "supersedes_id": first["decision_id"]}
+    later = {"decision": "keep the module boundary", "supersedes_ids": [first["decision_id"]]}
     second = checkpoint(cur, tasks.task_get(cur, task_id), decisions=[later])["decisions"][0]
     other = new_task(cur, "different task", "history")
 
@@ -196,7 +197,83 @@ def test_decisions_form_a_same_task_supersedes_chain(cur, task, task_id):
         second["decision_id"],
         first["decision_id"],
     ]
-    assert decisions[0]["supersedes_id"] == first["decision_id"]
+    assert decisions[0]["supersedes_ids"] == [first["decision_id"]]
+
+
+def _decide(cur, task_id, count, *, supersedes=()):
+    """Write `count` decisions in checkpoints of the most one write may carry."""
+    written = []
+    supersedes = list(supersedes)
+    for start in range(0, count, task_history.CHECKPOINT_ITEM_MAX["decisions"]):
+        size = min(task_history.CHECKPOINT_ITEM_MAX["decisions"], count - start)
+        items = [{"decision": f"decision {start + n}"} for n in range(size)]
+        if supersedes:
+            items[0]["supersedes_ids"] = supersedes
+            supersedes = []
+        written += checkpoint(cur, tasks.task_get(cur, task_id), decisions=items)["decisions"]
+    return written
+
+
+def test_one_decision_folds_several_into_one(cur, task, task_id):
+    folded = _decide(cur, task_id, 3)
+    ids = [row["decision_id"] for row in folded]
+
+    merged = _decide(cur, task_id, 1, supersedes=[*ids, ids[0]])[0]
+
+    assert merged["supersedes_ids"] == ids
+    in_force = task_history.decisions_in_force(cur, task_id)["decisions_in_force"]
+    assert [row["decision_id"] for row in in_force] == [merged["decision_id"]]
+    assert task_history.decision_list(cur, task_id)[0]["supersedes_ids"] == sorted(ids)
+
+
+def test_one_checkpoint_carries_at_most_its_share_of_attempts_and_decisions(cur, task):
+    most = task_history.CHECKPOINT_ITEM_MAX
+    with pytest.raises(MalformedRequestError) as refused:
+        checkpoint(
+            cur,
+            task,
+            attempts=[{"attempt": f"try {n}"} for n in range(most["attempts"] + 1)],
+            decisions=[{"decision": f"keep {n}"} for n in range(most["decisions"] + 1)],
+            artifacts=[{"kind": "file", "locator": f"f{n}"} for n in range(5)],
+        )
+    assert refused.value.over_limit == [
+        {"field": name, "limit": most[name], "actual": most[name] + 1, "unit": "items"}
+        for name in ("attempts", "decisions")
+    ]
+
+
+def test_a_task_full_of_decisions_takes_one_more_only_by_superseding(cur, task, task_id):
+    cap = task_history.DECISIONS_IN_FORCE_MAX
+    written = _decide(cur, task_id, cap)
+
+    with pytest.raises(OverLimitError) as refused:
+        _decide(cur, task_id, 1)
+    answer = server._failure(refused.value)
+    assert (answer["field"], answer["limit"]) == ("decisions in force", cap)
+    assert answer["actual"] == cap + 1
+    assert "supersedes_ids" in answer["error"]
+
+    replaced = _decide(cur, task_id, 1, supersedes=[written[0]["decision_id"]])
+    assert task_history.decision_count(cur, [task_id])[task_id] == cap
+    assert replaced[0]["supersedes_ids"] == [written[0]["decision_id"]]
+
+
+def test_a_task_already_over_the_cap_may_hold_or_lower_its_count(cur, task, task_id):
+    cap = task_history.DECISIONS_IN_FORCE_MAX
+    old = [uuid4() for _ in range(cap + 3)]
+    for ident in old:
+        cur.execute(
+            "INSERT INTO decision (decision_id, task_id, decision, created_by) "
+            "VALUES (%s, %s, 'written before the cap', 'agent')",
+            (ident, task_id),
+        )
+
+    with pytest.raises(OverLimitError):
+        _decide(cur, task_id, 1)
+    _decide(cur, task_id, 1, supersedes=old[:1])
+    assert task_history.decision_count(cur, [task_id])[task_id] == cap + 3
+    _decide(cur, task_id, 1, supersedes=old[1:4])
+    assert task_history.decision_count(cur, [task_id])[task_id] == cap + 1
 
 
 def test_close_freezes_the_last_state_with_the_closing_actor(cur, task, task_id):
@@ -288,7 +365,7 @@ def test_checkpoint_writes_attempts_decisions_and_artifacts_with_the_state(cur, 
             {
                 "decision": "keep the module boundary",
                 "reason": "the CLI still reads the rows",
-                "supersedes_id": str(earlier["decision_id"]),
+                "supersedes_ids": [str(earlier["decision_id"])],
             }
         ],
         artifacts=[{"kind": "git_commit", "locator": "9d12f5a", "label": "fold history"}],
@@ -299,7 +376,7 @@ def test_checkpoint_writes_attempts_decisions_and_artifacts_with_the_state(cur, 
         "one call",
     ]
     assert checkpointed["attempts"][1]["next"] == "measure it"
-    assert checkpointed["decisions"][0]["supersedes_id"] == earlier["decision_id"]
+    assert checkpointed["decisions"][0]["supersedes_ids"] == [earlier["decision_id"]]
     assert checkpointed["artifacts"][0]["label"] == "fold history"
     assert checkpointed["state"]["status_text"] == "checkpoint carries its history"
     assert len(task_history.decision_list(cur, task_id)) == 2
@@ -349,7 +426,8 @@ def test_checkpoint_writes_attempts_decisions_and_artifacts_with_the_state(cur, 
         ({"decisions": [{"reason": "no decision given"}]}, "missing required"),
         ({"artifacts": [{"kind": "file"}]}, "missing required"),
         ({"artifacts": [{"kind": "tarball", "locator": "a.tgz"}]}, r"artifacts\[0\]\.kind"),
-        ({"decisions": [{"decision": "d", "supersedes_id": "not-a-uuid"}]}, "UUID"),
+        ({"decisions": [{"decision": "d", "supersedes_ids": ["not-a-uuid"]}]}, "UUID"),
+        ({"decisions": [{"decision": "d", "supersedes_ids": "not-a-list"}]}, "list of"),
         ({"attempts": ["just a string"]}, "must be an object"),
     ],
 )
