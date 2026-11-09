@@ -167,7 +167,7 @@ retire 済みの規則を書き戻す操作や、似た open な Task がある�
 
 60 秒ごとに store を見にいき、review 待ちの candidate、Memory change proposal、close の提案が増えると OS の通知を出す。トレイのアイコンに重ねたヒントにはそれぞれの件数が出る。窓を閉じてもトレイに残り、終えるときはトレイのメニューの Quit を使う。
 
-GitHub Release に、正式版ごとの Mac（Apple silicon）の `Mashu_aarch64.app.tar.gz`（展開すると `Mashu.app`） と Windows のインストーラ（`Mashu_<版>_x64-setup.exe`）を置いている。署名していないので、初回は Mac では Finder の右クリックから開き、Windows では SmartScreen の警告から実行を許可する。手元でビルドするときは次を実行する。
+GitHub Release に、正式版ごとの Mac（Apple silicon）の `Mashu_aarch64.app.tar.gz`（展開すると `Mashu.app`） と Windows のインストーラ（`Mashu_<版>_x64-setup.exe`）を置いている。Apple と Microsoft の署名は受けていない。Mac では、初回に開くと「開発元を確認できない」と表示されるので、システム設定の「プライバシーとセキュリティ」で「このまま開く」を押す。Windows では SmartScreen の警告から実行を許可する。Mac の配布物は ad-hoc の署名を .app 全体に掛けている。掛けていないと、ダウンロードしたものは「壊れている」と表示されて開けない。手元でビルドするときは次を実行する。
 
 ~~~bash
 cd desktop/src-tauri
