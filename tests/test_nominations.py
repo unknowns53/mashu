@@ -185,9 +185,9 @@ def test_the_queue_hands_over_the_pains_and_not_their_ids(cur):
     first, second, _ = two_pains(cur)
     rows = nominations.pending_nominations(cur)[0]["evidence_rows"]
 
-    assert [row["ledger_id"] for row in rows] == [first["ledger_id"], second["ledger_id"]]
-    assert rows[0]["what"] == "looked it up"
-    assert rows[1]["prevention"] == SAME_HOLE
+    assert [row["ledger_id"] for row in rows] == [second["ledger_id"], first["ledger_id"]]
+    assert rows[1]["what"] == "looked it up"
+    assert rows[0]["prevention"] == SAME_HOLE
     assert all(row["kind"] == "incident" for row in rows)
 
 

@@ -231,7 +231,10 @@ def get_memory(cur: psycopg.Cursor, memory_id: UUID) -> dict[str, Any] | None:
 
 
 def memory_details(cur: psycopg.Cursor, memory_id: UUID) -> dict[str, Any] | None:
-    """Read a Memory for an explicit management or change decision."""
+    """Read a Memory for an explicit management or change decision.
+
+    Its evidence and revisions come newest first, so the latest account leads.
+    """
     cur.execute(
         """
         SELECT m.*, s.name AS scope_name,
@@ -257,7 +260,7 @@ def memory_details(cur: psycopg.Cursor, memory_id: UUID) -> dict[str, Any] | Non
     cur.execute(
         """
         SELECT revision_id, content, actor, note, created_at
-        FROM memory_revision WHERE memory_id = %s ORDER BY created_at, revision_id
+        FROM memory_revision WHERE memory_id = %s ORDER BY created_at DESC, revision_id DESC
         """,
         (memory_id,),
     )

@@ -330,17 +330,18 @@ def deferred_count(cur: psycopg.Cursor) -> int:
 
 
 def _evidence_rows(cur: psycopg.Cursor, evidence: list[UUID]) -> list[dict[str, Any]]:
+    """The ledger rows an evidence array names, newest first, so the latest account leads."""
     if not evidence:
         return []
     cur.execute(
         """
         SELECT ledger_id, kind, what, prevention, created_at, created_by
         FROM ledger WHERE ledger_id = ANY(%s)
+        ORDER BY created_at DESC, array_position(%s, ledger_id) DESC
         """,
-        (list(evidence),),
+        (list(evidence), list(evidence)),
     )
-    by_id = {row["ledger_id"]: row for row in cur.fetchall()}
-    return [by_id[e] for e in evidence if e in by_id]
+    return cur.fetchall()
 
 
 def _conflict_snapshot(cur: psycopg.Cursor, conflicts: list[UUID]) -> list[dict[str, Any]]:
