@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import psycopg
 
 from mashu import approvals, config, events, redact, settings, tasks
-from mashu.errors import MalformedRequestError, MashuError, OverLimit, RefusedError
+from mashu.errors import MalformedRequestError, MashuError, OverLimit, OverLimitError, RefusedError
 from mashu.tokens import pushed_cost
 
 ArtifactKind = Literal[
@@ -36,6 +36,16 @@ HISTORY_LIMITS = {
     "locator": 500,
     "label": 300,
 }
+
+#: How many items of each kind one checkpoint may carry. A session that records every check
+#: and measurement as an attempt or decision buries the few whose loss would cost a later
+#: session, and an instruction to be selective does not hold. Artifacts are references only.
+CHECKPOINT_ITEM_MAX = {"attempts": 2, "decisions": 2}
+
+#: How many decisions a task may hold in force. Past it, a new decision must supersede as many
+#: as it adds, so the agent folds settled points together instead of piling them up. The cap
+#: counts what a write would leave, so decisions written before it are not refused.
+DECISIONS_IN_FORCE_MAX = 15
 
 
 def _what_changed_problems(what_changed: str | None) -> list[str | OverLimit]:
@@ -92,7 +102,7 @@ def _freeze_current(
 #: Keys each checkpoint history item takes, required first.
 ITEM_KEYS = {
     "attempts": (("attempt",), ("result", "reason", "next")),
-    "decisions": (("decision",), ("reason", "supersedes_id")),
+    "decisions": (("decision",), ("reason", "supersedes_ids")),
     "artifacts": (("kind", "locator"), ("label",)),
 }
 
@@ -126,11 +136,9 @@ def _item(name: str, where: str, item: Any) -> tuple[dict[str, Any], list[str | 
         label = f"{where}.{key}" if where else key
         if value is None or key in missing:
             continue
-        if key == "supersedes_id":
-            try:
-                row[key] = value if isinstance(value, UUID) else UUID(str(value))
-            except ValueError:
-                problems.append(f"{label} must be a UUID")
+        if key == "supersedes_ids":
+            row[key], found = _decision_ids(label, value)
+            problems += found
         elif not isinstance(value, str):
             problems.append(f"{label} must be text")
         elif key == "kind":
@@ -143,10 +151,40 @@ def _item(name: str, where: str, item: Any) -> tuple[dict[str, Any], list[str | 
     return row, problems
 
 
+def _decision_ids(label: str, value: Any) -> tuple[list[UUID], list[str | OverLimit]]:
+    """The distinct decision ids a list names, in the order given."""
+    if not isinstance(value, list):
+        return [], [f"{label} must be a list of decision ids"]
+    ids: list[UUID] = []
+    problems: list[str | OverLimit] = []
+    for index, entry in enumerate(value):
+        try:
+            ident = entry if isinstance(entry, UUID) else UUID(str(entry))
+        except ValueError:
+            problems.append(f"{label}[{index}] must be a UUID")
+            continue
+        if ident not in ids:
+            ids.append(ident)
+    return ids, problems
+
+
 def _items(
     name: str, items: list[Any] | None
 ) -> tuple[list[dict[str, Any]], list[str | OverLimit]]:
-    rows, problems = [], []
+    rows: list[dict[str, Any]] = []
+    problems: list[str | OverLimit] = []
+    most = CHECKPOINT_ITEM_MAX.get(name)
+    if most is not None and len(items or []) > most:
+        problems.append(
+            OverLimit(
+                name,
+                most,
+                len(items or []),
+                unit="items",
+                advice="keep the ones a later session would pay to lose; checks and "
+                "measurements belong in a commit or the project's documents",
+            )
+        )
     for index, item in enumerate(items or []):
         row, found = _item(name, f"{name}[{index}]", item)
         if name == "artifacts" and isinstance(row.get("locator"), str):
@@ -159,25 +197,59 @@ def _items(
 
 
 def _gate_item(where: str, row: dict[str, Any]) -> redact.Verdict:
-    """The entrance check on an item's free text; kind and supersedes_id are not text."""
+    """The entrance check on an item's free text; kind and supersedes_ids are not text."""
     return tasks._gate(
         {
             f"{where}.{key}" if where else key: value
             for key, value in row.items()
-            if key not in ("kind", "supersedes_id")
+            if key not in ("kind", "supersedes_ids")
         }
     )
 
 
-def _check_supersedes(cur: psycopg.Cursor, task_id: UUID, supersedes_id: UUID | None) -> None:
-    if supersedes_id is None:
+def _check_supersedes(cur: psycopg.Cursor, task_id: UUID, supersedes_ids: list[UUID]) -> None:
+    for supersedes_id in supersedes_ids:
+        cur.execute("SELECT task_id FROM decision WHERE decision_id = %s", (supersedes_id,))
+        prior = cur.fetchone()
+        if prior is None:
+            raise MashuError(f"no decision {supersedes_id} to supersede")
+        if prior["task_id"] != task_id:
+            raise MashuError(f"decision {supersedes_id} belongs to another task")
+
+
+_IN_FORCE = """
+SELECT d.decision_id FROM decision d
+WHERE d.task_id = %s
+  AND NOT EXISTS (SELECT 1 FROM decision_supersession s WHERE s.supersedes_id = d.decision_id)
+"""
+
+
+def _check_in_force(cur: psycopg.Cursor, task_id: UUID, items: list[dict[str, Any]]) -> None:
+    """Refuse decisions that would leave the task over its cap and above where it stands.
+
+    A write that keeps or lowers the count passes even over the cap, since a task already
+    past it can only come back down by such writes.
+    """
+    if not items:
         return
-    cur.execute("SELECT task_id FROM decision WHERE decision_id = %s", (supersedes_id,))
-    prior = cur.fetchone()
-    if prior is None:
-        raise MashuError(f"no decision {supersedes_id} to supersede")
-    if prior["task_id"] != task_id:
-        raise MashuError(f"decision {supersedes_id} belongs to another task")
+    cur.execute(_IN_FORCE, (task_id,))
+    in_force = {row["decision_id"] for row in cur.fetchall()}
+    retired = {ident for item in items for ident in item["supersedes_ids"] or []} & in_force
+    after = len(in_force) - len(retired) + len(items)
+    if after <= DECISIONS_IN_FORCE_MAX or after <= len(in_force):
+        return
+    raise OverLimitError(
+        "decisions in force",
+        DECISIONS_IN_FORCE_MAX,
+        after,
+        unit="decisions",
+        advice=(
+            f"the task holds {len(in_force)}; let each new decision list in `supersedes_ids` "
+            "the decisions in force it settles or replaces, folding several into one where "
+            "they make one point, so the write adds no more than it supersedes. "
+            "task_get with decisions=true lists them with their ids"
+        ),
+    )
 
 
 def _last_own_write(cur: psycopg.Cursor, task_id: UUID, session: UUID | None, minutes: int) -> Any:
@@ -277,7 +349,8 @@ def checkpoint(
     ):
         verdicts += [_gate_item(f"{item_name}[{index}]", row) for index, row in enumerate(rows)]
     for row in decision_items:
-        _check_supersedes(cur, task_id, row["supersedes_id"])
+        _check_supersedes(cur, task_id, row["supersedes_ids"] or [])
+    _check_in_force(cur, task_id, decision_items)
 
     # Ids are drawn before the state write so its event can name the rows, while every
     # refusal the state write can raise still comes before the first row is written.
@@ -363,19 +436,23 @@ def _insert_decision(
     decision_id: UUID,
     decision: str,
     reason: str | None = None,
-    supersedes_id: UUID | None = None,
+    supersedes_ids: list[UUID] | None = None,
 ) -> dict[str, Any]:
+    supersedes_ids = supersedes_ids or []
     cur.execute(
         """
-        INSERT INTO decision (
-            decision_id, task_id, decision, reason, supersedes_id, created_at, created_by
-        )
-        VALUES (%s, %s, %s, %s, %s, clock_timestamp(), %s)
+        INSERT INTO decision (decision_id, task_id, decision, reason, created_at, created_by)
+        VALUES (%s, %s, %s, %s, clock_timestamp(), %s)
         RETURNING *
         """,
-        (decision_id, task_id, decision, reason, supersedes_id, actor),
+        (decision_id, task_id, decision, reason, actor),
     )
-    row = cur.fetchone()
+    row = {**cur.fetchone(), "supersedes_ids": supersedes_ids}
+    for supersedes_id in supersedes_ids:
+        cur.execute(
+            "INSERT INTO decision_supersession (decision_id, supersedes_id) VALUES (%s, %s)",
+            (decision_id, supersedes_id),
+        )
     tasks._renew(cur, task_id)
     events.record(
         cur,
@@ -384,7 +461,7 @@ def _insert_decision(
         detail={
             "task_id": str(task_id),
             "decision_id": str(row["decision_id"]),
-            "supersedes_id": str(supersedes_id) if supersedes_id is not None else None,
+            "supersedes_ids": [str(ident) for ident in supersedes_ids],
         },
     )
     return row
@@ -443,7 +520,9 @@ def decisions_in_force(cur: psycopg.Cursor, task_id: UUID) -> dict[str, Any]:
         """
         SELECT d.decision_id, d.decision, d.created_at FROM decision d
         WHERE d.task_id = %s
-          AND NOT EXISTS (SELECT 1 FROM decision x WHERE x.supersedes_id = d.decision_id)
+          AND NOT EXISTS (
+              SELECT 1 FROM decision_supersession s WHERE s.supersedes_id = d.decision_id
+          )
         ORDER BY d.created_at DESC, d.decision_id DESC
         """,
         (task_id,),
@@ -471,7 +550,9 @@ def decision_count(cur: psycopg.Cursor, task_ids: list[UUID]) -> dict[UUID, int]
         """
         SELECT d.task_id, count(*) AS n FROM decision d
         WHERE d.task_id = ANY(%s)
-          AND NOT EXISTS (SELECT 1 FROM decision x WHERE x.supersedes_id = d.decision_id)
+          AND NOT EXISTS (
+              SELECT 1 FROM decision_supersession s WHERE s.supersedes_id = d.decision_id
+          )
         GROUP BY d.task_id
         """,
         (task_ids,),
@@ -480,12 +561,17 @@ def decision_count(cur: psycopg.Cursor, task_ids: list[UUID]) -> dict[UUID, int]
 
 
 def decision_list(cur: psycopg.Cursor, task_id: UUID) -> list[dict[str, Any]]:
-    """Return a task's decisions newest first, without reshaping the rows."""
+    """Return a task's decisions newest first, each with the decisions it superseded."""
     cur.execute(
         """
-        SELECT * FROM decision
-        WHERE task_id = %s
-        ORDER BY created_at DESC, decision_id DESC
+        SELECT d.*,
+               ARRAY(
+                   SELECT s.supersedes_id FROM decision_supersession s
+                   WHERE s.decision_id = d.decision_id ORDER BY s.supersedes_id
+               ) AS supersedes_ids
+        FROM decision d
+        WHERE d.task_id = %s
+        ORDER BY d.created_at DESC, d.decision_id DESC
         """,
         (task_id,),
     )

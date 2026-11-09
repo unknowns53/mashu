@@ -255,8 +255,9 @@ def _history_lines(row: dict[str, Any]) -> list[str]:
             lines.append(f"    {screen.dim(dated)}")
             lines.extend(_field("decision", item.get("decision"), _ENTRY, 10))
             lines.extend(_field("reason", item.get("reason"), _ENTRY, 10))
-            if item.get("supersedes_id"):
-                lines.extend(_field("supersedes", _short(item["supersedes_id"]), _ENTRY, 10))
+            if item.get("supersedes_ids"):
+                superseded = ", ".join(_short(ident) for ident in item["supersedes_ids"])
+                lines.extend(_field("supersedes", superseded, _ENTRY, 10))
     return lines
 
 

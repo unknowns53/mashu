@@ -630,7 +630,9 @@ def search_terms(query: str) -> list[str]:
 _DECISION_SEARCH = f"""
 SELECT d.decision_id, d.decision, d.reason, d.created_at, t.task_id, t.name AS task_name,
        t.status AS task_status, p.name AS project_name,
-       EXISTS (SELECT 1 FROM decision x WHERE x.supersedes_id = d.decision_id) AS superseded
+       EXISTS (
+           SELECT 1 FROM decision_supersession s WHERE s.supersedes_id = d.decision_id
+       ) AS superseded
 FROM decision d
 JOIN task t ON t.task_id = d.task_id
 JOIN project p ON p.project_id = t.project_id

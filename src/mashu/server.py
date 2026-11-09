@@ -100,7 +100,7 @@ class AttemptItem(TypedDict):
 class DecisionItem(TypedDict):
     decision: str
     reason: NotRequired[str]
-    supersedes_id: NotRequired[UUID]
+    supersedes_ids: NotRequired[list[UUID]]
 
 
 class ArtifactItem(TypedDict):
@@ -167,7 +167,13 @@ def _history_contract() -> str:
     for name, (required, optional) in task_history.ITEM_KEYS.items():
         keys = [key for key in (*required, *optional) if key in limits]
         parts.append(f"{name} {{{', '.join(f'{key} {limits[key]}' for key in keys)}}}")
-    return f"History char limits: {'; '.join(parts)}."
+    counts = ", ".join(f"{most} {name}" for name, most in task_history.CHECKPOINT_ITEM_MAX.items())
+    return (
+        f"History char limits: {'; '.join(parts)}. One write carries at most {counts}. A "
+        f"task holds at most {task_history.DECISIONS_IN_FORCE_MAX} decisions in force; past "
+        "that, a write may add no more decisions than it supersedes, and one decision may "
+        "list several in `supersedes_ids` to fold them into one."
+    )
 
 
 def _body_contract() -> str:
