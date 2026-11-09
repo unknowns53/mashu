@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from typing import Any
-from uuid import uuid4
 
-from mashu import db, memories, memory_changes, nominations, screen
+from mashu import db, memory_actions, memory_changes, screen
 from mashu.errors import ChangedSinceReadError, MashuError
 
 _KEYS = "  ↑↓/jk move   ⏎ open   ← back   q quit"
@@ -215,25 +214,13 @@ def _edit_reason(dsn: str | None, row: dict[str, Any]) -> tuple[str, bool]:
         return screen.warning("  ! proposal unchanged — reason is required"), False
     try:
         with db.transaction(dsn) as cur:
-            updated = memory_changes.propose(
+            updated = memory_actions.edit_change_reason(
                 cur,
-                target_memory_id=row["target_memory_id"],
+                row["change_id"],
+                version=row["version"],
                 target_revision_id=row["target"].get("current_revision_id"),
-                target_updated_at=row["target"]["updated_at"],
-                operation=row["operation"],
-                evidence=row["evidence"],
+                reason=reason,
                 actor="user",
-                retirement_kind=row["retirement_kind"],
-                retire_reason=reason if field == "retire_reason" else row["retire_reason"],
-                successor_nomination_id=row["successor_nomination_id"],
-                successor_nomination_version=(
-                    row["successor"]["version"] if row["operation"] == "replace" else None
-                ),
-                successor_settings=memory_changes.requested_settings(row),
-                relocated_to_kind=row["relocated_to_kind"],
-                relocated_to_id=row["relocated_to_id"],
-                restore_reason=reason if field == "restore_reason" else row["restore_reason"],
-                change_id=row["change_id"],
             )
     except MashuError as refusal:
         return screen.danger(f"  {refusal}"), False
@@ -242,24 +229,19 @@ def _edit_reason(dsn: str | None, row: dict[str, Any]) -> tuple[str, bool]:
 
 
 def _apply(dsn: str | None, row: dict[str, Any]) -> tuple[str, bool, bool]:
-    conflicts = [
-        item["memory_id"]
-        for item in row.get("conflicts", [])
-        if item.get("retirement_kind") in ("invalidated", "legacy")
-    ]
     try:
         with db.transaction(dsn) as cur:
-            result = memory_changes.apply(
+            result = memory_actions.apply_change(
                 cur,
                 row["change_id"],
                 version=row["version"],
-                request_id=uuid4(),
-                approval={"kind": "user_direct", "conflict_ids": conflicts},
+                conflict_ids=memory_actions.blocking_conflict_ids(row),
                 actor="user",
             )
     except ChangedSinceReadError as refusal:
         try:
-            refreshed = _refresh(dsn, row)
+            with db.transaction(dsn) as cur:
+                refreshed = memory_actions.refresh_change(cur, row["change_id"], actor="user")
         except MashuError:
             return screen.danger(f"  {refusal}"), False, False
         row.update(refreshed)
@@ -283,52 +265,6 @@ def _apply(dsn: str | None, row: dict[str, Any]) -> tuple[str, bool, bool]:
         True,
         False,
     )
-
-
-def _refresh(dsn: str | None, row: dict[str, Any]) -> dict[str, Any]:
-    """Re-propose against the current target and displayed conflicts after a stale refusal."""
-    with db.transaction(dsn) as cur:
-        current = memory_changes.get(cur, row["change_id"])
-        if current is None or current["status"] != "pending":
-            raise MashuError("memory change is no longer pending")
-        target = memories.memory_details(cur, current["target_memory_id"])
-        if target is None:
-            raise MashuError("target Memory no longer exists")
-        if current["operation"] == "replace":
-            cur.execute(
-                "SELECT * FROM nomination WHERE nomination_id = %s FOR UPDATE",
-                (current["successor_nomination_id"],),
-            )
-            successor = cur.fetchone()
-            if successor is None or successor["status"] != "pending":
-                raise MashuError("replacement nomination is no longer pending")
-            conflict_ids = nominations.current_conflict_ids(cur, successor["content"])
-            refreshed_successor = nominations.refresh_conflicts(
-                cur, current["successor_nomination_id"], conflict_ids, actor="user"
-            )
-            if refreshed_successor is None:
-                raise MashuError("replacement nomination is no longer pending")
-            successor_version = refreshed_successor["version"]
-        else:
-            successor_version = None
-        return memory_changes.propose(
-            cur,
-            target_memory_id=current["target_memory_id"],
-            target_revision_id=target["current_revision_id"],
-            target_updated_at=target["updated_at"],
-            operation=current["operation"],
-            evidence=current["evidence"],
-            actor="user",
-            retirement_kind=current["retirement_kind"],
-            retire_reason=current["retire_reason"],
-            successor_nomination_id=current["successor_nomination_id"],
-            successor_nomination_version=successor_version,
-            successor_settings=memory_changes.requested_settings(current),
-            relocated_to_kind=current["relocated_to_kind"],
-            relocated_to_id=current["relocated_to_id"],
-            restore_reason=current["restore_reason"],
-            change_id=current["change_id"],
-        )
 
 
 def _decide(dsn: str | None, row: dict[str, Any], status: str) -> tuple[str, bool]:
@@ -420,13 +356,7 @@ def run(dsn: str | None = None) -> int:
                 at = min(at, max(0, len(rows) - 1))
                 offset, conflicts_seen = 0, False
         elif key == "y":
-            if (
-                any(
-                    item.get("retirement_kind") in ("invalidated", "legacy")
-                    for item in current.get("conflicts", [])
-                )
-                and not conflicts_seen
-            ):
+            if memory_actions.blocking_conflict_ids(current) and not conflicts_seen:
                 note = screen.warning("  ! read the retirement conflict reasons before applying")
                 continue
             note, applied, refreshed = _apply(dsn, current)

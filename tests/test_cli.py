@@ -233,7 +233,7 @@ def test_a_memory_change_can_be_read_applied_and_replayed_from_the_cli(run, comm
             cur,
             memory,
             "retire",
-            retirement_kind="out_of_scope",
+            retirement_kind="withdrawn",
             retire_reason="this export path has been removed",
         )
 
@@ -329,10 +329,10 @@ def test_the_short_id_that_is_printed_is_the_one_that_can_be_typed_back(run):
     code, _, err = run("show", "abc")
     assert code == 1 and "too short" in err
 
-    code, out, err = run("retire", "not-a-uuid", "--kind", "invalidated", "--reason", "whatever")
+    code, out, err = run("retire", "not-a-uuid", "--reason", "whatever")
     assert code == 1 and out == "" and "not an id" in err
 
-    code, _, err = run("retire", NOWHERE, "--kind", "invalidated", "--reason", "no such row")
+    code, _, err = run("retire", NOWHERE, "--reason", "no such row")
     assert code == 1 and "no memory begins with" in err
 
     code, _, err = run("show", NOWHERE)
@@ -356,7 +356,7 @@ def test_a_prefix_two_rows_answer_to_is_refused_with_both_of_them(run, committin
                 (memory_id, TWIN, [ledger_id]),
             )
 
-    code, _, err = run("retire", "abcd", "--kind", "invalidated", "--reason", "whichever it is")
+    code, _, err = run("retire", "abcd", "--reason", "whichever it is")
     assert code == 1
     assert "names more than one memory" in err
     assert "abcd0001" in err and "abcd0002" in err
@@ -386,7 +386,7 @@ def test_the_memories_listing_holds_the_active_set_and_can_be_narrowed(run):
     assert code == 0
     assert SCOPED in out and LISTED not in out
 
-    run("retire", memory_id[:8], "--kind", "invalidated", "--reason", "it grew a timezone")
+    run("retire", memory_id[:8], "--reason", "it grew a timezone")
 
     code, out, _ = run("memories")
     assert code == 0 and LISTED not in out
@@ -417,7 +417,7 @@ DELIVERED = "hold a lock across the whole rename, or a reader sees half of it ap
 def test_a_retired_rule_written_back_is_answered_with_the_reason_it_was_retired(run):
     memory_id = remembered_id(run("remember", REVIVED)[1])
     reason = "the replica lost its audit table in the last schema change"
-    run("retire", memory_id, "--kind", "invalidated", "--reason", reason)
+    run("retire", memory_id, "--reason", reason)
 
     code, out, err = run("remember", REVIVED)
     assert code == 1 and out == ""
@@ -426,7 +426,7 @@ def test_a_retired_rule_written_back_is_answered_with_the_reason_it_was_retired(
     code, out, _ = pain(run, REVIVED)
     assert code == 0 and "nomination  created" in out
     _, out, _ = run("review", "--list")
-    assert "retired conflict" in out and "invalidated" in out and reason in out
+    assert "retired conflict" in out and "withdrawn" in out and reason in out
     _, out, _ = run("show", pending(out, REVIVED)[0][:8])
     assert "contradicts retired" in out and reason in out
 

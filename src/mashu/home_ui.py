@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mashu import (
+    application,
     close_ui,
     db,
     memory_change_ui,
@@ -14,7 +15,6 @@ from mashu import (
     settings_ui,
     work_ui,
 )
-from mashu import migrate as migration
 
 _KEYS = (
     "  ↑↓/jk move   ⏎ open   a attention   m memories   w work   s settings   ? help\n"
@@ -91,65 +91,7 @@ class Dashboard:
 def _dashboard(dsn: str | None) -> Dashboard:
     """Read only the aggregate values needed by the home screen."""
     with db.transaction(dsn) as cur:
-        cur.execute(
-            """
-            SELECT count(*) FILTER (WHERE deferred_at IS NULL) AS ready,
-                   count(*) FILTER (WHERE deferred_at IS NOT NULL) AS deferred
-            FROM nomination WHERE status = 'pending'
-            """
-        )
-        review = cur.fetchone()
-
-        cur.execute("SELECT count(*) AS n FROM memory_change WHERE status = 'pending'")
-        memory_change_count = cur.fetchone()["n"]
-
-        cur.execute(
-            """
-            SELECT count(*) FILTER (
-                       WHERE t.status = 'open' AND now() <= t.active_until
-                   ) AS active,
-                   count(*) FILTER (
-                       WHERE t.status = 'open' AND now() > t.active_until
-                   ) AS dormant,
-                   count(*) FILTER (WHERE t.status = 'closed') AS closed,
-                   count(cp.task_id) FILTER (WHERE t.status = 'open') AS proposals
-            FROM task t
-            LEFT JOIN task_close_proposal cp ON cp.task_id = t.task_id
-            """
-        )
-        task = cur.fetchone()
-
-        cur.execute(
-            "SELECT count(*) FILTER (WHERE status = 'active') AS active, "
-            "count(*) FILTER (WHERE status = 'retired') AS retired FROM memory"
-        )
-        memory = cur.fetchone()
-        cur.execute("SELECT count(*) AS n FROM temporary_context WHERE expires_at > now()")
-        temporary_contexts = cur.fetchone()["n"]
-        cur.execute("SELECT count(*) AS n FROM project WHERE archived_at IS NULL")
-        project_count = cur.fetchone()["n"]
-        cur.execute("SELECT count(*) AS n FROM scope")
-        scope_count = cur.fetchone()["n"]
-        cur.execute("SELECT count(*) AS n FROM route")
-        route_count = cur.fetchone()["n"]
-        schema_pending = len(migration.pending(cur))
-
-    return Dashboard(
-        review_ready=review["ready"],
-        review_deferred=review["deferred"],
-        memory_changes=memory_change_count,
-        tasks_active=task["active"],
-        tasks_dormant=task["dormant"],
-        task_proposals=task["proposals"],
-        active_memories=memory["active"],
-        projects=project_count,
-        tasks_closed=task["closed"],
-        retired_memories=memory["retired"],
-        temporary_contexts=temporary_contexts,
-        scopes=scope_count,
-        routes=route_count,
-        schema_pending=schema_pending,
-    )
+        return Dashboard(**application.dashboard_counts(cur))
 
 
 def _choice(label: str, detail: str, current: bool) -> str:

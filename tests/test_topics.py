@@ -102,7 +102,7 @@ def test_removing_deletes_an_unused_topic_and_archives_a_used_one_that_stays_shu
     rule = filed(cur, used)
     with pytest.raises(MashuError, match="still holds 1 active rule"):
         topics.remove_topic(cur, used["topic_id"], actor="user")
-    retire(cur, rule, "lever gone", "out_of_scope")
+    retire(cur, rule, "lever gone", "withdrawn")
     assert topics.remove_topic(cur, used["topic_id"], actor="user")["removed"] == "archived"
     assert topics.get_topic(cur, "difficulty")["archived_at"] is not None
     with pytest.raises(MashuError, match="archived"):
@@ -138,7 +138,7 @@ def test_editing_a_topic_moves_its_rules_scope_with_it(cur, scope_id):
     assert cur.fetchone()["n"] == 2
 
     # A retired rule is restored into its topic and the scope the topic has by then.
-    retire(cur, rule, "the lever moved", "out_of_scope")
+    retire(cur, rule, "the lever moved", "withdrawn")
     topics.update_topic(cur, subject["topic_id"], actor="user", scope_id=scope_id)
     restored = memories.restore(
         cur,

@@ -5,7 +5,7 @@ import datetime as dt
 import pytest
 
 from conftest import keys, retire
-from mashu import db, memories, memory_ui, scopes, screen, temporary, topics
+from mashu import db, memories, memory_ui, scopes, temporary, topics
 
 RULE = "never report a run as finished without the output that proves it"
 REVISED = "never report a run as finished without pasting the output that proves it"
@@ -83,25 +83,25 @@ def test_new_durable_memory_can_choose_a_scope_delivery_and_keep_its_reason(dsn,
     assert [entry["what"] for entry in basis] == [why]
 
 
-def test_retirement_selects_a_kind_and_applies_after_entering_its_reason(dsn, monkeypatch):
+def test_retirement_applies_after_entering_its_reason(dsn, monkeypatch):
     memory = remember(dsn)
-    keys(monkeypatch, "r", "invalidated", "reason", "q")
+    keys(monkeypatch, "r", "reason", "q")
 
     assert memory_ui.run(dsn) == 0
     row = memory_row(dsn, memory["memory_id"])
     assert row["status"] == "retired"
-    assert row["retirement_kind"] == "invalidated"
+    assert row["retirement_kind"] == "withdrawn"
     assert row["retire_reason"] == "reason"
 
 
-def test_retirement_cancellation_and_legacy_selection_leave_the_memory_active(dsn, monkeypatch):
+def test_cancelling_a_retirement_leaves_the_memory_active(dsn, monkeypatch):
     memory = remember(dsn)
-    monkeypatch.setattr(screen, "editline", lambda *_args: screen.Cancelled())
-    memory_ui._retire(dsn, memory)
-    assert memory_row(dsn, memory["memory_id"])["status"] == "active"
 
-    monkeypatch.setattr(screen, "editline", lambda *_args: screen.Submitted("legacy"))
-    assert "choose a supported" in memory_ui._retire(dsn, memory)
+    def cancel(_prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", cancel)
+    assert "left active" in memory_ui._retire(dsn, memory)
     assert memory_row(dsn, memory["memory_id"])["status"] == "active"
 
 

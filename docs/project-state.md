@@ -173,7 +173,7 @@ decision_supersession: decision_id / supersedes_id
 
 Agent はどちらも `task_checkpoint` の `attempts` / `decisions` として state の置換と一緒に書き、追記だけの Tool は持たない（5.6 節）。どちらも全文は bootstrap に載らず、`task_get` の `attempts` / `decisions` 引数で明示取得する（12.1 節）。
 
-ただし、後の decision に supersede されていない decision（有効な決定）だけは、`task_get` が引数なしでも `decisions_in_force` として返す。決定の文だけを新しい順に 800 token（`MASHU_DECISION_CAPACITY`）まで載せ、入らない古い分は件数で示す。理由は全履歴の側に残す。既定で見えず、見ると巨大、という作りでは、決着済みの案をセッションが出し直すのを防ぐという decision の役目が果たせない。全履歴は上限を持たないので、決定の多い Task では展開すると数万字になる。bootstrap の card は有効な決定の件数を details に出す。`task_search` は decision の本文と理由も探す。閉じた Task や別の Task で決着した事項を引くためで、日本語の短い語には pg_trgm の類似度がほぼ 0 になるので、語をすべて含むかどうかで当てる。
+ただし、後の decision に supersede されていない decision（有効な決定）だけは、`task_get` が引数なしでも `decisions_in_force` として返す。決定の文だけを新しい順に 800 token（`decision_capacity`）まで載せ、入らない古い分は件数で示す。理由は全履歴の側に残す。既定で見えず、見ると巨大、という作りでは、決着済みの案をセッションが出し直すのを防ぐという decision の役目が果たせない。全履歴は上限を持たないので、決定の多い Task では展開すると数万字になる。bootstrap の card は有効な決定の件数を details に出す。`task_search` は decision の本文と理由も探す。閉じた Task や別の Task で決着した事項を引くためで、日本語の短い語には pg_trgm の類似度がほぼ 0 になるので、語をすべて含むかどうかで当てる。
 
 ### 5.5 Artifact Reference
 
@@ -271,7 +271,7 @@ approach / open questions / blockers / next actions の本文、および Attemp
 
 Task card は Task 名・goal・statusをラベルつきで運び、approach / open questions / blockers / next actions は本文でなく存在と件数だけを示す。card は作業を開始するための state ではなく、どの Task の詳細を取得するか選ぶ索引である。各 row は MCP がそのまま `task_get` に渡せる完全な `task_id` を持ち、bootstrap 全体も「着手前に task_get」を明記する。これにより、存在を忘れて検索できない問題は card の push で防ぎ、詳細の常時注入は避ける。
 
-既定の hard cap は次のとおりで、実測で較正する。`MASHU_CAPACITY`（2000）/ `MASHU_ALWAYS_CAPACITY`（800）と同じ環境変数方式で構成する。
+既定の hard cap は次のとおりで、実測で較正する。User は設定画面の「配信量の上限」で一つずつ変えられ、値は `setting` テーブルに置く（README の容量の節）。環境変数は既定値だけを差し替える。外側の予算に含まれる予算（always と Memory、Memory・Task cards・Temporary と TOTAL、card 1 枚と Task cards・Task detail）は、外側を超える値にできない。
 
 ```text
 TOTAL            4000 tokens
@@ -353,6 +353,7 @@ Memory 関連 Tool は `docs/memory.md` 7.1 節に記す。`session_bootstrap` �
 ```text
 mashu                           人向け dashboard。Attention / Memories / Work / Settings を開く
 mashu gui                       Task を含む一覧の読み取り専用ブラウザ表示（docs/memory.md 7.2 節）
+mashu desktop-backend           デスクトップアプリの子プロセス。Task と Project の操作を Work と close の画面と同じ関数で行う（docs/memory.md 7.2 節）
 mashu project list / create / edit <id> / show <id>
 mashu task list [--dormant] [--closed]
 mashu task show <id>            state・履歴・artifacts を全文

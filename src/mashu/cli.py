@@ -22,6 +22,7 @@ from mashu import (
     db,
     events,
     memories,
+    memory_actions,
     memory_changes,
     nominations,
     projects,
@@ -29,6 +30,7 @@ from mashu import (
     routing,
     scopes,
     screen,
+    settings,
     task_actions,
     task_history,
     tasks,
@@ -253,21 +255,21 @@ def cmd_status(args: argparse.Namespace) -> int:
     active = "  ".join(f"{key}={status.memory_counts.get(key, 0)}" for key in memories.DELIVERIES)
     print(f"active  {active}")
     print(
-        f"tokens  always={status.memory_always_tokens}/{config.always_capacity()}  "
-        f"worst={status.memory_worst_tokens}/{config.capacity()}"
+        f"tokens  always={status.memory_always_tokens}/{status.limits['always_capacity']}  "
+        f"worst={status.memory_worst_tokens}/{status.limits['memory_capacity']}"
     )
     print(
         f"cards   active={status.active_states}  "
-        f"worst={status.state_worst_tokens}/{config.project_capacity()}"
+        f"worst={status.state_worst_tokens}/{status.limits['project_capacity']}"
     )
     heaviest = (
         f"  heaviest={status.topic_heaviest_name} "
-        f"{status.topic_heaviest_tokens}/{config.topic_capacity()}"
+        f"{status.topic_heaviest_tokens}/{status.limits['topic_capacity']}"
         if status.topic_heaviest_name
         else ""
     )
     print(f"topics  count={status.topic_count}{heaviest}")
-    print(f"temporary  tokens={status.temporary_tokens}/{config.temporary_capacity()}")
+    print(f"temporary  tokens={status.temporary_tokens}/{status.limits['temporary_capacity']}")
     print(f"pending {status.pending_ready + status.pending_deferred}")
     print(f"ledger  last_30_days={status.ledger_30d}")
     routes = "  ".join(
@@ -330,7 +332,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         print(f"  {row['content']}  (expires {row['expires_at']})")
     print(
         f"tokens    {answer.get('tokens', 0)}/"
-        f"{answer.get('capacity', config.total_capacity())}  "
+        f"{answer['capacity']}  "
         f"memory={answer.get('memory_tokens', 0)}  "
         f"cards={answer.get('card_tokens', answer.get('project_tokens', 0))}  "
         f"temporary={answer.get('temporary_tokens', 0)}"
@@ -365,8 +367,10 @@ def cmd_remember(args: argparse.Namespace) -> int:
             "omit --scope and --delivery"
         )
     delivery = args.delivery or ("topic" if args.topic else "scope" if args.scope else "always")
-    # memories.remember holds the same ceiling; checked here so the refusal names the flag.
-    memories.check_body(args.body, why=args.why, rest="--why")
+    # memories.remember holds the same limit; checked here so the refusal names the flag.
+    with db.transaction(args.dsn) as cur:
+        limit = settings.limit(cur, "content_limit")
+    memories.check_body(args.body, limit=limit, why=args.why, rest="--why")
     acknowledged: list[UUID] | None = None
     while True:
         try:
@@ -401,7 +405,7 @@ def cmd_remember(args: argparse.Namespace) -> int:
 
 
 def _print_retirement_conflicts(conflict: RetiredConflictError) -> None:
-    """Show the exact invalidated or legacy conflicts that need acknowledgment."""
+    """Show the exact withdrawn or legacy conflicts that need acknowledgment."""
     print(str(conflict), file=sys.stderr)
     for row in conflict.tombstones:
         retired = row.get("retired_at")
@@ -454,38 +458,35 @@ def _print_retirement_warnings(rows: list[dict[str, Any]]) -> None:
 def cmd_retire(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
         memory_id = _memory_ref(cur, args.memory_id)
-        row = memories.retire(
-            cur,
-            memory_id,
-            reason=args.reason,
-            actor=ACTOR,
-            retirement_kind=args.kind,
-            superseded_by=(
-                _resolve(
-                    cur,
-                    args.superseded_by,
-                    table="memory",
-                    id_col="memory_id",
-                    label="successor memory",
-                )
-                if args.superseded_by
-                else None
-            ),
-            relocated_to_kind="temporary_context" if args.temporary_context else None,
-            relocated_to_id=(
-                _resolve(
-                    cur,
-                    args.temporary_context,
-                    table="temporary_context",
-                    id_col="context_id",
-                    label="temporary context",
-                )
-                if args.temporary_context
-                else None
-            ),
-        )
+        row = memory_actions.retire(cur, memory_id, reason=args.reason, actor=ACTOR)
     _gate_warnings(row)
     print(f"retired  {row['memory_id']}")
+    return 0
+
+
+def cmd_restore(args: argparse.Namespace) -> int:
+    with db.transaction(args.dsn) as cur:
+        memory_id = _memory_ref(cur, args.memory_id)
+    acknowledged: list[UUID] | None = None
+    while True:
+        try:
+            with db.transaction(args.dsn) as cur:
+                former = memories.get_memory(cur, memory_id)
+                row = memory_actions.restore(
+                    cur, memory_id, reason=args.reason, acknowledged=acknowledged, actor=ACTOR
+                )
+            break
+        except RetiredConflictError as conflict:
+            if args.force:
+                _print_retirement_conflicts(conflict)
+                acknowledged = [row["memory_id"] for row in conflict.tombstones]
+                continue
+            acknowledged = _confirm_override(conflict)
+            if acknowledged is None:
+                return 1
+    _gate_warnings(row)
+    kind = former["retirement_kind"] or "legacy"
+    print(f"restored  {row['memory_id']}  (was {kind}: {former['retire_reason']})")
     return 0
 
 
@@ -1637,6 +1638,12 @@ def cmd_gui(args: argparse.Namespace) -> int:
     return gui.serve(args.dsn, port=args.port, open_browser=not args.no_open)
 
 
+def cmd_desktop_backend(args: argparse.Namespace) -> int:
+    from mashu import desktop
+
+    return desktop.serve(args.dsn)
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     if args.dsn is not None:
         os.environ[db.DSN_ENV_VAR] = args.dsn
@@ -1795,7 +1802,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     remember.add_argument(
         "body",
-        help=f"the rule alone, at most {memories.CONTENT_LIMIT} chars; it reaches every session",
+        help=(
+            f"the rule alone, at most {config.DEFAULT_CONTENT_LIMIT} chars unless the Settings "
+            "screen changed it; it reaches every session"
+        ),
     )
     remember.add_argument(
         "--why",
@@ -1830,28 +1840,30 @@ def build_parser() -> argparse.ArgumentParser:
         sub,
         "retire",
         "withdraw a memory, leaving the reason as its tombstone",
-        examples=(
-            'mashu retire 1a2b3c4d --kind invalidated --reason "The service no longer exists"',
-        ),
+        examples=('mashu retire 1a2b3c4d --reason "The service no longer exists"',),
     )
     retire.add_argument("memory_id", help=_REF_HELP)
     retire.add_argument(
-        "--reason", required=True, help="why it is retired; later matches read this"
-    )
-    retire.add_argument(
-        "--kind",
-        choices=("invalidated", "superseded", "out_of_scope", "relocated"),
+        "--reason",
         required=True,
-        help="why it is retired",
-    )
-    retire.add_argument(
-        "--superseded-by", help="successor Memory ID or unique prefix for superseded"
-    )
-    retire.add_argument(
-        "--temporary-context",
-        help="destination Temporary Context ID or unique prefix for relocated",
+        help="why it is retired; a similar rule offered later is shown this and waits",
     )
     retire.set_defaults(func=cmd_retire)
+
+    restore = _command(
+        sub,
+        "restore",
+        "bring a retired memory back, keeping its retirement in the history",
+        examples=('mashu restore 1a2b3c4d --reason "The service is back in use"',),
+    )
+    restore.add_argument("memory_id", help=_REF_HELP)
+    restore.add_argument("--reason", required=True, help="why the retirement no longer holds")
+    restore.add_argument(
+        "--force",
+        action="store_true",
+        help="restore over retired rules it repeats whose reasons you have already read",
+    )
+    restore.set_defaults(func=cmd_restore)
 
     revise = _command(
         sub,
@@ -2034,7 +2046,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--ack-conflict",
         action="append",
         type=UUID,
-        help="explicitly acknowledge a displayed invalidated or legacy conflict (repeat per id)",
+        help="explicitly acknowledge a displayed withdrawn or legacy conflict (repeat per id)",
     )
     review.add_argument("--reason", help="why it is turned down; required with --decline")
     review.add_argument(
@@ -2412,6 +2424,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gui.add_argument("--no-open", action="store_true", help="do not open a browser window")
     gui.set_defaults(func=cmd_gui)
+
+    desktop_backend = _command(
+        sub,
+        "desktop-backend",
+        "answer the desktop app's requests, one JSON line each, on stdin and stdout",
+        description=(
+            "Run as the desktop app's child process. Each line on stdin is one request, "
+            "answered on one line of stdout, through the same functions as the terminal UI. "
+            "Decisions are recorded as the User's."
+        ),
+        examples=("mashu desktop-backend",),
+    )
+    desktop_backend.set_defaults(func=cmd_desktop_backend)
 
     serve = _command(
         sub,

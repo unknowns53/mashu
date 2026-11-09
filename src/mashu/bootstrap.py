@@ -8,11 +8,11 @@ from uuid import UUID
 import psycopg
 
 from mashu import (
-    config,
     events,
     memories,
     migrate,
     projects,
+    settings,
     task_history,
     tasks,
     temporary,
@@ -31,10 +31,10 @@ UNSEATED_INSTRUCTION = (
 )
 
 
-def _unseated_lines(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+def _unseated_lines(rows: list[dict[str, Any]], share: int) -> tuple[list[dict[str, Any]], int]:
     """Name as many cardless tasks as the overflow share holds, and count the rest."""
     named: list[dict[str, Any]] = []
-    budget = config.card_overflow_capacity() - pushed_cost([UNSEATED_INSTRUCTION])
+    budget = share - pushed_cost([UNSEATED_INSTRUCTION])
     for row in rows:
         line = {
             "task": str(row["task_id"])[:8],
@@ -80,6 +80,7 @@ def session_bootstrap(
     routed: bool = False,
 ) -> dict[str, Any]:
     """Everything a session in this scope is told, and what it cost to tell it."""
+    limits = settings.limits(cur)
     always = memories.always_memories(cur)
     scoped = memories.scope_push_memories(cur, scope_id) if scope_id is not None else []
     index = topics.session_index(cur, scope_id)
@@ -112,7 +113,7 @@ def session_bootstrap(
         }
         for row in states
     ]
-    seated, unseated = tasks.seat_cards(costed, config.project_capacity())
+    seated, unseated = tasks.seat_cards(costed, limits["project_capacity"])
     state_rows = [
         {
             "task": str(card["task_id"])[:8],
@@ -122,7 +123,7 @@ def session_bootstrap(
         }
         for card in seated
     ]
-    named, unnamed = _unseated_lines(unseated)
+    named, unnamed = _unseated_lines(unseated, limits["card_overflow_capacity"])
     project_tokens = sum(card["tokens"] for card in seated) + (
         pushed_cost([UNSEATED_INSTRUCTION, *(_unseated_text(line) for line in named)])
         if unseated
@@ -130,7 +131,7 @@ def session_bootstrap(
     )
     temporary_tokens = pushed_cost([row["content"] for row in contexts])
     total = memory_tokens + project_tokens + temporary_tokens
-    ceiling = config.total_capacity()
+    ceiling = limits["total_capacity"]
     over = total > ceiling
 
     events.record(

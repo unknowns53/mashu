@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mashu</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="i18n.js" defer></script>
+  <script src="core.js" defer></script>
+  <script src="inbox.js" defer></script>
+  <script src="memories.js" defer></script>
+  <script src="work.js" defer></script>
+  <script src="settings.js" defer></script>
+  <script src="main.js" defer></script>
+</head>
+<body>
+  <nav class="nav" aria-label="Mashu">
+    <div class="nav-items" id="nav-items"></div>
+    <div class="nav-foot">
+      <span class="checked" id="checked"></span>
+      <button type="button" class="btn quiet icon" id="refresh"></button>
+    </div>
+  </nav>
+  <div class="page" id="page"></div>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <dialog id="dialog"></dialog>
+</body>
+</html>

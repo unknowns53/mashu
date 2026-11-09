@@ -8,6 +8,8 @@ from datetime import date, datetime
 from typing import Annotated, Any, NotRequired
 from uuid import UUID, uuid4
 
+import psycopg
+
 if sys.version_info >= (3, 12):
     from typing import TypedDict
 else:
@@ -28,6 +30,7 @@ from mashu import (
     references,
     routing,
     scopes,
+    settings,
     task_history,
     tasks,
     topics,
@@ -149,14 +152,27 @@ DecisionList = Annotated[list[Any], _ItemSchema(DecisionItem)]
 ArtifactList = Annotated[list[Any], _ItemSchema(ArtifactItem)]
 
 
-def _state_contract() -> str:
+def _limits() -> dict[str, int]:
+    """The limits in force when this session's server starts.
+
+    Each session runs its own server, so a new session reads a changed limit; a refusal names
+    the limit in force at the write either way.
+    """
+    try:
+        with db.transaction() as cur:
+            return settings.limits(cur)
+    except psycopg.Error:
+        return {name: limit.default() for name, limit in settings.LIMITS.items()}
+
+
+def _state_contract(limits: dict[str, int]) -> str:
     """The limits every task state write is held to, taken from the code that enforces them."""
     texts = ", ".join(f"{field} {limit}" for field, limit in tasks.TEXT_LIMITS.items())
     return (
         f"Char limits: {texts}; {', '.join(tasks.LIST_FIELDS)} at most "
         f"{tasks.LIST_MAX_ITEMS} items of {tasks.LIST_MAX_CHARS} each. Budgets in estimated "
-        f"tokens: card {config.task_card_capacity()}, full state "
-        f"{config.task_detail_capacity()}."
+        f"tokens: card {limits['task_card_capacity']}, full state "
+        f"{limits['task_detail_capacity']}."
     )
 
 
@@ -176,11 +192,11 @@ def _history_contract() -> str:
     )
 
 
-def _body_contract() -> str:
+def _body_contract(limits: dict[str, int]) -> str:
     """The ceilings on a new Memory body and its reason, from the code that enforces them."""
     return (
         f"`content` is pushed to every matching session, so it is held to "
-        f"{memories.CONTENT_LIMIT} chars and states the rule alone. Put the reason, "
+        f"{limits['content_limit']} chars and states the rule alone. Put the reason, "
         f"measurements, dates, and history in `why` (at most {memories.WHY_LIMIT} chars): it "
         "is kept on the evidence ledger row that memory_get returns and is never pushed. An "
         "over-limit field is refused with `problems` and `over_limit`."
@@ -350,6 +366,7 @@ def build_server() -> Any:
     from mcp.server import MCPServer
 
     server = MCPServer(name="mashu", instructions=INSTRUCTIONS)
+    limits = _limits()
     # Each client session runs its own stdio server process, so one id per build names it.
     session = uuid4()
 
@@ -401,7 +418,7 @@ def build_server() -> Any:
             "Otherwise use `work` with `task_id` for a one-time fix, such as editing a doc, an "
             "instruction file, or code, and `rule` only for knowledge every future session "
             "must carry; this never admits knowledge directly. A `rule` prevention becomes a "
-            f"candidate Memory body, so it is held to {memories.CONTENT_LIMIT} chars and states "
+            f"candidate Memory body, so it is held to {limits['content_limit']} chars and states "
             "the rule alone; put the reason, measurements, dates, and history in `what`."
         )
     )
@@ -470,7 +487,7 @@ def build_server() -> Any:
         except MashuError as error:
             return _failure(error)
 
-    body_contract = _body_contract()
+    body_contract = _body_contract(limits)
 
     @server.tool(
         description=(
@@ -526,7 +543,7 @@ def build_server() -> Any:
             "pass it, and tell the user which delivery and scope the answer shows. "
             "Pass `content` (and optional `scope`): the "
             "nomination and admission happen in one call. If it joins an already pending "
-            "candidate or repeats invalidated or legacy retired Memory, it stops with "
+            "candidate or repeats withdrawn or legacy retired Memory, it stops with "
             "`admitted: false` and returns the nomination to read; then pass that "
             f"`nomination_id` and its `version` as `nomination_version`. {_PROVENANCE} "
             "Invalidated or legacy conflicts need `conflict_ids` and a `conflict_instruction` "
@@ -662,10 +679,10 @@ def build_server() -> Any:
         delivery move one memory_redeliver call. Call memory_get first; pass its memory_id,
         current_revision_id, and updated_at as the target fields. Each operation takes only
         its own fields:
-        - retire (active Memory): `retire_reason` and `retirement_kind`, one of
-          `invalidated` (the content is wrong), `out_of_scope` (the conditions it served
-          ended), or `relocated` (moved to Temporary Context; also pass
-          `relocated_to_kind='temporary_context'` and `relocated_to_id`).
+        - retire (active Memory): `retire_reason`. A similar rule offered later is shown
+          that reason and waits for confirmation. For a move to Temporary Context, also pass
+          `retirement_kind='relocated'`, `relocated_to_kind='temporary_context'`, and
+          `relocated_to_id`.
         - replace (active Memory): `retire_reason`, plus the nomination_id and version of a
           successor from memory_nominate as `successor_nomination_id` and
           `successor_nomination_version` (reread and update if that version changes);
@@ -714,7 +731,7 @@ def build_server() -> Any:
             "takes one memory_change_instructed call instead. If the successor changed and no "
             "longer matches that instruction, get a new instruction first. Invalidated or "
             "legacy conflicts need `conflict_ids` and a `conflict_instruction` addressing them, "
-            "and restoring a Memory retired as invalidated or legacy needs a "
+            "and restoring a Memory retired as withdrawn or legacy needs a "
             f"`reversal_instruction`. {_PROVENANCE}"
         )
     )
@@ -794,17 +811,16 @@ def build_server() -> Any:
             "Use it only for a change the user asked for; your own idea goes to "
             "memory_change_propose and stays pending. The server reads the Memory's current "
             f"revision itself. {_PROVENANCE} Each `operation` takes only its own fields:\n"
-            "- retire (active Memory): `retire_reason` and `retirement_kind`, `invalidated` "
-            "(the content is wrong) or `out_of_scope` (the conditions it served ended). A move "
-            "to Temporary Context is the user's own step (`c` in the Memories TUI); tell them "
-            "so.\n"
+            "- retire (active Memory): `retire_reason`. A similar rule offered later is shown "
+            "that reason and waits for confirmation. A move to Temporary Context is the user's "
+            "own step (`c` in the Memories TUI); tell them so.\n"
             "- replace (active Memory): `content`, the successor rule, and optional `why`; the "
             "successor keeps the old delivery, and `retire_reason` defaults to the instruction. "
             f"{body_contract}\n"
-            "- restore (retired Memory): `restore_reason`; a Memory retired as invalidated or "
+            "- restore (retired Memory): `restore_reason`; a Memory retired as withdrawn or "
             "legacy also needs `reversal_instruction`, the user's words addressing that "
             "retirement.\n"
-            "When the new or restored content repeats Memory retired as invalidated or legacy, "
+            "When the new or restored content repeats Memory retired as withdrawn or legacy, "
             "nothing is written and the refusal returns `conflicts`; show them to the user and, "
             "if they address them, resend with their ids as `conflict_ids` and their words as "
             "`conflict_instruction`. All shape problems come back together in `problems`. It is "
@@ -817,8 +833,6 @@ def build_server() -> Any:
         instruction: str,
         conversation_ref: str,
         request_id: UUID,
-        retirement_kind: Annotated[str, _Choice(memory_changes.INSTRUCTED_RETIREMENT_KINDS)]
-        | None = None,
         retire_reason: str | None = None,
         content: str | None = None,
         why: str | None = None,
@@ -842,7 +856,6 @@ def build_server() -> Any:
                         reversal_instruction=reversal_instruction,
                     ),
                     actor=actor(),
-                    retirement_kind=retirement_kind,
                     retire_reason=retire_reason,
                     content=content,
                     why=why,
@@ -874,7 +887,7 @@ def build_server() -> Any:
         except MashuError as error:
             return _failure(error)
 
-    state_contract = _state_contract()
+    state_contract = _state_contract(limits)
 
     @server.tool(
         description=(

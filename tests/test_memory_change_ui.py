@@ -16,7 +16,7 @@ def _proposal(dsn: str):
     with db.transaction(dsn) as cur:
         memory = remember(cur, RULE)
         return propose_change(
-            cur, memory, "retire", retirement_kind="out_of_scope", retire_reason=REASON
+            cur, memory, "retire", retirement_kind="withdrawn", retire_reason=REASON
         )
 
 
@@ -27,12 +27,12 @@ def test_change_review_shows_the_full_target_and_applies_on_one_key(dsn, monkeyp
     assert memory_change_ui.run(dsn) == 0
     output = capsys.readouterr().out
     assert RULE in output
-    assert "out_of_scope" in output
+    assert "withdrawn" in output
     assert REASON in output
     with db.transaction(dsn) as cur:
         memory = memories.get_memory(cur, proposal["target_memory_id"])
         assert memory["status"] == "retired"
-        assert memory["retirement_kind"] == "out_of_scope"
+        assert memory["retirement_kind"] == "withdrawn"
         cur.execute(
             "SELECT actor, detail FROM event_log WHERE event_type = 'memory_retired' "
             "AND memory_id = %s",
@@ -167,7 +167,7 @@ def test_restore_acknowledges_conflict_only_after_its_reason_is_shown(dsn, monke
     with db.transaction(dsn) as cur:
         target = remember(cur, body)
         conflict = remember(cur, body)
-        retire(cur, target, "scope ended", kind="out_of_scope")
+        retire(cur, target, "scope ended", kind="withdrawn")
         retire(cur, conflict, "unsafe now")
         proposal = propose_change(cur, target, "restore", restore_reason="needed again")
     monkeypatch.setenv("LINES", "12")

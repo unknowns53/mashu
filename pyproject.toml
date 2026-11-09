@@ -15,7 +15,10 @@ mcp = [
 ]
 
 [dependency-groups]
+# mcp is here as well as in its extra because a bare `uv sync` installs dev but no extras,
+# and would remove the package the MCP server in this checkout's .venv runs on.
 dev = [
+    "mcp>=1.2",
     "pytest>=8.3",
     "ruff>=0.7",
 ]

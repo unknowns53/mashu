@@ -1,4 +1,4 @@
-"""Human task operations shared by the command line and terminal screens."""
+"""Human task operations shared by the command line, terminal screens, and desktop app."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import projects, references, routing, tasks
+from mashu import projects, references, routing, scopes, task_history, tasks
 from mashu.errors import MashuError
 
 _PROPOSAL_FIELDS = ("outcome", "reason", "state_at", "proposed_at", "proposed_by")
@@ -59,6 +59,12 @@ def accept_close_proposal(
     )
 
 
+def keep_open(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, Any]:
+    """Turn a close proposal down: the work is still live, so its lease is renewed too."""
+    tasks.withdraw_proposal(cur, task_id, actor=actor)
+    return tasks.touch(cur, task_id, actor=actor)
+
+
 def task_project_choices(cur: psycopg.Cursor, *, cwd: str | None) -> ProjectChoices:
     """List open projects in the routed scope, or all open projects as a fallback."""
     scope_id, _ = routing.resolve(cur, cwd)
@@ -77,6 +83,57 @@ def task_project_choices(cur: psycopg.Cursor, *, cwd: str | None) -> ProjectChoi
             return ProjectChoices(scoped, scope_name)
     cur.execute("SELECT project_id, name FROM project WHERE archived_at IS NULL ORDER BY name")
     return ProjectChoices(cur.fetchall(), None)
+
+
+def task_view(cur: psycopg.Cursor, activity: str) -> list[dict[str, Any]]:
+    """One task view, each task with the history a person may read or search."""
+    return [
+        task_history.expanded_task(
+            cur,
+            row["task"]["task_id"],
+            attempts=True,
+            decisions=True,
+            artifacts=True,
+            checkpoints=True,
+        )
+        for row in tasks.task_list(cur, activity=activity)
+    ]
+
+
+def create_task(
+    cur: psycopg.Cursor,
+    *,
+    name: str,
+    project: str | None,
+    goal: str | None,
+    cwd: str | None,
+    actor: str,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Open a task under the named project, or the only one available from cwd.
+
+    Without force, a task that reads like one already open in the project raises
+    DuplicateTaskError naming it, so the person can look before creating it anyway.
+    """
+    project_id = resolve_task_project(cur, project, cwd=cwd)
+    return tasks.task_create(
+        cur, project=project_id, name=name, goal=goal or None, actor=actor, force=force
+    )
+
+
+def save_project(
+    cur: psycopg.Cursor,
+    project_id: UUID | None,
+    *,
+    name: str,
+    scope_name: str | None,
+    actor: str,
+) -> dict[str, Any]:
+    """Create a project, or rename and rehome one; no scope pushes its cards everywhere."""
+    scope_id = scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
+    if project_id is None:
+        return projects.create_project(cur, name=name, scope_id=scope_id, actor=actor)
+    return projects.update_project(cur, project_id, name=name, scope_id=scope_id, actor=actor)
 
 
 def resolve_task_project(cur: psycopg.Cursor, given: str | None, *, cwd: str | None) -> UUID:

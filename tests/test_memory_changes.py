@@ -84,7 +84,7 @@ def test_a_malformed_proposal_reports_every_shape_problem_at_once(cur):
 def test_agent_proposal_stays_pending_until_explicit_instruction_and_replay_is_idempotent(cur):
     memory = remember(cur, RULE)
     proposal = propose_change(
-        cur, memory, "retire", retirement_kind="invalidated", retire_reason="now verified"
+        cur, memory, "retire", retirement_kind="withdrawn", retire_reason="now verified"
     )
 
     assert proposal["operation"] == "retire"
@@ -107,7 +107,7 @@ def test_agent_proposal_stays_pending_until_explicit_instruction_and_replay_is_i
 
     assert applied == replay
     assert applied["memory"]["status"] == "retired"
-    assert applied["memory"]["retirement_kind"] == "invalidated"
+    assert applied["memory"]["retirement_kind"] == "withdrawn"
     assert memories.get_memory(cur, memory["memory_id"])["status"] == "retired"
     cur.execute(
         "SELECT actor, detail FROM event_log WHERE event_type = 'memory_retired' "
@@ -127,7 +127,7 @@ def test_agent_proposal_stays_pending_until_explicit_instruction_and_replay_is_i
 
 def test_changed_target_revision_requires_a_refreshed_proposal(cur):
     memory = remember(cur, RULE)
-    retirement = {"retirement_kind": "invalidated", "retire_reason": "the adapter verifies it"}
+    retirement = {"retirement_kind": "withdrawn", "retire_reason": "the adapter verifies it"}
     proposal = propose_change(cur, memory, "retire", **retirement)
     memories.revise(cur, memory["memory_id"], content=UPDATED, actor="user")
 
@@ -161,7 +161,7 @@ def test_new_conflict_after_replace_proposal_requires_reread_and_acknowledgment(
         cur, old, successor, refreshed_nomination["version"], change_id=proposal["change_id"]
     )
     assert refreshed["version"] == 2
-    assert refreshed["conflicts"][0]["retirement_kind"] == "invalidated"
+    assert refreshed["conflicts"][0]["retirement_kind"] == "withdrawn"
     result = apply_change(
         cur,
         refreshed,
@@ -392,7 +392,7 @@ def test_mcp_records_a_user_instruction_without_being_told_its_kind(mcp, dsn):
     with db.transaction(dsn) as cur:
         memory = remember(cur, RULE)
         proposal = propose_change(
-            cur, memory, "retire", retirement_kind="invalidated", retire_reason="now verified"
+            cur, memory, "retire", retirement_kind="withdrawn", retire_reason="now verified"
         )
 
     admitted = mcp("memory_admit", request_id=str(uuid4()), instruction="do it", content=SUCCESSOR)
@@ -498,7 +498,9 @@ def _instructed(cur, memory, operation, approval, request_id=None, **fields):
 @pytest.mark.parametrize("operation", ["retire", "replace", "restore"])
 def test_an_instructed_change_leaves_what_proposing_and_applying_it_leaves(cur, operation):
     instruction = f"Please {operation} that rule"
-    approval = _approval(instruction)
+    # A withdrawn rule comes back only on words that address its retirement.
+    reversal = {"reversal_instruction": "Bring it back, the adapter returned"}
+    approval = _approval(instruction, **(reversal if operation == "restore" else {}))
     evidence = [
         {
             "kind": "artifact",
@@ -512,9 +514,9 @@ def test_an_instructed_change_leaves_what_proposing_and_applying_it_leaves(cur, 
     for one_call, target, successor in zip((False, True), targets, successors, strict=True):
         memory = remember(cur, target)
         if operation == "restore":
-            retire(cur, memory, "the adapter no longer exists", "out_of_scope")
+            retire(cur, memory, "the adapter no longer exists", "withdrawn")
         fields = {
-            "retire": {"retirement_kind": "invalidated", "retire_reason": "it is wrong"},
+            "retire": {"retire_reason": "it is wrong"},
             "replace": {"content": successor, "retire_reason": "the user rewrote it"},
             "restore": {"restore_reason": "the adapter is back"},
         }[operation]
@@ -565,7 +567,7 @@ def test_an_instructed_replace_stops_on_an_unaddressed_conflict_and_answers_a_re
     assert server._failure(stopped.value)["conflicts"] == [
         {
             "memory_id": str(invalidated["memory_id"]),
-            "retirement_kind": "invalidated",
+            "retirement_kind": "withdrawn",
             "retire_reason": INVALIDATED,
             "superseded_by": None,
             "relocated_to_kind": None,
@@ -634,14 +636,9 @@ def test_memory_change_instructed_takes_the_users_words_in_one_call(mcp, dsn, mo
         "request_id": str(uuid4()),
     }
 
-    malformed = mcp("memory_change_instructed", **call, retirement_kind="relocated", content="x")
-    assert malformed["problems"] == [
-        "retire does not take content",
-        "retire needs retire_reason",
-        "a relocated retirement names its Temporary Context, so propose it with "
-        "memory_change_propose",
-    ]
-    retirement = {"retirement_kind": "invalidated", "retire_reason": "the adapter verifies it"}
+    malformed = mcp("memory_change_instructed", **call, content="x")
+    assert malformed["problems"] == ["retire does not take content", "retire needs retire_reason"]
+    retirement = {"retire_reason": "the adapter verifies it"}
     banned = {**call, "conversation_ref": "conversation:SECRETMARKER2"}
     assert mcp("memory_change_instructed", **banned, **retirement)["field"] == "conversation_ref"
 
@@ -667,7 +664,7 @@ def test_an_evidence_reference_keeps_the_home_directory_from_tilde(cur, monkeypa
         remember(cur, RULE),
         "retire",
         evidence=evidence,
-        retirement_kind="out_of_scope",
+        retirement_kind="withdrawn",
         retire_reason="the conditions it served ended",
     )
 

@@ -6,7 +6,16 @@ import datetime as dt
 from typing import Any
 from uuid import UUID
 
-from mashu import application, db, memories, references, scopes, screen, temporary, topics
+from mashu import (
+    application,
+    db,
+    memories,
+    memory_actions,
+    screen,
+    settings,
+    temporary,
+    topics,
+)
 from mashu.errors import MashuError, RetiredConflictError
 
 ACTOR = "user"
@@ -14,7 +23,8 @@ ACTOR = "user"
 _VIEWS = {"1": "active", "2": "retired", "3": "temporary"}
 _KEYS = (
     "  ↑↓/jk move   PgUp/PgDn   / search   ⏎ why   ← back   q quit   ? help\n"
-    "  n remember   p temporary   e edit   c convert   r retire/end   d delivery"
+    "  n remember   p temporary   e edit   c convert   r retire/end   d delivery\n"
+    "  o restore a retired memory   s sort   v reverse"
 )
 _ITEM_KEYS = "  space read on   b page back   ← back   q quit   ? help"
 
@@ -33,6 +43,10 @@ _HELP = """
   c            convert an active memory to temporary context, or the reverse
   r            retire the selected active memory, or end the selected temporary context
   d            change where the selected active memory is delivered
+  o            restore the selected retired memory, after reading why it was retired
+  s            sort by the next key: updated, created, delivery or kind, then back to
+               the listed order (created, expires, scope for temporary context)
+  v            reverse the order
   ← or Esc     clear the search; without a search, go back
   ?            show this help
   q            quit Mashu
@@ -228,10 +242,29 @@ def _tabs(view: str) -> str:
     return "  " + "   ".join(tabs)
 
 
-def _heading(view: str, shown: int, total: int, query: str) -> str:
+Order = tuple[str, bool] | None
+
+
+def _order_text(order: Order) -> str:
+    if order is None:
+        return ""
+    key, descending = order
+    return f"  ·  sorted by {key} {'↓' if descending else '↑'}"
+
+
+def _ordered(rows: list[dict[str, Any]], order: Order) -> list[dict[str, Any]]:
+    """Rows in the order chosen with s and v; None keeps the order the store lists them in."""
+    if order is None:
+        return rows
+    key, descending = order
+    return application.sort_rows(rows, key, descending=descending)
+
+
+def _heading(view: str, shown: int, total: int, query: str, order: Order = None) -> str:
     name = "temporary context" if view == "temporary" else f"{view} memories"
     count = f"{shown}/{total}" if query else str(total)
     suffix = f"  ·  search {screen.accent(repr(query))}" if query else ""
+    suffix += _order_text(order)
     title = screen.bold(screen.accent("Memories"))
     return f"{title}\n{_tabs(view)}\n\n  {screen.bold(name)}  {count}{suffix}"
 
@@ -259,8 +292,9 @@ def _screen_text(
     *,
     total: int,
     query: str,
+    order: Order = None,
 ) -> str:
-    head = _heading(view, len(rows), total, query)
+    head = _heading(view, len(rows), total, query, order)
     width = screen.terminal_width() - 1
     columns = _columns(rows, width)
     rendered = [_line(row, view, width, columns) for row in rows]
@@ -327,20 +361,6 @@ def _optional(prompt: str) -> str | None:
         return None
 
 
-def _scope_id(cur: Any, name: str | None) -> UUID | None:
-    return scopes.require_scope(cur, name)["scope_id"] if name else None
-
-
-def _resolve_id(cur: Any, value: str, *, table: str, column: str, label: str) -> UUID:
-    return references.resolve_id(
-        cur,
-        value,
-        table=table,
-        column=column,
-        label=label,
-    )
-
-
 def _topic_line(number: int, row: dict[str, Any]) -> str:
     scope = row.get("scope_name") or "every session"
     rules = f"{row['rules']} rule" + ("" if row["rules"] == 1 else "s")
@@ -395,23 +415,6 @@ def _new_topic() -> dict[str, Any] | None:
     if trigger is None:
         return None
     return {"topic_id": None, "name": name, "scope_name": scope.text or None, "trigger": trigger}
-
-
-def topic_id_for(cur: Any, choice: dict[str, Any] | None) -> UUID | None:
-    """The chosen topic's id, creating a described topic inside the caller's write."""
-    if choice is None:
-        return None
-    if choice.get("topic_id") is not None:
-        return choice["topic_id"]
-    if choice.get("trigger") is None:
-        return topics.require_topic(cur, choice["name"])["topic_id"]
-    return topics.create_topic(
-        cur,
-        name=choice["name"],
-        trigger=choice["trigger"],
-        scope_id=_scope_id(cur, choice.get("scope_name")),
-        actor=ACTOR,
-    )["topic_id"]
 
 
 def _chosen_delivery(text: str) -> str:
@@ -504,75 +507,46 @@ def _revise_temporary(dsn: str | None, row: dict[str, Any]) -> str:
     if scope_name == "-":
         scope_name = None
     with db.transaction(dsn) as cur:
-        temporary.revise(
-            cur,
-            row["context_id"],
-            content=content,
-            scope_id=_scope_id(cur, scope_name),
-            actor=ACTOR,
+        memory_actions.revise_temporary(
+            cur, row["context_id"], content=content, scope_name=scope_name, actor=ACTOR
         )
     return screen.success(f"  ✓ revised temporary {_short(row['context_id'])}")
 
 
 def _retire(dsn: str | None, row: dict[str, Any]) -> str:
-    choices = ("invalidated", "superseded", "out_of_scope", "relocated")
-    answer = screen.editline(f"  retirement kind [{'/'.join(choices)}]: ", "")
-    if isinstance(answer, screen.Cancelled):
-        return screen.warning("  ! retirement cancelled; Memory remains active")
-    retirement_kind = answer.text
-    if retirement_kind not in choices:
-        return screen.warning("  ! left active — choose a supported retirement kind")
-    successor_ref = None
-    context_ref = None
-    if retirement_kind == "superseded":
-        successor_ref = _required("  successor Memory ID [required]: ")
-        if successor_ref is None:
-            return screen.warning("  ! left active — successor Memory is required")
-    if retirement_kind == "relocated":
-        context_ref = _required("  Temporary Context ID [required]: ")
-        if context_ref is None:
-            return screen.warning("  ! left active — destination Temporary Context is required")
-    reason = _required("  retirement reason [required]: ")
+    reason = _required("  retirement reason [required; a similar rule later is shown it]: ")
     if reason is None:
         return screen.warning("  ! left active — retirement needs a reason")
     try:
         with db.transaction(dsn) as cur:
-            superseded_by = (
-                _resolve_id(
-                    cur,
-                    successor_ref,
-                    table="memory",
-                    column="memory_id",
-                    label="successor Memory",
-                )
-                if successor_ref
-                else None
-            )
-            relocated_to_id = (
-                _resolve_id(
-                    cur,
-                    context_ref,
-                    table="temporary_context",
-                    column="context_id",
-                    label="Temporary Context",
-                )
-                if context_ref
-                else None
-            )
-            memories.retire(
-                cur,
-                row["memory_id"],
-                reason=reason,
-                actor=ACTOR,
-                retirement_kind=retirement_kind,
-                superseded_by=superseded_by,
-                relocated_to_kind="temporary_context" if relocated_to_id else None,
-                relocated_to_id=relocated_to_id,
-                approval_source={"kind": "user_direct"},
-            )
+            memory_actions.retire(cur, row["memory_id"], reason=reason, actor=ACTOR)
     except MashuError as refusal:
         return screen.danger(f"  {refusal}")
     return screen.success(f"  ✓ retired {_short(row['memory_id'])}")
+
+
+def _restore(dsn: str | None, row: dict[str, Any]) -> tuple[str, bool]:
+    """Restore a retired rule; the note to show, and whether it is active again."""
+    kind = row.get("retirement_kind") or "legacy"
+    print(screen.wrap(f"  retired as {kind}: {row.get('retire_reason') or '-'}", indent="    "))
+    reason = _required("  why the retirement no longer holds [required]: ")
+    if reason is None:
+        return screen.warning("  ! left retired — restoring needs a reason"), False
+    acknowledged: list[UUID] | None = None
+    while True:
+        try:
+            with db.transaction(dsn) as cur:
+                memory_actions.restore(
+                    cur, row["memory_id"], reason=reason, acknowledged=acknowledged, actor=ACTOR
+                )
+            return screen.success(f"  ✓ restored {_short(row['memory_id'])}"), True
+        except RetiredConflictError as conflict:
+            print(_conflict_text(conflict))
+            if not _confirm("restore it after reading these retirement reasons?"):
+                return screen.warning("  ! left retired"), False
+            acknowledged = [tomb["memory_id"] for tomb in conflict.tombstones]
+        except MashuError as refusal:
+            return screen.danger(f"  {refusal}"), False
 
 
 def _set_delivery(dsn: str | None, row: dict[str, Any]) -> str:
@@ -586,16 +560,13 @@ def _set_delivery(dsn: str | None, row: dict[str, Any]) -> str:
         return screen.warning("  ! delivery unchanged")
     delivery, scope_name, topic = answers
     with db.transaction(dsn) as cur:
-        scope_id = _scope_id(cur, scope_name)
-        changed = memories.set_delivery(
+        changed = memory_actions.set_delivery(
             cur,
             row["memory_id"],
             delivery=delivery,
+            scope_name=scope_name,
+            topic=topic,
             actor=ACTOR,
-            scope_id=scope_id,
-            clear_scope=scope_id is None,
-            topic_id=topic_id_for(cur, topic),
-            approval_source={"kind": "user_direct"},
         )
     label = f"topic:{topic['name']}" if topic else changed["delivery"]
     return screen.success(f"  ✓ delivery {_short(row['memory_id'])}  {label}")
@@ -617,7 +588,9 @@ def _remember(dsn: str | None) -> tuple[str, UUID | None]:
         return screen.warning("  ! nothing remembered"), None
     why = _optional("  why [optional: reason, measurements, dates, history]: ")
     # Refused before the delivery questions, so an over-long body costs no further answers.
-    memories.check_body(content, why=why)
+    with db.transaction(dsn) as cur:
+        limit = settings.limit(cur, "content_limit")
+    memories.check_body(content, limit=limit, why=why)
     answers = _delivery_answers(dsn=dsn)
     if answers is None:
         return screen.warning("  ! nothing remembered"), None
@@ -626,15 +599,15 @@ def _remember(dsn: str | None) -> tuple[str, UUID | None]:
     while True:
         try:
             with db.transaction(dsn) as cur:
-                row = memories.remember(
+                row = memory_actions.remember(
                     cur,
                     content=content,
-                    actor=ACTOR,
-                    scope_id=_scope_id(cur, scope_name),
-                    delivery=delivery,
-                    topic_id=topic_id_for(cur, topic),
-                    acknowledged_conflicts=acknowledged,
                     why=why,
+                    delivery=delivery,
+                    scope_name=scope_name,
+                    topic=topic,
+                    acknowledged=acknowledged,
+                    actor=ACTOR,
                 )
             message = screen.success(f"  ✓ remembered {_short(row['memory_id'])}")
             for warning in row.get("retirement_warnings", []):
@@ -680,13 +653,7 @@ def _temporary(dsn: str | None) -> tuple[str, UUID | None]:
     if days is None:
         return screen.warning("  ! nothing recorded"), None
     with db.transaction(dsn) as cur:
-        row = temporary.put_temporary(
-            cur,
-            content=content,
-            actor=ACTOR,
-            days=days,
-            scope_id=None,
-        )
+        row = memory_actions.add_temporary(cur, content=content, days=days, actor=ACTOR)
     return screen.success(f"  ✓ temporary {_short(row['context_id'])}"), row["context_id"]
 
 
@@ -759,6 +726,20 @@ def _move(at: int, total: int, key: str, page: int) -> int:
     return at
 
 
+def _next_order(current: Order, keys: tuple[str, ...], key: str) -> Order:
+    """s moves to the next key in its own default direction, and from the last back to the
+    listed order; v reverses the current key, starting from the first when none is chosen."""
+    if key == "v":
+        name, descending = current or (keys[0], keys[0] in application.DATE_SORTS)
+        return name, not descending
+    if current is None:
+        return keys[0], keys[0] in application.DATE_SORTS
+    at = keys.index(current[0]) + 1
+    if at == len(keys):
+        return None
+    return keys[at], keys[at] in application.DATE_SORTS
+
+
 @screen.fullscreen
 def run(dsn: str | None = None) -> int:
     """Browse what Mashu remembers and carry out one explicit change at a time."""
@@ -770,6 +751,7 @@ def run(dsn: str | None = None) -> int:
     reading = False
     scroll = 0
     back: list[int] = []
+    order: dict[str, Order] = {name: None for name in _VIEWS.values()}
 
     while True:
         try:
@@ -778,7 +760,7 @@ def run(dsn: str | None = None) -> int:
         except MashuError as error:
             print(error)
             return 1
-        rows = _filtered(all_rows, view, query)
+        rows = _ordered(_filtered(all_rows, view, query), order[view])
         wanted = selected[view]
         kept = next(
             (number for number, row in enumerate(rows) if _row_id(row, view) == wanted), None
@@ -815,6 +797,7 @@ def run(dsn: str | None = None) -> int:
                     note,
                     total=len(all_rows),
                     query=query,
+                    order=order[view],
                 )
             )
         key = screen.getkey()
@@ -846,6 +829,9 @@ def run(dsn: str | None = None) -> int:
             if searched is not None:
                 query = searched
                 at[view] = 0
+            continue
+        if key in ("s", "v"):
+            order[view] = _next_order(order[view], application.MEMORY_SORTS[view], key)
             continue
         if key == "left":
             if query:
@@ -908,6 +894,11 @@ def run(dsn: str | None = None) -> int:
                     note = screen.warning("  ! retired memories cannot be converted")
             except MashuError as error:
                 note = screen.danger(f"  ✗ {error}")
+            continue
+        if view == "retired" and key == "o":
+            note, restored = _restore(dsn, row)
+            if restored:
+                view, query, selected["active"] = "active", "", row["memory_id"]
             continue
         if view == "temporary" and key in {"e", "r"}:
             try:

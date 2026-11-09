@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 
 from conftest import new_project, new_task, remember, retire, update_task
-from mashu import application, ledger, memories, nominations, tasks, topics
+from mashu import application, config, ledger, memories, nominations, tasks, topics
 from mashu.errors import MalformedRequestError, MashuError, RefusedError
 
 # Trigram fixtures use near-identical and unrelated text.
@@ -61,8 +61,8 @@ def test_hand_recording_and_a_banned_pattern_are_refused_and_nothing_is_written(
     assert count(cur, "nomination") == 0
 
 
-@pytest.mark.parametrize("retirement_kind", ("invalidated", "legacy"))
-def test_a_new_incident_on_invalidated_or_legacy_retirement_keeps_a_conflicted_candidate(
+@pytest.mark.parametrize("retirement_kind", ("withdrawn", "legacy"))
+def test_a_new_incident_on_withdrawn_or_legacy_retirement_keeps_a_conflicted_candidate(
     cur, retirement_kind
 ):
     kept = remember(cur, HOLE)
@@ -80,8 +80,8 @@ def test_a_new_incident_on_invalidated_or_legacy_retirement_keeps_a_conflicted_c
     assert count(cur, "nomination") == 1
 
 
-@pytest.mark.parametrize("retirement_kind", ("out_of_scope", "relocated"))
-def test_out_of_scope_and_relocated_memories_do_not_suppress_new_candidates(cur, retirement_kind):
+@pytest.mark.parametrize("retirement_kind", ("withdrawn", "relocated"))
+def test_withdrawn_and_relocated_memories_do_not_suppress_new_candidates(cur, retirement_kind):
     kept = remember(cur, HOLE)
     if retirement_kind == "relocated":
         converted = memories.convert_to_temporary(cur, kept["memory_id"], days=1, actor="user")
@@ -167,7 +167,7 @@ def test_work_never_asks_for_a_seat_and_lands_on_the_task_that_will_make_it(cur,
 
 def test_a_rule_prevention_over_the_body_ceiling_is_refused_and_work_is_not(cur, task_id):
     long_fix = FIX + ", each with the date it was written and the session that wrote it"
-    assert len(long_fix) > memories.CONTENT_LIMIT
+    assert len(long_fix) > config.DEFAULT_CONTENT_LIMIT
 
     with pytest.raises(MalformedRequestError, match="prevention is .* put .* in what"):
         report(cur, "incident", long_fix)

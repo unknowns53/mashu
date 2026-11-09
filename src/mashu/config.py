@@ -1,4 +1,7 @@
-"""Read Mashu configuration from the environment."""
+"""Read Mashu configuration from the environment.
+
+The limits here are defaults; a value set on the Settings screen overrides them (settings.py).
+"""
 
 from __future__ import annotations
 
@@ -33,6 +36,9 @@ DEFAULT_DECISION_CAPACITY = 800
 
 #: Hard ceiling on the temporary share of the opening (project-state 8).
 DEFAULT_TEMPORARY_CAPACITY = 400
+
+#: Characters one Memory body may hold; its reason goes to `why` (5.2).
+DEFAULT_CONTENT_LIMIT = 120
 
 #: Maximum rule bodies one topic holds; they are read on demand, not pushed (5.2).
 DEFAULT_TOPIC_CAPACITY = 800
@@ -88,6 +94,10 @@ def task_detail_capacity() -> int:
 
 def temporary_capacity() -> int:
     return int(os.environ.get("MASHU_TEMPORARY_CAPACITY") or DEFAULT_TEMPORARY_CAPACITY)
+
+
+def content_limit() -> int:
+    return int(os.environ.get("MASHU_CONTENT_LIMIT") or DEFAULT_CONTENT_LIMIT)
 
 
 def topic_capacity() -> int:

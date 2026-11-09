@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "What the pages in the main window may call",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

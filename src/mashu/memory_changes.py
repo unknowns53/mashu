@@ -18,6 +18,7 @@ from mashu import (
     memories,
     nominations,
     redact,
+    settings,
     topics,
 )
 from mashu.errors import (
@@ -31,13 +32,13 @@ from mashu.errors import (
 Operation = Literal["retire", "replace", "restore", "redeliver"]
 #: The kinds a proposal may set. `legacy` marks rows retired before kinds existed, so only a
 #: proposal that already carries it may keep it.
-RetirementKind = Literal["invalidated", "superseded", "out_of_scope", "relocated"]
+RetirementKind = Literal["withdrawn", "superseded", "relocated"]
 EvidenceKind = Literal["ledger", "trace", "artifact"]
 
 OPERATIONS: tuple[str, ...] = get_args(Operation)
 RETIREMENT_KINDS: tuple[str, ...] = get_args(RetirementKind)
 EVIDENCE_KINDS: tuple[str, ...] = get_args(EvidenceKind)
-BLOCKING_KINDS = ("invalidated", "legacy")
+BLOCKING_KINDS = ("withdrawn", "legacy")
 OBSERVATION_LIMIT = 2000
 EVIDENCE_SHAPE = "kind 'ledger' or 'trace' with id, or kind 'artifact' with ref, plus observation"
 #: A user's words have no ledger row or trace of their own, so they are cited as an artifact.
@@ -339,7 +340,10 @@ def _shape_problems(
         if kind == "superseded":
             problems.append("use replace to retire a memory as superseded")
         elif kind not in RETIREMENT_KINDS and not (kind == "legacy" and legacy_possible):
-            problems.append("retire needs retirement_kind: invalidated, out_of_scope, or relocated")
+            problems.append(
+                "retire takes retirement_kind withdrawn (the default) or relocated with its "
+                "Temporary Context"
+            )
         if kind == "relocated" and (
             fields["relocated_to_kind"] != "temporary_context" or fields["relocated_to_id"] is None
         ):
@@ -465,6 +469,8 @@ def propose(
     """
     if operation == "replace" and retirement_kind is None:
         retirement_kind = "superseded"
+    if operation == "retire" and retirement_kind is None:
+        retirement_kind = "withdrawn"
     problems = _shape_problems(
         operation,
         evidence,
@@ -1043,18 +1049,17 @@ def redeliver_instructed(
 #: What an instructed change takes beside its target and provenance. A relocation names a
 #: Temporary Context only the user can register, so it stays on the proposal path.
 _INSTRUCTED_TAKES = {
-    "retire": {"retirement_kind", "retire_reason"},
+    "retire": {"retire_reason"},
     "replace": {"content", "why", "retire_reason"},
     "restore": {"restore_reason", "reversal_instruction"},
 }
 INSTRUCTED_OPERATIONS: tuple[str, ...] = tuple(_INSTRUCTED_TAKES)
-INSTRUCTED_RETIREMENT_KINDS = ("invalidated", "out_of_scope")
 
 
 def _instructed_problems(
-    operation: str, approval: dict[str, Any], fields: dict[str, Any]
+    operation: str, approval: dict[str, Any], fields: dict[str, Any], *, content_limit: int
 ) -> list[str | OverLimit]:
-    """Every problem with an instructed change that can be seen without the database."""
+    """Every problem with an instructed change that can be seen without reading any row."""
     problems: list[str | OverLimit] = []
     for key, needs in (
         ("instruction", "a short exact quote of the user's words"),
@@ -1080,25 +1085,15 @@ def _instructed_problems(
     if extra:
         problems.append(f"{operation} does not take {', '.join(extra)}")
     if operation == "retire":
-        kind = fields["retirement_kind"]
         if _blank(fields["retire_reason"]):
             problems.append("retire needs retire_reason")
-        if kind == "relocated":
-            problems.append(
-                "a relocated retirement names its Temporary Context, so propose it with "
-                "memory_change_propose"
-            )
-        elif kind == "superseded":
-            problems.append("use operation replace with content to retire a memory as superseded")
-        elif kind not in INSTRUCTED_RETIREMENT_KINDS:
-            problems.append(
-                f"retire needs retirement_kind: {' or '.join(INSTRUCTED_RETIREMENT_KINDS)}"
-            )
     elif operation == "replace":
         if _blank(fields["content"]):
             problems.append("replace needs content, the successor rule")
         else:
-            problems += memories.body_problems(fields["content"], why=fields["why"])
+            problems += memories.body_problems(
+                fields["content"], limit=content_limit, why=fields["why"]
+            )
     elif _blank(fields["restore_reason"]):
         problems.append("restore needs restore_reason")
     return problems
@@ -1107,7 +1102,7 @@ def _instructed_problems(
 def _require_acknowledged(
     cur: psycopg.Cursor, approval: dict[str, Any], conflict_ids: list[UUID], subject: str
 ) -> None:
-    """Stop before writing when the invalidated or legacy conflicts go unaddressed.
+    """Stop before writing when the withdrawn or legacy conflicts go unaddressed.
 
     Nothing of the call survives the refusal, so it carries the conflicts for the agent to
     show the user instead of pointing at rows it could read.
@@ -1118,12 +1113,12 @@ def _require_acknowledged(
         return
     if blocking:
         reason = (
-            f"{subject} repeats Memory retired as invalidated or legacy, so nothing was written. "
+            f"{subject} repeats Memory retired as withdrawn or legacy, so nothing was written. "
             "Show the user `conflicts`; if they address them, resend with their memory_id "
             "values as conflict_ids and the user's words as conflict_instruction"
         )
     else:
-        reason = "conflict_ids name no current invalidated or legacy conflict; resend without them"
+        reason = "conflict_ids name no current withdrawn or legacy conflict; resend without them"
     shown = [row for row in rows if row["memory_id"] in blocking]
     raise RetiredConflictError(reason, _conflict_snapshot(shown))
 
@@ -1136,7 +1131,6 @@ def change_instructed(
     request_id: UUID,
     approval: dict[str, Any],
     actor: str,
-    retirement_kind: str | None = None,
     retire_reason: str | None = None,
     content: str | None = None,
     why: str | None = None,
@@ -1150,13 +1144,14 @@ def change_instructed(
     answers with the first result.
     """
     fields = {
-        "retirement_kind": retirement_kind,
         "retire_reason": retire_reason,
         "content": content,
         "why": why,
         "restore_reason": restore_reason,
     }
-    problems = _instructed_problems(operation, approval, fields)
+    problems = _instructed_problems(
+        operation, approval, fields, content_limit=settings.limit(cur, "content_limit")
+    )
     if problems:
         raise MalformedRequestError(problems)
     redact.gate(
@@ -1165,7 +1160,7 @@ def change_instructed(
             "conversation_ref": approval["conversation_ref"],
             "conflict_instruction": approval.get("conflict_instruction"),
             "reversal_instruction": approval.get("reversal_instruction"),
-            **{name: value for name, value in fields.items() if name != "retirement_kind"},
+            **fields,
         }
     )
     request = approvals.json_value({"memory_id": memory_id, "operation": operation, **fields})
@@ -1184,7 +1179,7 @@ def change_instructed(
     target = _current(cur, memory_id)
     proposal: dict[str, Any] = {}
     if operation == "retire":
-        proposal = {"retirement_kind": retirement_kind, "retire_reason": retire_reason}
+        proposal = {"retirement_kind": "withdrawn", "retire_reason": retire_reason}
     elif operation == "replace":
         successor = nominations.nominate_user_explicit(
             cur,

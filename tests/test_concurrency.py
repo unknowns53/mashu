@@ -121,7 +121,7 @@ def test_two_connections_replaying_one_memory_change_create_one_result(committin
             cur,
             memory,
             "retire",
-            retirement_kind="out_of_scope",
+            retirement_kind="withdrawn",
             retire_reason="the exporter now records its checksum in the index",
         )
 

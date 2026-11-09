@@ -7,7 +7,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import capacity, config, events, redact
+from mashu import capacity, config, events, redact, settings
 from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
@@ -80,7 +80,7 @@ def _check_room(
 
     cost = pushed_cost([content])
     projected = _cost(against) + cost
-    ceiling = config.temporary_capacity()
+    ceiling = settings.limit(cur, "temporary_capacity")
     if projected <= ceiling:
         return
 
@@ -205,7 +205,7 @@ def convert_to_memory(
     """Replace a standing condition with a durable memory in one transaction.
 
     `acknowledged_conflicts` passes through to memories.remember, which refuses a body that
-    repeats an invalidated or legacy Memory until the caller has read those retirements.
+    repeats a withdrawn or legacy Memory until the caller has read those retirements.
     """
     from mashu import memories
 

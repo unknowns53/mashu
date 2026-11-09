@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+ <linearGradient id="bg" x1="0" y1="0" x2="0.9" y2="1">
+  <stop offset="0" stop-color="#4573F5"/><stop offset="1" stop-color="#1E3C9F"/>
+ </linearGradient>
+ <linearGradient id="hl" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18"/><stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0"/>
+ </linearGradient>
+ <filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#0A1640" flood-opacity="0.32"/></filter>
+ <filter id="card" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="12.0" stdDeviation="16.0" flood-color="#0A1A5C" flood-opacity="0.38"/></filter>
+</defs>
+<rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)" filter="url(#sh)"/>
+<rect x="100" y="100" width="824" height="824" rx="186" fill="url(#hl)"/>
+<rect x="352.0" y="250.0" width="400.0" height="500.0" rx="46.0" fill="#FFFFFF" fill-opacity="0.30" transform="rotate(9 552.0 500.0)"/>
+<g filter="url(#card)"><rect x="312.0" y="272.0" width="400.0" height="500.0" rx="46.0" fill="#FFFFFF"/></g>
+<rect x="374.0" y="400.0" width="170.0" height="34.0" rx="17.0" fill="#9FB4F2"/>
+<rect x="374.0" y="484.0" width="276.0" height="30.0" rx="15.0" fill="#D6DFFA"/>
+<rect x="374.0" y="560.0" width="236.0" height="30.0" rx="15.0" fill="#D6DFFA"/>
+<rect x="374.0" y="636.0" width="176.0" height="30.0" rx="15.0" fill="#D6DFFA"/>
+<path d="M590.0 258.0 h78.0 v186.0 l-39.0 -34.0 l-39.0 34.0 z" fill="#F4B23C"/>
+</svg>

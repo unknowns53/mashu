@@ -7,7 +7,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import capacity, config, events, match, nominations, redact, topics
+from mashu import capacity, config, events, match, nominations, redact, settings, topics
 from mashu.errors import (
     MalformedRequestError,
     MashuError,
@@ -20,10 +20,6 @@ DELIVERIES = ("always", "scope", "topic")
 
 _EXPLICIT_WHAT = "recorded by the user's own hand"
 
-#: The longest body a caller may write, in characters. Every matching session is handed the
-#: body whole, and capacity bounds what the bodies cost together, not what one of them costs.
-CONTENT_LIMIT = 120
-
 #: The longest reason one write leaves on its evidence row, which is read but never pushed.
 WHY_LIMIT = 500
 
@@ -31,16 +27,19 @@ WHY_LIMIT = 500
 def check_body(
     content: str,
     *,
+    limit: int,
     why: str | None = None,
     field: str = "content",
     rest: str | None = "why",
 ) -> None:
-    """Refuse a new body over its ceiling, naming `rest` as where its reason goes.
+    """Refuse a new body over `limit` characters, naming `rest` as where its reason goes.
 
+    Every matching session is handed a body whole, and capacity bounds what the bodies cost
+    together, not what one of them costs; settings.limit(cur, "content_limit") is the limit.
     Only text a caller writes is held to it. A body carried over unchanged was admitted under
-    the ceiling of its day.
+    the limit of its day.
     """
-    problems = body_problems(content, why=why, field=field, rest=rest)
+    problems = body_problems(content, limit=limit, why=why, field=field, rest=rest)
     if problems:
         raise MalformedRequestError(problems)
 
@@ -48,6 +47,7 @@ def check_body(
 def body_problems(
     content: str,
     *,
+    limit: int,
     why: str | None = None,
     field: str = "content",
     rest: str | None = "why",
@@ -56,7 +56,7 @@ def body_problems(
     problems: list[str | OverLimit] = []
     if not content.strip():
         problems.append(f"{field} is empty; a Memory body states the rule itself")
-    if len(content) > CONTENT_LIMIT:
+    if len(content) > limit:
         where = (
             f"put its reason, measurements, dates, and history in {rest}"
             if rest
@@ -65,7 +65,7 @@ def body_problems(
         advice = (
             f"a Memory body is pushed to every matching session, so keep the rule alone and {where}"
         )
-        problems.append(OverLimit(field, CONTENT_LIMIT, len(content), advice=advice))
+        problems.append(OverLimit(field, limit, len(content), advice=advice))
     if why is not None and len(why) > WHY_LIMIT:
         problems.append(OverLimit("why", WHY_LIMIT, len(why)))
     return problems
@@ -97,9 +97,9 @@ def topic_home(cur: psycopg.Cursor, delivery: str, topic_id: UUID | None) -> UUI
 def _retired_conflicts(
     cur: psycopg.Cursor, content: str, acknowledged_conflicts: list[UUID] | None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """The retirements a direct write resembles, and the invalidated or legacy ones among them.
+    """The retirements a direct write resembles, and the withdrawn or legacy ones among them.
 
-    Refuses until `acknowledged_conflicts` names exactly those invalidated or legacy rows, so
+    Refuses until `acknowledged_conflicts` names exactly those withdrawn or legacy rows, so
     a body that repeats a withdrawn rule is written only after its reason has been read.
     """
     cur.execute(
@@ -109,18 +109,18 @@ def _retired_conflicts(
     tombstones = match.similar_tombstones(cur, content, limit=None)
     retirement_matches = [row for row in tombstones if row["score"] >= config.match_threshold()]
     overruled = [
-        row for row in retirement_matches if row.get("retirement_kind") in ("invalidated", "legacy")
+        row for row in retirement_matches if row.get("retirement_kind") in ("withdrawn", "legacy")
     ]
     expected_conflicts = {row["memory_id"] for row in overruled}
     if expected_conflicts != set(acknowledged_conflicts or []):
         if expected_conflicts:
             raise RetiredConflictError(
-                "this repeats retired memories marked invalidated or legacy; read and "
+                "this repeats retired memories marked withdrawn or legacy; read and "
                 "acknowledge those retirement reasons before writing it back",
                 overruled,
             )
         if acknowledged_conflicts:
-            raise MashuError("no current invalidated or legacy conflicts match the acknowledgment")
+            raise MashuError("no current withdrawn or legacy conflicts match the acknowledgment")
     return retirement_matches, overruled
 
 
@@ -140,7 +140,7 @@ def remember(
     `why` becomes the evidence row's account, where the reason is kept without being pushed.
     """
     why = (why or "").strip() or None
-    check_body(content, why=why)
+    check_body(content, limit=settings.limit(cur, "content_limit"), why=why)
     check_delivery(delivery, scope_id, topic_id)
     if delivery == "topic":
         scope_id = topic_home(cur, delivery, topic_id)
@@ -231,7 +231,10 @@ def get_memory(cur: psycopg.Cursor, memory_id: UUID) -> dict[str, Any] | None:
 
 
 def memory_details(cur: psycopg.Cursor, memory_id: UUID) -> dict[str, Any] | None:
-    """Read a Memory for an explicit management or change decision."""
+    """Read a Memory for an explicit management or change decision.
+
+    Its evidence and revisions come newest first, so the latest account leads.
+    """
     cur.execute(
         """
         SELECT m.*, s.name AS scope_name,
@@ -257,7 +260,7 @@ def memory_details(cur: psycopg.Cursor, memory_id: UUID) -> dict[str, Any] | Non
     cur.execute(
         """
         SELECT revision_id, content, actor, note, created_at
-        FROM memory_revision WHERE memory_id = %s ORDER BY created_at, revision_id
+        FROM memory_revision WHERE memory_id = %s ORDER BY created_at DESC, revision_id DESC
         """,
         (memory_id,),
     )
@@ -317,7 +320,7 @@ def retire(
     )
     if not reason or not reason.strip():
         raise MashuError("retiring needs a reason: the reason is what later readers are given")
-    if retirement_kind not in ("invalidated", "superseded", "out_of_scope", "relocated", "legacy"):
+    if retirement_kind not in ("withdrawn", "superseded", "relocated", "legacy"):
         raise MashuError("unknown retirement kind")
     if retirement_kind == "legacy" and not _legacy_compat:
         raise MashuError("legacy retirement kind is reserved for existing data and migration")
@@ -449,10 +452,10 @@ def revise(
     current = _require_active(cur, memory_id)
     overruled: list[dict[str, Any]] = []
     if content != current["content"]:
-        check_body(content, rest=None)
+        check_body(content, limit=settings.limit(cur, "content_limit"), rest=None)
         _, overruled = _retired_conflicts(cur, content, acknowledged_conflicts)
     elif acknowledged_conflicts:
-        raise MashuError("no current invalidated or legacy conflicts match the acknowledgment")
+        raise MashuError("no current withdrawn or legacy conflicts match the acknowledgment")
     redact.gate({"content": content, "note": note})
     admission = capacity.check_admission(
         cur,
@@ -481,6 +484,41 @@ def revise(
     return row
 
 
+def add_reason(cur: psycopg.Cursor, memory_id: UUID, *, why: str, actor: str) -> dict[str, Any]:
+    """Add a reason to a rule after the fact, as one more evidence row.
+
+    The ledger is append-only, so a reason left out at remember is written as the same kind
+    of row remember writes, holding the body as it reads now. Neither the body nor the
+    delivery changes, so `updated_at` stays and proposals read against the rule stay current.
+    """
+    memory = get_memory(cur, memory_id)
+    if memory is None:
+        raise MashuError(f"no memory {memory_id}")
+    why = (why or "").strip()
+    if not why:
+        raise MalformedRequestError(["why needs the reason to add"])
+    if len(why) > WHY_LIMIT:
+        raise MalformedRequestError([OverLimit("why", WHY_LIMIT, len(why))])
+    verdict = redact.gate({"why": why})
+    cur.execute(
+        """
+        INSERT INTO ledger (kind, what, prevention, scope_id, created_by)
+        VALUES ('explicit', %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (why, memory["content"], memory["scope_id"], actor),
+    )
+    row = cur.fetchone()
+    cur.execute(
+        "UPDATE memory SET evidence = array_append(evidence, %s) WHERE memory_id = %s",
+        (row["ledger_id"], memory_id),
+    )
+    events.record(
+        cur, "memory_reason_added", actor, memory_id=memory_id, ledger_id=row["ledger_id"]
+    )
+    return {**row, **_gate_report(verdict)}
+
+
 def restore(
     cur: psycopg.Cursor,
     memory_id: UUID,
@@ -507,7 +545,7 @@ def restore(
         for row in match.similar_tombstones(cur, current["content"], limit=None)
         if row["memory_id"] != memory_id
         and row["score"] >= config.match_threshold()
-        and row.get("retirement_kind") in ("invalidated", "legacy")
+        and row.get("retirement_kind") in ("withdrawn", "legacy")
     ]
     expected = {str(row["memory_id"]) for row in conflicts}
     acknowledged = set(approval_source.get("conflict_ids", []))
@@ -517,7 +555,7 @@ def restore(
                 "restore conflicts changed or need explicit acknowledgment", conflicts
             )
         if acknowledged:
-            raise MashuError("no current invalidated or legacy conflicts match the acknowledgment")
+            raise MashuError("no current withdrawn or legacy conflicts match the acknowledgment")
 
     active = [
         row

@@ -7,8 +7,9 @@ import os
 from typing import Any
 from uuid import UUID
 
-from mashu import close_ui, config, db, projects, scopes, screen, task_actions, task_history, tasks
+from mashu import application, close_ui, db, projects, screen, task_actions, tasks
 from mashu.errors import DuplicateTaskError, MashuError
+from mashu.memory_ui import Order, _next_order, _order_text, _ordered
 
 ACTOR = "user"
 VIEWS = ("active", "dormant", "closed", "projects")
@@ -16,11 +17,11 @@ _VIEW_KEYS = {str(number): view for number, view in enumerate(VIEWS, 1)}
 
 _TASK_KEYS = (
     "  ↑↓/jk move   Home/End   PgUp/PgDn   / search   ⏎ details   ? help\n"
-    "  n new   e edit   t renew   c close   o reopen   ← back   q quit"
+    "  n new   e edit   t renew   c close   o reopen   s sort   v reverse   ← back   q quit"
 )
 _PROJECT_KEYS = (
     "  ↑↓/jk move   Home/End   PgUp/PgDn   / search   ⏎ details   ? help\n"
-    "  n new project   e edit   ← back   q quit"
+    "  n new project   e edit   s sort   v reverse   ← back   q quit"
 )
 _DETAIL_KEYS = "  space read on   q quit   ? help   any other key goes back"
 
@@ -38,6 +39,9 @@ _HELP = """
   t              renew the selected active or dormant task, making it active
   c              close the selected active or dormant task
   o              reopen the selected closed task
+  s              sort by the next key: updated, created, project, then back to the
+                 listed order (created, then name for projects)
+  v              reverse the order
   ← or Esc       clear the search; without a search, go back
   ?              show this help
   q              quit Mashu
@@ -72,18 +76,7 @@ def _find(rows: list[dict[str, Any]], wanted: UUID | None, view: str) -> int | N
 def _load_tasks(dsn: str | None, activity: str) -> list[dict[str, Any]]:
     """Load one task view and the history a person may inspect or search."""
     with db.transaction(dsn) as cur:
-        rows = tasks.task_list(cur, activity=activity)
-        return [
-            task_history.expanded_task(
-                cur,
-                _task_id(row),
-                attempts=True,
-                decisions=True,
-                artifacts=True,
-                checkpoints=True,
-            )
-            for row in rows
-        ]
+        return task_actions.task_view(cur, activity)
 
 
 def _load_projects(dsn: str | None) -> list[dict[str, Any]]:
@@ -144,10 +137,15 @@ def _tabs(view: str) -> str:
     return "  " + "   ".join(tabs)
 
 
-def _heading(view: str, shown: int, total: int, query: str) -> str:
+def _sorts(view: str) -> tuple[str, ...]:
+    return application.PROJECT_SORTS if view == "projects" else application.TASK_SORTS
+
+
+def _heading(view: str, shown: int, total: int, query: str, order: Order = None) -> str:
     noun = "project" if view == "projects" else "task"
     count = f"{shown}/{total}" if query else str(total)
     suffix = f"  ·  search {screen.accent(repr(query))}" if query else ""
+    suffix += _order_text(order)
     title = screen.bold(screen.accent("Work"))
     return f"{title}\n{_tabs(view)}\n  {count} {view} {noun}(s){suffix}"
 
@@ -267,8 +265,8 @@ def _task_detail(row: dict[str, Any]) -> str:
         screen.bold(f"  {_short(task['task_id'])}  {task['name']}"),
         f"  {task['project_name']}  ·  {row['heading']}",
         f"  status  {task['status']} / {row['activity']}",
-        f"  size  card {tasks.card_cost(task['name'], state)}/{config.task_card_capacity()}"
-        f"  ·  detail {tasks.state_cost(task['name'], state)}/{config.task_detail_capacity()}",
+        f"  size  card {tasks.card_cost(task['name'], state)}/{row['card_limit']}"
+        f"  ·  detail {tasks.state_cost(task['name'], state)}/{row['detail_limit']}",
     ]
     if task["status"] == "closed":
         lines.extend(_field("outcome", task.get("outcome")))
@@ -324,8 +322,9 @@ def _screen_text(
     *,
     total: int,
     query: str,
+    order: Order = None,
 ) -> str:
-    head = _heading(view, len(rows), total, query)
+    head = _heading(view, len(rows), total, query, order)
     width = screen.terminal_width() - 1
     line = _project_line if view == "projects" else _task_line
     listed = [line(row, width) for row in rows]
@@ -410,25 +409,16 @@ def _create_task(dsn: str | None) -> tuple[str, UUID | None]:
     goal = _readline("  goal [optional]: ")
     if goal is None:
         return screen.warning("  ! task creation cancelled"), None
+    request = {"name": name, "project": project_ref, "goal": goal, "cwd": os.getcwd()}
     try:
         with db.transaction(dsn) as cur:
-            project_id = task_actions.resolve_task_project(cur, project_ref, cwd=os.getcwd())
-            created = tasks.task_create(
-                cur, project=project_id, name=name, goal=goal or None, actor=ACTOR
-            )
+            created = task_actions.create_task(cur, **request, actor=ACTOR)
     except DuplicateTaskError as error:
         print(_duplicate_candidates(error))
         if not _confirm("create it anyway?"):
             return screen.warning("  ! left existing tasks alone"), None
         with db.transaction(dsn) as cur:
-            created = tasks.task_create(
-                cur,
-                project=project_id,
-                name=name,
-                goal=goal or None,
-                actor=ACTOR,
-                force=True,
-            )
+            created = task_actions.create_task(cur, **request, actor=ACTOR, force=True)
     task_id = _task_id(created)
     return screen.success(f"  ✓ created task  {_short(task_id)}"), task_id
 
@@ -441,8 +431,9 @@ def _create_project(dsn: str | None) -> tuple[str, UUID | None]:
     if scope_name is None:
         return screen.warning("  ! project creation cancelled"), None
     with db.transaction(dsn) as cur:
-        scope_id = scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
-        created = projects.create_project(cur, name=name, scope_id=scope_id, actor=ACTOR)
+        created = task_actions.save_project(
+            cur, None, name=name, scope_name=scope_name, actor=ACTOR
+        )
     note = screen.success(f"  ✓ created project  {_short(created['project_id'])}")
     return note, created["project_id"]
 
@@ -528,13 +519,8 @@ def _edit_project(dsn: str | None, row: dict[str, Any]) -> str:
     if isinstance(scope_name, screen.Cancelled):
         return screen.warning("  ! project edit cancelled")
     with db.transaction(dsn) as cur:
-        scope_id = scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
-        projects.update_project(
-            cur,
-            row["project_id"],
-            name=name or row["name"],
-            scope_id=scope_id,
-            actor=ACTOR,
+        task_actions.save_project(
+            cur, row["project_id"], name=name or row["name"], scope_name=scope_name, actor=ACTOR
         )
     return screen.success(f"  ✓ edited project  {_short(row['project_id'])}")
 
@@ -564,6 +550,7 @@ def run(dsn: str | None = None, *, initial_view: str = "active") -> int:
         raise ValueError(f"unknown work view {initial_view!r}")
     view, at, query, note = initial_view, 0, "", ""
     selected: dict[str, UUID | None] = {name: None for name in VIEWS}
+    order: dict[str, Order] = {name: None for name in VIEWS}
 
     while True:
         try:
@@ -571,7 +558,7 @@ def run(dsn: str | None = None, *, initial_view: str = "active") -> int:
         except MashuError as error:
             print(error)
             return 1
-        rows = _filtered(all_rows, view, query)
+        rows = _ordered(_filtered(all_rows, view, query), order[view])
         preserved = _find(rows, selected[view], view)
         if preserved is not None:
             at = preserved
@@ -581,8 +568,10 @@ def run(dsn: str | None = None, *, initial_view: str = "active") -> int:
         else:
             at = 0
 
-        head = _heading(view, len(rows), len(all_rows), query)
-        screen.paint(_screen_text(rows, at, view, note, total=len(all_rows), query=query))
+        head = _heading(view, len(rows), len(all_rows), query, order[view])
+        screen.paint(
+            _screen_text(rows, at, view, note, total=len(all_rows), query=query, order=order[view])
+        )
         key = screen.getkey()
         note = ""
 
@@ -598,6 +587,9 @@ def run(dsn: str | None = None, *, initial_view: str = "active") -> int:
             searched = _search(query)
             if searched is not None:
                 query, at = searched, 0
+            continue
+        if key in ("s", "v"):
+            order[view] = _next_order(order[view], _sorts(view), key)
             continue
         if key == "left":
             if query:

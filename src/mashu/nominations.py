@@ -8,7 +8,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Jsonb
 
-from mashu import approvals, capacity, config, events, match, redact, topics
+from mashu import approvals, capacity, config, events, match, redact, settings, topics
 from mashu.errors import MashuError, RefusedError
 
 KINDS = ("incident", "rederivation", "user_explicit", "proposed")
@@ -236,7 +236,7 @@ def _nominate(
     ledger_kind, nomination_kind, default_what = stated
 
     why = (why or "").strip() or None
-    memories.check_body(content, why=why)
+    memories.check_body(content, limit=settings.limit(cur, "content_limit"), why=why)
     verdict = redact.gate({"content": content, "why": why})
 
     cur.execute(
@@ -330,17 +330,18 @@ def deferred_count(cur: psycopg.Cursor) -> int:
 
 
 def _evidence_rows(cur: psycopg.Cursor, evidence: list[UUID]) -> list[dict[str, Any]]:
+    """The ledger rows an evidence array names, newest first, so the latest account leads."""
     if not evidence:
         return []
     cur.execute(
         """
         SELECT ledger_id, kind, what, prevention, created_at, created_by
         FROM ledger WHERE ledger_id = ANY(%s)
+        ORDER BY created_at DESC, array_position(%s, ledger_id) DESC
         """,
-        (list(evidence),),
+        (list(evidence), list(evidence)),
     )
-    by_id = {row["ledger_id"]: row for row in cur.fetchall()}
-    return [by_id[e] for e in evidence if e in by_id]
+    return cur.fetchall()
 
 
 def _conflict_snapshot(cur: psycopg.Cursor, conflicts: list[UUID]) -> list[dict[str, Any]]:
@@ -386,7 +387,7 @@ def conflict_rows(cur: psycopg.Cursor, conflicts: list[UUID] | None) -> list[dic
 def blocking_conflicts(rows: list[dict[str, Any]]) -> list[UUID]:
     """The retirements an admission may not walk past without an instruction addressing them."""
     return [
-        row["memory_id"] for row in rows if row.get("retirement_kind") in ("invalidated", "legacy")
+        row["memory_id"] for row in rows if row.get("retirement_kind") in ("withdrawn", "legacy")
     ]
 
 
@@ -420,7 +421,7 @@ def revise(
     if not content:
         raise MashuError("a candidate cannot be empty")
     if content != nomination["content"]:
-        memories.check_body(content, rest=None)
+        memories.check_body(content, limit=settings.limit(cur, "content_limit"), rest=None)
     redact.gate({"content": content})
     conflict_ids = current_conflict_ids(cur, content)
     snapshot = _conflict_snapshot(cur, conflict_ids)
@@ -498,7 +499,7 @@ def admit(
 
     final = nomination["content"] if content is None else content
     if final != nomination["content"]:
-        memories.check_body(final, rest=None)
+        memories.check_body(final, limit=settings.limit(cur, "content_limit"), rest=None)
     home = scope_id if scope_override else nomination["scope_id"] if scope_id is None else scope_id
 
     cur.execute(
@@ -622,7 +623,7 @@ _STOP_EXISTING = (
     "covers it, call memory_admit with its nomination_id and nomination version."
 )
 _STOP_CONFLICT = (
-    "this content repeats Memory retired as invalidated or legacy, so nothing was admitted. "
+    "this content repeats Memory retired as withdrawn or legacy, so nothing was admitted. "
     "Show the user the returned conflicts; if they address them, call memory_admit with the "
     "nomination_id, nomination version, conflict_ids, and conflict_instruction."
 )

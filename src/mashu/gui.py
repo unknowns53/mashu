@@ -18,7 +18,6 @@ import psycopg
 
 from mashu import (
     application,
-    config,
     db,
     memories,
     memory_changes,
@@ -225,7 +224,7 @@ def _overview(cur: psycopg.Cursor, query: dict[str, str]) -> str:
             "Temporary Context",
             "/temporary",
             status.temporary_count,
-            f"{status.temporary_tokens}/{config.temporary_capacity()} tokens",
+            f"{status.temporary_tokens}/{status.limits['temporary_capacity']} tokens",
         ),
         ("Tasks (active)", _href("/tasks", activity="active"), status.tasks_active, ""),
         ("Tasks (dormant)", _href("/tasks", activity="dormant"), status.tasks_dormant, ""),
@@ -257,15 +256,15 @@ def _overview(cur: psycopg.Cursor, query: dict[str, str]) -> str:
         (
             "Memory tokens",
             _e(
-                f"always {status.memory_always_tokens}/{config.always_capacity()}  "
-                f"worst {status.memory_worst_tokens}/{config.capacity()}"
+                f"always {status.memory_always_tokens}/{status.limits['always_capacity']}  "
+                f"worst {status.memory_worst_tokens}/{status.limits['memory_capacity']}"
             ),
         ),
         (
             "Task cards",
             _e(
                 f"{status.active_states} active  "
-                f"worst {status.state_worst_tokens}/{config.project_capacity()} tokens"
+                f"worst {status.state_worst_tokens}/{status.limits['project_capacity']} tokens"
             ),
         ),
         ("Ledger (30 days)", _e(status.ledger_30d)),
@@ -277,7 +276,7 @@ def _overview(cur: psycopg.Cursor, query: dict[str, str]) -> str:
                 f"{status.topic_count}"
                 + (
                     f"  heaviest {status.topic_heaviest_name} "
-                    f"{status.topic_heaviest_tokens}/{config.topic_capacity()}"
+                    f"{status.topic_heaviest_tokens}/{status.limits['topic_capacity']}"
                     if status.topic_heaviest_name
                     else ""
                 )

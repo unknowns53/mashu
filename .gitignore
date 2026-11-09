@@ -9,6 +9,10 @@ build/
 .ruff_cache/
 .mypy_cache/
 
+# Desktop app build output and generated permission schemas
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+
 # Local configuration / secrets
 .env
 .env.*

@@ -28,7 +28,7 @@ def admit(cur, nomination_id, **kwargs):
     acknowledged = [
         row["memory_id"]
         for row in conflicts
-        if row.get("retirement_kind") in ("invalidated", "legacy")
+        if row.get("retirement_kind") in ("withdrawn", "legacy")
     ]
     return nominations.admit(
         cur,
@@ -185,9 +185,9 @@ def test_the_queue_hands_over_the_pains_and_not_their_ids(cur):
     first, second, _ = two_pains(cur)
     rows = nominations.pending_nominations(cur)[0]["evidence_rows"]
 
-    assert [row["ledger_id"] for row in rows] == [first["ledger_id"], second["ledger_id"]]
-    assert rows[0]["what"] == "looked it up"
-    assert rows[1]["prevention"] == SAME_HOLE
+    assert [row["ledger_id"] for row in rows] == [second["ledger_id"], first["ledger_id"]]
+    assert rows[1]["what"] == "looked it up"
+    assert rows[0]["prevention"] == SAME_HOLE
     assert all(row["kind"] == "incident" for row in rows)
 
 
@@ -237,7 +237,7 @@ def test_explicit_instruction_admits_in_the_same_session_and_keeps_agent_as_acto
     with pytest.raises(MashuError, match="approval kind"):
         admit_on_instruction(cur, nomination, {})
     memory = admit_on_instruction(cur, nomination, REMEMBER, request_id=request_id)
-    retire(cur, memory, "the admitted rule later stopped applying", "out_of_scope")
+    retire(cur, memory, "the admitted rule later stopped applying", "withdrawn")
     replay = admit_on_instruction(cur, nomination, REMEMBER, request_id=request_id)
 
     assert replay == memory
@@ -360,7 +360,7 @@ def test_one_call_nominates_and_admits_with_the_same_provenance_and_replays_its_
     cur.execute("SELECT kind, prevention FROM ledger WHERE ledger_id = %s", (got["ledger_id"],))
     assert cur.fetchone() == {"kind": "claimed", "prevention": HOLE}
 
-    retire(cur, memory, "the admitted rule later stopped applying", "out_of_scope")
+    retire(cur, memory, "the admitted rule later stopped applying", "withdrawn")
     again = nominations.remember_explicit(
         cur,
         content=HOLE,
@@ -399,7 +399,7 @@ def test_a_one_call_remember_stops_at_a_pending_candidate_it_has_not_read(cur):
     assert cur.fetchone()["status"] == "pending"
 
 
-def test_a_one_call_remember_stops_at_an_unaddressed_invalidated_conflict(cur):
+def test_a_one_call_remember_stops_at_an_unaddressed_withdrawn_conflict(cur):
     retired = retired_admission(cur)
 
     got = nominations.remember_explicit(
@@ -407,7 +407,7 @@ def test_a_one_call_remember_stops_at_an_unaddressed_invalidated_conflict(cur):
     )
 
     assert got["admitted"] is False
-    assert "invalidated or legacy" in got["stopped"]
+    assert "withdrawn or legacy" in got["stopped"]
     assert got["nomination_existing"] is False
     assert got["nomination"]["status"] == "pending"
     assert got["nomination"]["conflicts"] == [UUID(retired["memory_id"])]

@@ -14,6 +14,7 @@ from mashu import (
     migrate,
     routing,
     scopes,
+    settings,
     tasks,
     temporary,
     topics,
@@ -47,6 +48,7 @@ class StatusSnapshot:
     tasks_active: int
     tasks_dormant: int
     tasks_closed: int
+    limits: dict[str, int]
 
 
 def memory_view(cur: psycopg.Cursor, view: str) -> list[dict[str, Any]]:
@@ -74,6 +76,58 @@ def memory_view(cur: psycopg.Cursor, view: str) -> list[dict[str, Any]]:
             (view,),
         )
     return cur.fetchall()
+
+
+#: The orders each list can be put in, the default first. Shared by the terminal screens and
+#: the desktop app so both offer the same keys.
+MEMORY_SORTS = {
+    "active": ("updated", "created", "delivery"),
+    "retired": ("updated", "created", "kind"),
+    "temporary": ("created", "expires", "scope"),
+}
+TASK_SORTS = ("updated", "created", "project")
+PROJECT_SORTS = ("created", "name")
+#: Keys that hold a time; they start newest first, and the rest start A to Z.
+DATE_SORTS = frozenset({"updated", "created", "expires"})
+_DELIVERY_ORDER = ("always", "scope", "topic")
+
+
+def sort_value(row: dict[str, Any], key: str) -> Any:
+    """What one Memory, temporary context, task view, or project row is ordered by."""
+    task = row.get("task")
+    if task is not None:
+        if key == "created":
+            return task["created_at"]
+        if key == "project":
+            return task["project_name"]
+        return task.get("last_activity_at") or row["state"]["updated_at"]
+    if key == "updated":
+        return row.get("updated_at") or row.get("created_at")
+    if key == "expires":
+        return row.get("expires_at")
+    if key == "delivery":
+        place = row.get("topic_name") or row.get("scope_name") or ""
+        return (_DELIVERY_ORDER.index(row["delivery"]), place)
+    if key == "kind":
+        return row.get("retirement_kind") or "legacy"
+    if key == "scope":
+        return row.get("scope_name") or ""
+    return row.get(key if key == "name" else "created_at")
+
+
+def sort_rows(rows: list[dict[str, Any]], key: str, *, descending: bool) -> list[dict[str, Any]]:
+    """Rows in order of `key`, rows without a value last either way.
+
+    A key many rows share, such as delivery or project, keeps each group newest first, whichever
+    way the groups run, since the latest change is what a person looks for inside one.
+    """
+    if key not in DATE_SORTS:
+        rows = sort_rows(rows, "updated", descending=True)
+    keyed = [(sort_value(row, key), row) for row in rows]
+    present = [pair for pair in keyed if pair[0] not in (None, "")]
+    blank = [row for value, row in keyed if value in (None, "")]
+    present.sort(key=lambda pair: pair[0], reverse=descending)
+    return [row for _, row in present] + blank
 
 
 def routed_scope(cur: psycopg.Cursor, cwd: str | None) -> tuple[UUID | None, str | None, bool]:
@@ -176,6 +230,102 @@ def status_snapshot(cur: psycopg.Cursor) -> StatusSnapshot:
         tasks_active=task_counts["active"],
         tasks_dormant=task_counts["dormant"],
         tasks_closed=task_counts["closed"],
+        limits=settings.limits(cur),
+    )
+
+
+def dashboard_counts(cur: psycopg.Cursor) -> dict[str, int]:
+    """The counts the home screens summarise the store with."""
+    cur.execute(
+        """
+        SELECT count(*) FILTER (WHERE deferred_at IS NULL) AS ready,
+               count(*) FILTER (WHERE deferred_at IS NOT NULL) AS deferred
+        FROM nomination WHERE status = 'pending'
+        """
+    )
+    review = cur.fetchone()
+
+    cur.execute("SELECT count(*) AS n FROM memory_change WHERE status = 'pending'")
+    memory_change_count = cur.fetchone()["n"]
+
+    cur.execute(
+        """
+        SELECT count(*) FILTER (
+                   WHERE t.status = 'open' AND now() <= t.active_until
+               ) AS active,
+               count(*) FILTER (
+                   WHERE t.status = 'open' AND now() > t.active_until
+               ) AS dormant,
+               count(*) FILTER (WHERE t.status = 'closed') AS closed,
+               count(cp.task_id) FILTER (WHERE t.status = 'open') AS proposals
+        FROM task t
+        LEFT JOIN task_close_proposal cp ON cp.task_id = t.task_id
+        """
+    )
+    task = cur.fetchone()
+
+    cur.execute(
+        "SELECT count(*) FILTER (WHERE status = 'active') AS active, "
+        "count(*) FILTER (WHERE status = 'retired') AS retired FROM memory"
+    )
+    memory = cur.fetchone()
+    cur.execute("SELECT count(*) AS n FROM temporary_context WHERE expires_at > now()")
+    temporary_contexts = cur.fetchone()["n"]
+    cur.execute("SELECT count(*) AS n FROM project WHERE archived_at IS NULL")
+    project_count = cur.fetchone()["n"]
+    cur.execute("SELECT count(*) AS n FROM scope")
+    scope_count = cur.fetchone()["n"]
+    cur.execute("SELECT count(*) AS n FROM route")
+    route_count = cur.fetchone()["n"]
+
+    return {
+        "review_ready": review["ready"],
+        "review_deferred": review["deferred"],
+        "memory_changes": memory_change_count,
+        "tasks_active": task["active"],
+        "tasks_dormant": task["dormant"],
+        "task_proposals": task["proposals"],
+        "active_memories": memory["active"],
+        "projects": project_count,
+        "tasks_closed": task["closed"],
+        "retired_memories": memory["retired"],
+        "temporary_contexts": temporary_contexts,
+        "scopes": scope_count,
+        "routes": route_count,
+        "schema_pending": len(migrate.pending(cur)),
+    }
+
+
+def save_topic(
+    cur: psycopg.Cursor,
+    topic_id: UUID | None,
+    *,
+    name: str,
+    trigger: str,
+    scope_name: str | None,
+    actor: str,
+    action: str | None = None,
+    source: str | None = None,
+) -> dict[str, Any]:
+    """Create a topic, or set every field of one; no scope means every session.
+
+    Editing sets action and source too, so None removes them. A new topic takes neither.
+    """
+    scope_id = scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
+    if topic_id is None:
+        return topics.create_topic(cur, name=name, trigger=trigger, scope_id=scope_id, actor=actor)
+    return topics.update_topic(
+        cur,
+        topic_id,
+        actor=actor,
+        name=name,
+        trigger=trigger,
+        scope_id=scope_id,
+        clear_scope=scope_id is None,
+        action=action,
+        clear_action=action is None,
+        source=source,
+        clear_source=source is None,
     )
 
 
