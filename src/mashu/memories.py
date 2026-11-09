@@ -97,9 +97,9 @@ def topic_home(cur: psycopg.Cursor, delivery: str, topic_id: UUID | None) -> UUI
 def _retired_conflicts(
     cur: psycopg.Cursor, content: str, acknowledged_conflicts: list[UUID] | None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """The retirements a direct write resembles, and the invalidated or legacy ones among them.
+    """The retirements a direct write resembles, and the withdrawn or legacy ones among them.
 
-    Refuses until `acknowledged_conflicts` names exactly those invalidated or legacy rows, so
+    Refuses until `acknowledged_conflicts` names exactly those withdrawn or legacy rows, so
     a body that repeats a withdrawn rule is written only after its reason has been read.
     """
     cur.execute(
@@ -109,18 +109,18 @@ def _retired_conflicts(
     tombstones = match.similar_tombstones(cur, content, limit=None)
     retirement_matches = [row for row in tombstones if row["score"] >= config.match_threshold()]
     overruled = [
-        row for row in retirement_matches if row.get("retirement_kind") in ("invalidated", "legacy")
+        row for row in retirement_matches if row.get("retirement_kind") in ("withdrawn", "legacy")
     ]
     expected_conflicts = {row["memory_id"] for row in overruled}
     if expected_conflicts != set(acknowledged_conflicts or []):
         if expected_conflicts:
             raise RetiredConflictError(
-                "this repeats retired memories marked invalidated or legacy; read and "
+                "this repeats retired memories marked withdrawn or legacy; read and "
                 "acknowledge those retirement reasons before writing it back",
                 overruled,
             )
         if acknowledged_conflicts:
-            raise MashuError("no current invalidated or legacy conflicts match the acknowledgment")
+            raise MashuError("no current withdrawn or legacy conflicts match the acknowledgment")
     return retirement_matches, overruled
 
 
@@ -320,7 +320,7 @@ def retire(
     )
     if not reason or not reason.strip():
         raise MashuError("retiring needs a reason: the reason is what later readers are given")
-    if retirement_kind not in ("invalidated", "superseded", "out_of_scope", "relocated", "legacy"):
+    if retirement_kind not in ("withdrawn", "superseded", "relocated", "legacy"):
         raise MashuError("unknown retirement kind")
     if retirement_kind == "legacy" and not _legacy_compat:
         raise MashuError("legacy retirement kind is reserved for existing data and migration")
@@ -455,7 +455,7 @@ def revise(
         check_body(content, rest=None)
         _, overruled = _retired_conflicts(cur, content, acknowledged_conflicts)
     elif acknowledged_conflicts:
-        raise MashuError("no current invalidated or legacy conflicts match the acknowledgment")
+        raise MashuError("no current withdrawn or legacy conflicts match the acknowledgment")
     redact.gate({"content": content, "note": note})
     admission = capacity.check_admission(
         cur,
@@ -545,7 +545,7 @@ def restore(
         for row in match.similar_tombstones(cur, current["content"], limit=None)
         if row["memory_id"] != memory_id
         and row["score"] >= config.match_threshold()
-        and row.get("retirement_kind") in ("invalidated", "legacy")
+        and row.get("retirement_kind") in ("withdrawn", "legacy")
     ]
     expected = {str(row["memory_id"]) for row in conflicts}
     acknowledged = set(approval_source.get("conflict_ids", []))
@@ -555,7 +555,7 @@ def restore(
                 "restore conflicts changed or need explicit acknowledgment", conflicts
             )
         if acknowledged:
-            raise MashuError("no current invalidated or legacy conflicts match the acknowledgment")
+            raise MashuError("no current withdrawn or legacy conflicts match the acknowledgment")
 
     active = [
         row

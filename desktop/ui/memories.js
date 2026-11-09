@@ -384,56 +384,23 @@ function toTemporaryPanel(detail) {
   );
 }
 
+/** Retire with a reason only; a move to a temporary note is its own button. */
 function retirePanel(detail) {
-  const panel = h("div", { class: "inline-panel" });
-  Promise.all([call("memory.list", { view: "active" }), call("memory.list", { view: "temporary" })])
-    .then(([active, temporary]) => {
-      const pick = (rows, idOf) => [["", t("retire.choose")], ...rows.map((row) => [idOf(row), reference(idOf(row), row.content, 56)])];
-      panel.append(
-        form({
-          fields: [
-            {
-              name: "kind",
-              label: t("retire.kind"),
-              kind: "radio",
-              value: "invalidated",
-              options: ["invalidated", "superseded", "out_of_scope", "relocated"].map((kind) => [kind, named("retire.kind", kind)]),
-            },
-            {
-              name: "successor",
-              label: t("retire.successor"),
-              kind: "select",
-              options: pick(active.rows.filter((row) => row.memory_id !== detail.memory_id), (row) => row.memory_id),
-              show: (v) => v.kind === "superseded",
-            },
-            {
-              name: "destination",
-              label: t("retire.destination"),
-              kind: "select",
-              options: pick(temporary.rows, (row) => row.context_id),
-              show: (v) => v.kind === "relocated",
-            },
-            { name: "reason", label: t("retire.reason"), kind: "area", rows: 2 },
-          ],
-          submit: t("memory.retire"),
-          kind: "danger solid",
-          onCancel: () => memTogglePanel("retire"),
-          onSubmit: (values) =>
-            act(async () => {
-              await call("memory.retire", {
-                memory_id: detail.memory_id,
-                kind: values.kind,
-                reason: values.reason,
-                successor: values.kind === "superseded" ? values.successor || null : null,
-                destination: values.kind === "relocated" ? values.destination || null : null,
-              });
-              mem.panel = null;
-            }, t("memory.retired")),
-        })
-      );
+  return h(
+    "div",
+    { class: "inline-panel" },
+    form({
+      fields: [{ name: "reason", label: t("retire.reason"), kind: "area", rows: 2, hint: t("retire.reason_hint") }],
+      submit: t("memory.retire"),
+      kind: "danger solid",
+      onCancel: () => memTogglePanel("retire"),
+      onSubmit: (values) =>
+        act(async () => {
+          await call("memory.retire", { memory_id: detail.memory_id, reason: values.reason });
+          mem.panel = null;
+        }, t("memory.retired")),
     })
-    .catch(fail);
-  return panel;
+  );
 }
 
 // ---------------------------------------------------------------- one temporary note

@@ -158,17 +158,14 @@ const STRINGS = {
 
     // retirement kinds
     "retire.kind": "種類",
-    "retire.kind.invalidated": "誤り",
+    "retire.kind.withdrawn": "取り下げ",
     "retire.kind.superseded": "置換",
-    "retire.kind.out_of_scope": "対象外",
     "retire.kind.relocated": "一時メモへ移動",
     "retire.kind.legacy": "記録なし",
-    "retire.successor": "置換先のメモリ",
-    "retire.destination": "移動先の一時メモ",
-    "retire.choose": "選ぶ…",
     "retire.successor_label": "置換先",
     "retire.when": "廃止した日",
     "retire.reason": "理由",
+    "retire.reason_hint": "似た規則があとで登録されそうになると、この理由を見せて確認を求める",
 
     // close proposals
     "close.outcome": "結果",
@@ -534,17 +531,14 @@ const STRINGS = {
     "change.changed": "The rule, its replacement, or the similar retired rules changed. Read it again before applying.",
 
     "retire.kind": "Kind",
-    "retire.kind.invalidated": "It was wrong",
+    "retire.kind.withdrawn": "Withdrawn",
     "retire.kind.superseded": "Another rule replaces it",
-    "retire.kind.out_of_scope": "It doesn't belong here",
     "retire.kind.relocated": "Moved to a temporary note",
     "retire.kind.legacy": "Kind not recorded",
-    "retire.successor": "The rule that replaces it",
-    "retire.destination": "The temporary note it moved to",
-    "retire.choose": "Choose…",
     "retire.successor_label": "Replaced by",
     "retire.when": "Retired",
     "retire.reason": "Reason",
+    "retire.reason_hint": "If a similar rule is added later, this reason is shown and confirmation is asked",
 
     "close.outcome": "Outcome",
     "close.outcome.completed": "Done",

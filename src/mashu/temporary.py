@@ -205,7 +205,7 @@ def convert_to_memory(
     """Replace a standing condition with a durable memory in one transaction.
 
     `acknowledged_conflicts` passes through to memories.remember, which refuses a body that
-    repeats an invalidated or legacy Memory until the caller has read those retirements.
+    repeats a withdrawn or legacy Memory until the caller has read those retirements.
     """
     from mashu import memories
 

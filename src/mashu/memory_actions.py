@@ -7,14 +7,15 @@ from uuid import UUID, uuid4
 
 import psycopg
 
-from mashu import memories, memory_changes, nominations, references, scopes, temporary, topics
+from mashu import memories, memory_changes, nominations, scopes, temporary, topics
 from mashu.errors import ChangedSinceReadError, MashuError
 
-#: The retirement kinds a person chooses; legacy belongs to data written before kinds existed.
-RETIREMENT_KINDS = ("invalidated", "superseded", "out_of_scope", "relocated")
+#: The kind a person's own retirement records. superseded and relocated are recorded by the
+#: operations that link a successor or a Temporary Context, never chosen.
+RETIREMENT_KIND = "withdrawn"
 
 #: Conflicts that must be read, and named in the approval, before a change is applied.
-BLOCKING_KINDS = ("invalidated", "legacy")
+BLOCKING_KINDS = ("withdrawn", "legacy")
 
 
 def scope_id_named(cur: psycopg.Cursor, name: str | None) -> UUID | None:
@@ -114,46 +115,18 @@ def restore(
     return memories.restore(cur, memory_id, reason=reason, actor=actor, approval_source=approval)
 
 
-def retire(
-    cur: psycopg.Cursor,
-    memory_id: UUID,
-    *,
-    kind: str,
-    reason: str,
-    successor: str | None,
-    destination: str | None,
-    actor: str,
-) -> dict[str, Any]:
-    """Retire a rule on the person's word; successor and destination may be id prefixes."""
-    if kind not in RETIREMENT_KINDS:
-        raise MashuError(f"retirement kind must be one of {', '.join(RETIREMENT_KINDS)}")
-    superseded_by = (
-        references.resolve_id(
-            cur, successor, table="memory", column="memory_id", label="successor Memory"
-        )
-        if successor
-        else None
-    )
-    relocated_to_id = (
-        references.resolve_id(
-            cur,
-            destination,
-            table="temporary_context",
-            column="context_id",
-            label="Temporary Context",
-        )
-        if destination
-        else None
-    )
+def retire(cur: psycopg.Cursor, memory_id: UUID, *, reason: str, actor: str) -> dict[str, Any]:
+    """Retire a rule on the person's word, with a reason and no kind to choose.
+
+    A similar rule offered later is shown this reason and waits for confirmation. A move to
+    Temporary Context is the conversion's own step, which records it as relocated.
+    """
     return memories.retire(
         cur,
         memory_id,
         reason=reason,
         actor=actor,
-        retirement_kind=kind,
-        superseded_by=superseded_by,
-        relocated_to_kind="temporary_context" if relocated_to_id else None,
-        relocated_to_id=relocated_to_id,
+        retirement_kind=RETIREMENT_KIND,
         approval_source={"kind": "user_direct"},
     )
 

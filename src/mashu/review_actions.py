@@ -83,5 +83,5 @@ def blocking_conflict_ids(row: dict[str, Any]) -> list[UUID]:
     return [
         item["memory_id"]
         for item in row.get("conflict_rows", [])
-        if item.get("retirement_kind") in ("invalidated", "legacy")
+        if item.get("retirement_kind") in ("withdrawn", "legacy")
     ]

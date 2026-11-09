@@ -505,37 +505,12 @@ def _revise_temporary(dsn: str | None, row: dict[str, Any]) -> str:
 
 
 def _retire(dsn: str | None, row: dict[str, Any]) -> str:
-    choices = memory_actions.RETIREMENT_KINDS
-    answer = screen.editline(f"  retirement kind [{'/'.join(choices)}]: ", "")
-    if isinstance(answer, screen.Cancelled):
-        return screen.warning("  ! retirement cancelled; Memory remains active")
-    retirement_kind = answer.text
-    if retirement_kind not in choices:
-        return screen.warning("  ! left active — choose a supported retirement kind")
-    successor_ref = None
-    context_ref = None
-    if retirement_kind == "superseded":
-        successor_ref = _required("  successor Memory ID [required]: ")
-        if successor_ref is None:
-            return screen.warning("  ! left active — successor Memory is required")
-    if retirement_kind == "relocated":
-        context_ref = _required("  Temporary Context ID [required]: ")
-        if context_ref is None:
-            return screen.warning("  ! left active — destination Temporary Context is required")
-    reason = _required("  retirement reason [required]: ")
+    reason = _required("  retirement reason [required; a similar rule later is shown it]: ")
     if reason is None:
         return screen.warning("  ! left active — retirement needs a reason")
     try:
         with db.transaction(dsn) as cur:
-            memory_actions.retire(
-                cur,
-                row["memory_id"],
-                kind=retirement_kind,
-                reason=reason,
-                successor=successor_ref,
-                destination=context_ref,
-                actor=ACTOR,
-            )
+            memory_actions.retire(cur, row["memory_id"], reason=reason, actor=ACTOR)
     except MashuError as refusal:
         return screen.danger(f"  {refusal}")
     return screen.success(f"  ✓ retired {_short(row['memory_id'])}")

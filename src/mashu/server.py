@@ -526,7 +526,7 @@ def build_server() -> Any:
             "pass it, and tell the user which delivery and scope the answer shows. "
             "Pass `content` (and optional `scope`): the "
             "nomination and admission happen in one call. If it joins an already pending "
-            "candidate or repeats invalidated or legacy retired Memory, it stops with "
+            "candidate or repeats withdrawn or legacy retired Memory, it stops with "
             "`admitted: false` and returns the nomination to read; then pass that "
             f"`nomination_id` and its `version` as `nomination_version`. {_PROVENANCE} "
             "Invalidated or legacy conflicts need `conflict_ids` and a `conflict_instruction` "
@@ -662,10 +662,10 @@ def build_server() -> Any:
         delivery move one memory_redeliver call. Call memory_get first; pass its memory_id,
         current_revision_id, and updated_at as the target fields. Each operation takes only
         its own fields:
-        - retire (active Memory): `retire_reason` and `retirement_kind`, one of
-          `invalidated` (the content is wrong), `out_of_scope` (the conditions it served
-          ended), or `relocated` (moved to Temporary Context; also pass
-          `relocated_to_kind='temporary_context'` and `relocated_to_id`).
+        - retire (active Memory): `retire_reason`. A similar rule offered later is shown
+          that reason and waits for confirmation. For a move to Temporary Context, also pass
+          `retirement_kind='relocated'`, `relocated_to_kind='temporary_context'`, and
+          `relocated_to_id`.
         - replace (active Memory): `retire_reason`, plus the nomination_id and version of a
           successor from memory_nominate as `successor_nomination_id` and
           `successor_nomination_version` (reread and update if that version changes);
@@ -714,7 +714,7 @@ def build_server() -> Any:
             "takes one memory_change_instructed call instead. If the successor changed and no "
             "longer matches that instruction, get a new instruction first. Invalidated or "
             "legacy conflicts need `conflict_ids` and a `conflict_instruction` addressing them, "
-            "and restoring a Memory retired as invalidated or legacy needs a "
+            "and restoring a Memory retired as withdrawn or legacy needs a "
             f"`reversal_instruction`. {_PROVENANCE}"
         )
     )
@@ -794,17 +794,16 @@ def build_server() -> Any:
             "Use it only for a change the user asked for; your own idea goes to "
             "memory_change_propose and stays pending. The server reads the Memory's current "
             f"revision itself. {_PROVENANCE} Each `operation` takes only its own fields:\n"
-            "- retire (active Memory): `retire_reason` and `retirement_kind`, `invalidated` "
-            "(the content is wrong) or `out_of_scope` (the conditions it served ended). A move "
-            "to Temporary Context is the user's own step (`c` in the Memories TUI); tell them "
-            "so.\n"
+            "- retire (active Memory): `retire_reason`. A similar rule offered later is shown "
+            "that reason and waits for confirmation. A move to Temporary Context is the user's "
+            "own step (`c` in the Memories TUI); tell them so.\n"
             "- replace (active Memory): `content`, the successor rule, and optional `why`; the "
             "successor keeps the old delivery, and `retire_reason` defaults to the instruction. "
             f"{body_contract}\n"
-            "- restore (retired Memory): `restore_reason`; a Memory retired as invalidated or "
+            "- restore (retired Memory): `restore_reason`; a Memory retired as withdrawn or "
             "legacy also needs `reversal_instruction`, the user's words addressing that "
             "retirement.\n"
-            "When the new or restored content repeats Memory retired as invalidated or legacy, "
+            "When the new or restored content repeats Memory retired as withdrawn or legacy, "
             "nothing is written and the refusal returns `conflicts`; show them to the user and, "
             "if they address them, resend with their ids as `conflict_ids` and their words as "
             "`conflict_instruction`. All shape problems come back together in `problems`. It is "
@@ -817,8 +816,6 @@ def build_server() -> Any:
         instruction: str,
         conversation_ref: str,
         request_id: UUID,
-        retirement_kind: Annotated[str, _Choice(memory_changes.INSTRUCTED_RETIREMENT_KINDS)]
-        | None = None,
         retire_reason: str | None = None,
         content: str | None = None,
         why: str | None = None,
@@ -842,7 +839,6 @@ def build_server() -> Any:
                         reversal_instruction=reversal_instruction,
                     ),
                     actor=actor(),
-                    retirement_kind=retirement_kind,
                     retire_reason=retire_reason,
                     content=content,
                     why=why,

@@ -175,7 +175,7 @@ def remember(cur: psycopg.Cursor, content: str, **kwargs):
     return memories.remember(cur, content=content, actor="user", **kwargs)
 
 
-def retire(cur: psycopg.Cursor, memory, reason: str = "withdrawn", kind: str = "invalidated", **kw):
+def retire(cur: psycopg.Cursor, memory, reason: str = "withdrawn", kind: str = "withdrawn", **kw):
     return memories.retire(
         cur,
         memory["memory_id"],

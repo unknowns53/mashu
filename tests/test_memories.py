@@ -204,7 +204,7 @@ def test_a_memory_can_become_temporary_and_back_where_it_was_delivered(cur, scop
     ]
 
 
-def test_temporary_round_trip_does_not_override_an_unrelated_invalidated_memory(cur):
+def test_temporary_round_trip_does_not_override_an_unrelated_withdrawn_memory(cur):
     source = remember(cur, RULE)
     retire(cur, remember(cur, REVISED), "the required output now comes from the build service")
     converted = memories.convert_to_temporary(cur, source["memory_id"], days=2, actor="user")
@@ -370,7 +370,7 @@ def test_a_long_body_carried_over_unchanged_still_passes(cur, scope_id, monkeypa
 
     def restored(body):
         memory = written_before_the_ceiling(lambda: remember(cur, body))
-        retire(cur, memory, "the project paused", kind="out_of_scope")
+        retire(cur, memory, "the project paused", kind="withdrawn")
         return memories.restore(
             cur,
             memory["memory_id"],

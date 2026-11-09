@@ -61,8 +61,8 @@ def test_hand_recording_and_a_banned_pattern_are_refused_and_nothing_is_written(
     assert count(cur, "nomination") == 0
 
 
-@pytest.mark.parametrize("retirement_kind", ("invalidated", "legacy"))
-def test_a_new_incident_on_invalidated_or_legacy_retirement_keeps_a_conflicted_candidate(
+@pytest.mark.parametrize("retirement_kind", ("withdrawn", "legacy"))
+def test_a_new_incident_on_withdrawn_or_legacy_retirement_keeps_a_conflicted_candidate(
     cur, retirement_kind
 ):
     kept = remember(cur, HOLE)
@@ -80,8 +80,8 @@ def test_a_new_incident_on_invalidated_or_legacy_retirement_keeps_a_conflicted_c
     assert count(cur, "nomination") == 1
 
 
-@pytest.mark.parametrize("retirement_kind", ("out_of_scope", "relocated"))
-def test_out_of_scope_and_relocated_memories_do_not_suppress_new_candidates(cur, retirement_kind):
+@pytest.mark.parametrize("retirement_kind", ("withdrawn", "relocated"))
+def test_withdrawn_and_relocated_memories_do_not_suppress_new_candidates(cur, retirement_kind):
     kept = remember(cur, HOLE)
     if retirement_kind == "relocated":
         converted = memories.convert_to_temporary(cur, kept["memory_id"], days=1, actor="user")

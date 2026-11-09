@@ -303,7 +303,7 @@ def test_a_memory_change_applies_at_its_version_or_comes_back_reproposed(dsn):
     with db.transaction(dsn) as cur:
         memory = remember(cur, RULE)
         change = propose_change(
-            cur, memory, "retire", retirement_kind="out_of_scope", retire_reason="other repos"
+            cur, memory, "retire", retirement_kind="withdrawn", retire_reason="other repos"
         )
         memories.revise(cur, memory["memory_id"], content=f"{RULE}!", actor="user")
 
@@ -320,7 +320,7 @@ def test_a_change_reason_is_reworded_only_against_what_was_shown(dsn):
     with db.transaction(dsn) as cur:
         memory = remember(cur, RULE)
         change = propose_change(
-            cur, memory, "retire", retirement_kind="out_of_scope", retire_reason="other repos"
+            cur, memory, "retire", retirement_kind="withdrawn", retire_reason="other repos"
         )
     shown = ask(dsn, "change.list")["result"]["changes"][0]
     request = {

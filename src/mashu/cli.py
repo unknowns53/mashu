@@ -402,7 +402,7 @@ def cmd_remember(args: argparse.Namespace) -> int:
 
 
 def _print_retirement_conflicts(conflict: RetiredConflictError) -> None:
-    """Show the exact invalidated or legacy conflicts that need acknowledgment."""
+    """Show the exact withdrawn or legacy conflicts that need acknowledgment."""
     print(str(conflict), file=sys.stderr)
     for row in conflict.tombstones:
         retired = row.get("retired_at")
@@ -455,36 +455,7 @@ def _print_retirement_warnings(rows: list[dict[str, Any]]) -> None:
 def cmd_retire(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
         memory_id = _memory_ref(cur, args.memory_id)
-        row = memories.retire(
-            cur,
-            memory_id,
-            reason=args.reason,
-            actor=ACTOR,
-            retirement_kind=args.kind,
-            superseded_by=(
-                _resolve(
-                    cur,
-                    args.superseded_by,
-                    table="memory",
-                    id_col="memory_id",
-                    label="successor memory",
-                )
-                if args.superseded_by
-                else None
-            ),
-            relocated_to_kind="temporary_context" if args.temporary_context else None,
-            relocated_to_id=(
-                _resolve(
-                    cur,
-                    args.temporary_context,
-                    table="temporary_context",
-                    id_col="context_id",
-                    label="temporary context",
-                )
-                if args.temporary_context
-                else None
-            ),
-        )
+        row = memory_actions.retire(cur, memory_id, reason=args.reason, actor=ACTOR)
     _gate_warnings(row)
     print(f"retired  {row['memory_id']}")
     return 0
@@ -1863,26 +1834,13 @@ def build_parser() -> argparse.ArgumentParser:
         sub,
         "retire",
         "withdraw a memory, leaving the reason as its tombstone",
-        examples=(
-            'mashu retire 1a2b3c4d --kind invalidated --reason "The service no longer exists"',
-        ),
+        examples=('mashu retire 1a2b3c4d --reason "The service no longer exists"',),
     )
     retire.add_argument("memory_id", help=_REF_HELP)
     retire.add_argument(
-        "--reason", required=True, help="why it is retired; later matches read this"
-    )
-    retire.add_argument(
-        "--kind",
-        choices=("invalidated", "superseded", "out_of_scope", "relocated"),
+        "--reason",
         required=True,
-        help="why it is retired",
-    )
-    retire.add_argument(
-        "--superseded-by", help="successor Memory ID or unique prefix for superseded"
-    )
-    retire.add_argument(
-        "--temporary-context",
-        help="destination Temporary Context ID or unique prefix for relocated",
+        help="why it is retired; a similar rule offered later is shown this and waits",
     )
     retire.set_defaults(func=cmd_retire)
 
@@ -2082,7 +2040,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--ack-conflict",
         action="append",
         type=UUID,
-        help="explicitly acknowledge a displayed invalidated or legacy conflict (repeat per id)",
+        help="explicitly acknowledge a displayed withdrawn or legacy conflict (repeat per id)",
     )
     review.add_argument("--reason", help="why it is turned down; required with --decline")
     review.add_argument(

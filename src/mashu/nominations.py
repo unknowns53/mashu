@@ -387,7 +387,7 @@ def conflict_rows(cur: psycopg.Cursor, conflicts: list[UUID] | None) -> list[dic
 def blocking_conflicts(rows: list[dict[str, Any]]) -> list[UUID]:
     """The retirements an admission may not walk past without an instruction addressing them."""
     return [
-        row["memory_id"] for row in rows if row.get("retirement_kind") in ("invalidated", "legacy")
+        row["memory_id"] for row in rows if row.get("retirement_kind") in ("withdrawn", "legacy")
     ]
 
 
@@ -623,7 +623,7 @@ _STOP_EXISTING = (
     "covers it, call memory_admit with its nomination_id and nomination version."
 )
 _STOP_CONFLICT = (
-    "this content repeats Memory retired as invalidated or legacy, so nothing was admitted. "
+    "this content repeats Memory retired as withdrawn or legacy, so nothing was admitted. "
     "Show the user the returned conflicts; if they address them, call memory_admit with the "
     "nomination_id, nomination version, conflict_ids, and conflict_instruction."
 )

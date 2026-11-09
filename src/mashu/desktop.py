@@ -175,7 +175,6 @@ def choices(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
             for row in topics.list_topics(cur)
         ],
         "outcomes": list(tasks.OUTCOMES),
-        "retirement_kinds": list(memory_actions.RETIREMENT_KINDS),
         "temporary_max_days": config.TEMPORARY_MAX_DAYS,
     }
 
@@ -342,13 +341,7 @@ def memory_restore(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 def memory_retire(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     return memory_actions.retire(
-        cur,
-        _uuid(args, "memory_id"),
-        kind=_text(args, "kind"),
-        reason=_text(args, "reason"),
-        successor=_optional(args, "successor"),
-        destination=_optional(args, "destination"),
-        actor=ACTOR,
+        cur, _uuid(args, "memory_id"), reason=_text(args, "reason"), actor=ACTOR
     )
 
 

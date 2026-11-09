@@ -83,7 +83,7 @@ def test_stored_rows_appear_in_full_on_their_pages_and_filters_narrow_them(
         memories.revise(cur, kept["memory_id"], content="keep notes by the tag", actor="user")
         timed = remember(cur, "spell out the timezone in every scheduled job")
         propose_change(
-            cur, timed, "retire", retirement_kind="out_of_scope", retire_reason="cron moved to UTC"
+            cur, timed, "retire", retirement_kind="withdrawn", retire_reason="cron moved to UTC"
         )
         new_project(cur)
         task = new_task(cur, "ship the browser view", goal="survey every list at once")
