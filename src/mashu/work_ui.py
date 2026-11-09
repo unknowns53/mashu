@@ -7,7 +7,7 @@ import os
 from typing import Any
 from uuid import UUID
 
-from mashu import close_ui, config, db, projects, scopes, screen, task_actions, task_history, tasks
+from mashu import close_ui, config, db, projects, screen, task_actions, tasks
 from mashu.errors import DuplicateTaskError, MashuError
 
 ACTOR = "user"
@@ -72,18 +72,7 @@ def _find(rows: list[dict[str, Any]], wanted: UUID | None, view: str) -> int | N
 def _load_tasks(dsn: str | None, activity: str) -> list[dict[str, Any]]:
     """Load one task view and the history a person may inspect or search."""
     with db.transaction(dsn) as cur:
-        rows = tasks.task_list(cur, activity=activity)
-        return [
-            task_history.expanded_task(
-                cur,
-                _task_id(row),
-                attempts=True,
-                decisions=True,
-                artifacts=True,
-                checkpoints=True,
-            )
-            for row in rows
-        ]
+        return task_actions.task_view(cur, activity)
 
 
 def _load_projects(dsn: str | None) -> list[dict[str, Any]]:
@@ -410,25 +399,16 @@ def _create_task(dsn: str | None) -> tuple[str, UUID | None]:
     goal = _readline("  goal [optional]: ")
     if goal is None:
         return screen.warning("  ! task creation cancelled"), None
+    request = {"name": name, "project": project_ref, "goal": goal, "cwd": os.getcwd()}
     try:
         with db.transaction(dsn) as cur:
-            project_id = task_actions.resolve_task_project(cur, project_ref, cwd=os.getcwd())
-            created = tasks.task_create(
-                cur, project=project_id, name=name, goal=goal or None, actor=ACTOR
-            )
+            created = task_actions.create_task(cur, **request, actor=ACTOR)
     except DuplicateTaskError as error:
         print(_duplicate_candidates(error))
         if not _confirm("create it anyway?"):
             return screen.warning("  ! left existing tasks alone"), None
         with db.transaction(dsn) as cur:
-            created = tasks.task_create(
-                cur,
-                project=project_id,
-                name=name,
-                goal=goal or None,
-                actor=ACTOR,
-                force=True,
-            )
+            created = task_actions.create_task(cur, **request, actor=ACTOR, force=True)
     task_id = _task_id(created)
     return screen.success(f"  ✓ created task  {_short(task_id)}"), task_id
 
@@ -441,8 +421,9 @@ def _create_project(dsn: str | None) -> tuple[str, UUID | None]:
     if scope_name is None:
         return screen.warning("  ! project creation cancelled"), None
     with db.transaction(dsn) as cur:
-        scope_id = scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
-        created = projects.create_project(cur, name=name, scope_id=scope_id, actor=ACTOR)
+        created = task_actions.save_project(
+            cur, None, name=name, scope_name=scope_name, actor=ACTOR
+        )
     note = screen.success(f"  ✓ created project  {_short(created['project_id'])}")
     return note, created["project_id"]
 
@@ -528,13 +509,8 @@ def _edit_project(dsn: str | None, row: dict[str, Any]) -> str:
     if isinstance(scope_name, screen.Cancelled):
         return screen.warning("  ! project edit cancelled")
     with db.transaction(dsn) as cur:
-        scope_id = scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
-        projects.update_project(
-            cur,
-            row["project_id"],
-            name=name or row["name"],
-            scope_id=scope_id,
-            actor=ACTOR,
+        task_actions.save_project(
+            cur, row["project_id"], name=name or row["name"], scope_name=scope_name, actor=ACTOR
         )
     return screen.success(f"  ✓ edited project  {_short(row['project_id'])}")
 

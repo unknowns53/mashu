@@ -6,7 +6,7 @@ import datetime as dt
 from typing import Any
 from uuid import UUID
 
-from mashu import application, db, memories, references, scopes, screen, temporary, topics
+from mashu import application, db, memories, memory_actions, screen, temporary, topics
 from mashu.errors import MashuError, RetiredConflictError
 
 ACTOR = "user"
@@ -327,20 +327,6 @@ def _optional(prompt: str) -> str | None:
         return None
 
 
-def _scope_id(cur: Any, name: str | None) -> UUID | None:
-    return scopes.require_scope(cur, name)["scope_id"] if name else None
-
-
-def _resolve_id(cur: Any, value: str, *, table: str, column: str, label: str) -> UUID:
-    return references.resolve_id(
-        cur,
-        value,
-        table=table,
-        column=column,
-        label=label,
-    )
-
-
 def _topic_line(number: int, row: dict[str, Any]) -> str:
     scope = row.get("scope_name") or "every session"
     rules = f"{row['rules']} rule" + ("" if row["rules"] == 1 else "s")
@@ -395,23 +381,6 @@ def _new_topic() -> dict[str, Any] | None:
     if trigger is None:
         return None
     return {"topic_id": None, "name": name, "scope_name": scope.text or None, "trigger": trigger}
-
-
-def topic_id_for(cur: Any, choice: dict[str, Any] | None) -> UUID | None:
-    """The chosen topic's id, creating a described topic inside the caller's write."""
-    if choice is None:
-        return None
-    if choice.get("topic_id") is not None:
-        return choice["topic_id"]
-    if choice.get("trigger") is None:
-        return topics.require_topic(cur, choice["name"])["topic_id"]
-    return topics.create_topic(
-        cur,
-        name=choice["name"],
-        trigger=choice["trigger"],
-        scope_id=_scope_id(cur, choice.get("scope_name")),
-        actor=ACTOR,
-    )["topic_id"]
 
 
 def _chosen_delivery(text: str) -> str:
@@ -504,18 +473,14 @@ def _revise_temporary(dsn: str | None, row: dict[str, Any]) -> str:
     if scope_name == "-":
         scope_name = None
     with db.transaction(dsn) as cur:
-        temporary.revise(
-            cur,
-            row["context_id"],
-            content=content,
-            scope_id=_scope_id(cur, scope_name),
-            actor=ACTOR,
+        memory_actions.revise_temporary(
+            cur, row["context_id"], content=content, scope_name=scope_name, actor=ACTOR
         )
     return screen.success(f"  ✓ revised temporary {_short(row['context_id'])}")
 
 
 def _retire(dsn: str | None, row: dict[str, Any]) -> str:
-    choices = ("invalidated", "superseded", "out_of_scope", "relocated")
+    choices = memory_actions.RETIREMENT_KINDS
     answer = screen.editline(f"  retirement kind [{'/'.join(choices)}]: ", "")
     if isinstance(answer, screen.Cancelled):
         return screen.warning("  ! retirement cancelled; Memory remains active")
@@ -537,38 +502,14 @@ def _retire(dsn: str | None, row: dict[str, Any]) -> str:
         return screen.warning("  ! left active — retirement needs a reason")
     try:
         with db.transaction(dsn) as cur:
-            superseded_by = (
-                _resolve_id(
-                    cur,
-                    successor_ref,
-                    table="memory",
-                    column="memory_id",
-                    label="successor Memory",
-                )
-                if successor_ref
-                else None
-            )
-            relocated_to_id = (
-                _resolve_id(
-                    cur,
-                    context_ref,
-                    table="temporary_context",
-                    column="context_id",
-                    label="Temporary Context",
-                )
-                if context_ref
-                else None
-            )
-            memories.retire(
+            memory_actions.retire(
                 cur,
                 row["memory_id"],
+                kind=retirement_kind,
                 reason=reason,
+                successor=successor_ref,
+                destination=context_ref,
                 actor=ACTOR,
-                retirement_kind=retirement_kind,
-                superseded_by=superseded_by,
-                relocated_to_kind="temporary_context" if relocated_to_id else None,
-                relocated_to_id=relocated_to_id,
-                approval_source={"kind": "user_direct"},
             )
     except MashuError as refusal:
         return screen.danger(f"  {refusal}")
@@ -586,16 +527,13 @@ def _set_delivery(dsn: str | None, row: dict[str, Any]) -> str:
         return screen.warning("  ! delivery unchanged")
     delivery, scope_name, topic = answers
     with db.transaction(dsn) as cur:
-        scope_id = _scope_id(cur, scope_name)
-        changed = memories.set_delivery(
+        changed = memory_actions.set_delivery(
             cur,
             row["memory_id"],
             delivery=delivery,
+            scope_name=scope_name,
+            topic=topic,
             actor=ACTOR,
-            scope_id=scope_id,
-            clear_scope=scope_id is None,
-            topic_id=topic_id_for(cur, topic),
-            approval_source={"kind": "user_direct"},
         )
     label = f"topic:{topic['name']}" if topic else changed["delivery"]
     return screen.success(f"  ✓ delivery {_short(row['memory_id'])}  {label}")
@@ -626,15 +564,15 @@ def _remember(dsn: str | None) -> tuple[str, UUID | None]:
     while True:
         try:
             with db.transaction(dsn) as cur:
-                row = memories.remember(
+                row = memory_actions.remember(
                     cur,
                     content=content,
-                    actor=ACTOR,
-                    scope_id=_scope_id(cur, scope_name),
-                    delivery=delivery,
-                    topic_id=topic_id_for(cur, topic),
-                    acknowledged_conflicts=acknowledged,
                     why=why,
+                    delivery=delivery,
+                    scope_name=scope_name,
+                    topic=topic,
+                    acknowledged=acknowledged,
+                    actor=ACTOR,
                 )
             message = screen.success(f"  ✓ remembered {_short(row['memory_id'])}")
             for warning in row.get("retirement_warnings", []):
@@ -680,13 +618,7 @@ def _temporary(dsn: str | None) -> tuple[str, UUID | None]:
     if days is None:
         return screen.warning("  ! nothing recorded"), None
     with db.transaction(dsn) as cur:
-        row = temporary.put_temporary(
-            cur,
-            content=content,
-            actor=ACTOR,
-            days=days,
-            scope_id=None,
-        )
+        row = memory_actions.add_temporary(cur, content=content, days=days, actor=ACTOR)
     return screen.success(f"  ✓ temporary {_short(row['context_id'])}"), row["context_id"]
 
 

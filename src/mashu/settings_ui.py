@@ -494,21 +494,15 @@ def _topics_page(dsn: str | None) -> None:
                 continue
             try:
                 with db.transaction(dsn) as cur:
-                    scope_id = (
-                        scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
-                    )
-                    topics.update_topic(
+                    application.save_topic(
                         cur,
                         row["topic_id"],
-                        actor=ACTOR,
                         name=name or row["name"],
                         trigger=trigger or row["trigger"],
-                        scope_id=scope_id,
-                        clear_scope=scope_id is None,
+                        scope_name=scope_name,
                         action=action,
-                        clear_action=action is None,
                         source=source,
-                        clear_source=source is None,
+                        actor=ACTOR,
                     )
                 note = f"  edited topic {name or row['name']}"
             except MashuError as error:
@@ -545,13 +539,12 @@ def _topics_page(dsn: str | None) -> None:
                 continue
             try:
                 with db.transaction(dsn) as cur:
-                    topics.create_topic(
+                    application.save_topic(
                         cur,
+                        None,
                         name=name_answer.text,
                         trigger=trigger_answer.text,
-                        scope_id=scopes.require_scope(cur, scope_answer.text)["scope_id"]
-                        if scope_answer.text
-                        else None,
+                        scope_name=scope_answer.text or None,
                         actor=ACTOR,
                     )
                 note = f"  created topic {name_answer.text}"

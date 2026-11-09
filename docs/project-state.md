@@ -353,7 +353,7 @@ Memory 関連 Tool は `docs/memory.md` 7.1 節に記す。`session_bootstrap` �
 ```text
 mashu                           人向け dashboard。Attention / Memories / Work / Settings を開く
 mashu gui                       Task を含む一覧の読み取り専用ブラウザ表示（docs/memory.md 7.2 節）
-mashu desktop-backend           デスクトップアプリの子プロセス。close・提案の取り下げ・lease 更新を close 画面と同じ関数で行う（docs/memory.md 7.2 節）
+mashu desktop-backend           デスクトップアプリの子プロセス。Task と Project の操作を Work と close の画面と同じ関数で行う（docs/memory.md 7.2 節）
 mashu project list / create / edit <id> / show <id>
 mashu task list [--dormant] [--closed]
 mashu task show <id>            state・履歴・artifacts を全文

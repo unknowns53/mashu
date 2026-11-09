@@ -152,16 +152,27 @@ Memories は status、delivery、Scope、topic と本文の部分一致で、Tas
 
 GUI は読むだけで、採用・却下・編集・close などの操作は TUI、CLI、デスクトップアプリで行う。GET と HEAD 以外の要求は 405 で拒否し、ページを作る DB の transaction は PostgreSQL 側で READ ONLY にする。localhost の HTTP から書き込めると、shell を持つ Agent が curl で User として承認できてしまうためだ。
 
-### デスクトップアプリで review する
+### デスクトップアプリで操作する
 
-`desktop/` は Tauri 2 で作ったトレイ常駐アプリで、Review タブでは review 待ちの candidate を採用・却下・保留し、文面を直せる。Tasks タブでは open な Task を close の提案があるものから並べ、提案どおりの close、outcome と理由を選んでの close、提案を退けて開いたままにすること、lease の更新ができる。state が提案より後に書かれた提案は、確認のチェックを入れるまで受け入れられない。60 秒ごとに store を見にいき、review 待ちの candidate や close の提案が増えると OS の通知を出す。トレイのアイコンに重ねたヒントには、review 待ちと close 提案の件数が出る。窓を閉じてもトレイに残り、終えるときはトレイのメニューの Quit を使う。
+`desktop/` は Tauri 2 で作ったトレイ常駐アプリで、TUI でできる人の操作をすべて窓の中で行える。タブは次の六つである。
+
+- Home: 決定を待つもの（review、Memory change、close の提案、dormant な Task）と、store の各部の件数。押すとそのタブへ移る
+- Review: candidate の採用・却下・保留と文面の編集。topic への採用では、その場で新しい topic を作れる
+- Changes: Memory change proposal の適用・理由の編集・却下・取り下げ
+- Memories: active・retired の Memory と Temporary Context の一覧、検索、根拠と revision の表示。直接の remember、本文の編集、delivery の変更、retire、Temporary Context との相互の変換、Temporary Context の登録・編集・終了
+- Work: active・dormant・closed の Task と Project。Task の作成・編集・lease の更新・close・reopen、close 提案の受け入れと取り下げ、Project の作成と編集
+- Settings: Health/status、Bootstrap preview、Scope・Topic・Route の追加と編集と削除、checkpoint の間隔、migration の適用
+
+retire 済みの規則を書き戻す操作や、似た open な Task がある中での作成、削除や migration の適用は、理由や候補を見せて一度確かめてから行う。state が提案より後に書かれた close の提案は、確認のチェックを入れるまで受け入れられない。Bootstrap preview は入力したディレクトリで開くセッションの内容を示し、TUI と同じく配信として記録される。
+
+60 秒ごとに store を見にいき、review 待ちの candidate、Memory change proposal、close の提案が増えると OS の通知を出す。トレイのアイコンに重ねたヒントにはそれぞれの件数が出る。窓を閉じてもトレイに残り、終えるときはトレイのメニューの Quit を使う。
 
 ~~~bash
 cd desktop/src-tauri
 cargo run
 ~~~
 
-ビルドには Rust と、Windows では WebView2 が要る。アプリは `mashu desktop-backend` を子プロセスとして起こし、標準入出力の JSON 一行ずつで要求と応答をやりとりする。待ち受けるポートは無い。採用と close は TUI と同じ関数（`review_actions` と `task_actions`）を通るので、楽観チェック、容量の上限、入口の拒否は TUI と同じに掛かる。起こす実行ファイルは、環境変数 `MASHU_EXE`、この checkout の `.venv` にある `mashu`、PATH の `mashu` の順に探す。
+ビルドには Rust と、Windows では WebView2 が要る。アプリは `mashu desktop-backend` を子プロセスとして起こし、標準入出力の JSON 一行ずつで要求と応答をやりとりする。待ち受けるポートは無い。書き込みは TUI と同じ関数（`review_actions`、`memory_actions`、`task_actions`、`application`）を通るので、楽観チェック、容量の上限、入口の拒否は TUI と同じに掛かる。起こす実行ファイルは、環境変数 `MASHU_EXE`、この checkout の `.venv` にある `mashu`、PATH の `mashu` の順に探す。
 
 `mashu desktop-backend` は shell から誰でも起動できるので、User としての承認を Agent から守る強さは CLI と TUI と同じである。Agent に `mashu review` を禁じているなら、`mashu desktop-backend` も同じく禁じる。
 
@@ -275,7 +286,7 @@ TUI の操作は次のとおり。
 | mashu status | schema、容量、pending 件数、最近の ledger、配信失敗の疑いとその経路別の内訳、有った知識が使われなかった件数、action つき topic ごとの直近 30 日の guard の発火回数を表示する。拒否の次の呼び出しが変わった割合は、guard が呼び出しを止めていた期間の記録から出る |
 | mashu bootstrap | 現在のディレクトリのセッションへ配信される内容と token 数を表示 |
 | mashu gui | Memory、Temporary Context、Task、review 待ちを読み取り専用のページとしてブラウザに表示 |
-| mashu desktop-backend | デスクトップアプリが子プロセスとして起こす。標準入力の JSON 一行ずつの要求に、標準出力の一行で答える。review の決定と Task の close・lease 更新を扱う |
+| mashu desktop-backend | デスクトップアプリが子プロセスとして起こす。標準入力の JSON 一行ずつの要求に、標準出力の一行で答える。TUI と同じ人の操作をすべて扱う |
 | mashu show REF | Memory、candidate、Ledger、Memory change proposal の 1 件を根拠・履歴つきで表示 |
 | mashu memories | active Memory の一覧を表示 |
 | mashu memories --retired | retire された Memory と retire の理由を表示 |

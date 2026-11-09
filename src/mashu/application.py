@@ -179,6 +179,101 @@ def status_snapshot(cur: psycopg.Cursor) -> StatusSnapshot:
     )
 
 
+def dashboard_counts(cur: psycopg.Cursor) -> dict[str, int]:
+    """The counts the home screens summarise the store with."""
+    cur.execute(
+        """
+        SELECT count(*) FILTER (WHERE deferred_at IS NULL) AS ready,
+               count(*) FILTER (WHERE deferred_at IS NOT NULL) AS deferred
+        FROM nomination WHERE status = 'pending'
+        """
+    )
+    review = cur.fetchone()
+
+    cur.execute("SELECT count(*) AS n FROM memory_change WHERE status = 'pending'")
+    memory_change_count = cur.fetchone()["n"]
+
+    cur.execute(
+        """
+        SELECT count(*) FILTER (
+                   WHERE t.status = 'open' AND now() <= t.active_until
+               ) AS active,
+               count(*) FILTER (
+                   WHERE t.status = 'open' AND now() > t.active_until
+               ) AS dormant,
+               count(*) FILTER (WHERE t.status = 'closed') AS closed,
+               count(cp.task_id) FILTER (WHERE t.status = 'open') AS proposals
+        FROM task t
+        LEFT JOIN task_close_proposal cp ON cp.task_id = t.task_id
+        """
+    )
+    task = cur.fetchone()
+
+    cur.execute(
+        "SELECT count(*) FILTER (WHERE status = 'active') AS active, "
+        "count(*) FILTER (WHERE status = 'retired') AS retired FROM memory"
+    )
+    memory = cur.fetchone()
+    cur.execute("SELECT count(*) AS n FROM temporary_context WHERE expires_at > now()")
+    temporary_contexts = cur.fetchone()["n"]
+    cur.execute("SELECT count(*) AS n FROM project WHERE archived_at IS NULL")
+    project_count = cur.fetchone()["n"]
+    cur.execute("SELECT count(*) AS n FROM scope")
+    scope_count = cur.fetchone()["n"]
+    cur.execute("SELECT count(*) AS n FROM route")
+    route_count = cur.fetchone()["n"]
+
+    return {
+        "review_ready": review["ready"],
+        "review_deferred": review["deferred"],
+        "memory_changes": memory_change_count,
+        "tasks_active": task["active"],
+        "tasks_dormant": task["dormant"],
+        "task_proposals": task["proposals"],
+        "active_memories": memory["active"],
+        "projects": project_count,
+        "tasks_closed": task["closed"],
+        "retired_memories": memory["retired"],
+        "temporary_contexts": temporary_contexts,
+        "scopes": scope_count,
+        "routes": route_count,
+        "schema_pending": len(migrate.pending(cur)),
+    }
+
+
+def save_topic(
+    cur: psycopg.Cursor,
+    topic_id: UUID | None,
+    *,
+    name: str,
+    trigger: str,
+    scope_name: str | None,
+    actor: str,
+    action: str | None = None,
+    source: str | None = None,
+) -> dict[str, Any]:
+    """Create a topic, or set every field of one; no scope means every session.
+
+    Editing sets action and source too, so None removes them. A new topic takes neither.
+    """
+    scope_id = scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
+    if topic_id is None:
+        return topics.create_topic(cur, name=name, trigger=trigger, scope_id=scope_id, actor=actor)
+    return topics.update_topic(
+        cur,
+        topic_id,
+        actor=actor,
+        name=name,
+        trigger=trigger,
+        scope_id=scope_id,
+        clear_scope=scope_id is None,
+        action=action,
+        clear_action=action is None,
+        source=source,
+        clear_source=source is None,
+    )
+
+
 def set_route(
     cur: psycopg.Cursor, *, path_prefix: str, scope_name: str, actor: str
 ) -> dict[str, Any]:

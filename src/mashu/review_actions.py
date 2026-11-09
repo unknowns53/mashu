@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 
-from mashu import memory_ui, nominations
+from mashu import memory_actions, nominations
 from mashu.errors import MashuError
 
 
@@ -72,7 +72,7 @@ def admit(
         actor=actor,
         delivery=delivery,
         expected_version=expected_version,
-        topic_id=memory_ui.topic_id_for(cur, topic),
+        topic_id=memory_actions.topic_id_for(cur, topic, actor=actor),
         approval={"kind": "user_direct", "conflict_ids": conflict_ids},
         request_id=uuid4(),
     )

@@ -186,6 +186,7 @@ fn set_tooltip(app: &AppHandle, text: &str) {
 #[derive(Default)]
 struct Seen {
     pending: Option<u64>,
+    changes: Option<u64>,
     proposals: Option<HashSet<String>>,
 }
 
@@ -204,6 +205,7 @@ fn check(app: &AppHandle, seen: &mut Seen) {
     };
     let status = &reply["result"];
     let pending = status["pending_ready"].as_u64().unwrap_or(0);
+    let changes = status["memory_changes"].as_u64().unwrap_or(0);
     let proposals: Vec<&Value> = status["close_proposals"]
         .as_array()
         .map(|rows| rows.iter().collect())
@@ -211,10 +213,23 @@ fn check(app: &AppHandle, seen: &mut Seen) {
     set_tooltip(
         app,
         &format!(
-            "Mashu: {pending} waiting for review, {} close proposal(s)",
+            "Mashu: {pending} waiting for review, {changes} Memory change(s), {} close proposal(s)",
             proposals.len()
         ),
     );
+
+    match seen.changes {
+        None if changes > 0 => notify(app, &format!("{changes} Memory change(s) proposed")),
+        Some(before) if changes > before => notify(
+            app,
+            &format!(
+                "{} new Memory change(s); {changes} proposed",
+                changes - before
+            ),
+        ),
+        _ => {}
+    }
+    seen.changes = Some(changes);
 
     match seen.pending {
         None if pending > 0 => notify(app, &format!("{pending} candidate(s) waiting for review")),
