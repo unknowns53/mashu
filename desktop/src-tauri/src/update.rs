@@ -339,6 +339,8 @@ fn update_checkout(app: &AppHandle, root: &Path, version: &str) -> Result<(), St
     step(app, "checkout");
     run(&git, &["merge", "--ff-only", "--quiet", &tag], root)?;
     step(app, "sync");
+    #[cfg(windows)]
+    set_aside_running(root);
     let uv = tool("uv").ok_or("uv was not found")?;
     run(&uv, &["sync", "--extra", "mcp"], root).map_err(|error| {
         format!("{error}\nA running MCP server can hold the files on Windows; close agent sessions and update again.")
@@ -346,6 +348,31 @@ fn update_checkout(app: &AppHandle, root: &Path, version: &str) -> Result<(), St
     step(app, "migrate");
     run(&venv_mashu(root), &["admin", "migrate"], root)?;
     Ok(())
+}
+
+/// Rename the checkout's mashu.exe so uv can write the new one.
+///
+/// Windows refuses to delete a program that agent sessions are running as their MCP server or
+/// hooks, but lets it be renamed; those sessions keep the old copy until they restart. Copies
+/// set aside by an earlier update are removed once nothing runs them.
+#[cfg(windows)]
+fn set_aside_running(root: &Path) {
+    let scripts = root.join(".venv").join("Scripts");
+    if let Ok(entries) = std::fs::read_dir(&scripts) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("mashu.exe.old-") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default();
+    let _ = std::fs::rename(
+        scripts.join("mashu.exe"),
+        scripts.join(format!("mashu.exe.old-{stamp}")),
+    );
 }
 
 /// Update the checkout, then the app, then restart into the new app.
