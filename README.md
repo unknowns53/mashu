@@ -461,9 +461,10 @@ User が配信先の変更を指示した      → memory_redeliver
 起動する `mashu` は次の順に探す。
 
 1. 環境変数 `MASHU_EXE`
-2. 設定の「バージョン」で指定した checkout の `.venv` にある `mashu`
-3. 手元でビルドしたときは、そのアプリがある checkout の `mashu`
-4. PATH と `~/.local/bin` にある `mashu`。checkout の `.venv` への symlink なら、その checkout を更新の対象にする
+2. `cargo run` で起動した開発ビルドは、ビルドした checkout の `.venv` にある `mashu`
+3. 設定の「バージョン」で指定した checkout の `.venv` にある `mashu`
+4. 手元でリリースビルドしたときは、そのアプリがある checkout の `mashu`
+5. PATH と `~/.local/bin` にある `mashu`。checkout の `.venv` への symlink なら、その checkout を更新の対象にする
 
 どれも見つからなければ、[デスクトップアプリから導入](#デスクトップアプリから導入)で説明した最初の画面を出す。checkout はあるのに DB が無いときは「データベースを作成」を、PostgreSQL に接続できないときは「再試行」を出す。
 

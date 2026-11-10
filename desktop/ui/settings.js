@@ -451,7 +451,7 @@ async function versionSection() {
         input,
         h("button", { type: "submit", class: "btn primary", text: t("common.save") })
       ),
-      h("p", { class: "sub", text: place.from_env ? t("update.from_env") : t("update.place_hint") })
+      h("p", { class: "sub", text: place.from_env ? t("update.from_env") : place.from_build ? t("update.from_build") : t("update.place_hint") })
     ),
   ];
 }
