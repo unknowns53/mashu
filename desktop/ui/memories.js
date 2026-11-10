@@ -9,6 +9,7 @@ const mem = {
   detail: null,
   panel: null, // "edit", "delivery", "temporary", "retire"
   creating: null, // "memory" or "temporary" while the new form is shown
+  contentLimit: null, // the Settings screen's limit on one memory body
 };
 
 const memSeg = segmented(
@@ -182,7 +183,7 @@ function memoryDetail(detail) {
   if (mem.panel === "edit") {
     nodes.push(
       form({
-        fields: [{ name: "content", label: t("memory.rule"), kind: "area", rows: 3, value: detail.content, max: 120, big: true }],
+        fields: [{ name: "content", label: t("memory.rule"), kind: "area", rows: 3, value: detail.content, max: mem.contentLimit, big: true }],
         onCancel: () => memTogglePanel("edit"),
         onSubmit: (values) =>
           acknowledging(
@@ -244,6 +245,11 @@ function memoryDetail(detail) {
     if (mem.panel === "temporary") nodes.push(toTemporaryPanel(detail));
     if (mem.panel === "retire") nodes.push(retirePanel(detail));
     if (mem.panel === "reason") nodes.push(reasonAddPanel(detail));
+  }
+
+  if (mem.panel !== "edit") {
+    // Code points, as the store's char_length and the form's counter count them.
+    nodes.push(h("div", { class: "size-line" }, meterRow(t("memory.rule"), [...detail.content].length, mem.contentLimit)));
   }
 
   nodes.push(
@@ -469,7 +475,7 @@ function newMemoryForm(target) {
         form({
           title: t("memory.new"),
           fields: [
-            { name: "content", label: t("memory.rule"), kind: "area", rows: 3, max: 120, hint: t("memory.rule_hint"), big: true },
+            { name: "content", label: t("memory.rule"), kind: "area", rows: 3, max: mem.contentLimit, hint: t("memory.rule_hint"), big: true },
             { name: "why", label: t("memory.why"), kind: "area", rows: 3, hint: t("memory.why_hint") },
             { name: "delivery", label: t("delivery.title"), kind: "radio", options: deliveryOptions(), value: "always" },
             {
@@ -538,7 +544,9 @@ page("memories", {
   selected: () => mem.selected,
   pick: pickMemory,
   async load() {
-    mem.rows = (await call("memory.list", { view: mem.view })).rows;
+    const listed = await call("memory.list", { view: mem.view });
+    mem.rows = listed.rows;
+    mem.contentLimit = listed.content_limit;
     mem.selected = keepSelection(shownMemories().map(memoryId), mem.selected);
     await loadMemoryDetail();
   },
