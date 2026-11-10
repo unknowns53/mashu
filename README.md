@@ -194,7 +194,7 @@ Ledger、Memory の revision、Task の checkpoint と attempt と decision と 
 
 ### 規則を直接登録する
 
-本文は該当するすべてのセッションに配信されるので、規則だけを 120 字以内で書く。理由、測定値、日付、経緯は `--why`（500 字まで）に渡す。`--why` は Ledger に根拠として残り、`mashu show` で読めるが、セッションには配信されない。
+本文は該当するすべてのセッションに配信されるので、規則だけを本文の上限（既定 120 字）以内で書く。理由、測定値、日付、経緯は `--why`（500 字まで）に渡す。`--why` は Ledger に根拠として残り、`mashu show` で読めるが、セッションには配信されない。
 
 ~~~bash
 mashu remember "Run migrations before restarting the service"
@@ -217,7 +217,7 @@ agent が `pain_report` で書く記録は、CLI の `mashu pain` からも記�
 
 | オプション | 使う場面 | 結果 |
 |---|---|---|
-| なし（`--prevention-kind rule`） | 記録しておくべき規則が無かった | `--prevention` が candidate の本文になる。120 字までで、経緯は `--what` に記入する |
+| なし（`--prevention-kind rule`） | 記録しておくべき規則が無かった | `--prevention` が candidate の本文になる。本文の上限（既定 120 字）までで、経緯は `--what` に記入する |
 | `--prevention-kind work --task TASK` | 一度修正すれば済む | candidate を作成せず、その Task の next actions に記入する |
 | `--violated MEMORY` | 配信された Memory が遵守されなかった | candidate を作らず、配信の失敗の疑いとして記録する |
 | `--ignored-task TASK` | Task の decisions や attempts に書いてあったのに活用しなかった。decision が一つに絞れるときは `--ignored-decision` も添える | candidate を作らず、活用されなかった知識としてカウント |
