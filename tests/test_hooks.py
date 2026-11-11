@@ -96,6 +96,11 @@ def test_pretooluse_uses_local_mashu_and_separates_option_like_action(monkeypatc
 DENIAL = [{"memory_id": "m", "content": "hand over the goal, not the steps", "topic": "handover"}]
 
 
+def mashu_args(argv):
+    """The arguments after the command that starts mashu: python.exe -m mashu on Windows."""
+    return argv[len(sessionstart_guard.mashu_command()) :]
+
+
 @pytest.fixture
 def guarded(monkeypatch, tmp_path):
     """Send one delegate call through the hook, and hand back its output and the CLI calls."""
@@ -105,10 +110,10 @@ def guarded(monkeypatch, tmp_path):
 
     def call(tool_input, *, cli=None):
         def run(argv, **kw):
-            seen.append(argv[1:])
+            seen.append(mashu_args(argv))
             if cli is not None:
                 return cli(argv)
-            if argv[1:3] == ["guard", "--json"]:
+            if mashu_args(argv)[:2] == ["guard", "--json"]:
                 return subprocess.CompletedProcess(argv, 2, json.dumps(DENIAL), "")
             return subprocess.CompletedProcess(argv, 0, "", "")
 
@@ -177,7 +182,7 @@ def delivered(monkeypatch):
         seen = []
 
         def run(argv, **kw):
-            seen.append((argv[1:], kw.get("cwd")))
+            seen.append((mashu_args(argv), kw.get("cwd")))
             return subprocess.CompletedProcess(argv, returncode, stdout, "")
 
         monkeypatch.setattr(sessionstart_guard.subprocess, "run", run)
