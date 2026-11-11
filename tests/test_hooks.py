@@ -77,7 +77,16 @@ def test_pretooluse_uses_local_mashu_and_separates_option_like_action(monkeypatc
 
     monkeypatch.setattr(pretooluse_guard.subprocess, "run", run)
     assert pretooluse_guard.main() == 0
-    assert seen == [[str(sessionstart_guard.MASHU), "guard", "--json", "--", "-guard"]]
+    assert seen == [
+        [
+            str(sessionstart_guard.MASHU),
+            *sessionstart_guard.MASHU_ARGS,
+            "guard",
+            "--json",
+            "--",
+            "-guard",
+        ]
+    ]
     monkeypatch.setattr(sessionstart_guard, "MASHU", tmp_path / "absent")
     monkeypatch.setattr(pretooluse_guard.sys, "stdin", io.StringIO(json.dumps(event)))
     assert pretooluse_guard.main() == 0
