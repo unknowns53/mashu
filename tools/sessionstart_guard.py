@@ -10,11 +10,18 @@ import subprocess
 import sys
 
 _VENV = pathlib.Path(__file__).resolve().parent.parent / ".venv"
-MASHU = _VENV / "Scripts" / "mashu.exe" if os.name == "nt" else _VENV / "bin" / "mashu"
+if os.name == "nt":
+    # A running mashu.exe can be neither deleted nor renamed, so a hook started through it would
+    # stop uv sync from rewriting it at an update. python.exe stays as long as the Python version.
+    MASHU = _VENV / "Scripts" / "python.exe"
+    MASHU_ARGS = ["-m", "mashu"]
+else:
+    MASHU = _VENV / "bin" / "mashu"
+    MASHU_ARGS = []
 
 
-def mashu_command() -> str:
-    return str(MASHU) if MASHU.exists() else "mashu"
+def mashu_command() -> list[str]:
+    return [str(MASHU), *MASHU_ARGS] if MASHU.exists() else ["mashu"]
 
 
 #: Context preamble used after compaction.
@@ -48,7 +55,7 @@ def main() -> int:
 
     try:
         done = subprocess.run(
-            [mashu_command(), "bootstrap"],
+            [*mashu_command(), "bootstrap"],
             capture_output=True,
             text=True,
             timeout=20,

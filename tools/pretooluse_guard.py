@@ -129,7 +129,7 @@ def main() -> int:
 
     try:
         done = subprocess.run(
-            [mashu_command(), "guard", "--json", "--", action],
+            [*mashu_command(), "guard", "--json", "--", action],
             capture_output=True,
             text=True,
             timeout=20,

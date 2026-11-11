@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::Mutex;
 use std::thread;
@@ -49,7 +49,7 @@ struct Wake(Sender<()>);
 fn spawn(app: &AppHandle) -> Result<Process, String> {
     let program =
         update::executable(app).ok_or("could not start mashu: set where the Mashu checkout is")?;
-    let mut command = Command::new(&program);
+    let mut command = update::mashu_command(&program);
     command
         .arg("desktop-backend")
         .stdin(Stdio::piped())

@@ -99,6 +99,17 @@ claude mcp add mashu \
 
 agent の名前は `serve` の `--agent` か、環境変数 `MASHU_AGENT` で指定する。Codex など別の MCP client でも、同じように `mashu serve` を stdio server として登録する。
 
+Windows では、`mashu.exe` ではなく同じフォルダの `python.exe` に `-m mashu` を渡して登録する。
+
+~~~powershell
+claude mcp add mashu `
+  --scope user `
+  --env MASHU_DATABASE_URL=dbname=mashu `
+  -- C:\path\to\mashu\.venv\Scripts\python.exe -m mashu serve --agent claude
+~~~
+
+`uv sync` は mashu のバージョンが変わるたびに `.venv\Scripts\mashu.exe` を作り直す。Windows では動いている `mashu.exe` を削除も改名もできないので、MCP server が `mashu.exe` で動いていると、セッションを閉じるまで更新が止まる。`python.exe` は Python の版が変わらない限り作り直されないので、セッションを開いたまま更新できる。
+
 ### SessionStart hook で開始時の配信を自動化する
 
 `tools/sessionstart_guard.py` を SessionStart hook に登録すると、セッションの開始時と再開時に bootstrap の内容を配信する。compaction（文脈の要約）の後には、要約で欠落した内容をもう一度配信する。
@@ -480,7 +491,7 @@ User が配信先の変更を指示した      → memory_redeliver
 2. `uv sync --extra mcp` と `mashu admin migrate` を実行する
 3. アプリを GitHub Release の配布物で入れ替えて、再起動する
 
-checkout に commit していない変更があるとき、main 以外のブランチにいるとき、main にタグに無いコミットがあるときは、何も変えずに理由を示す。途中で失敗しても、もう一度「更新」を押せば続きから進む。手元でビルドしたアプリは checkout だけを更新するので、アプリは `cargo run` で起動し直す。Windows では、動いている MCP server が `.venv` の実行ファイルを開いたままだと `uv sync` が失敗するので、agent のセッションを閉じてから更新する。
+checkout に commit していない変更があるとき、main 以外のブランチにいるとき、main にタグに無いコミットがあるときは、何も変えずに理由を示す。途中で失敗しても、もう一度「更新」を押せば続きから進む。手元でビルドしたアプリは checkout だけを更新するので、アプリは `cargo run` で起動し直す。Windows のアプリは backend を `.venv\Scripts\python.exe -m mashu` で起動する。MCP server を `mashu.exe` で登録した agent のセッションが開いていると `uv sync` が失敗するので、そのセッションを閉じてから更新するか、[MCP server を登録する](#mcp-server-を登録する)の手順で `python.exe` から登録し直す。
 
 ### 手元でビルドする
 
