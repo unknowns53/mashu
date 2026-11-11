@@ -382,6 +382,7 @@ async function act(work, done, handle) {
   try {
     const returned = await work();
     const note = typeof returned === "string" ? returned : "";
+    // Pages read app.busy in load() to tell this reload from one the user asked for.
     await reload();
     toast(note || done, note ? "warn" : "ok");
   } catch (error) {
@@ -531,6 +532,31 @@ function fillList(container, groups, { selected, onPick, empty, note }) {
   container.replaceChildren(...nodes);
   const picked = container.querySelector('[aria-selected="true"]');
   if (picked) picked.scrollIntoView({ block: "nearest" });
+}
+
+/**
+ * The order a list was last shown in, so that a reload after a write does not move rows under
+ * the reader. place(rows, idOf, key) returns rows already shown under the same key (view,
+ * sort, and search) in their earlier places, after the rows not shown before; release() lets
+ * the next call take rows in the order given.
+ */
+function heldOrder() {
+  let held = null;
+  return {
+    place(rows, idOf, key) {
+      if (held && held.key === key) {
+        const at = new Map(held.ids.map((id, index) => [id, index]));
+        const seen = rows.filter((row) => at.has(idOf(row)));
+        seen.sort((a, b) => at.get(idOf(a)) - at.get(idOf(b)));
+        rows = [...rows.filter((row) => !at.has(idOf(row))), ...seen];
+      }
+      held = { key, ids: rows.map(idOf) };
+      return rows;
+    },
+    release() {
+      held = null;
+    },
+  };
 }
 
 /** Rows in display order, for moving the selection with the keyboard. */

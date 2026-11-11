@@ -433,6 +433,7 @@ page("inbox", {
   selected: () => inbox.selected,
   pick: pickInbox,
   async load() {
+    const before = listIds(inboxList.list);
     const [queue, changeList, active, dormant] = await Promise.all([
       call("review.list", { include_deferred: inbox.includeDeferred }),
       call("change.list"),
@@ -445,7 +446,7 @@ page("inbox", {
     inbox.closes = [...active.tasks, ...dormant.tasks].filter((row) => row.proposal);
     const ids = inboxItems().map((item) => item.id);
     if (!ids.includes(inbox.selected)) inbox.panel = null;
-    inbox.selected = keepSelection(ids, inbox.selected);
+    inbox.selected = keepSelection(ids, inbox.selected, before);
     renderInbox();
   },
   badge: (status) => status.pending_ready + status.memory_changes + status.close_proposals.length,
