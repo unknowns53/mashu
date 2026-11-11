@@ -8,6 +8,7 @@ const inbox = {
   changes: [],
   closes: [],
   hiddenDeferred: 0,
+  contentLimit: null, // the Settings screen's limit on one memory body
   includeDeferred: false,
   selected: null,
   panel: null, // the open inline panel: "admit", "edit", "decline", "defer", "reason", "withdraw"
@@ -139,7 +140,7 @@ function candidateDetail(row) {
   if (inbox.panel === "edit") {
     nodes.push(
       form({
-        fields: [{ name: "content", label: t("memory.rule"), kind: "area", rows: 3, value: row.content, max: 120, big: true }],
+        fields: [{ name: "content", label: t("memory.rule"), kind: "area", rows: 3, value: row.content, max: inbox.contentLimit, big: true }],
         onCancel: () => togglePanel("edit"),
         onSubmit: (values) =>
           act(async () => {
@@ -441,6 +442,7 @@ page("inbox", {
     ]);
     inbox.candidates = queue.candidates;
     inbox.hiddenDeferred = queue.hidden_deferred || 0;
+    inbox.contentLimit = queue.content_limit;
     inbox.changes = changeList.changes;
     inbox.closes = [...active.tasks, ...dormant.tasks].filter((row) => row.proposal);
     const ids = inboxItems().map((item) => item.id);

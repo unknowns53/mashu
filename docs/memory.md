@@ -69,7 +69,7 @@ append-only の記録で、1 エントリが一度の痛みに対応する。
 3. **pending の昇格候補** に閾値以上で当たった場合は、新しい候補を作らず**今回の `ledger` の行を既存候補の evidence に追加する**（4.1 節）
 4. `incident` は単独で昇格候補を生成する
 
-報告者が `ignored_task_id` で Task を、または `ignored_source` で指示ファイルや skill を名指した場合は、照合 2 で配信失敗が見つからなければ 3 と 4 に進まず、候補を作らない。知識はその場所にあったので、欠けていたのは知識ではない。ここで「そこを読んでから動く」という規則を候補にしても、失敗したことを繰り返し求めるだけで、その review は User に回る。`ledger` の行は残り、`knowledge_unused` を event_log に記録し、`mashu status` が直近 30 日の件数を出す。この件数は Memory の入口ではなく、その場所の引き渡し方を疑う材料になる（`docs/project-state.md` 15 節）。その場所の文面や届き方を直すなら、それは `prevention_kind='work'` として Task に積む。名指されたものが候補を作らない以上、`prevention` に 120 字の上限は掛けない。名指された Task が無いか、decision がその Task のものでなければ、何も書かずに拒否する
+報告者が `ignored_task_id` で Task を、または `ignored_source` で指示ファイルや skill を名指した場合は、照合 2 で配信失敗が見つからなければ 3 と 4 に進まず、候補を作らない。知識はその場所にあったので、欠けていたのは知識ではない。ここで「そこを読んでから動く」という規則を候補にしても、失敗したことを繰り返し求めるだけで、その review は User に回る。`ledger` の行は残り、`knowledge_unused` を event_log に記録し、`mashu status` が直近 30 日の件数を出す。この件数は Memory の入口ではなく、その場所の引き渡し方を疑う材料になる（`docs/project-state.md` 15 節）。その場所の文面や届き方を直すなら、それは `prevention_kind='work'` として Task に積む。名指されたものが候補を作らない以上、`prevention` に本文の上限は掛けない。名指された Task が無いか、decision がその Task のものでなければ、何も書かずに拒否する
 
 `violated_memory_id` と `ignored_task_id` は、完全な id のほかに、SessionStart フックが出す 8 文字の前置きでも受ける。フックで配信されたセッションは完全な id を持たないからである
 
@@ -81,7 +81,7 @@ append-only の記録で、1 エントリが一度の痛みに対応する。
 
 | フィールド | 内容 |
 |---|---|
-| content | push される全文。規則だけを一文で書き、新しく書く本文は 1 件 120 字まで |
+| content | push される全文。規則だけを一文で書き、新しく書く本文は 1 件 `content_limit`（既定 120 字）まで |
 | scope_id | 所属 Scope。無指定は全域を意味する（delivery = `always` の規則と、Scope を持たない topic の規則がこれに当たる） |
 | delivery | `always` / `scope` / `topic:<name>` |
 | evidence | 根拠となる `ledger` の行への参照（1 件以上、必須）。参照先が実在する `ledger` の行であることは DB のトリガが検証する。`ledger` は append-only なので、書き込み時に実在した参照は失われない |
@@ -248,10 +248,10 @@ Memories TUI の `c` は、active な always / scope Memory と Temporary Contex
 | Tool | 役割 |
 |---|---|
 | `session_bootstrap` | 5.1 節の内容を返す。セッション開始時に一度 |
-| `pain_report` | incident を `ledger` へ記録し、類似の `ledger` の行・tombstone・active な記憶を返す。候補を生成する。`rule` の `prevention` は候補の本文になるので 120 字までとし、理由や経緯は `what` に書く。incident は誤った作業が実際に出たことに限る。届いていた規則が守られなかったときは `violated_memory_id` でその active Memory を指す（3 節の照合 0）。Task の state にあったときは `ignored_task_id`（と任意の `ignored_decision_id`）、指示ファイルや skill にあったときは `ignored_source` で指し、候補を作らない |
+| `pain_report` | incident を `ledger` へ記録し、類似の `ledger` の行・tombstone・active な記憶を返す。候補を生成する。`rule` の `prevention` は候補の本文になるので本文の上限（既定 120 字）までとし、理由や経緯は `what` に書く。incident は誤った作業が実際に出たことに限る。届いていた規則が守られなかったときは `violated_memory_id` でその active Memory を指す（3 節の照合 0）。Task の state にあったときは `ignored_task_id`（と任意の `ignored_decision_id`）、指示ファイルや skill にあったときは `ignored_source` で指し、候補を作らない |
 | `memory_list` | 指定 Scope の active な記憶を列挙する。`always`（または `global`）は全セッションへ push される記憶を返す。`topic` を渡すと、その topic の発動条件・source（vault のノートなら `source_path` と `source_exists`）と規則の本文を返し、読んだことをセッション単位で event_log に残す |
 | `memory_get` | 指定した Memory の本文、revision、evidence、retire の情報を返す。retire された Memory の本文は明示取得でのみ読む |
-| `memory_nominate` | Agent 自身の replace 提案の後継を pending 候補として作るだけで採用しない。kind = `proposed` で記録し、他の候補に合流しない。本文は 120 字までで、理由は `why` に渡す |
+| `memory_nominate` | Agent 自身の replace 提案の後継を pending 候補として作るだけで採用しない。kind = `proposed` で記録し、他の候補に合流しない。本文は上限（既定 120 字）までで、理由は `why` に渡す |
 | `memory_admit` | 承認根拠を必須にして採用する。本文を渡すと候補の作成と採用を 1 回で行い（本文は 120 字まで、理由は `why`）、合流した既存候補や未対応の withdrawn / legacy conflict があれば採用せず候補を返す。候補 ID で採用するときは読み取った nomination version を必須にする。まだ無い topic は発動条件つき（原典を指すなら `topic_source` も）で指定すると記憶とともに作る。実行者 Agent と `user_instruction` の出所を別に保存し、request replay には初回応答を返す |
 | `memory_change_propose` | Agent 自身の retire / replace / restore / redeliver 案を作成・更新する。redeliver は本文を変えずに配信条件だけを変え、まだ無い topic を名前と発動条件つきで指定すると適用時にその topic を作る。replace は後継 nomination version と配信条件を固定する |
 | `memory_change_apply` | proposal version、対象 revision、conflict、承認根拠、request ID を照合して一度だけ適用する |

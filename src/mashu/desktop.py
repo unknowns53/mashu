@@ -191,6 +191,7 @@ def review_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     return {
         "candidates": rows,
         "hidden_deferred": 0 if include_deferred else nominations.deferred_count(cur),
+        "content_limit": settings.limit(cur, "content_limit"),
     }
 
 
@@ -293,7 +294,10 @@ def memory_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     view = args.get("view", "active")
     if view not in ("active", "retired", "temporary"):
         raise MashuError("view must be active, retired, or temporary")
-    return {"rows": application.memory_view(cur, view)}
+    return {
+        "rows": application.memory_view(cur, view),
+        "content_limit": settings.limit(cur, "content_limit"),
+    }
 
 
 def memory_get(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:

@@ -1,8 +1,8 @@
 // Settings: store health, what a session receives, scopes, topics, routes, delivery limits,
-// the checkpoint interval, the schema, versions and updates, and the window's language.
+// the checkpoint interval, the schema, versions and updates, starting at login, and the window's language.
 "use strict";
 
-const SECTIONS = ["health", "bootstrap", "scopes", "topics", "routes", "limits", "interval", "schema", "version", "display"];
+const SECTIONS = ["health", "bootstrap", "scopes", "topics", "routes", "limits", "interval", "schema", "version", "startup", "display"];
 
 const settings = { section: "health", editing: null, bootstrapCwd: "", bootstrap: null };
 
@@ -451,7 +451,29 @@ async function versionSection() {
         input,
         h("button", { type: "submit", class: "btn primary", text: t("common.save") })
       ),
-      h("p", { class: "sub", text: place.from_env ? t("update.from_env") : t("update.place_hint") })
+      h("p", { class: "sub", text: place.from_env ? t("update.from_env") : place.from_build ? t("update.from_build") : t("update.place_hint") })
+    ),
+  ];
+}
+
+async function startupSection() {
+  const enabled = await invoke("plugin:autostart|is_enabled");
+  return [
+    h("h1", { class: "title", text: t("settings.startup") }),
+    h(
+      "label",
+      { class: "check" },
+      h("input", {
+        type: "checkbox",
+        checked: enabled,
+        on: {
+          change: (event) => {
+            const wanted = event.target.checked;
+            act(() => invoke(wanted ? "plugin:autostart|enable" : "plugin:autostart|disable"), t(wanted ? "startup.enabled" : "startup.disabled"));
+          },
+        },
+      }),
+      t("startup.login")
     ),
   ];
 }
@@ -497,6 +519,7 @@ const SECTION_VIEWS = {
   routes: routesSection,
   limits: limitsSection,
   version: versionSection,
+  startup: startupSection,
   interval: intervalSection,
   schema: schemaSection,
   display: async () => displaySection(),

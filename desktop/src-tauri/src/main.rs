@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::Mutex;
@@ -268,10 +269,45 @@ fn watch(app: AppHandle, wakeup: Receiver<()>) {
     }
 }
 
+/// The login item keeps the executable path it was enabled from, and whether it is enabled is
+/// judged by its name alone. An item enabled from another copy of the app would show as enabled
+/// here and start that copy at login, so an enabled item is registered again with this
+/// executable. A build run from the source tree changes nothing, so trying a build does not take
+/// the item over.
+fn follow_autostart_path(app: &AppHandle) {
+    use tauri_plugin_autostart::ManagerExt;
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let in_source_tree = match (std::env::current_exe(), source_root.canonicalize()) {
+        (Ok(exe), Ok(root)) => exe.canonicalize().is_ok_and(|exe| exe.starts_with(root)),
+        _ => false,
+    };
+    if in_source_tree {
+        return;
+    }
+    let autolaunch = app.autolaunch();
+    if autolaunch.is_enabled().unwrap_or(false) {
+        if let Err(e) = autolaunch.enable() {
+            eprintln!("mashu: cannot update the login item: {e}");
+        }
+    }
+}
+
 fn main() {
     let (wake, wakeup) = channel::<()>();
     let wake_from_tray = wake.clone();
+    let context = tauri::generate_context!();
+
+    // A LaunchAgent is registered without asking for permission to automate System Events.
+    // Its plist is named after the bundle identifier, since the product name Mashu could be
+    // shared with another app.
+    let autostart = tauri_plugin_autostart::Builder::new();
+    #[cfg(target_os = "macos")]
+    let autostart = autostart
+        .macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent)
+        .app_name(context.config().identifier.clone());
+
     tauri::Builder::default()
+        .plugin(autostart.build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Backend::default())
@@ -320,6 +356,7 @@ fn main() {
             tray.build(app)?;
             let handle = app.handle().clone();
             thread::spawn(move || watch(handle, wakeup));
+            follow_autostart_path(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -329,6 +366,6 @@ fn main() {
                 api.prevent_close();
             }
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running Mashu");
 }

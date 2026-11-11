@@ -66,19 +66,33 @@ fn checkout_of(executable: &Path) -> Option<PathBuf> {
     root.join(".git").exists().then(|| root.to_path_buf())
 }
 
-/// The checkout set on the Settings screen, else the one a local build was made from, else
-/// the one the mashu on PATH runs from.
-pub fn checkout(app: &AppHandle) -> Option<PathBuf> {
-    if let Some(root) = read_config(app).checkout {
-        return Some(root);
-    }
+/// The checkout a local build was made from, when that checkout is still on this machine.
+fn built_checkout() -> Option<PathBuf> {
     let built = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..");
-    if built.join(".git").exists() {
-        return Some(built.canonicalize().unwrap_or(built));
+    built
+        .join(".git")
+        .exists()
+        .then(|| built.canonicalize().unwrap_or(built))
+}
+
+/// A debug build runs from the checkout it was built from, so a window built in a worktree
+/// talks to that worktree's backend. The Settings screen's checkout is shared with the
+/// installed app through the bundle identifier and usually names the main checkout, whose
+/// backend may not yet answer what this build's pages ask. Other builds take the checkout set
+/// on the Settings screen, else the one a local build was made from, else the one the mashu on
+/// PATH runs from.
+pub fn checkout(app: &AppHandle) -> Option<PathBuf> {
+    if cfg!(debug_assertions) {
+        if let Some(root) = built_checkout() {
+            return Some(root);
+        }
     }
-    tool("mashu").and_then(|found| checkout_of(&found))
+    if let Some(root) = read_config(app).checkout {
+        return Some(root);
+    }
+    built_checkout().or_else(|| tool("mashu").and_then(|found| checkout_of(&found)))
 }
 
 /// The mashu executable: MASHU_EXE, then the checkout's virtual environment, then PATH.
@@ -194,6 +208,7 @@ pub fn checkout_get(app: AppHandle) -> Value {
         "ready": executable.as_ref().is_some_and(|path| path.is_file()),
         "executable": executable,
         "from_env": std::env::var_os("MASHU_EXE").is_some(),
+        "from_build": cfg!(debug_assertions) && built_checkout().is_some(),
     })
 }
 

@@ -179,7 +179,7 @@ remote-shell command \b(cluster-wrapper|scheduler-cmd)\b
 | 作業（Work） | active、dormant、closed の Task と Project。Task の作成、編集、lease（活動期限）の延長、close、reopen と、Project の作成と編集 |
 | 設定（Settings） | 容量と最近の記録、Bootstrap preview、Scope と Topic と Route の編集、checkpoint の間隔、配信量の上限、migration の適用、表示の言語、バージョンと更新 |
 
-編集は、詳細の表示をその場で入力欄に変えて行う。⌘/Ctrl + Enter で保存し、Esc で取り消す。一覧は ↑↓ か j/k で移動し、/ で検索欄へ移る。retire した規則を書き戻す操作、似た Task がある中での Task の作成、削除、migration の適用は、理由や候補を見せて確認してから実行する。Bootstrap preview は入力したディレクトリで開くセッションに配信される内容を示し、TUI と同様に記録される。ウィンドウを閉じてもトレイに残り、終了するときはトレイのメニューの Quit を使う。表示の言語は日本語と英語を切り替えられる。CLI と TUI の文言は英語だけである。
+編集は、詳細の表示をその場で入力欄に変えて行う。⌘/Ctrl + Enter で保存し、Esc で取り消す。一覧は ↑↓ か j/k で移動し、/ で検索欄へ移る。retire した規則を書き戻す操作、似た Task がある中での Task の作成、削除、migration の適用は、理由や候補を見せて確認してから実行する。Bootstrap preview は入力したディレクトリで開くセッションに配信される内容を示し、TUI と同様に記録される。ウィンドウを閉じてもトレイに残り、終了するときはトレイのメニューの Quit を使う。設定の「起動」で「ログイン時に起動」にチェックを入れると、ログインのたびにアプリが起動する。表示の言語は日本語と英語を切り替えられる。CLI と TUI の文言は英語だけである。
 
 TUI は四つの領域（Attention、Memories、Work、Settings & health）を持ち、デスクトップアプリとほぼ同じことができる。矢印か j/k で移動し、Enter で開き、Esc か ← で一段戻る。q はどの画面からでも Mashu を終了し、? はその画面のキーの説明を出す。`e` で編集欄が開くので、その場で直して Enter で保存する。`VISUAL` か `EDITOR` を設定していれば、そのエディタで開く。
 
@@ -194,7 +194,7 @@ Ledger、Memory の revision、Task の checkpoint と attempt と decision と 
 
 ### 規則を直接登録する
 
-本文は該当するすべてのセッションに配信されるので、規則だけを 120 字以内で書く。理由、測定値、日付、経緯は `--why`（500 字まで）に渡す。`--why` は Ledger に根拠として残り、`mashu show` で読めるが、セッションには配信されない。
+本文は該当するすべてのセッションに配信されるので、規則だけを本文の上限（既定 120 字）以内で書く。理由、測定値、日付、経緯は `--why`（500 字まで）に渡す。`--why` は Ledger に根拠として残り、`mashu show` で読めるが、セッションには配信されない。
 
 ~~~bash
 mashu remember "Run migrations before restarting the service"
@@ -217,7 +217,7 @@ agent が `pain_report` で書く記録は、CLI の `mashu pain` からも記�
 
 | オプション | 使う場面 | 結果 |
 |---|---|---|
-| なし（`--prevention-kind rule`） | 記録しておくべき規則が無かった | `--prevention` が candidate の本文になる。120 字までで、経緯は `--what` に記入する |
+| なし（`--prevention-kind rule`） | 記録しておくべき規則が無かった | `--prevention` が candidate の本文になる。本文の上限（既定 120 字）までで、経緯は `--what` に記入する |
 | `--prevention-kind work --task TASK` | 一度修正すれば済む | candidate を作成せず、その Task の next actions に記入する |
 | `--violated MEMORY` | 配信された Memory が遵守されなかった | candidate を作らず、配信の失敗の疑いとして記録する |
 | `--ignored-task TASK` | Task の decisions や attempts に書いてあったのに活用しなかった。decision が一つに絞れるときは `--ignored-decision` も添える | candidate を作らず、活用されなかった知識としてカウント |
@@ -461,13 +461,16 @@ User が配信先の変更を指示した      → memory_redeliver
 起動する `mashu` は次の順に探す。
 
 1. 環境変数 `MASHU_EXE`
-2. 設定の「バージョン」で指定した checkout の `.venv` にある `mashu`
-3. 手元でビルドしたときは、そのアプリがある checkout の `mashu`
-4. PATH と `~/.local/bin` にある `mashu`。checkout の `.venv` への symlink なら、その checkout を更新の対象にする
+2. `cargo run` で起動した開発ビルドは、ビルドした checkout の `.venv` にある `mashu`
+3. 設定の「バージョン」で指定した checkout の `.venv` にある `mashu`
+4. 手元でリリースビルドしたときは、そのアプリがある checkout の `mashu`
+5. PATH と `~/.local/bin` にある `mashu`。checkout の `.venv` への symlink なら、その checkout を更新の対象にする
 
 どれも見つからなければ、[デスクトップアプリから導入](#デスクトップアプリから導入)で説明した最初の画面を出す。checkout はあるのに DB が無いときは「データベースを作成」を、PostgreSQL に接続できないときは「再試行」を出す。
 
 60 秒ごとに DB を読み、review を待つ candidate、proposal、close の提案が増えると OS の通知を出す。トレイのアイコンのツールチップに、それぞれの件数を出す。画面の文言は `desktop/ui/i18n.js` の辞書にまとめてあり、キーは DB と CLI で使う名前（`admit`、`dormant` など）である。
+
+ログイン時の起動は、macOS では `~/Library/LaunchAgents/dev.mashu.desktop.plist` の LaunchAgent（ログイン時に macOS がプログラムを起動するための設定ファイル）、Windows ではレジストリの `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` に登録する。登録は有効にした時点の実行ファイルのパスを指すので、有効なままアプリを別の場所へ移すと、ログイン時には古い場所のアプリが起動しようとする。そこでアプリは起動のたびに、有効なら今の実行ファイルで登録し直す。ただし checkout の中でビルドしたアプリから起動したときは、試しに動かしただけで登録を奪わないよう、登録し直さない。
 
 ### 更新
 
