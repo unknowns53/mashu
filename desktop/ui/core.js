@@ -538,9 +538,18 @@ function listIds(container) {
   return [...container.querySelectorAll(".item")].map((node) => node.dataset.id);
 }
 
-/** The id still listed if it is, otherwise the first one's. */
-function keepSelection(ids, current) {
+/**
+ * The id still listed if it is. A row that left the list hands the selection to its nearest
+ * neighbour in `before`, the order shown until now, looking below it first; otherwise the
+ * first row is chosen.
+ */
+function keepSelection(ids, current, before = []) {
   if (ids.includes(current)) return current;
+  const at = before.indexOf(current);
+  if (at >= 0) {
+    const near = [...before.slice(at + 1), ...before.slice(0, at).reverse()].find((id) => ids.includes(id));
+    if (near) return near;
+  }
   return ids.length ? ids[0] : null;
 }
 

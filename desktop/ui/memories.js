@@ -9,6 +9,7 @@ const mem = {
   detail: null,
   panel: null, // "edit", "delivery", "temporary", "retire"
   creating: null, // "memory" or "temporary" while the new form is shown
+  order: null, // {key, ids}: the order last shown, kept across reloads after a write
 };
 
 const memSeg = segmented(
@@ -83,12 +84,26 @@ function memoryRow() {
   return mem.rows.find((row) => memoryId(row) === mem.selected) || null;
 }
 
+/**
+ * Rows to list. While the view, sort, and search stay the same, rows keep the places they were
+ * shown in, so an edit that changes a row's update date does not carry it to the top under the
+ * reader. Rows not shown before come first.
+ */
 function shownMemories() {
   memSort.setKeys(memorySortKeys());
   const found = mem.rows.filter((row) =>
     matches(mem.query, memoryId(row), row.content, row.scope_name, row.delivery, row.topic_name, row.retire_reason)
   );
-  return sortRows(found, memSort.state, memorySortValue);
+  let rows = sortRows(found, memSort.state, memorySortValue);
+  const key = [mem.view, memSort.state.key, memSort.state.dir, mem.query].join("\n");
+  if (mem.order && mem.order.key === key) {
+    const place = new Map(mem.order.ids.map((id, index) => [id, index]));
+    const seen = rows.filter((row) => place.has(memoryId(row)));
+    seen.sort((a, b) => place.get(memoryId(a)) - place.get(memoryId(b)));
+    rows = [...rows.filter((row) => !place.has(memoryId(row))), ...seen];
+  }
+  mem.order = { key, ids: rows.map(memoryId) };
+  return rows;
 }
 
 function pickMemory(id) {
@@ -538,8 +553,11 @@ page("memories", {
   selected: () => mem.selected,
   pick: pickMemory,
   async load() {
+    // act() holds app.busy while it reloads after a write; any other load sorts afresh.
+    if (!app.busy) mem.order = null;
+    const before = listIds(memList.list);
     mem.rows = (await call("memory.list", { view: mem.view })).rows;
-    mem.selected = keepSelection(shownMemories().map(memoryId), mem.selected);
+    mem.selected = keepSelection(shownMemories().map(memoryId), mem.selected, before);
     await loadMemoryDetail();
   },
   keys: {
