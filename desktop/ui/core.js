@@ -382,6 +382,7 @@ async function act(work, done, handle) {
   try {
     const returned = await work();
     const note = typeof returned === "string" ? returned : "";
+    // Pages read app.busy in load() to tell this reload from one the user asked for.
     await reload();
     toast(note || done, note ? "warn" : "ok");
   } catch (error) {
@@ -534,14 +535,48 @@ function fillList(container, groups, { selected, onPick, empty, note }) {
   if (picked) picked.scrollIntoView({ block: "nearest" });
 }
 
+/**
+ * The order a list was last shown in, so that a reload after a write does not move rows under
+ * the reader. place(rows, idOf, key) returns rows already shown under the same key (view,
+ * sort, and search) in their earlier places, after the rows not shown before; release() lets
+ * the next call take rows in the order given.
+ */
+function heldOrder() {
+  let held = null;
+  return {
+    place(rows, idOf, key) {
+      if (held && held.key === key) {
+        const at = new Map(held.ids.map((id, index) => [id, index]));
+        const seen = rows.filter((row) => at.has(idOf(row)));
+        seen.sort((a, b) => at.get(idOf(a)) - at.get(idOf(b)));
+        rows = [...rows.filter((row) => !at.has(idOf(row))), ...seen];
+      }
+      held = { key, ids: rows.map(idOf) };
+      return rows;
+    },
+    release() {
+      held = null;
+    },
+  };
+}
+
 /** Rows in display order, for moving the selection with the keyboard. */
 function listIds(container) {
   return [...container.querySelectorAll(".item")].map((node) => node.dataset.id);
 }
 
-/** The id still listed if it is, otherwise the first one's. */
-function keepSelection(ids, current) {
+/**
+ * The id still listed if it is. A row that left the list hands the selection to its nearest
+ * neighbour in `before`, the order shown until now, looking below it first; otherwise the
+ * first row is chosen.
+ */
+function keepSelection(ids, current, before = []) {
   if (ids.includes(current)) return current;
+  const at = before.indexOf(current);
+  if (at >= 0) {
+    const near = [...before.slice(at + 1), ...before.slice(0, at).reverse()].find((id) => ids.includes(id));
+    if (near) return near;
+  }
   return ids.length ? ids[0] : null;
 }
 

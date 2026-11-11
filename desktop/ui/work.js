@@ -67,6 +67,7 @@ const workList = listPane(
   workSort
 );
 const workDetail = detailPane();
+const workOrder = heldOrder();
 
 function workId(row) {
   return work.view === "projects" ? row.project_id : row.task.task_id;
@@ -84,7 +85,8 @@ function shownWork() {
       : work.rows.filter((row) =>
           matches(work.query, row.task.task_id, row.task.name, row.task.project_name, row.state, row.decisions, row.attempts, row.artifacts)
         );
-  return sortRows(found, workSort.state, workSortValue);
+  const key = [work.view, workSort.state.key, workSort.state.dir, work.query].join("\n");
+  return workOrder.place(sortRows(found, workSort.state, workSortValue), workId, key);
 }
 
 function pickWork(id) {
@@ -468,11 +470,13 @@ page("work", {
   selected: () => work.selected,
   pick: pickWork,
   async load() {
+    if (!app.busy) workOrder.release();
+    const before = listIds(workList.list);
     work.rows =
       work.view === "projects"
         ? (await call("work.projects")).projects
         : (await call("work.tasks", { activity: work.view })).tasks;
-    work.selected = keepSelection(shownWork().map(workId), work.selected);
+    work.selected = keepSelection(shownWork().map(workId), work.selected, before);
     renderWork();
   },
   keys: {

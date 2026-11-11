@@ -75,6 +75,7 @@ const memList = listPane(
   memSort
 );
 const memDetail = detailPane();
+const memOrder = heldOrder();
 
 function memoryId(row) {
   return mem.view === "temporary" ? row.context_id : row.memory_id;
@@ -89,7 +90,8 @@ function shownMemories() {
   const found = mem.rows.filter((row) =>
     matches(mem.query, memoryId(row), row.content, row.scope_name, row.delivery, row.topic_name, row.retire_reason)
   );
-  return sortRows(found, memSort.state, memorySortValue);
+  const key = [mem.view, memSort.state.key, memSort.state.dir, mem.query].join("\n");
+  return memOrder.place(sortRows(found, memSort.state, memorySortValue), memoryId, key);
 }
 
 function pickMemory(id) {
@@ -544,10 +546,12 @@ page("memories", {
   selected: () => mem.selected,
   pick: pickMemory,
   async load() {
+    if (!app.busy) memOrder.release();
+    const before = listIds(memList.list);
     const listed = await call("memory.list", { view: mem.view });
     mem.rows = listed.rows;
     mem.contentLimit = listed.content_limit;
-    mem.selected = keepSelection(shownMemories().map(memoryId), mem.selected);
+    mem.selected = keepSelection(shownMemories().map(memoryId), mem.selected, before);
     await loadMemoryDetail();
   },
   keys: {
