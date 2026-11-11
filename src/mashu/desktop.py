@@ -16,6 +16,7 @@ import json
 import sys
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any, TextIO
 from uuid import UUID
 
@@ -616,9 +617,21 @@ def limits_set(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     return {"limits": settings.set_limits(cur, changes, actor=ACTOR)}
 
 
+def _checkout() -> str | None:
+    """The git checkout this package is installed from in editable mode, if it is one."""
+    for parent in Path(__file__).resolve().parents:
+        if (parent / ".git").exists() and (parent / "pyproject.toml").is_file():
+            return str(parent)
+    return None
+
+
 def version(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    """The version of the checkout the app runs, which an update moves with the app."""
-    return {"version": __version__}
+    """The version the app runs, and the checkout it runs from.
+
+    The app cannot always find the checkout from the executable it starts: on Windows, the
+    mashu in ~/.local/bin is a copy, not a link into the checkout's environment.
+    """
+    return {"version": __version__, "checkout": _checkout()}
 
 
 def interval_get(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
