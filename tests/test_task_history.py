@@ -131,19 +131,23 @@ def test_a_refused_state_write_leaves_its_history_unwritten(cur, task):
     assert set(_history_counts(cur).values()) == {0}
 
 
-def test_one_session_writes_a_task_once_per_interval_whatever_the_write_carries(cur, task, task_id):
+def test_a_second_write_inside_the_interval_is_kept_with_a_warning(cur, task, task_id):
     session = uuid4()
     first = checkpoint(cur, task, status_text="measured once", session=session)
+    assert "warning" not in first
 
     again = {**task, "state": first["state"]}
-    with pytest.raises(RefusedError, match="at most once every 30 minutes"):
-        checkpoint(cur, again, approach="a new approach", session=session, **ITEMS)
-    assert tasks.task_get(cur, task_id)["state"]["approach"] is None
-    assert set(_history_counts(cur).values()) == {0}
+    second = checkpoint(cur, again, approach="a new approach", session=session, **ITEMS)
+    assert "inside the 30-minute interval" in second["warning"]
+    assert tasks.task_get(cur, task_id)["state"]["approach"] == "a new approach"
+    assert set(_history_counts(cur).values()) != {0}
 
-    other = checkpoint(cur, again, status_text="another session", session=uuid4())
+    other = checkpoint(
+        cur, {**task, "state": second["state"]}, status_text="another session", session=uuid4()
+    )
+    assert "warning" not in other
     by_hand = checkpoint(cur, {**task, "state": other["state"]}, status_text="no session")
-    assert by_hand["state"]["status_text"] == "no session"
+    assert "warning" not in by_hand
 
 
 def test_a_zero_interval_lets_every_checkpoint_through(cur, task):
@@ -152,6 +156,7 @@ def test_a_zero_interval_lets_every_checkpoint_through(cur, task):
     first = checkpoint(cur, task, status_text="one", session=session)
     second = checkpoint(cur, {**task, "state": first["state"]}, status_text="two", session=session)
     assert second["state"]["status_text"] == "two"
+    assert "warning" not in second
 
 
 def test_the_interval_set_last_decides_and_a_store_without_it_runs_on_the_default(
@@ -160,8 +165,8 @@ def test_the_interval_set_last_decides_and_a_store_without_it_runs_on_the_defaul
     settings.set_checkpoint_interval_minutes(cur, 5, actor="user")
     session = uuid4()
     written = checkpoint(cur, task, status_text="one", session=session)
-    with pytest.raises(RefusedError, match="at most once every 5 minutes"):
-        checkpoint(cur, {**task, "state": written["state"]}, status_text="two", session=session)
+    again = checkpoint(cur, {**task, "state": written["state"]}, status_text="two", session=session)
+    assert "inside the 5-minute interval" in again["warning"]
     with pytest.raises(MashuError, match="0 to 1440 minutes"):
         settings.set_checkpoint_interval_minutes(cur, 1441, actor="user")
 

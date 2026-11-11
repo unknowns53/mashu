@@ -421,7 +421,7 @@ User が配信先の変更を指示した      → memory_redeliver
 ~~~
 
 - `task_checkpoint` には、次のセッションが必要なものだけを渡す。失敗した試行、理由を失うと調べ直しが高くつく判断、外部成果物の場所、goal と approach と blockers の変更、作業を止める前の状態が該当する。進捗と測定の途中結果は commit とプロジェクトの文書に書く
-- 同じセッションが同じ Task を書けるのは、一定の間隔ごとに一回である。間隔は既定で 30 分で、TUI の Settings & health の Checkpoint interval で 0〜1440 分に設定でき、0 にすると制限が外れる
+- 同じセッションが同じ Task を書くのは、一定の間隔ごとに一回を目安とする。間隔の中の二回目も記録し、応答に `warning` を付ける。間隔は既定で 30 分で、TUI の Settings & health の Checkpoint interval で 0〜1440 分に設定でき、0 にすると警告しない
 - 作業が終わったと思ったら `task_propose_close` で提案する。status に書くと User が読んで close を打ち直すことになるが、提案なら一回のキー操作で受理される。終わったと見なすのは User がマージや受け入れをしたあとである。提案後に state を書くと提案が古くなるので、checkpoint を先に打ち、提案を最後にする
 - agent 自身が考えた Memory の変更は proposal に留める。Temporary Context の登録、Memory の直接の操作、review は原則として User だけが行う
 

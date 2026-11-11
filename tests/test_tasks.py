@@ -473,7 +473,7 @@ def test_mcp_refuses_a_task_write_carrying_tool_call_markup(mcp, dsn, monkeypatc
         assert tasks.task_get(cur, task_id)["state"]["approach"] is None
 
 
-def test_a_session_writing_state_again_soon_is_refused_over_mcp(mcp, dsn):
+def test_a_session_writing_state_again_soon_is_warned_over_mcp(mcp, dsn):
     with db.transaction(dsn) as cur:
         new_project(cur, "mashu")
     made = mcp("task_create", project="mashu", name=SCHEMA, goal=GOAL)
@@ -486,18 +486,19 @@ def test_a_session_writing_state_again_soon_is_refused_over_mcp(mcp, dsn):
         expect_updated_at=first["state"]["updated_at"],
         status_text="written",
         what_changed="wrote it",
-        decisions=[{"decision": "made up to get through"}],
+        decisions=[{"decision": "kept with a warning"}],
     )
-    assert again["ok"] is False and "at most once every" in again["error"]
+    assert "warning" not in first
+    assert again["ok"] is True and "inside the 30-minute interval" in again["warning"]
     with db.transaction(dsn) as cur:
-        assert tasks.task_get(cur, task_id)["state"]["status_text"] is None
+        assert tasks.task_get(cur, task_id)["state"]["status_text"] == "written"
         cur.execute(
             "SELECT detail FROM event_log WHERE event_type = 'task_state_replaced' "
             "ORDER BY created_at"
         )
         sessions = {row["detail"]["session"] for row in cur.fetchall()}
         cur.execute("SELECT count(*) AS n FROM decision")
-        assert cur.fetchone()["n"] == 0
+        assert cur.fetchone()["n"] == 1
     assert len(sessions) == 1 and None not in sessions
 
 

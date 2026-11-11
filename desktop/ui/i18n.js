@@ -403,7 +403,7 @@ const STRINGS = {
     "settings.scopes.about": "メモリをまとめて配信する単位",
     "settings.topics.about": "特定の作業を始めるときに読むメモリ",
     "settings.routes.about": "フォルダとスコープの対応",
-    "settings.interval.about": "一つのセッションがタスクを書ける頻度",
+    "settings.interval.about": "一つのセッションがタスクを書く頻度の目安",
     "settings.schema.about": "データベースの構造の更新",
     "settings.display.about": "言語",
 
@@ -482,8 +482,8 @@ const STRINGS = {
     "route.removed": "削除しました。",
 
     "interval.minutes": "分ごと（0 で制限なし）",
-    "interval.none": "一つのセッションは、タスクを何度でも書けます。",
-    "interval.every": (v) => `一つのセッションがタスクを書けるのは ${v.n} 分に 1 回です。間隔の中の 2 回目は、中身にかかわらず拒否されます。`,
+    "interval.none": "一つのセッションは、タスクを何度でも警告なしで書けます。",
+    "interval.every": (v) => `一つのセッションがタスクを書くのは ${v.n} 分に 1 回を目安にします。間隔の中の 2 回目も記録され、応答に警告が付きます。`,
     "interval.not_whole": "分は整数で入力してください。",
     "interval.saved": (v) => `${v.n} 分にしました。`,
 
@@ -875,7 +875,7 @@ const STRINGS = {
     "settings.scopes.about": "Groups of rules sent together",
     "settings.topics.about": "Rules read when one kind of work begins",
     "settings.routes.about": "Which folder belongs to which area",
-    "settings.interval.about": "How often one session may write a task",
+    "settings.interval.about": "How often one session is expected to write a task",
     "settings.schema.about": "Updates to the database structure",
     "settings.display.about": "Language",
 
@@ -954,8 +954,8 @@ const STRINGS = {
     "route.removed": "Removed.",
 
     "interval.minutes": "minutes (0 for no limit)",
-    "interval.none": "One session may write a task as often as it likes.",
-    "interval.every": (v) => `One session may write a task once every ${v.n} minutes. A second write inside that time is refused, whatever it carries.`,
+    "interval.none": "One session may write a task as often as it likes, without a warning.",
+    "interval.every": (v) => `One session is expected to write a task once every ${v.n} minutes. A second write inside that time is kept and answered with a warning.`,
     "interval.not_whole": "Enter a whole number of minutes.",
     "interval.saved": (v) => `Set to ${v.n} minutes.`,
 

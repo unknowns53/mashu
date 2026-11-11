@@ -793,8 +793,8 @@ def _interval_text(minutes: int) -> str:
     if minutes == 0:
         return "  One session may write a task's state as often as it likes."
     return (
-        f"  One session may write a task's state once every {minutes} minutes.\n"
-        "  A second write inside that time is refused whatever it carries,\n"
+        f"  One session is expected to write a task's state once every {minutes} minutes.\n"
+        "  A second write inside that time is kept and answered with a warning,\n"
         "  and the session's next MCP call reads a changed value."
     )
 
