@@ -248,14 +248,15 @@ def test_a_ruling_without_the_users_words_is_refused(cur, task, item, message):
     assert _history_counts(cur)["ruling"] == 0
 
 
-def test_the_users_setting_bounds_a_rulings_length(cur, task):
-    settings.set_limits(cur, {"ruling_chars": 20}, actor="user")
+def test_the_users_settings_bound_a_ruling_and_the_words_beside_it(cur, task):
+    settings.set_limits(cur, {"ruling_chars": 20, "ruling_words_chars": 30}, actor="user")
     with pytest.raises(MalformedRequestError) as refused:
-        checkpoint(cur, task, rulings=[{**RULE, "ruling": "x" * 21}])
+        checkpoint(cur, task, rulings=[{"ruling": "x" * 21, "user_instruction": "y" * 31}])
     assert refused.value.over_limit == [
-        {"field": "rulings[0].ruling", "limit": 20, "actual": 21, "unit": "chars"}
+        {"field": "rulings[0].ruling", "limit": 20, "actual": 21, "unit": "chars"},
+        {"field": "rulings[0].user_instruction", "limit": 30, "actual": 31, "unit": "chars"},
     ]
-    checkpoint(cur, task, rulings=[{**RULE, "ruling": "x" * 20}])
+    checkpoint(cur, task, rulings=[{"ruling": "x" * 20, "user_instruction": "y" * 30}])
 
 
 def test_a_task_at_the_users_cap_takes_a_ruling_only_for_one_withdrawn(cur, task, task_id):

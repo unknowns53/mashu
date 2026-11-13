@@ -314,7 +314,7 @@ task_checkpoint の `rulings` は User がその作業について決めたこ�
 |---|---|---|
 | pain / nomination | ○ | ○ |
 | task 作成・state・checkpoint・artifact | ○ | ○ |
-| ruling の記録と取り下げ | User の言葉を運ぶときだけ | ○ |
+| ruling の記録と取り下げ | User の言葉を運ぶときだけ | Agent を通す（直接の画面や CLI は無い） |
 | task close / reopen | × | ○ |
 | close proposal（提案のみ・決定ではない） | ○ | ○（取り下げ） |
 | Memory admission / retire / replace / restore / redeliver | 明示指示どおりの実行、または pending proposal | 直接操作 |

@@ -76,6 +76,7 @@ LIMITS: dict[str, Limit] = {
     "content_limit": Limit(config.content_limit, 20, 1000, "chars"),
     "ruling_count": Limit(config.ruling_count, 1, 50, "items"),
     "ruling_chars": Limit(config.ruling_chars, 20, 1000, "chars"),
+    "ruling_words_chars": Limit(config.ruling_words_chars, 20, 1000, "chars"),
 }
 
 #: (share, whole): the share is delivered inside the whole, so it may not exceed it.

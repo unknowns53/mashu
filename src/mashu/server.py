@@ -179,7 +179,10 @@ def _state_contract(limits: dict[str, int]) -> str:
 
 def _history_contract(settings_now: dict[str, int]) -> str:
     """The limits on checkpoint history, keyed as each item takes them."""
-    limits = {**task_history.HISTORY_LIMITS, "ruling": settings_now["ruling_chars"]}
+    limits = {
+        **task_history.HISTORY_LIMITS,
+        **{key: settings_now[name] for key, name in task_history.SETTING_LIMITS.items()},
+    }
     parts = [f"what_changed {limits['what_changed']}"]
     for name, (required, optional) in task_history.ITEM_KEYS.items():
         keys = [key for key in (*required, *optional) if key in limits]

@@ -53,7 +53,7 @@ append-only の記録で、1 エントリが一度の痛みに対応する。
 | source | セッション参照 |
 | violated_memory_id | 報告者が「届いていたのに守られなかった」と名指した active Memory（任意） |
 | ignored_task_id | 報告者が「state にあったのに使わなかった」と名指した Task（任意。読んだかどうかは問わない） |
-| ignored_decision_id | その Task の中で事態を扱っていた decision（任意。ignored_task_id を伴う） |
+| ignored_decision_id | その Task の中で事態を扱っていた過去の decision（任意。ignored_task_id を伴う。CLI の `--ignored-decision` だけが渡す） |
 | ignored_source | 報告者が「ここにあったのに使わなかった」と名指した指示ファイルや skill（任意。~ かリポジトリからのパス、または `skill <name>`） |
 | created_at | 記録時刻 |
 
@@ -248,7 +248,7 @@ Memories TUI の `c` は、active な always / scope Memory と Temporary Contex
 | Tool | 役割 |
 |---|---|
 | `session_bootstrap` | 5.1 節の内容を返す。セッション開始時に一度 |
-| `pain_report` | incident を `ledger` へ記録し、類似の `ledger` の行・tombstone・active な記憶を返す。候補を生成する。`rule` の `prevention` は候補の本文になるので本文の上限（既定 120 字）までとし、理由や経緯は `what` に書く。incident は誤った作業が実際に出たことに限る。届いていた規則が守られなかったときは `violated_memory_id` でその active Memory を指す（3 節の照合 0）。Task の state にあったときは `ignored_task_id`（と任意の `ignored_decision_id`）、指示ファイルや skill にあったときは `ignored_source` で指し、候補を作らない |
+| `pain_report` | incident を `ledger` へ記録し、類似の `ledger` の行・tombstone・active な記憶を返す。候補を生成する。`rule` の `prevention` は候補の本文になるので本文の上限（既定 120 字）までとし、理由や経緯は `what` に書く。incident は誤った作業が実際に出たことに限る。届いていた規則が守られなかったときは `violated_memory_id` でその active Memory を指す（3 節の照合 0）。Task の state や ruling にあったときは `ignored_task_id`、指示ファイルや skill にあったときは `ignored_source` で指し、候補を作らない |
 | `memory_list` | 指定 Scope の active な記憶を列挙する。`always`（または `global`）は全セッションへ push される記憶を返す。`topic` を渡すと、その topic の発動条件・source（vault のノートなら `source_path` と `source_exists`）と規則の本文を返し、読んだことをセッション単位で event_log に残す |
 | `memory_get` | 指定した Memory の本文、revision、evidence、retire の情報を返す。retire された Memory の本文は明示取得でのみ読む |
 | `memory_nominate` | Agent 自身の replace 提案の後継を pending 候補として作るだけで採用しない。kind = `proposed` で記録し、他の候補に合流しない。本文は上限（既定 120 字）までで、理由は `why` に渡す |

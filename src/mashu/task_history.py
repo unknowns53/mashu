@@ -32,14 +32,16 @@ ArtifactKind = Literal[
 ]
 ARTIFACT_KINDS: tuple[str, ...] = get_args(ArtifactKind)
 
-#: Character ceilings on history text. A ruling's own ceiling is the user's setting
-#: (`ruling_chars`), read at each write.
+#: Character ceilings on history text. A ruling and the user's words beside it are held to the
+#: user's settings (`ruling_chars`, `ruling_words_chars`), read at each write.
 HISTORY_LIMITS = {
     "what_changed": 500,
-    "user_instruction": 300,
     "locator": 500,
     "label": 300,
 }
+
+#: The setting that bounds each key whose ceiling the user sets.
+SETTING_LIMITS = {"ruling": "ruling_chars", "user_instruction": "ruling_words_chars"}
 
 #: How many rulings and withdrawals one checkpoint may carry. Each comes from something the user
 #: said in the session, so a write carrying more is restating the conversation.
@@ -162,8 +164,10 @@ def _item(name: str, where: str, item: Any) -> tuple[dict[str, Any], list[str | 
 
 
 def _items(
-    name: str, items: list[Any] | None, *, ruling_chars: int
+    name: str, items: list[Any] | None, *, set_limits: dict[str, int]
 ) -> tuple[list[dict[str, Any]], list[str | OverLimit]]:
+    """The items with their keys filled in, and every problem with them; `set_limits` holds the
+    ceilings the user set, keyed as the items take them."""
     rows: list[dict[str, Any]] = []
     problems: list[str | OverLimit] = []
     most = CHECKPOINT_ITEM_MAX.get(name)
@@ -180,9 +184,10 @@ def _items(
     for index, item in enumerate(items or []):
         where = f"{name}[{index}]"
         row, found = _item(name, where, item)
-        ruling = row.get("ruling")
-        if name == "rulings" and isinstance(ruling, str) and len(ruling) > ruling_chars:
-            found.append(OverLimit(f"{where}.ruling", ruling_chars, len(ruling)))
+        for key, limit in set_limits.items():
+            value = row.get(key)
+            if isinstance(value, str) and len(value) > limit:
+                found.append(OverLimit(f"{where}.{key}", limit, len(value)))
         if name == "artifacts" and isinstance(row.get("locator"), str):
             # A locator points at a file, so its home directory is kept from ~ instead of
             # being refused.
@@ -360,12 +365,13 @@ def checkpoint(
 
     tasks._lock(cur)
     tasks._require_open(cur, task_id)
-    ruling_chars = settings.limit(cur, "ruling_chars")
-    ruling_items, ruling_problems = _items("rulings", rulings, ruling_chars=ruling_chars)
+    now = settings.limits(cur)
+    set_limits = {key: now[name] for key, name in SETTING_LIMITS.items()}
+    ruling_items, ruling_problems = _items("rulings", rulings, set_limits=set_limits)
     withdrawal_items, withdrawal_problems = _items(
-        "withdraw_rulings", withdraw_rulings, ruling_chars=ruling_chars
+        "withdraw_rulings", withdraw_rulings, set_limits=set_limits
     )
-    artifact_items, artifact_problems = _items("artifacts", artifacts, ruling_chars=ruling_chars)
+    artifact_items, artifact_problems = _items("artifacts", artifacts, set_limits=set_limits)
     current = tasks.task_get(cur, task_id)["state"]
     warning = _interval_warning(cur, task_id, session)
     problems = [

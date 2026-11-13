@@ -37,6 +37,9 @@ DEFAULT_RULING_COUNT = 10
 #: Characters one ruling may hold. The user's words beside it are held to their own ceiling.
 DEFAULT_RULING_CHARS = 120
 
+#: Characters of the user's own words a ruling or a withdrawal quotes.
+DEFAULT_RULING_WORDS_CHARS = 300
+
 #: Hard ceiling on the temporary share of the opening (project-state 8).
 DEFAULT_TEMPORARY_CAPACITY = 400
 
@@ -89,6 +92,10 @@ def ruling_count() -> int:
 
 def ruling_chars() -> int:
     return int(os.environ.get("MASHU_RULING_CHARS") or DEFAULT_RULING_CHARS)
+
+
+def ruling_words_chars() -> int:
+    return int(os.environ.get("MASHU_RULING_WORDS_CHARS") or DEFAULT_RULING_WORDS_CHARS)
 
 
 def task_card_capacity() -> int:

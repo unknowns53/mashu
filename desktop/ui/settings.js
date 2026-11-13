@@ -278,11 +278,13 @@ async function routesSection() {
   ];
 }
 
-/** The limits in the order a person reads them: what one session opens with, then each share. */
+/** The limits in the order a person reads them: what one session opens with, then each share.
+ * A name the backend does not return is skipped, since the app's pages ship with a release and
+ * the backend is the checkout's, which may be newer or older. */
 const LIMIT_GROUPS = [
   ["opening", ["total_capacity"]],
   ["memory", ["memory_capacity", "always_capacity", "topic_capacity", "content_limit"]],
-  ["work", ["project_capacity", "task_card_capacity", "card_overflow_capacity", "task_detail_capacity", "ruling_count", "ruling_chars"]],
+  ["work", ["project_capacity", "task_card_capacity", "card_overflow_capacity", "task_detail_capacity", "ruling_count", "ruling_chars", "ruling_words_chars"]],
   ["temporary", ["temporary_capacity"]],
 ];
 
@@ -332,7 +334,7 @@ async function limitsSection() {
     h(
       "form",
       { class: "limits", on: { submit } },
-      LIMIT_GROUPS.map(([group, names]) => section(t(`limit.group.${group}`), null, h("div", { class: "limit-list" }, names.map((name) => row(byName[name]))))),
+      LIMIT_GROUPS.map(([group, names]) => section(t(`limit.group.${group}`), null, h("div", { class: "limit-list" }, names.filter((name) => byName[name]).map((name) => row(byName[name]))))),
       h("div", { class: "form-actions" }, h("button", { type: "submit", class: "btn primary", text: t("common.save") }))
     ),
   ];

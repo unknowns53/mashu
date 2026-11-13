@@ -702,6 +702,7 @@ _LIMIT_LABELS = {
     "task_detail_capacity": ("one task in full", "what task_get returns"),
     "ruling_count": ("user rulings per task", "task_get returns them all"),
     "ruling_chars": ("one ruling", "excludes the user's words"),
+    "ruling_words_chars": ("user's words per ruling", "also bounds a withdrawal"),
     "temporary_capacity": ("temporary notes", ""),
 }
 _LIMIT_ORDER = tuple(_LIMIT_LABELS)
