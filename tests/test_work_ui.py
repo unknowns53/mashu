@@ -76,7 +76,7 @@ def test_task_details_show_all_state_proposal_and_latest_history(dsn, monkeypatc
     assert work_ui.run(dsn) == 0
     out = capsys.readouterr().out
     assert "size  card" in out and "detail" in out
-    assert "後ろはそのまま" in out and "User rulings (2)" in out
+    assert "後ろはそのまま" in out and "User decisions (2)" in out
     for value in STATE.values():
         assert (value[0] if isinstance(value, list) else value) in out
     for text in (

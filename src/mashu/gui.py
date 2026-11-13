@@ -595,7 +595,7 @@ def _task_detail(cur: psycopg.Cursor, task_id: UUID) -> tuple[str, str]:
         empty="no checkpoints",
     )
     ruling_table = _table(
-        ("when", "ruling", "user said", "withdrawn"),
+        ("when", "decision", "quote", "withdrawn with"),
         (
             *(
                 [
@@ -616,7 +616,7 @@ def _task_detail(cur: psycopg.Cursor, task_id: UUID) -> tuple[str, str]:
                 for item in row["withdrawn_rulings"]
             ),
         ),
-        empty="no rulings",
+        empty="no user decisions",
     )
     attempt_table = _table(
         ("when", "by", "attempt", "result", "reason", "next"),
@@ -650,10 +650,10 @@ def _task_detail(cur: psycopg.Cursor, task_id: UUID) -> tuple[str, str]:
     body = (
         _fields(fields)
         + f"<h2>Current state</h2>{current}"
-        + f"<h2>User rulings</h2>{ruling_table}"
+        + f"<h2>User decisions</h2>{ruling_table}"
         + f"<h2>Checkpoints</h2>{checkpoint_table}"
-        + f"<h2>Attempts (record from before rulings)</h2>{attempt_table}"
-        + f"<h2>Decisions (record from before rulings)</h2>{decision_table}"
+        + f"<h2>Agent attempts (old record)</h2>{attempt_table}"
+        + f"<h2>Agent decisions (old record)</h2>{decision_table}"
         + f"<h2>Artifacts</h2>{artifact_table}"
     )
     return f"Task {task['name']}", body

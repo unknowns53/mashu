@@ -570,7 +570,7 @@ def test_the_history_and_the_artifact_locators_are_visible_on_one_task(run, comm
 
     code, out, _ = run("task", "show", short)
     assert code == 0
-    assert "count every seed" in out and "user said   全部数えて" in out
+    assert "count every seed" in out and "quote       全部数えて" in out
     assert ATTEMPT in out and "the count came out short" in out
     assert DECISION in out and "a half-run must not look whole" in out
     assert CHANGED in out

@@ -700,9 +700,9 @@ _LIMIT_LABELS = {
     "task_card_capacity": ("one task card", ""),
     "card_overflow_capacity": ("cardless task line", ""),
     "task_detail_capacity": ("one task in full", "what task_get returns"),
-    "ruling_count": ("user rulings per task", "task_get returns them all"),
-    "ruling_chars": ("one ruling", "excludes the user's words"),
-    "ruling_words_chars": ("user's words per ruling", "also bounds a withdrawal"),
+    "ruling_count": ("user decisions per task", ""),
+    "ruling_chars": ("one user decision", "excludes the quote"),
+    "ruling_words_chars": ("quote per user decision", "the user's own words"),
     "temporary_capacity": ("temporary notes", ""),
 }
 _LIMIT_ORDER = tuple(_LIMIT_LABELS)
