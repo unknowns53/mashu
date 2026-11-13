@@ -83,7 +83,7 @@ function shownWork() {
     work.view === "projects"
       ? work.rows.filter((row) => matches(work.query, row.project_id, row.name, row.scope_name))
       : work.rows.filter((row) =>
-          matches(work.query, row.task.task_id, row.task.name, row.task.project_name, row.state, row.decisions, row.attempts, row.artifacts)
+          matches(work.query, row.task.task_id, row.task.name, row.task.project_name, row.state, row.rulings, row.withdrawn_rulings, row.decisions, row.attempts, row.artifacts)
         );
   const key = [work.view, workSort.state.key, workSort.state.dir, work.query].join("\n");
   return workOrder.place(sortRows(found, workSort.state, workSortValue), workId, key);
@@ -236,6 +236,7 @@ function taskDetail(row) {
         { showEmpty: true }
       )
     ),
+    rulingsSection(row.rulings || [], row.withdrawn_rulings || []),
     decisionsSection(row.decisions || []),
     attemptsSection(row.attempts || []),
     section(
@@ -256,6 +257,31 @@ function taskDetail(row) {
       : null
   );
   return nodes;
+}
+
+function rulingsSection(rulings, withdrawn) {
+  return section(
+    t("work.rulings"),
+    rulings.length,
+    entries(rulings, (item) => [day(item.on), item.ruling, [t("work.user_said"), item.user_said]]),
+    withdrawn.length
+      ? h(
+          "details",
+          { class: "more" },
+          h("summary", { text: t("work.rulings_withdrawn", { n: withdrawn.length }) }),
+          entries(
+            withdrawn,
+            (item) => [
+              day(item.created_at),
+              item.ruling,
+              [t("work.user_said"), item.user_instruction],
+              [t("work.withdrawn_because"), item.withdrawn_because],
+            ],
+            { old: () => true }
+          )
+        )
+      : null
+  );
 }
 
 function decisionsSection(decisions) {

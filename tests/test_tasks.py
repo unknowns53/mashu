@@ -486,7 +486,7 @@ def test_a_session_writing_state_again_soon_is_warned_over_mcp(mcp, dsn):
         expect_updated_at=first["state"]["updated_at"],
         status_text="written",
         what_changed="wrote it",
-        decisions=[{"decision": "kept with a warning"}],
+        rulings=[{"ruling": "kept with a warning", "user_instruction": "警告つきで残して"}],
     )
     assert "warning" not in first
     assert again["ok"] is True and "inside the 30-minute interval" in again["warning"]
@@ -497,7 +497,7 @@ def test_a_session_writing_state_again_soon_is_warned_over_mcp(mcp, dsn):
             "ORDER BY created_at"
         )
         sessions = {row["detail"]["session"] for row in cur.fetchall()}
-        cur.execute("SELECT count(*) AS n FROM decision")
+        cur.execute("SELECT count(*) AS n FROM ruling")
         assert cur.fetchone()["n"] == 1
     assert len(sessions) == 1 and None not in sessions
 

@@ -38,8 +38,7 @@ Mashu
 |---|---|
 | Memory | 今後も守るべき |
 | Current State | この日時にそうであると最後に確認された |
-| Attempt | この日時にこう試して、こうなった |
-| Decision | この日時にこの理由でこう決めた |
+| Ruling | User がこの日時にこう決めた（User の言葉つき） |
 
 ## 3. 境界の扱い
 
@@ -57,7 +56,7 @@ Mashu
 | 更新 | 稀 | 頻繁 |
 | 古くなることへの対策 | 入口を絞る | lease による退場 |
 | bootstrap | 全量 push | active Task の索引 card のみ。Current State 全文は `task_get` |
-| 履歴 | revision | checkpoint / attempt / decision |
+| 履歴 | revision | ruling と取り下げ、close 時の checkpoint |
 | 終了 | retire / replace / restore。理由と retire の種類（`retirement_kind`）を記録 | close（User）/ dormant（lease） |
 
 Project State から Memory への昇格経路は作らない。作業中に恒久規則が見つかったなら、それは通常どおり `pain_report` の実証経路か、User の明示指示による `memory_admit` を通る。
@@ -66,7 +65,7 @@ Project State から Memory への昇格経路は作らない。作業中に恒�
 
 Memory の信頼境界は `docs/memory.md` 4.1 節に定める。Agent は自分の判断で恒久 Memory の採用、retire、置換、復帰を行えない。Agent が独自に考えた変更は根拠つき proposal として pending に置く。一方、会話中のユーザー明示指示を Agent が運ぶ場合は、その指示を `user_instruction` として記録して同じセッションで実行できる。actor は Agent のまま残す。短い原文と会話参照は監査用であり、サーバーが指示の真正性を認証するものではない。Agent の有用性判断・confidence・ユーザーの沈黙は承認ではない。
 
-Project State は性質が異なる。Agent が書いた Current State のうち Task 名・goal・status・詳細件数からなる索引 card は、人の review を経ずに次のセッションの bootstrap へ push される。approach・open questions・blockers・next actions の本文は `task_get` で明示取得する。
+Project State は性質が異なる。ただし User の裁定（5.4 節）だけは Memory と同じ側に置き、User の言葉なしには書けない。Agent が書いた Current State のうち Task 名・goal・status・詳細件数からなる索引 card は、人の review を経ずに次のセッションの bootstrap へ push される。approach・open questions・blockers・next actions の本文は `task_get` で明示取得する。
 
 都度の承認を省く理由は、作業状態の性質にある。頻繁に変わるものに毎回人の確定を要求すれば書かれなくなり、書かれない state は存在しないのと同じである。恒久 Memory はこの性質を持たず、明示指示のない Agent の変更は proposal のまま残す。
 
@@ -91,7 +90,7 @@ evidence: git commit 9d12f5a
 
 ## 5. Project State subsystem
 
-構成要素は Project、Task、Current State、Checkpoint、Attempt、Decision、Artifact Reference の七つである。
+構成要素は Project、Task、Current State、Ruling、Checkpoint、Artifact Reference の六つである。
 
 ### 5.1 Project
 
@@ -152,28 +151,26 @@ MCP で全文の state を返すのは `task_get` だけである。検索結果
 
 ただし**その Task 自身の card を小さくする書き込みは、予算を超えている状態からでも通す**。予算は設定値であり、card の重さは配信の形から計算されるので、どちらも誰も行を書き換えていないのに変わりうる。つまり書き込みを経ずに予算を超えた状態が成立する。そこで一律に拒否すると、他の active Task だけで予算を超えている場合、対象を空にしても総量が予算を下回らないため拒否される。「他を縮めろ」と言いながらその縮約自体を拒むので、抜け出す手段が無くなる。入口拒否の思想は保ったまま、card を縮めて予算に近づける書き込みだけを通す。
 
-### 5.4 Attempt / Decision
+### 5.4 Ruling（User の裁定）
 
-**Attempt** は試行錯誤の append-only 記録である。
-
-```text
-task_id / attempt (300) / result (500) / reason (500) / next (300) / created_at / created_by
-```
-
-**Decision** は「なぜそうしたか」を後から失うと再導出コストが高い判断だけを残す。append-only で、変更は置き換える Decision を `supersedes_ids` に並べた新 Decision で行い、過去の行を書き換えない。一つの Decision は複数の Decision を置き換えられる。一つの論点に散らばった決定を一つにまとめるためである。置き換えの関係は `decision_supersession` に一対ずつ置く。
+Task が Current State のほかに次のセッションへ渡すのは、User がその作業について決めたこと、退けたことだけである。
 
 ```text
-decision:              task_id / decision / reason / created_at / created_by
-decision_supersession: decision_id / supersedes_id
+ruling:            task_id / ruling / user_instruction (300) / created_at / created_by
+ruling_withdrawal: ruling_id / user_instruction (300) / created_at / created_by
 ```
 
-どちらもコード・ログ・長文引用は文字上限が物理的に拒否する。
+`ruling` は Agent が User の決定を書き直した文、`user_instruction` は User の言葉の短い原文で、どちらも必須である。原文は Memory の `user_instruction` と同じく監査のための記録で、server は真正性を認証しない（3.1 節）。Agent 自身の判断は ruling にならず、置き換え式の approach に書く。
 
-**件数にも上限を store が掛ける。**一回の `task_checkpoint` が運べるのは attempts と decisions それぞれ 2 件まで（`CHECKPOINT_ITEM_MAX`）で、一つの Task が持てる有効な decision は 15 件まで（`DECISIONS_IN_FORCE_MAX`）である。文字上限と書き込みの間隔だけでは件数が抑えられず、Agent は確認作業や測定値を attempt に、コミットの言い直しやユーザーの恒久的な指示を decision に書き続け、一つの Task の履歴が数日で数十件に積もる。「選んで書け」という指示は情報量制御にならないので、文字数と同じく件数を拒否で制御する。有効な decision の上限を超える書き込みは、置き換える decision を `supersedes_ids` に並べて、増やす数が置き換える数を超えないときだけ通す。上限は書き込み後の件数に掛け、件数を増やさない書き込みは上限を超えた状態からでも通す。上限を入れる前に書かれた Task が、統合する書き込みまで拒否されて縮められなくなるのを避けるためである（5.3 節の card と同じ考え方）。拒否は `field`（`decisions in force`）・`limit`・`actual` と、統合のしかたを示す文面を返す。
+**なぜ Agent に追記させないか。**Agent が試行（attempt）と判断（decision）を承認なしに追記し、有効な decision を毎回 `task_get` で返す形では、次のことが起きる。Memory の流入は User が一件ずつ通すので User の速さで頭打ちになるが、Task への流入は書き手の Agent が「次に要るか」を自分で判定するので、測定を回す Task では一日に十数件ずつ積もり、User が読んで裁ける量を超えた。件数の上限を掛けても、何を外すかは書き手が決めるので、Agent は関係のない古い決定を置き換えて枠を空け、1 件に何件分も詰め込んだ。さらに、Agent が自分で決めた測定の条件が User の決定と同じ「有効な決定」の形で返り、次のセッションはそれを合意済みの仕様として読んだ。一方で、試行の記録は要る場面で読まれず、Agent はセッションログを読みに行った。試行錯誤の正本はセッションログとプロジェクトの文書であり、Mashu に写しを持つ理由が無い。
 
-Agent はどちらも `task_checkpoint` の `attempts` / `decisions` として state の置換と一緒に書き、追記だけの Tool は持たない（5.6 節）。どちらも全文は bootstrap に載らず、`task_get` の `attempts` / `decisions` 引数で明示取得する（12.1 節）。
+**枠の大きさは User が決める。**一つの Task が持てる有効な ruling の件数（`ruling_count`、既定 10）と、ruling 1 件の字数（`ruling_chars`、既定 120）は、設定画面の「配信量の上限」で変えられる。件数の上限を超える書き込みは、同じ書き込みで取り下げる数が足す数以上でない限り拒否する。上限は書き込み後の件数に掛け、件数を増やさない書き込みは上限を超えた状態からでも通す。User が上限を下げても、すでにある ruling は消さない。拒否は `ruling_cap_refused` として event_log に数える（15 節）。
 
-ただし、後の decision に supersede されていない decision（有効な決定）だけは、`task_get` が引数なしでも `decisions_in_force` として返す。決定の文だけを新しい順に 800 token（`decision_capacity`）まで載せ、入らない古い分は件数で示す。理由は全履歴の側に残す。既定で見えず、見ると巨大、という作りでは、決着済みの案をセッションが出し直すのを防ぐという decision の役目が果たせない。全履歴は上限を持たないので、決定の多い Task では展開すると数万字になる。bootstrap の card は有効な決定の件数を details に出す。`task_search` は decision の本文と理由も探す。閉じた Task や別の Task で決着した事項を引くためで、日本語の短い語には pg_trgm の類似度がほぼ 0 になるので、語をすべて含むかどうかで当てる。
+**取り下げにも User の言葉が要る。**`withdraw_rulings` は取り下げる ruling ごとに、その ruling についての User の言葉を求める。同じ書き込みで足す ruling と同じ言葉を使った取り下げは拒否する。一つの指示で ruling を足し、関係のない ruling を追い出す形を防ぐためで、store が見分けられるのはこの使い回しだけである。
+
+**`task_get` は有効な ruling をすべて、User の言葉つきで返す。**上限の件数までしか無いので切り詰めない。言葉を必ず並べるのは、ruling の文が User の言ったことより広い条件を含みうるからで、読む側が言葉と照らせることだけが、その広がりへの備えになる。`task_search` も ruling を User の言葉つきで探す。閉じた Task や別の Task で User が決めた事項を引くためで、日本語の短い語には pg_trgm の類似度がほぼ 0 になるので、語をすべて含むかどうかで当てる。
+
+**過去の attempt と decision は記録として残す。**行は消さず（append-only の trigger がある）、`mashu task show`・GUI・デスクトップアプリの Work で「裁定より前の記録」として読める。MCP は返さず、`task_get` は件数と読み方を `past_record` で示すだけである。`task_checkpoint` に `attempts` や `decisions` を渡す呼び出しは、それぞれの行き先（approach、プロジェクトの文書と artifacts、ruling）を示して拒否する。黙って捨てると、書いたつもりの内容が消える。
 
 ### 5.5 Artifact Reference
 
@@ -187,13 +184,13 @@ kind は `git_commit` / `git_branch` / `file` / `document` / `obsidian` / `issue
 
 ### 5.6 Checkpoint
 
-Agent が次のセッションへ作業を引き継ぐために打つ。渡すのは、失敗した試行、後で理由を失うと高くつく判断、外部成果物の原典、goal・approach・blockers の変更、作業を止めるときと中断するときの状態である。進捗、測定の途中結果、次の一手の変更は渡さない。それらは commit とプロジェクトの文書が持つ。`task_checkpoint` は **Agent が Task の state を書く唯一の動詞である**。渡したフィールドだけを置き換え、省いたフィールドは前の値を保ち、空文字か空リストでフィールドを空にする。`name` を渡せば Task 名も変える（重複照合つき）。
+Agent が次のセッションへ作業を引き継ぐために打つ。渡すのは、User の裁定とその取り下げ、外部成果物の原典、goal・approach・blockers の変更、作業を止めるときと中断するときの状態である。進捗、試行の結果、測定、退けた案、次の一手の変更は渡さない。それらは commit とプロジェクトの文書が持つ。`task_checkpoint` は **Agent が Task の state を書く唯一の動詞である**。渡したフィールドだけを置き換え、省いたフィールドは前の値を保ち、空文字か空リストでフィールドを空にする。`name` を渡せば Task 名も変える（重複照合つき）。
 
-**一つのセッションが一つの Task に書くのは、間隔（既定 30 分）に一度を目安とする。**測定を回す Agent は数分ごとに status と次の一手を変え、そのたびに書く理由があると読んで、進捗の報告を checkpoint に書き続ける。間隔の中の書き込みも記録し、応答に `warning` を付けて、進捗や測定ならその場で commit か文書へ置くよう伝える。拒否はしない。拒否すると、一回目の書き込みのあとに分かった失敗した試行が次のセッションへ届かない。中身によって警告を外すこともしない。例外があると、警告を避けるために試行や判断を作って書く動機が生まれ、作られた decision は有効な判断として次のセッションに届く。成功の応答も警告も、次に書ける時刻を示さない。時刻を示すと、Agent は書きたい中身をその時刻まで取っておいて送るので、書き込みは減らずに遅れるだけになる。セッションの区別は MCP server のプロセスごとの id で行い、CLI と User の編集には間隔をかけない。間隔は User が Settings 画面で 0〜1440 分に変え、0 で警告を外す。MCP server は起動したときの環境を持ち続けるので、値は環境変数でなく `setting` テーブルに置き、書き込みのたびに読む。
+**一つのセッションが一つの Task に書くのは、間隔（既定 30 分）に一度を目安とする。**測定を回す Agent は数分ごとに status と次の一手を変え、そのたびに書く理由があると読んで、進捗の報告を checkpoint に書き続ける。間隔の中の書き込みも記録し、応答に `warning` を付けて、進捗や測定ならその場で commit か文書へ置くよう伝える。拒否はしない。拒否すると、一回目の書き込みのあとに User が下した裁定が次のセッションへ届かない。中身によって警告を外すこともしない。例外があると、警告を避けるために中身を作って書く動機が生まれる。成功の応答も警告も、次に書ける時刻を示さない。時刻を示すと、Agent は書きたい中身をその時刻まで取っておいて送るので、書き込みは減らずに遅れるだけになる。セッションの区別は MCP server のプロセスごとの id で行い、CLI と User の編集には間隔をかけない。間隔は User が Settings 画面で 0〜1440 分に変え、0 で警告を外す。MCP server は起動したときの環境を持ち続けるので、値は環境変数でなく `setting` テーブルに置き、書き込みのたびに読む。
 
-失敗した試行・判断・外部成果物の原典は同じ呼び出しの `attempts` / `decisions` / `artifacts` で渡す。state の置換とそれらの追記は一つの transaction で行い、文字上限・件数の上限・入口拒否・kind・supersedes・楽観チェック・予算の検査は最初の行を書く前にすべてかけ、形の誤りと上限の超過は行とフィールドをまたいで一度の拒否にまとめて返す。一行でも拒否されれば state も履歴も書かない。履歴を書くための動詞を別に覚えさせずに済む。
+裁定・取り下げ・外部成果物の原典は同じ呼び出しの `rulings` / `withdraw_rulings` / `artifacts` で渡す。state の置換とそれらの追記は一つの transaction で行い、文字上限・件数の上限・入口拒否・kind・取り下げの対象・楽観チェック・予算の検査は最初の行を書く前にすべてかけ、形の誤りと上限の超過は行とフィールドをまたいで一度の拒否にまとめて返す。一行でも拒否されれば state も履歴も書かない。履歴を書くための動詞を別に覚えさせずに済む。
 
-**呼び出しのたびに state のスナップショットを保存しない。**写しはほとんど読まれず、添える what_changed は commit log の言い直しになるからである。代わりに、任意の `what_changed` と、同じ呼び出しで書いた attempt / decision / artifact の id を `task_state_replaced` の event に残す。Attempt・Decision・Artifact Reference はもともと Task に結びついているので、それで足りる。
+**呼び出しのたびに state のスナップショットを保存しない。**写しはほとんど読まれず、添える what_changed は commit log の言い直しになるからである。代わりに、任意の `what_changed` と、同じ呼び出しで書いた ruling・取り下げ・artifact の id を `task_state_replaced` の event に残す。Ruling と Artifact Reference はもともと Task に結びついているので、それで足りる。
 
 スナップショットの保存は close のときだけ行う（6 節）。close は終了時点の Current State と、close の outcome と理由を what_changed に持つ checkpoint 行を一つ作る。
 
@@ -205,7 +202,7 @@ Checkpoint は append-only の履歴であり、bootstrap には載らない。�
 
 ### 5.7 要約を永続化しない
 
-session summary・daily summary・進捗レポートの類は保存しない。必要なら Current State・Attempt・Decision・Artifact Reference からその場で生成し、生成物を新しい正本にしない。要約の要約が育つと、読む側の予算を破る。
+session summary・daily summary・進捗レポートの類は保存しない。必要なら Current State・Ruling・Artifact Reference からその場で生成し、生成物を新しい正本にしない。要約の要約が育つと、読む側の予算を破る。
 
 ## 6. Task の終了 — close は人だけ
 
@@ -216,7 +213,7 @@ mashu task close                     決定の画面。open な Task を一覧�
 mashu task close <id>... --outcome   outcome: completed / abandoned / superseded
 ```
 
-close 時は最終 checkpoint を固定して残し、Task を bootstrap から除外する。state のスナップショットを保存するのはこのときだけで、行は終了時点の Current State と、`closed as <outcome>: <理由>` の what_changed を持つ（5.6 節）。attempt / decision / artifact は保持する。closed の再開は `mashu task reopen <id>`（User のみ）。
+close 時は最終 checkpoint を固定して残し、Task を bootstrap から除外する。state のスナップショットを保存するのはこのときだけで、行は終了時点の Current State と、`closed as <outcome>: <理由>` の what_changed を持つ（5.6 節）。ruling / artifact と過去の記録は保持する。closed の再開は `mashu task reopen <id>`（User のみ）。
 
 ### 6.1 Close Proposal — 判定は渡さない、転記だけ消す
 
@@ -267,7 +264,7 @@ dormant な Task は bootstrap に載らず、履歴は保持され、明示検�
 6. pending nomination 件数
 ```
 
-approach / open questions / blockers / next actions の本文、および Attempt / Decision / Checkpoint / Ledger / dormant / closed は載らない。
+approach / open questions / blockers / next actions の本文、および Ruling / Checkpoint / Ledger / dormant / closed は載らない。card は有効な ruling の件数だけを details に出す。
 
 Task card は Task 名・goal・statusをラベルつきで運び、approach / open questions / blockers / next actions は本文でなく存在と件数だけを示す。card は作業を開始するための state ではなく、どの Task の詳細を取得するか選ぶ索引である。各 row は MCP がそのまま `task_get` に渡せる完全な `task_id` を持ち、bootstrap 全体も「着手前に task_get」を明記する。これにより、存在を忘れて検索できない問題は card の push で防ぎ、詳細の常時注入は避ける。
 
@@ -296,7 +293,7 @@ User が覚えてと言った     → memory_admit
 次のセッションへ引き継ぐ  → task_checkpoint
 ```
 
-task_checkpoint の `attempts` と `decisions` は「失敗した試行の結末」「後から理由を失うと高くつく判断」に限って埋める引数であり、毎回の checkpoint で書くものではない。独立した動詞にはしないので、上の三行は増えない。
+task_checkpoint の `rulings` は User がその作業について決めたことを User の言葉つきで渡す引数であり、Agent の判断や発見を書く場所ではない。独立した動詞にはしないので、上の三行は増えない。
 
 **痛みの答えには二つの形がある。**痛みを防ぐものが、毎回持っているべき規則とは限らない。一度直せば以後は何も覚えなくてよい変更 ＝ 作業は、規則ではない。
 
@@ -316,7 +313,8 @@ task_checkpoint の `attempts` と `decisions` は「失敗した試行の結末
 | 書けるもの | Agent | User |
 |---|---|---|
 | pain / nomination | ○ | ○ |
-| task 作成・state・checkpoint・attempt・decision・artifact | ○ | ○ |
+| task 作成・state・checkpoint・artifact | ○ | ○ |
+| ruling の記録と取り下げ | User の言葉を運ぶときだけ | ○ |
 | task close / reopen | × | ○ |
 | close proposal（提案のみ・決定ではない） | ○ | ○（取り下げ） |
 | Memory admission / retire / replace / restore / redeliver | 明示指示どおりの実行、または pending proposal | 直接操作 |
@@ -343,10 +341,10 @@ Memory 関連 Tool は `docs/memory.md` 7.1 節に記す。`session_bootstrap` �
 |---|---|
 | `task_create` | 重複照合つきの Task 作成（5.2 節） |
 | `task_get` / `task_search` / `project_list` | 明示取得・検索 |
-| `task_checkpoint` | Agent が state を書く唯一の Tool。Current State の置換と任意の Task 名変更（楽観チェック・重複照合・hard limit・予算判定つき）+ attempt / decision / artifact の追記。state のスナップショットは保存しない（5.6 節） |
+| `task_checkpoint` | Agent が state を書く唯一の Tool。Current State の置換と任意の Task 名変更（楽観チェック・重複照合・hard limit・予算判定つき）+ ruling の記録と取り下げ、artifact の追記。state のスナップショットは保存しない（5.6 節） |
 | `task_propose_close` / `task_withdraw_close_proposal` | 終了の提案と取り下げ（6.1 節） |
 
-`attempt_list` / `decision_list` / `artifact_list` は `task_get` の展開引数として提供し、Tool 数の増殖を避ける。全文の state を返すのは `task_get` だけで、他の Task 系 Tool は card view と予算を返す（5.3 節）。**`task_close` は Agent 用 MCP に置かない。**提案は close ではないので `task_propose_close` はこの禁止に触れない。
+有効な ruling は `task_get` が常に返し、artifact と close の checkpoint は `task_get` の展開引数として提供し、Tool 数の増殖を避ける。全文の state を返すのは `task_get` だけで、他の Task 系 Tool は card view と予算を返す（5.3 節）。**`task_close` は Agent 用 MCP に置かない。**提案は close ではないので `task_propose_close` はこの禁止に触れない。
 
 ### 12.2 CLI
 
@@ -364,7 +362,7 @@ mashu task close <id>... [--outcome ...] / reopen <id>
 mashu pain --prevention-kind {rule,work} [--task <id>]   9 節の二つの形
 ```
 
-dashboard は Attention / Memories / Work / Settings & health の四領域を持ち、各画面から戻るたびに件数を再集計する。Attention は review、close proposal、dormant Task を扱う。Work は active / dormant / closed Task と Project を閲覧・検索し、Current State、proposal、全履歴、artifact を表示する。User は Task の create / touch / close / reopen に加え、open Task の名前・所属 Project・Current State と Project の名前・Scope を編集できる。編集入力は現在値を入力バッファへ入れて開き、全文の再入力ではなく既存値の部分修正として扱う。現在値を人が訂正する経路であり、checkpoint / attempt / decision / artifact の追記履歴は編集しない。Settings & health は status、現在の cwd に対する bootstrap preview、Scope と route の作成・編集、checkpoint の間隔、migration を扱う。
+dashboard は Attention / Memories / Work / Settings & health の四領域を持ち、各画面から戻るたびに件数を再集計する。Attention は review、close proposal、dormant Task を扱う。Work は active / dormant / closed Task と Project を閲覧・検索し、Current State、proposal、全履歴、artifact を表示する。User は Task の create / touch / close / reopen に加え、open Task の名前・所属 Project・Current State と Project の名前・Scope を編集できる。編集入力は現在値を入力バッファへ入れて開き、全文の再入力ではなく既存値の部分修正として扱う。現在値を人が訂正する経路であり、ruling・checkpoint・artifact と過去の記録は編集しない。Settings & health は status、現在の cwd に対する bootstrap preview、Scope と route の作成・編集、checkpoint の間隔、migration を扱う。
 
 Work の `c` は選択中の Task だけを同じ close decision screen で開く。専用一覧、Work、CLI の `task close <id> --outcome ...` は、明示 outcome と proposal acceptance を別操作にする。proposal acceptance は画面に出した proposal と state を transaction 内で再照合する。stale 確認は proposal を受理するときだけで、reason の入力中に Ctrl+C を受けたら変更しない。
 
@@ -376,17 +374,18 @@ Work の `c` は選択中の Task だけを同じ close decision screen で開�
 
 ## 13. スキーマ
 
-Memory の 11 表に Project State の 8 表を加えて 19 表。
+Memory の 11 表に Project State の 10 表を加えて 21 表。
 
 ```text
 Memory:        scope route ledger trace memory memory_revision topic
                nomination memory_change temporary_context event_log
 
 Project State: project task task_state task_checkpoint
-               attempt decision decision_supersession artifact_reference
+               ruling ruling_withdrawal artifact_reference
+               attempt decision decision_supersession（記録。もう書かない）
 ```
 
-`ledger` は `prevention_kind` と `filed_task` を持ち（9 節）、CHECK が両者を結ぶ（`filed_task` が非 NULL なら `prevention_kind='work'`）。`ledger` の行は append-only なので、**提出先は行が書かれる前に決まり、後から書き込むことはできない**。矛盾した行を後から直す手段が無いことが、規約ではなく制約で持つ理由である。`ledger` の `ignored_task_id`、`ignored_decision_id`、`ignored_source`（有ったのに使われなかった知識の場所、15 節）は、decision だけを指す行を CHECK で拒む。`memory`、`memory_revision`、`nomination`、`temporary_context` の本文は、空白しか含まない値を CHECK で拒む。
+`ledger` は `prevention_kind` と `filed_task` を持ち（9 節）、CHECK が両者を結ぶ（`filed_task` が非 NULL なら `prevention_kind='work'`）。`ledger` の行は append-only なので、**提出先は行が書かれる前に決まり、後から書き込むことはできない**。矛盾した行を後から直す手段が無いことが、規約ではなく制約で持つ理由である。`ledger` の `ignored_task_id`、`ignored_decision_id`、`ignored_source`（有ったのに使われなかった知識の場所、15 節）は、decision だけを指す行を CHECK で拒む。`ignored_decision_id` は過去の decision を指す CLI 用の引数として残り、MCP の `pain_report` は受け取らない。`memory`、`memory_revision`、`nomination`、`temporary_context` の本文は、空白しか含まない値を CHECK で拒む。
 
 表はすべて public に置き、PostgreSQL の schema 分離（`memory.*` / `project.*`）はしない。**境界はコードの module boundary で持つ**（`projects.py` / `tasks.py` / `task_history.py` に Project State のロジックを置き、Memory 側の module に混ぜない）。拡張は pg_trgm のみで、pgvector は導入しない。
 
@@ -398,6 +397,8 @@ DB / service 層のテストで保証する。
 
 ```text
 Task lifecycle:
+  ruling は User の言葉なしに記録も取り下げもされない
+  task_get は有効な ruling をすべて User の言葉つきで返し、過去の attempt と decision を返さない
   Agent は Task を close できない
   Agent の close proposal は Task の status を変えない
   沈黙は Task を close しない（lease は dormant 導出までしかしない）
@@ -422,7 +423,7 @@ Bootstrap:
 
 ## 15. 観測指標と、この設計が誤りだったと知る方法
 
-event_log から最低限次を測れるようにする。active / dormant Task 数、自動 dormant 率、reactivate 頻度、Task card と full detail の token 使用量、`task_card_write_refused` の件数と超過量、Task あたり attempt 数、checkpoint の打たれた率、stale-state incident（古い state を信じて誤った作業が出た pain_report）、有った知識が使われなかった incident（Task の decisions や attempts、または指示ファイルや skill にあったのに、それを使わずに誤った作業が出た pain_report。`ignored_task_id` か `ignored_source` を渡すと `knowledge_unused` として数える）。
+event_log から最低限次を測れるようにする。active / dormant Task 数、自動 dormant 率、reactivate 頻度、Task card と full detail の token 使用量、`task_card_write_refused` の件数と超過量、`ruling_recorded`・`ruling_withdrawn`・`ruling_cap_refused` の件数、checkpoint の打たれた率、stale-state incident（古い state を信じて誤った作業が出た pain_report）、有った知識が使われなかった incident（Task の state や ruling、または指示ファイルや skill にあったのに、それを使わずに誤った作業が出た pain_report。`ignored_task_id` か `ignored_source` を渡すと `knowledge_unused` として数える）。
 
 | 観測 | 意味 |
 |---|---|
@@ -432,14 +433,17 @@ event_log から最低限次を測れるようにする。active / dormant Task 
 | active Task が増え続ける | lease が長すぎるか activity の定義が広すぎる |
 | dormant から頻繁に reactivate される | lease が短すぎる（研究のリズムに合っていない） |
 | User がほぼ close しない | dormant が機能していれば失敗ではない。close を lifecycle の必須条件と考えない |
-| Attempt が大量で役に立たない | 記録基準を見直す。自由文書化では解決しない |
+| ruling の枠が数日で埋まる、`ruling_cap_refused` が多い | User の言葉という入口が効いていない。Agent が細かな指示まで ruling にしていないか見る |
+| ruling の文を User が「そんなことは言っていない」と訂正する | 狭い許可を広げて書いている。言葉と並べる提示が効いていない |
+| 「前に試した」「前に決めた」の出し直しが増える | 試行と Agent の判断を Mashu から外した判断が誤り。プロジェクトの文書やログから引けていない |
+| プロジェクトの文書が同じ速さで同じ中身に膨らむ | 問題は置き場でなく書き手の動機にある |
 | Agent が state を記録しない | instructions / hooks を改善する。記録漏れは誤情報の自動生成より安全 |
 | stale-state incident が起きる | 日付つき提示と裏取り規律（3.1 節）が機能していない。配信形式を疑う |
-| 有った知識が使われなかった incident が起きる | 知識は届く場所にあったが、判断の瞬間に効いていない。Task なら decisions の書き方か、別の Task にある決定を辿れないことを、指示ファイルなら文面か届き方を疑う。Memory に「そこを読め」という規則を足しても直らない |
+| 有った知識が使われなかった incident が起きる | 知識は届く場所にあったが、判断の瞬間に効いていない。Task なら ruling の書き方か、別の Task にある裁定を辿れないことを、指示ファイルなら文面か届き方を疑う。Memory に「そこを読め」という規則を足しても直らない |
 | Memory nomination が大量になる | Project State の情報を Memory へ安易に昇格させていないか疑う |
 | 再開の拾い直しが減らない | Project State そのものの誤りを疑う。1 節の動機が反証されたことになる |
 
-成功条件。新セッションで bootstrap card から継続対象を短時間で選び、`task_get` 1 回で現在地を復元できる。同じ試行の無駄な再実行が減る。重要な Decision の理由を再導出しなくてよい。Agent が長大な作業日誌を生成できない。User が close を忘れても古くなった card が push され続けない。そして作業状態が Memory の容量を圧迫しない。
+成功条件。新セッションで bootstrap card から継続対象を短時間で選び、`task_get` 1 回で現在地を復元できる。User が決めたことを出し直さない。Agent が長大な作業日誌を生成できない。User が close を忘れても古くなった card が push され続けない。そして作業状態が Memory の容量を圧迫しない。
 
 ## 16. 非目標と、持たない機構
 

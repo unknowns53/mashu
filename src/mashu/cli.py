@@ -1487,6 +1487,7 @@ def cmd_task_show(args: argparse.Namespace) -> int:
             decisions=True,
             artifacts=True,
             checkpoints=True,
+            withdrawn_rulings=True,
         )
     task, state = row["task"], row["state"]
     _field("task", task["task_id"])
@@ -1502,6 +1503,18 @@ def cmd_task_show(args: argparse.Namespace) -> int:
     _field("created", f"{_date(task['created_at'])}  {task['created_by']}")
     print(f"{row['heading']}  {state['updated_by']}")
     _print_state_fields(state)
+
+    print("user rulings")
+    for ruling in row["rulings"]:
+        print(f"  {_short(ruling['ruling_id'])}  {_date(ruling['on'])}  {ruling['ruling']}")
+        print(f"    user said   {ruling['user_said']}")
+    for ruling in row["withdrawn_rulings"]:
+        print(
+            f"  {_short(ruling['ruling_id'])}  {_date(ruling['created_at'])}  withdrawn  "
+            f"{ruling['ruling']}"
+        )
+        print(f"    user said   {ruling['user_instruction']}")
+        print(f"    withdrawn   {_date(ruling['withdrawn_at'])}  {ruling['withdrawn_because']}")
 
     # Print artifact locators in full; the store keeps references, not file bodies.
     artifacts = {artifact["reference_id"]: artifact for artifact in row["artifacts"]}
@@ -1521,13 +1534,13 @@ def cmd_task_show(args: argparse.Namespace) -> int:
                 print(f"    evidence  {_short(reference_id)}")
             else:
                 print(f"    evidence  {cited['kind']}  {cited['locator']}")
-    print("attempts")
+    print("attempts (record from before rulings)")
     for attempt in row["attempts"]:
         print(f"  {_date(attempt['created_at'])}  {attempt['created_by']}  {attempt['attempt']}")
         for label in ("result", "reason", "next"):
             if attempt[label]:
                 print(f"    {label:<8}  {attempt[label]}")
-    print("decisions")
+    print("decisions (record from before rulings)")
     for decision in row["decisions"]:
         print(
             f"  {_date(decision['created_at'])}  {decision['created_by']}  {decision['decision']}"

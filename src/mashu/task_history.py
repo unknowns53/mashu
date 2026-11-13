@@ -1,4 +1,5 @@
-"""Store and read immutable task checkpoints, attempts, decisions, and artifact references."""
+"""Store and read a task's history: the user's rulings, artifact references, the checkpoint frozen
+at close, and the attempts and decisions kept as a read-only record."""
 
 from __future__ import annotations
 
@@ -9,8 +10,13 @@ from uuid import UUID, uuid4
 import psycopg
 
 from mashu import approvals, events, redact, settings, tasks
-from mashu.errors import MalformedRequestError, MashuError, OverLimit, OverLimitError
-from mashu.tokens import pushed_cost
+from mashu.errors import (
+    MalformedRequestError,
+    MashuError,
+    OverLimit,
+    OverLimitError,
+    RefusedError,
+)
 
 ArtifactKind = Literal[
     "git_commit",
@@ -26,26 +32,18 @@ ArtifactKind = Literal[
 ]
 ARTIFACT_KINDS: tuple[str, ...] = get_args(ArtifactKind)
 
+#: Character ceilings on history text. A ruling's own ceiling is the user's setting
+#: (`ruling_chars`), read at each write.
 HISTORY_LIMITS = {
     "what_changed": 500,
-    "attempt": 300,
-    "result": 500,
-    "reason": 500,
-    "next": 300,
-    "decision": 300,
+    "user_instruction": 300,
     "locator": 500,
     "label": 300,
 }
 
-#: How many items of each kind one checkpoint may carry. A session that records every check
-#: and measurement as an attempt or decision buries the few whose loss would cost a later
-#: session, and an instruction to be selective does not hold. Artifacts are references only.
-CHECKPOINT_ITEM_MAX = {"attempts": 2, "decisions": 2}
-
-#: How many decisions a task may hold in force. Past it, a new decision must supersede as many
-#: as it adds, so the agent folds settled points together instead of piling them up. The cap
-#: counts what a write would leave, so decisions written before it are not refused.
-DECISIONS_IN_FORCE_MAX = 15
+#: How many rulings and withdrawals one checkpoint may carry. Each comes from something the user
+#: said in the session, so a write carrying more is restating the conversation.
+CHECKPOINT_ITEM_MAX = {"rulings": 3, "withdraw_rulings": 3}
 
 
 def _what_changed_problems(what_changed: str | None) -> list[str | OverLimit]:
@@ -101,28 +99,35 @@ def _freeze_current(
 
 #: Keys each checkpoint history item takes, required first.
 ITEM_KEYS = {
-    "attempts": (("attempt",), ("result", "reason", "next")),
-    "decisions": (("decision",), ("reason", "supersedes_ids")),
+    "rulings": (("ruling", "user_instruction"), ()),
+    "withdraw_rulings": (("ruling_id", "user_instruction"), ()),
     "artifacts": (("kind", "locator"), ("label",)),
 }
+
+#: Where what agents used to write as attempts and decisions now goes, for the refusal of a
+#: write that still carries them.
+RETIRED_ITEMS = (
+    "attempts and agent decisions are no longer kept: put the approach you chose in "
+    "`approach`, findings, measurements, and rejected options in the project's documents "
+    "linked as `artifacts`, and what the user decided in `rulings` with the user's words"
+)
 
 
 def _item(name: str, where: str, item: Any) -> tuple[dict[str, Any], list[str | OverLimit]]:
     """One history item with its keys filled in, and every problem with it.
 
-    `where` labels the item's keys in the problems, such as `attempts[0]`; empty, each key
-    is named alone.
+    `where` labels the item's keys in the problems, such as `rulings[0]`. A ruling's own
+    length is held to the user's setting by the caller, which reads it from the store.
     """
     required, optional = ITEM_KEYS[name]
     allowed = (*required, *optional)
     if not isinstance(item, dict):
-        return {}, [f"{where or name} must be an object with keys {', '.join(allowed)}"]
+        return {}, [f"{where} must be an object with keys {', '.join(allowed)}"]
     problems: list[str | OverLimit] = []
     unknown = sorted(set(item) - set(allowed))
     if unknown:
         problems.append(
-            f"{where or name} has unknown key(s) {', '.join(unknown)}; "
-            f"allowed: {', '.join(allowed)}"
+            f"{where} has unknown key(s) {', '.join(unknown)}; allowed: {', '.join(allowed)}"
         )
     missing = [
         key
@@ -130,15 +135,17 @@ def _item(name: str, where: str, item: Any) -> tuple[dict[str, Any], list[str | 
         if item.get(key) is None or (isinstance(item[key], str) and not item[key].strip())
     ]
     if missing:
-        problems.append(f"{where or name} is missing required key(s) {', '.join(missing)}")
+        problems.append(f"{where} is missing required key(s) {', '.join(missing)}")
     row = {key: item.get(key) for key in allowed}
     for key, value in row.items():
-        label = f"{where}.{key}" if where else key
+        label = f"{where}.{key}"
         if value is None or key in missing:
             continue
-        if key == "supersedes_ids":
-            row[key], found = _decision_ids(label, value)
-            problems += found
+        if key == "ruling_id":
+            try:
+                row[key] = value if isinstance(value, UUID) else UUID(str(value))
+            except ValueError:
+                problems.append(f"{label} must be a UUID")
         elif not isinstance(value, str):
             problems.append(f"{label} must be text")
         elif key == "kind":
@@ -146,30 +153,16 @@ def _item(name: str, where: str, item: Any) -> tuple[dict[str, Any], list[str | 
                 problems.append(
                     f"{label} must be one of {', '.join(ARTIFACT_KINDS)} (got '{value}')"
                 )
-        elif len(value) > HISTORY_LIMITS[key]:
-            problems.append(OverLimit(label, HISTORY_LIMITS[key], len(value)))
+        else:
+            if key in ("ruling", "user_instruction"):
+                row[key] = value = value.strip()
+            if key in HISTORY_LIMITS and len(value) > HISTORY_LIMITS[key]:
+                problems.append(OverLimit(label, HISTORY_LIMITS[key], len(value)))
     return row, problems
 
 
-def _decision_ids(label: str, value: Any) -> tuple[list[UUID], list[str | OverLimit]]:
-    """The distinct decision ids a list names, in the order given."""
-    if not isinstance(value, list):
-        return [], [f"{label} must be a list of decision ids"]
-    ids: list[UUID] = []
-    problems: list[str | OverLimit] = []
-    for index, entry in enumerate(value):
-        try:
-            ident = entry if isinstance(entry, UUID) else UUID(str(entry))
-        except ValueError:
-            problems.append(f"{label}[{index}] must be a UUID")
-            continue
-        if ident not in ids:
-            ids.append(ident)
-    return ids, problems
-
-
 def _items(
-    name: str, items: list[Any] | None
+    name: str, items: list[Any] | None, *, ruling_chars: int
 ) -> tuple[list[dict[str, Any]], list[str | OverLimit]]:
     rows: list[dict[str, Any]] = []
     problems: list[str | OverLimit] = []
@@ -181,12 +174,15 @@ def _items(
                 most,
                 len(items or []),
                 unit="items",
-                advice="keep the ones a later session would pay to lose; checks and "
-                "measurements belong in a commit or the project's documents",
+                advice="write only what the user said in this session, one point per item",
             )
         )
     for index, item in enumerate(items or []):
-        row, found = _item(name, f"{name}[{index}]", item)
+        where = f"{name}[{index}]"
+        row, found = _item(name, where, item)
+        ruling = row.get("ruling")
+        if name == "rulings" and isinstance(ruling, str) and len(ruling) > ruling_chars:
+            found.append(OverLimit(f"{where}.ruling", ruling_chars, len(ruling)))
         if name == "artifacts" and isinstance(row.get("locator"), str):
             # A locator points at a file, so its home directory is kept from ~ instead of
             # being refused.
@@ -197,57 +193,94 @@ def _items(
 
 
 def _gate_item(where: str, row: dict[str, Any]) -> redact.Verdict:
-    """The entrance check on an item's free text; kind and supersedes_ids are not text."""
+    """The entrance check on an item's free text; kind and ruling_id are not text."""
     return tasks._gate(
         {
             f"{where}.{key}" if where else key: value
             for key, value in row.items()
-            if key not in ("kind", "supersedes_ids")
+            if key not in ("kind", "ruling_id")
         }
     )
 
 
-def _check_supersedes(cur: psycopg.Cursor, task_id: UUID, supersedes_ids: list[UUID]) -> None:
-    for supersedes_id in supersedes_ids:
-        cur.execute("SELECT task_id FROM decision WHERE decision_id = %s", (supersedes_id,))
-        prior = cur.fetchone()
-        if prior is None:
-            raise MashuError(f"no decision {supersedes_id} to supersede")
-        if prior["task_id"] != task_id:
-            raise MashuError(f"decision {supersedes_id} belongs to another task")
+def _check_withdrawals(
+    cur: psycopg.Cursor,
+    task_id: UUID,
+    withdrawals: list[dict[str, Any]],
+    rulings: list[dict[str, Any]],
+) -> None:
+    """Refuse a withdrawal of a ruling that is not this task's in force, or one that borrows the
+    words of a ruling added in the same write.
 
-
-_IN_FORCE = """
-SELECT d.decision_id FROM decision d
-WHERE d.task_id = %s
-  AND NOT EXISTS (SELECT 1 FROM decision_supersession s WHERE s.supersedes_id = d.decision_id)
-"""
-
-
-def _check_in_force(cur: psycopg.Cursor, task_id: UUID, items: list[dict[str, Any]]) -> None:
-    """Refuse decisions that would leave the task over its cap and above where it stands.
-
-    A write that keeps or lowers the count passes even over the cap, since a task already
-    past it can only come back down by such writes.
+    An agent at the cap that can add a ruling and withdraw another under one instruction evicts
+    an unrelated ruling with words the user said about something else. The store cannot tell
+    what the user meant, so it refuses the one reuse it can see.
     """
-    if not items:
+    added_words = {row["user_instruction"] for row in rulings}
+    seen: set[UUID] = set()
+    for row in withdrawals:
+        ident = row["ruling_id"]
+        cur.execute(
+            """
+            SELECT r.task_id,
+                   EXISTS (SELECT 1 FROM ruling_withdrawal w WHERE w.ruling_id = r.ruling_id)
+                       AS withdrawn
+            FROM ruling r WHERE r.ruling_id = %s
+            """,
+            (ident,),
+        )
+        found = cur.fetchone()
+        if found is None:
+            raise MashuError(f"no ruling {ident} to withdraw")
+        if found["task_id"] != task_id:
+            raise MashuError(f"ruling {ident} belongs to another task")
+        if found["withdrawn"] or ident in seen:
+            raise MashuError(f"ruling {ident} is already withdrawn")
+        seen.add(ident)
+        if row["user_instruction"] in added_words:
+            raise RefusedError(
+                f"the withdrawal of ruling {ident} quotes the same words as a ruling added in "
+                "this write. Withdraw a ruling only with what the user said about that ruling"
+            )
+
+
+def _in_force_count(cur: psycopg.Cursor, task_ids: list[UUID]) -> dict[UUID, int]:
+    if not task_ids:
+        return {}
+    cur.execute(
+        """
+        SELECT r.task_id, count(*) AS n FROM ruling r
+        WHERE r.task_id = ANY(%s)
+          AND NOT EXISTS (SELECT 1 FROM ruling_withdrawal w WHERE w.ruling_id = r.ruling_id)
+        GROUP BY r.task_id
+        """,
+        (task_ids,),
+    )
+    return {row["task_id"]: row["n"] for row in cur.fetchall()}
+
+
+def _check_ruling_cap(cur: psycopg.Cursor, task_id: UUID, *, adding: int, withdrawing: int) -> None:
+    """Refuse rulings that would leave the task over the user's cap and above where it stands.
+
+    A write that keeps or lowers the count passes even over the cap, since the user may lower
+    the setting below what a task already holds.
+    """
+    if not adding:
         return
-    cur.execute(_IN_FORCE, (task_id,))
-    in_force = {row["decision_id"] for row in cur.fetchall()}
-    retired = {ident for item in items for ident in item["supersedes_ids"] or []} & in_force
-    after = len(in_force) - len(retired) + len(items)
-    if after <= DECISIONS_IN_FORCE_MAX or after <= len(in_force):
+    most = settings.limit(cur, "ruling_count")
+    current = _in_force_count(cur, [task_id]).get(task_id, 0)
+    after = current - withdrawing + adding
+    if after <= most or after <= current:
         return
     raise OverLimitError(
-        "decisions in force",
-        DECISIONS_IN_FORCE_MAX,
+        "rulings",
+        most,
         after,
-        unit="decisions",
+        unit="rulings",
         advice=(
-            f"the task holds {len(in_force)}; let each new decision list in `supersedes_ids` "
-            "the decisions in force it settles or replaces, folding several into one where "
-            "they make one point, so the write adds no more than it supersedes. "
-            "task_get with decisions=true lists them with their ids"
+            f"the task holds {current} rulings, the most the user set. Ask the user which "
+            "ruling no longer holds and withdraw it in `withdraw_rulings` with their words "
+            "about it; never withdraw one on your own judgment"
         ),
     )
 
@@ -273,7 +306,7 @@ def _interval_warning(cur: psycopg.Cursor, task_id: UUID, session: UUID | None) 
 
     Agents measuring or iterating change status and next steps every few minutes and read
     each change as a reason to write, so the write is answered with a warning. It still goes
-    through whatever it carries: a refusal dropped failed tries found after the first write,
+    through whatever it carries: a refusal dropped what the user ruled after the first write,
     and an exemption for some content would be met by making that content up.
     """
     minutes = settings.checkpoint_interval_minutes(cur)
@@ -282,8 +315,8 @@ def _interval_warning(cur: psycopg.Cursor, task_id: UUID, session: UUID | None) 
         return None
     return (
         f"this session also wrote this task's state at {written_at:%H:%M}, inside the "
-        f"{minutes}-minute interval. This write was kept. A checkpoint carries only failed "
-        "tries, costly decisions, sources, and the state before you stop; progress and "
+        f"{minutes}-minute interval. This write was kept. A checkpoint carries only the "
+        "user's rulings, sources, and the state before you stop; progress, findings, and "
         "measurements go in a commit or the project's documents, not into another write"
     )
 
@@ -302,18 +335,18 @@ def checkpoint(
     open_questions: list[str] | None = None,
     blockers: list[str] | None = None,
     next_actions: list[str] | None = None,
-    attempts: list[Any] | None = None,
-    decisions: list[Any] | None = None,
+    rulings: list[Any] | None = None,
+    withdraw_rulings: list[Any] | None = None,
     artifacts: list[Any] | None = None,
     session: UUID | None = None,
 ) -> dict[str, Any]:
-    """Replace the given state fields and name, and append the history they rest on.
+    """Replace the given state fields and name, and append the rulings and sources with them.
 
     Every item is checked before the first write, so a refused item leaves the state and
     history as they were. Malformed items and fields over their own ceilings are refused
-    together; the card and detail budgets, which depend on the whole state, come after.
-    No checkpoint row is frozen here: `what_changed` and the ids of the rows appended are
-    kept on the state-replaced event, and only close freezes a state.
+    together; the ruling cap and the card and detail budgets, which depend on what the task
+    holds, come after. No checkpoint row is frozen here: `what_changed` and the ids of the
+    rows written are kept on the state-replaced event, and only close freezes a state.
     """
     given = {
         "goal": goal,
@@ -324,43 +357,44 @@ def checkpoint(
         "next_actions": next_actions,
     }
     what_changed = (what_changed or "").strip() or None
-    attempt_items, attempt_problems = _items("attempts", attempts)
-    decision_items, decision_problems = _items("decisions", decisions)
-    artifact_items, artifact_problems = _items("artifacts", artifacts)
 
     tasks._lock(cur)
     tasks._require_open(cur, task_id)
+    ruling_chars = settings.limit(cur, "ruling_chars")
+    ruling_items, ruling_problems = _items("rulings", rulings, ruling_chars=ruling_chars)
+    withdrawal_items, withdrawal_problems = _items(
+        "withdraw_rulings", withdraw_rulings, ruling_chars=ruling_chars
+    )
+    artifact_items, artifact_problems = _items("artifacts", artifacts, ruling_chars=ruling_chars)
     current = tasks.task_get(cur, task_id)["state"]
     warning = _interval_warning(cur, task_id, session)
     problems = [
         *_what_changed_problems(what_changed),
         *tasks.limit_problems(tasks.replaced_state(current, **given), current),
-        *attempt_problems,
-        *decision_problems,
+        *ruling_problems,
+        *withdrawal_problems,
         *artifact_problems,
     ]
     if problems:
         raise MalformedRequestError(problems)
     verdicts = [tasks._gate({"what_changed": what_changed})]
     for item_name, rows in (
-        ("attempts", attempt_items),
-        ("decisions", decision_items),
+        ("rulings", ruling_items),
+        ("withdraw_rulings", withdrawal_items),
         ("artifacts", artifact_items),
     ):
         verdicts += [_gate_item(f"{item_name}[{index}]", row) for index, row in enumerate(rows)]
-    for row in decision_items:
-        _check_supersedes(cur, task_id, row["supersedes_ids"] or [])
-    _check_in_force(cur, task_id, decision_items)
+    _check_withdrawals(cur, task_id, withdrawal_items, ruling_items)
+    _check_ruling_cap(cur, task_id, adding=len(ruling_items), withdrawing=len(withdrawal_items))
 
     # Ids are drawn before the state write so its event can name the rows, while every
     # refusal the state write can raise still comes before the first row is written.
-    attempt_ids = [uuid4() for _ in attempt_items]
-    decision_ids = [uuid4() for _ in decision_items]
+    ruling_ids = [uuid4() for _ in ruling_items]
     reference_ids = [uuid4() for _ in artifact_items]
     history = {
         "what_changed": what_changed,
-        "attempt_ids": [str(ident) for ident in attempt_ids],
-        "decision_ids": [str(ident) for ident in decision_ids],
+        "ruling_ids": [str(ident) for ident in ruling_ids],
+        "withdrawn_ruling_ids": [str(row["ruling_id"]) for row in withdrawal_items],
         "reference_ids": [str(ident) for ident in reference_ids],
     }
     updated = tasks.task_update(
@@ -375,13 +409,12 @@ def checkpoint(
     )
     result = {
         **updated,
-        "attempts": [
-            _insert_attempt(cur, task_id, actor=actor, attempt_id=ident, **item)
-            for ident, item in zip(attempt_ids, attempt_items, strict=True)
+        "withdrawn_rulings": [
+            _insert_withdrawal(cur, task_id, actor=actor, **item) for item in withdrawal_items
         ],
-        "decisions": [
-            _insert_decision(cur, task_id, actor=actor, decision_id=ident, **item)
-            for ident, item in zip(decision_ids, decision_items, strict=True)
+        "rulings": [
+            _insert_ruling(cur, task_id, actor=actor, ruling_id=ident, **item)
+            for ident, item in zip(ruling_ids, ruling_items, strict=True)
         ],
         "artifacts": [
             _insert_artifact(cur, task_id, actor=actor, reference_id=ident, **item)
@@ -398,73 +431,57 @@ def checkpoint(
     return result
 
 
-def _insert_attempt(
+def _insert_ruling(
     cur: psycopg.Cursor,
     task_id: UUID,
     *,
     actor: str,
-    attempt_id: UUID,
-    attempt: str,
-    result: str | None = None,
-    reason: str | None = None,
-    next: str | None = None,
+    ruling_id: UUID,
+    ruling: str,
+    user_instruction: str,
 ) -> dict[str, Any]:
     cur.execute(
         """
-        INSERT INTO attempt (
-            attempt_id, task_id, attempt, result, reason, next, created_at, created_by
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, clock_timestamp(), %s)
+        INSERT INTO ruling (ruling_id, task_id, ruling, user_instruction, created_at, created_by)
+        VALUES (%s, %s, %s, %s, clock_timestamp(), %s)
         RETURNING *
         """,
-        (attempt_id, task_id, attempt, result, reason, next, actor),
+        (ruling_id, task_id, ruling, user_instruction, actor),
     )
     row = cur.fetchone()
     tasks._renew(cur, task_id)
     events.record(
         cur,
-        "attempt_recorded",
+        "ruling_recorded",
         actor,
-        detail={"task_id": str(task_id), "attempt_id": str(row["attempt_id"])},
+        detail={"task_id": str(task_id), "ruling_id": str(ruling_id)},
     )
     return row
 
 
-def _insert_decision(
+def _insert_withdrawal(
     cur: psycopg.Cursor,
     task_id: UUID,
     *,
     actor: str,
-    decision_id: UUID,
-    decision: str,
-    reason: str | None = None,
-    supersedes_ids: list[UUID] | None = None,
+    ruling_id: UUID,
+    user_instruction: str,
 ) -> dict[str, Any]:
-    supersedes_ids = supersedes_ids or []
     cur.execute(
         """
-        INSERT INTO decision (decision_id, task_id, decision, reason, created_at, created_by)
-        VALUES (%s, %s, %s, %s, clock_timestamp(), %s)
+        INSERT INTO ruling_withdrawal (ruling_id, user_instruction, created_at, created_by)
+        VALUES (%s, %s, clock_timestamp(), %s)
         RETURNING *
         """,
-        (decision_id, task_id, decision, reason, actor),
+        (ruling_id, user_instruction, actor),
     )
-    row = {**cur.fetchone(), "supersedes_ids": supersedes_ids}
-    for supersedes_id in supersedes_ids:
-        cur.execute(
-            "INSERT INTO decision_supersession (decision_id, supersedes_id) VALUES (%s, %s)",
-            (decision_id, supersedes_id),
-        )
+    row = cur.fetchone()
     tasks._renew(cur, task_id)
     events.record(
         cur,
-        "decision_recorded",
+        "ruling_withdrawn",
         actor,
-        detail={
-            "task_id": str(task_id),
-            "decision_id": str(row["decision_id"]),
-            "supersedes_ids": [str(ident) for ident in supersedes_ids],
-        },
+        detail={"task_id": str(task_id), "ruling_id": str(ruling_id)},
     )
     return row
 
@@ -511,55 +528,55 @@ def attempt_list(cur: psycopg.Cursor, task_id: UUID) -> list[dict[str, Any]]:
     return cur.fetchall()
 
 
-def decisions_in_force(cur: psycopg.Cursor, task_id: UUID) -> dict[str, Any]:
-    """The decisions no later one superseded, newest first, as far as their share holds.
-
-    They come with every task_get because they are what an earlier session settled, and a
-    session that never asks for history would otherwise propose them again. Reasons stay in
-    the full history, which `decisions=True` returns.
-    """
+def ruling_list(cur: psycopg.Cursor, task_id: UUID) -> list[dict[str, Any]]:
+    """A task's rulings newest first, the withdrawn ones with the words that withdrew them."""
     cur.execute(
         """
-        SELECT d.decision_id, d.decision, d.created_at FROM decision d
-        WHERE d.task_id = %s
-          AND NOT EXISTS (
-              SELECT 1 FROM decision_supersession s WHERE s.supersedes_id = d.decision_id
-          )
-        ORDER BY d.created_at DESC, d.decision_id DESC
+        SELECT r.ruling_id, r.ruling, r.user_instruction, r.created_at, r.created_by,
+               w.user_instruction AS withdrawn_because, w.created_at AS withdrawn_at
+        FROM ruling r
+        LEFT JOIN ruling_withdrawal w ON w.ruling_id = r.ruling_id
+        WHERE r.task_id = %s
+        ORDER BY r.created_at DESC, r.ruling_id DESC
         """,
         (task_id,),
     )
-    rows = cur.fetchall()
-    shown: list[dict[str, Any]] = []
-    budget = settings.limit(cur, "decision_capacity")
-    for row in rows:
-        line = {
-            "decision_id": row["decision_id"],
+    return cur.fetchall()
+
+
+def rulings_in_force(cur: psycopg.Cursor, task_id: UUID) -> list[dict[str, Any]]:
+    """The user's rulings not withdrawn, newest first, each with the user's words.
+
+    All of them come with every task_get: the user's setting bounds how many a task holds, and
+    the words beside each ruling are the one check a reader has that the agent's wording of
+    it did not carry more than the user said.
+    """
+    return [
+        {
+            "ruling_id": row["ruling_id"],
             "on": row["created_at"].date(),
-            "decision": row["decision"],
+            "ruling": row["ruling"],
+            "user_said": row["user_instruction"],
         }
-        if pushed_cost([item["decision"] for item in [*shown, line]]) > budget:
-            break
-        shown.append(line)
-    return {"decisions_in_force": shown, "decisions_in_force_more": len(rows) - len(shown)}
+        for row in ruling_list(cur, task_id)
+        if row["withdrawn_at"] is None
+    ]
 
 
-def decision_count(cur: psycopg.Cursor, task_ids: list[UUID]) -> dict[UUID, int]:
-    """How many decisions are in force on each task, for the card's details line."""
-    if not task_ids:
-        return {}
+def ruling_count(cur: psycopg.Cursor, task_ids: list[UUID]) -> dict[UUID, int]:
+    """How many rulings are in force on each task, for the card's details line."""
+    return _in_force_count(cur, task_ids)
+
+
+def _record_counts(cur: psycopg.Cursor, task_id: UUID) -> dict[str, int]:
     cur.execute(
         """
-        SELECT d.task_id, count(*) AS n FROM decision d
-        WHERE d.task_id = ANY(%s)
-          AND NOT EXISTS (
-              SELECT 1 FROM decision_supersession s WHERE s.supersedes_id = d.decision_id
-          )
-        GROUP BY d.task_id
+        SELECT (SELECT count(*) FROM attempt WHERE task_id = %(task)s) AS attempts,
+               (SELECT count(*) FROM decision WHERE task_id = %(task)s) AS decisions
         """,
-        (task_ids,),
+        {"task": task_id},
     )
-    return {row["task_id"]: row["n"] for row in cur.fetchall()}
+    return dict(cur.fetchone())
 
 
 def decision_list(cur: psycopg.Cursor, task_id: UUID) -> list[dict[str, Any]]:
@@ -614,9 +631,25 @@ def expanded_task(
     decisions: bool = False,
     artifacts: bool = False,
     checkpoints: bool = False,
+    withdrawn_rulings: bool = False,
 ) -> dict[str, Any]:
-    """Return the task, its decisions in force, and only the history explicitly pulled with it."""
-    expanded = {**tasks.task_get(cur, task_id), **decisions_in_force(cur, task_id)}
+    """Return the task, its rulings in force, and only the history explicitly pulled with it.
+
+    Attempts and decisions are a record of what agents wrote before rulings; MCP never pulls
+    them, and `past_record` only counts them and names where a person reads them.
+    """
+    expanded = {**tasks.task_get(cur, task_id), "rulings": rulings_in_force(cur, task_id)}
+    record = _record_counts(cur, task_id)
+    if any(record.values()):
+        expanded["past_record"] = {
+            **record,
+            "read_with": f"mashu task show {task_id}",
+            "note": "what agents wrote before rulings existed; a record, not rules in force",
+        }
+    if withdrawn_rulings:
+        expanded["withdrawn_rulings"] = [
+            row for row in ruling_list(cur, task_id) if row["withdrawn_at"] is not None
+        ]
     if attempts:
         expanded["attempts"] = attempt_list(cur, task_id)
     if decisions:

@@ -512,7 +512,13 @@ def _state_fields(state: dict[str, Any]) -> list[tuple[str, str]]:
 def _task_detail(cur: psycopg.Cursor, task_id: UUID) -> tuple[str, str]:
     try:
         row = task_history.expanded_task(
-            cur, task_id, attempts=True, decisions=True, artifacts=True, checkpoints=True
+            cur,
+            task_id,
+            attempts=True,
+            decisions=True,
+            artifacts=True,
+            checkpoints=True,
+            withdrawn_rulings=True,
         )
     except MashuError as error:
         raise NotFound(str(error)) from error
@@ -588,6 +594,30 @@ def _task_detail(cur: psycopg.Cursor, task_id: UUID) -> tuple[str, str]:
         ),
         empty="no checkpoints",
     )
+    ruling_table = _table(
+        ("when", "ruling", "user said", "withdrawn"),
+        (
+            *(
+                [
+                    _td(_e(item["on"]), "nowrap"),
+                    _td(_e(item["ruling"]), "text"),
+                    _td(_e(item["user_said"]), "text"),
+                    _td("-"),
+                ]
+                for item in row["rulings"]
+            ),
+            *(
+                [
+                    _td(_e(item["created_at"]), "nowrap"),
+                    _td(_e(item["ruling"]), "text"),
+                    _td(_e(item["user_instruction"]), "text"),
+                    _td(_e(item["withdrawn_because"]), "text"),
+                ]
+                for item in row["withdrawn_rulings"]
+            ),
+        ),
+        empty="no rulings",
+    )
     attempt_table = _table(
         ("when", "by", "attempt", "result", "reason", "next"),
         (
@@ -620,9 +650,10 @@ def _task_detail(cur: psycopg.Cursor, task_id: UUID) -> tuple[str, str]:
     body = (
         _fields(fields)
         + f"<h2>Current state</h2>{current}"
+        + f"<h2>User rulings</h2>{ruling_table}"
         + f"<h2>Checkpoints</h2>{checkpoint_table}"
-        + f"<h2>Attempts</h2>{attempt_table}"
-        + f"<h2>Decisions</h2>{decision_table}"
+        + f"<h2>Attempts (record from before rulings)</h2>{attempt_table}"
+        + f"<h2>Decisions (record from before rulings)</h2>{decision_table}"
         + f"<h2>Artifacts</h2>{artifact_table}"
     )
     return f"Task {task['name']}", body

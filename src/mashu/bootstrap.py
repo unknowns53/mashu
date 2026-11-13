@@ -97,11 +97,11 @@ def session_bootstrap(
     # Topic lines sit in the Memory seats.
     topic_tokens = pushed_cost([row["line"] for row in index])
     memory_tokens = pushed_cost([row["content"] for row in always + scoped]) + topic_tokens
-    decided = task_history.decision_count(cur, [row["task"]["task_id"] for row in states])
+    ruled = task_history.ruling_count(cur, [row["task"]["task_id"] for row in states])
     for row in states:
         row["state"] = {
             **row["state"],
-            "decisions_in_force_count": decided.get(row["task"]["task_id"], 0),
+            "rulings_count": ruled.get(row["task"]["task_id"], 0),
         }
     costed = [
         {

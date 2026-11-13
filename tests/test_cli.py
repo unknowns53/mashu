@@ -553,13 +553,24 @@ def test_the_history_and_the_artifact_locators_are_visible_on_one_task(run, comm
             what_changed=CHANGED,
             expect_updated_at=state["updated_at"],
             status_text=CHANGED,
-            attempts=[{"attempt": ATTEMPT, "result": "the count came out short"}],
-            decisions=[{"decision": DECISION, "reason": "a half-run must not look whole"}],
+            rulings=[{"ruling": "count every seed", "user_instruction": "全部数えて"}],
             artifacts=[{"kind": "git_commit", "locator": LOCATOR, "label": "the manifest"}],
+        )
+        # Attempts and decisions are no longer written; rows from before stay readable here.
+        cur.execute(
+            "INSERT INTO attempt (task_id, attempt, result, created_by) "
+            "VALUES (%s, %s, 'the count came out short', 'agent')",
+            (task_id, ATTEMPT),
+        )
+        cur.execute(
+            "INSERT INTO decision (task_id, decision, reason, created_by) "
+            "VALUES (%s, %s, 'a half-run must not look whole', 'agent')",
+            (task_id, DECISION),
         )
 
     code, out, _ = run("task", "show", short)
     assert code == 0
+    assert "count every seed" in out and "user said   全部数えて" in out
     assert ATTEMPT in out and "the count came out short" in out
     assert DECISION in out and "a half-run must not look whole" in out
     assert CHANGED in out

@@ -700,7 +700,8 @@ _LIMIT_LABELS = {
     "task_card_capacity": ("one task card", ""),
     "card_overflow_capacity": ("cardless task line", ""),
     "task_detail_capacity": ("one task in full", "what task_get returns"),
-    "decision_capacity": ("decisions in force", "what task_get adds"),
+    "ruling_count": ("user rulings per task", "task_get returns them all"),
+    "ruling_chars": ("one ruling", "excludes the user's words"),
     "temporary_capacity": ("temporary notes", ""),
 }
 _LIMIT_ORDER = tuple(_LIMIT_LABELS)
@@ -714,7 +715,7 @@ def _limit_rows(dsn: str | None) -> list[dict[str, Any]]:
 
 
 def _limit_line(row: dict[str, Any]) -> str:
-    unit = "chars" if row["unit"] == "chars" else "tokens"
+    unit = row["unit"]
     origin = "set" if row["set"] else "default"
     return (
         f"    {screen.pad(_LIMIT_LABELS[row['name']][0], 26)} "

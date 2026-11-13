@@ -72,9 +72,10 @@ LIMITS: dict[str, Limit] = {
     "card_overflow_capacity": Limit(config.card_overflow_capacity, *_TOKENS),
     "task_card_capacity": Limit(config.task_card_capacity, *_TOKENS),
     "task_detail_capacity": Limit(config.task_detail_capacity, *_TOKENS),
-    "decision_capacity": Limit(config.decision_capacity, *_TOKENS),
     "temporary_capacity": Limit(config.temporary_capacity, *_TOKENS),
     "content_limit": Limit(config.content_limit, 20, 1000, "chars"),
+    "ruling_count": Limit(config.ruling_count, 1, 50, "items"),
+    "ruling_chars": Limit(config.ruling_chars, 20, 1000, "chars"),
 }
 
 #: (share, whole): the share is delivered inside the whole, so it may not exceed it.

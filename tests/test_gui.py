@@ -92,7 +92,12 @@ def test_stored_rows_appear_in_full_on_their_pages_and_filters_narrow_them(
             task["task"]["task_id"],
             actor="agent",
             expect_updated_at=task["state"]["updated_at"],
-            attempts=[{"attempt": "served it with a framework", "result": "too heavy"}],
+            rulings=[{"ruling": "serve it without a framework", "user_instruction": "素のままで"}],
+        )
+        cur.execute(
+            "INSERT INTO attempt (task_id, attempt, result, created_by) "
+            "VALUES (%s, 'served it with a framework', 'too heavy', 'agent')",
+            (task["task"]["task_id"],),
         )
         candidate(cur, "check the vendored toolchain before building")
 
@@ -106,6 +111,7 @@ def test_stored_rows_appear_in_full_on_their_pages_and_filters_narrow_them(
     assert "survey every list at once" in fetch("/tasks?project=enrai")[1]
     task_page = fetch(f"/tasks/{task['task']['task_id']}")[1]
     assert "served it with a framework" in task_page and "no checkpoints" in task_page
+    assert "serve it without a framework" in task_page and "素のままで" in task_page
 
     review = fetch("/review")[1]
     assert "check the vendored toolchain before building" in review

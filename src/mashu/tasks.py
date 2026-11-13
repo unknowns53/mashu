@@ -290,9 +290,9 @@ def _card_lines(name: str, state: dict[str, Any]) -> list[tuple[str, str]]:
             singular, plural = CARD_COUNT_LABELS[field]
             available.append(f"{count} {singular if count == 1 else plural}")
     # Counted by the reader that has the history at hand; a state row alone carries none.
-    decided = state.get("decisions_in_force_count") or 0
-    if decided:
-        available.append(f"{decided} decision{'' if decided == 1 else 's'} in force")
+    ruled = state.get("rulings_count") or 0
+    if ruled:
+        available.append(f"{ruled} user ruling{'' if ruled == 1 else 's'}")
     if available:
         parts.append(("details", f"details: {', '.join(available)}"))
     return parts
@@ -631,25 +631,25 @@ def search_terms(query: str) -> list[str]:
     return (query or "").split()
 
 
-_DECISION_SEARCH = f"""
-SELECT d.decision_id, d.decision, d.reason, d.created_at, t.task_id, t.name AS task_name,
-       t.status AS task_status, p.name AS project_name,
+_RULING_SEARCH = f"""
+SELECT r.ruling_id, r.ruling, r.user_instruction AS user_said, r.created_at, t.task_id,
+       t.name AS task_name, t.status AS task_status, p.name AS project_name,
        EXISTS (
-           SELECT 1 FROM decision_supersession s WHERE s.supersedes_id = d.decision_id
-       ) AS superseded
-FROM decision d
-JOIN task t ON t.task_id = d.task_id
+           SELECT 1 FROM ruling_withdrawal w WHERE w.ruling_id = r.ruling_id
+       ) AS withdrawn
+FROM ruling r
+JOIN task t ON t.task_id = r.task_id
 JOIN project p ON p.project_id = t.project_id
 WHERE (%(project)s::uuid IS NULL OR t.project_id = %(project)s::uuid)
   AND (%(closed)s OR t.status = 'open')
   AND cardinality(%(terms)s::text[]) > 0
-  AND {_HAS_TERMS.format(text="d.decision || ' ' || coalesce(d.reason, '')")}
-ORDER BY superseded, d.created_at DESC, d.decision_id DESC
+  AND {_HAS_TERMS.format(text="r.ruling || ' ' || r.user_instruction")}
+ORDER BY withdrawn, r.created_at DESC, r.ruling_id DESC
 LIMIT %(limit)s
 """
 
 
-def decision_search(
+def ruling_search(
     cur: psycopg.Cursor,
     query: str,
     *,
@@ -657,10 +657,11 @@ def decision_search(
     include_closed: bool = False,
     limit: int = 10,
 ) -> list[dict[str, Any]]:
-    """Decisions of any task whose text or reason holds every term, those in force first."""
+    """Rulings of any task whose text or the user's words hold every term, those in force
+    first."""
     project_id = projects.require_project(cur, project)["project_id"] if project else None
     cur.execute(
-        _DECISION_SEARCH,
+        _RULING_SEARCH,
         {
             "terms": search_terms(query),
             "project": project_id,

@@ -56,13 +56,9 @@ def test_task_details_show_all_state_proposal_and_latest_history(dsn, monkeypatc
             actor="agent",
             what_changed="recorded the fitted rail",
             expect_updated_at=tasks.task_get(cur, task_id)["state"]["updated_at"],
-            attempts=[
-                {"attempt": "fit the new rail", "result": "aligned"},
-                {"attempt": "test the forward mount", "result": "ok"},
-            ],
-            decisions=[
-                {"decision": "keep aft mountings", "reason": "loads pass"},
-                {"decision": "document the alternate rail", "reason": "refits need it"},
+            rulings=[
+                {"ruling": "keep aft mountings", "user_instruction": "後ろはそのまま"},
+                {"ruling": "document the alternate rail", "user_instruction": "代わりも書いて"},
             ],
             artifacts=[
                 {"kind": "file", "locator": "reports/rail-load.txt", "label": "load"},
@@ -70,11 +66,17 @@ def test_task_details_show_all_state_proposal_and_latest_history(dsn, monkeypatc
             ],
             **STATE,
         )
+        for attempt in ("fit the new rail", "test the forward mount"):
+            cur.execute(
+                "INSERT INTO attempt (task_id, attempt, created_by) VALUES (%s, %s, 'agent')",
+                (task_id, attempt),
+            )
     keys(monkeypatch, "enter", "space", "q", "q")
 
     assert work_ui.run(dsn) == 0
     out = capsys.readouterr().out
     assert "size  card" in out and "detail" in out
+    assert "後ろはそのまま" in out and "User rulings (2)" in out
     for value in STATE.values():
         assert (value[0] if isinstance(value, list) else value) in out
     for text in (

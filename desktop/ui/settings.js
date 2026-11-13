@@ -282,7 +282,7 @@ async function routesSection() {
 const LIMIT_GROUPS = [
   ["opening", ["total_capacity"]],
   ["memory", ["memory_capacity", "always_capacity", "topic_capacity", "content_limit"]],
-  ["work", ["project_capacity", "task_card_capacity", "card_overflow_capacity", "task_detail_capacity", "decision_capacity"]],
+  ["work", ["project_capacity", "task_card_capacity", "card_overflow_capacity", "task_detail_capacity", "ruling_count", "ruling_chars"]],
   ["temporary", ["temporary_capacity"]],
 ];
 

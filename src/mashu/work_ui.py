@@ -112,7 +112,14 @@ def _matches_task(row: dict[str, Any], query: str) -> bool:
         proposal.get("outcome"),
         proposal.get("reason"),
     ]
-    for history in ("attempts", "decisions", "checkpoints", "artifacts"):
+    for history in (
+        "rulings",
+        "withdrawn_rulings",
+        "attempts",
+        "decisions",
+        "checkpoints",
+        "artifacts",
+    ):
         values.extend(row.get(history) or [])
     needle = query.casefold()
     return any(needle in text.casefold() for value in values for text in _flatten(value))
@@ -207,6 +214,21 @@ _ENTRY = "      "
 def _history_lines(row: dict[str, Any]) -> list[str]:
     """All immutable history, in the same groups as `mashu task show`."""
     lines: list[str] = []
+    rulings = row.get("rulings") or []
+    withdrawn = row.get("withdrawn_rulings") or []
+    if rulings or withdrawn:
+        lines.append(screen.accent(f"  User rulings ({len(rulings)})"))
+        for item in rulings:
+            dated = f"{_short(item['ruling_id'])}  {_date(item.get('on'))}"
+            lines.append(f"    {screen.dim(dated)}")
+            lines.extend(_field("ruling", item.get("ruling"), _ENTRY, 9))
+            lines.extend(_field("user said", item.get("user_said"), _ENTRY, 9))
+        for item in withdrawn:
+            dated = f"{_short(item['ruling_id'])}  {_date(item.get('created_at'))}  withdrawn"
+            lines.append(f"    {screen.dim(dated)}")
+            lines.extend(_field("ruling", item.get("ruling"), _ENTRY, 9))
+            lines.extend(_field("user said", item.get("user_instruction"), _ENTRY, 9))
+            lines.extend(_field("withdrawn", item.get("withdrawn_because"), _ENTRY, 9))
     artifacts = row.get("artifacts") or []
     artifacts_by_id = {item["reference_id"]: item for item in artifacts}
     if artifacts:
@@ -237,7 +259,7 @@ def _history_lines(row: dict[str, Any]) -> list[str]:
 
     attempts = row.get("attempts") or []
     if attempts:
-        lines.append(screen.accent(f"  Attempts ({len(attempts)})"))
+        lines.append(screen.accent(f"  Attempts, record from before rulings ({len(attempts)})"))
         for item in attempts:
             dated = f"{_date(item.get('created_at'))}  {item.get('created_by', '-')}"
             lines.append(f"    {screen.dim(dated)}")
@@ -247,7 +269,7 @@ def _history_lines(row: dict[str, Any]) -> list[str]:
 
     decisions = row.get("decisions") or []
     if decisions:
-        lines.append(screen.accent(f"  Decisions ({len(decisions)})"))
+        lines.append(screen.accent(f"  Decisions, record from before rulings ({len(decisions)})"))
         for item in decisions:
             dated = f"{_date(item.get('created_at'))}  {item.get('created_by', '-')}"
             lines.append(f"    {screen.dim(dated)}")

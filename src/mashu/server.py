@@ -9,6 +9,7 @@ from typing import Annotated, Any, NotRequired
 from uuid import UUID, uuid4
 
 import psycopg
+from pydantic.json_schema import SkipJsonSchema
 
 if sys.version_info >= (3, 12):
     from typing import TypedDict
@@ -56,13 +57,13 @@ INSTRUCTIONS = (
     "session. When the work at hand matches a bootstrap topic's trigger, call memory_list "
     "with that topic before starting it. "
     "Memory holds standing rules only, pushed to every session (always), to one place "
-    "(scope), or when one kind of work starts (topic). Project facts, findings, and settled "
-    "decisions go in a task's decisions, which only task_get reads; notes go in project "
-    "docs. "
+    "(scope), or when one kind of work starts (topic). A task keeps only the user's "
+    "rulings, each with their words; findings, measurements, and rejected options go in "
+    "project docs. "
     "Before continuing a task from a card, call task_get with its full id and check old "
     "state against the repository. task_checkpoint, the one task state write, carries only "
-    "what the next session needs: failed tries (attempts), costly reasons (decisions), a "
-    "changed goal, approach, or blockers, and the state before you stop; progress and "
+    "what the next session needs: what the user ruled, a changed goal, approach, or "
+    "blockers, and the state before you stop; progress and "
     "measurements go in commits and docs. Write it once, before you stop; do not hold "
     "findings for a second write. Open a task only for work that spans sessions. "
     "Completion is the user's call: after your last checkpoint, "
@@ -93,17 +94,14 @@ class EvidenceItem(TypedDict):
     observation: str
 
 
-class AttemptItem(TypedDict):
-    attempt: str
-    result: NotRequired[str]
-    reason: NotRequired[str]
-    next: NotRequired[str]
+class RulingItem(TypedDict):
+    ruling: str
+    user_instruction: str
 
 
-class DecisionItem(TypedDict):
-    decision: str
-    reason: NotRequired[str]
-    supersedes_ids: NotRequired[list[UUID]]
+class WithdrawalItem(TypedDict):
+    ruling_id: UUID
+    user_instruction: str
 
 
 class ArtifactItem(TypedDict):
@@ -147,8 +145,11 @@ class _Choice:
 
 
 EvidenceList = Annotated[list[Any], _ItemSchema(EvidenceItem, min_items=1)]
-AttemptList = Annotated[list[Any], _ItemSchema(AttemptItem)]
-DecisionList = Annotated[list[Any], _ItemSchema(DecisionItem)]
+RulingList = Annotated[list[Any], _ItemSchema(RulingItem)]
+#: An argument task_checkpoint no longer takes, kept out of the schema so that a caller still
+#: passing it is refused with where its content goes, instead of having it dropped unseen.
+_Retired = Annotated[Any, SkipJsonSchema()]
+WithdrawalList = Annotated[list[Any], _ItemSchema(WithdrawalItem)]
 ArtifactList = Annotated[list[Any], _ItemSchema(ArtifactItem)]
 
 
@@ -176,9 +177,9 @@ def _state_contract(limits: dict[str, int]) -> str:
     )
 
 
-def _history_contract() -> str:
+def _history_contract(settings_now: dict[str, int]) -> str:
     """The limits on checkpoint history, keyed as each item takes them."""
-    limits = task_history.HISTORY_LIMITS
+    limits = {**task_history.HISTORY_LIMITS, "ruling": settings_now["ruling_chars"]}
     parts = [f"what_changed {limits['what_changed']}"]
     for name, (required, optional) in task_history.ITEM_KEYS.items():
         keys = [key for key in (*required, *optional) if key in limits]
@@ -186,9 +187,8 @@ def _history_contract() -> str:
     counts = ", ".join(f"{most} {name}" for name, most in task_history.CHECKPOINT_ITEM_MAX.items())
     return (
         f"History char limits: {'; '.join(parts)}. One write carries at most {counts}. A "
-        f"task holds at most {task_history.DECISIONS_IN_FORCE_MAX} decisions in force; past "
-        "that, a write may add no more decisions than it supersedes, and one decision may "
-        "list several in `supersedes_ids` to fold them into one."
+        f"task holds at most {settings_now['ruling_count']} rulings; past that, ask the user "
+        "which one to withdraw."
     )
 
 
@@ -301,7 +301,7 @@ def _failure(
             over_by=error.over_by,
             breakdown=error.breakdown,
         )
-        if task_write and error.field == "task bootstrap card":
+        if task_write and error.field in _REFUSAL_EVENTS:
             answer["refusal_recorded"] = _record_card_refusal(error, task_write, task_id)
     elif isinstance(error, RefusedError) and error.field is not None:
         answer["field"] = error.field
@@ -316,8 +316,16 @@ def _failure(
     return _plain(answer)
 
 
+#: Refusals counted in event_log after their transaction rolls back (project-state 15): a card
+#: over its limit, and rulings past the user's cap, whose frequency says whether the cap holds.
+_REFUSAL_EVENTS = {
+    "task bootstrap card": "task_card_write_refused",
+    "rulings": "ruling_cap_refused",
+}
+
+
 def _record_card_refusal(error: OverLimitError, tool: str, task_id: UUID | None) -> bool:
-    """Log a refused card write after its own transaction rolled back (project-state 15)."""
+    """Log a refused task write after its own transaction rolled back (project-state 15)."""
     detail = {
         "tool": tool,
         "task_id": str(task_id) if task_id else None,
@@ -330,7 +338,7 @@ def _record_card_refusal(error: OverLimitError, tool: str, task_id: UUID | None)
     # The refusal is the answer the agent needs; a failed log write must not replace it.
     try:
         with db.transaction() as cur:
-            events.record(cur, "task_card_write_refused", actor(), detail=detail)
+            events.record(cur, _REFUSAL_EVENTS[error.field], actor(), detail=detail)
     except Exception:
         return False
     return True
@@ -412,8 +420,8 @@ def build_server() -> Any:
             "review queue. When the knowledge was there, name where it was and no candidate is "
             "created: `violated_memory_id` for an active Memory delivered to this session, "
             "including a topic rule whose topic was listed but not read (the 8-character id "
-            "the hook prints is enough); `ignored_task_id`, with `ignored_decision_id` when one "
-            "decision held it, for task state read or not; `ignored_source` for an instruction "
+            "the hook prints is enough); `ignored_task_id` for task state or rulings, read or "
+            "not; `ignored_source` for an instruction "
             "file or skill, named as a path from ~ or the repository or as `skill <name>`. "
             "Otherwise use `work` with `task_id` for a one-time fix, such as editing a doc, an "
             "instruction file, or code, and `rule` only for knowledge every future session "
@@ -431,7 +439,6 @@ def build_server() -> Any:
         task_id: UUID | None = None,
         violated_memory_id: UUID | str | None = None,
         ignored_task_id: UUID | str | None = None,
-        ignored_decision_id: UUID | None = None,
         ignored_source: str | None = None,
     ) -> dict[str, Any]:
         try:
@@ -453,7 +460,6 @@ def build_server() -> Any:
                         _memory_ref(cur, violated_memory_id) if violated_memory_id else None
                     ),
                     ignored_task_id=_task_ref(cur, ignored_task_id) if ignored_task_id else None,
-                    ignored_decision_id=ignored_decision_id,
                     ignored_source=ignored_source,
                 )
                 return _plain({"ok": True, **answer})
@@ -534,8 +540,8 @@ def build_server() -> Any:
     @server.tool(
         description=(
             "Admit a new Memory with explicit instruction provenance.\n\n"
-            "Admit only a standing rule the user asked Mashu to keep. A fact about current "
-            "work belongs in the task's decisions, and an expiring condition in the user's "
+            "Admit only a standing rule the user asked Mashu to keep. What the user decided for "
+            "current work belongs in the task's rulings, and an expiring condition in the user's "
             "Temporary Context (`mashu remember --until`); offer those instead. Choose the "
             "delivery by where forgetting breaks work: `always` anywhere, `scope` in one "
             "place, `topic` in one kind of work. Left out, delivery is the scope routed from "
@@ -939,28 +945,23 @@ def build_server() -> Any:
     @server.tool()
     def task_get(
         task_id: UUID,
-        attempts: bool = False,
-        decisions: bool = False,
         artifacts: bool = False,
         checkpoints: bool = False,
     ) -> dict[str, Any]:
         """Get full current state and requested history; call before working on a task.
 
         The only tool returning full state; it adds card_tokens, card_limit, card_remaining,
-        detail_tokens, and detail_limit. `decisions_in_force` always comes with it: what
-        earlier sessions settled and nothing later superseded, newest first, with
-        `decisions_in_force_more` counting the older ones left out. Check a proposal against
-        them before making it. `decisions=true` adds the full history with reasons.
+        detail_tokens, and detail_limit. `rulings` always comes with it: every ruling the user
+        made on this task and has not withdrawn, newest first, each with `user_said`, the
+        user's own words. Follow them; where a ruling's text says more than the words, the
+        words hold. Check a proposal against them before making it. `past_record`, when
+        present, only counts the attempts and decisions agents wrote before rulings; they are
+        not rules, and a person reads them with the command it names.
         """
         try:
             with db.transaction() as cur:
                 answer = task_history.expanded_task(
-                    cur,
-                    task_id,
-                    attempts=attempts,
-                    decisions=decisions,
-                    artifacts=artifacts,
-                    checkpoints=checkpoints,
+                    cur, task_id, artifacts=artifacts, checkpoints=checkpoints
                 )
                 return _plain({"ok": True, **answer})
         except MashuError as error:
@@ -973,12 +974,13 @@ def build_server() -> Any:
         include_closed: bool = False,
         limit: int = 10,
     ) -> dict[str, Any]:
-        """Search tasks and their decisions, including closed tasks on request.
+        """Search tasks and the user's rulings, including closed tasks on request.
 
-        `tasks` carry the card view; call task_get for a task's full state. `decisions` are
-        decisions of any task whose text or reason holds every term of the query, those in
-        force first: search them before proposing a change, since another task may have
-        settled it. Japanese matches by containment, so query a short distinctive word.
+        `tasks` carry the card view; call task_get for a task's full state. `rulings` are
+        rulings of any task whose text or the user's words hold every term of the query,
+        those in force first, each with `user_said`: search them before proposing a change,
+        since the user may have ruled on it in another task. Japanese matches by
+        containment, so query a short distinctive word.
         """
         try:
             with db.transaction() as cur:
@@ -989,7 +991,7 @@ def build_server() -> Any:
                     include_closed=include_closed,
                     limit=limit,
                 )
-                decided = tasks.decision_search(
+                ruled = tasks.ruling_search(
                     cur,
                     query,
                     project=project,
@@ -1000,7 +1002,7 @@ def build_server() -> Any:
                     {
                         "ok": True,
                         "tasks": [_task_card_view(row) for row in found],
-                        "decisions": decided,
+                        "rulings": ruled,
                     }
                 )
         except MashuError as error:
@@ -1010,10 +1012,11 @@ def build_server() -> Any:
         description=(
             "Write a task's state: replace the fields given and append the history they rest "
             "on. The only task state write.\n\n"
-            "Hand off to the next session with it: failed tries, costly decisions, external "
-            "sources, a changed goal, approach, or blockers, and where things stand before "
-            "you stop. Progress, measurements, and each next step belong in commits and the "
-            "project's documents, so a new next step is no reason to write. A session's second "
+            "Hand off to the next session with it: what the user ruled, external sources, a "
+            "changed goal, approach, or blockers, and where things stand before you stop. "
+            "Progress, findings, measurements, rejected options, and each next step belong in "
+            "commits and the project's documents, linked as `artifacts`, so a new next step is "
+            "no reason to write. A session's second "
             "write to a task inside the interval the user sets "
             f"({config.DEFAULT_CHECKPOINT_INTERVAL_MINUTES} minutes unless changed) is kept "
             "and answered with `warning`. One write, before you stop, is usually all a session "
@@ -1025,10 +1028,14 @@ def build_server() -> Any:
             "where the task stands, so it changes only when that does; both ride on every "
             "bootstrap card, so details go in approach or next_actions. Optional "
             "`what_changed` is logged with the write and never delivered. Optional history, "
-            "all written with the state or not at all: `attempts` for failed tries, "
-            "`decisions` for reasons costly to re-derive, and `artifacts` for external "
-            "sources. No snapshot is frozen per write; closing the task freezes the final "
-            f"state. {state_contract} {_history_contract()} {_REFUSALS} Success returns the "
+            "all written with the state or not at all: `rulings` for what the user decided on "
+            "this task, each `ruling` in your words beside `user_instruction`, a short exact "
+            "quote of the user's own words; your own judgment is never a ruling and goes in "
+            "`approach`. `withdraw_rulings` names a ruling the user dropped, with their words "
+            "about that ruling. `artifacts` for external sources. The quotes are kept for "
+            "audit, not authentication. No snapshot is frozen per write; closing the task "
+            f"freezes the final state. {state_contract} {_history_contract(limits)} "
+            f"{_REFUSALS} Success returns the "
             f"card view with the card and detail budgets, and {_CARD_SHARE}."
         )
     )
@@ -1043,10 +1050,14 @@ def build_server() -> Any:
         blockers: list[str] | None = None,
         next_actions: list[str] | None = None,
         what_changed: str | None = None,
-        attempts: AttemptList | None = None,
-        decisions: DecisionList | None = None,
+        rulings: RulingList | None = None,
+        withdraw_rulings: WithdrawalList | None = None,
         artifacts: ArtifactList | None = None,
+        attempts: _Retired = None,
+        decisions: _Retired = None,
     ) -> dict[str, Any]:
+        if attempts is not None or decisions is not None:
+            return _failure(MashuError(task_history.RETIRED_ITEMS))
         try:
             with db.transaction() as cur:
                 answer = task_history.checkpoint(
@@ -1062,8 +1073,8 @@ def build_server() -> Any:
                     open_questions=open_questions,
                     blockers=blockers,
                     next_actions=next_actions,
-                    attempts=attempts,
-                    decisions=decisions,
+                    rulings=rulings,
+                    withdraw_rulings=withdraw_rulings,
                     artifacts=artifacts,
                     session=session,
                 )

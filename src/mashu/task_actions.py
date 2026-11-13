@@ -95,6 +95,7 @@ def task_view(cur: psycopg.Cursor, activity: str) -> list[dict[str, Any]]:
             decisions=True,
             artifacts=True,
             checkpoints=True,
+            withdrawn_rulings=True,
         )
         for row in tasks.task_list(cur, activity=activity)
     ]

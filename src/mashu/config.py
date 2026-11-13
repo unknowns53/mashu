@@ -31,8 +31,11 @@ DEFAULT_TASK_CARD_CAPACITY = 200
 #: Maximum full current state retrieved for one task.
 DEFAULT_TASK_DETAIL_CAPACITY = 800
 
-#: Decisions in force that task_get returns without being asked, newest first (project-state 5.4).
-DEFAULT_DECISION_CAPACITY = 800
+#: How many of the user's rulings one task holds; task_get returns them all (project-state 5.4).
+DEFAULT_RULING_COUNT = 10
+
+#: Characters one ruling may hold. The user's words beside it are held to their own ceiling.
+DEFAULT_RULING_CHARS = 120
 
 #: Hard ceiling on the temporary share of the opening (project-state 8).
 DEFAULT_TEMPORARY_CAPACITY = 400
@@ -80,8 +83,12 @@ def card_overflow_capacity() -> int:
     return int(os.environ.get("MASHU_CARD_OVERFLOW_CAPACITY") or DEFAULT_CARD_OVERFLOW_CAPACITY)
 
 
-def decision_capacity() -> int:
-    return int(os.environ.get("MASHU_DECISION_CAPACITY") or DEFAULT_DECISION_CAPACITY)
+def ruling_count() -> int:
+    return int(os.environ.get("MASHU_RULING_COUNT") or DEFAULT_RULING_COUNT)
+
+
+def ruling_chars() -> int:
+    return int(os.environ.get("MASHU_RULING_CHARS") or DEFAULT_RULING_CHARS)
 
 
 def task_card_capacity() -> int:

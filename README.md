@@ -201,7 +201,7 @@ mashu gui
 mashu gui --port 8700 --no-open
 ~~~
 
-Ledger、Memory の revision、Task の checkpoint と attempt と decision と artifact、event_log は履歴であるため、どの画面からも編集できない。
+Ledger、Memory の revision、Task の ruling と checkpoint と artifact、過去の attempt と decision、event_log は履歴であるため、どの画面からも編集できない。
 
 ### 規則を直接登録する
 
@@ -231,13 +231,13 @@ agent が `pain_report` で書く記録は、CLI の `mashu pain` からも記�
 | なし（`--prevention-kind rule`） | 記録しておくべき規則が無かった | `--prevention` が candidate の本文になる。本文の上限（既定 120 字）までで、経緯は `--what` に記入する |
 | `--prevention-kind work --task TASK` | 一度修正すれば済む | candidate を作成せず、その Task の next actions に記入する |
 | `--violated MEMORY` | 配信された Memory が遵守されなかった | candidate を作らず、配信の失敗の疑いとして記録する |
-| `--ignored-task TASK` | Task の decisions や attempts に書いてあったのに活用しなかった。decision が一つに絞れるときは `--ignored-decision` も添える | candidate を作らず、活用されなかった知識としてカウント |
+| `--ignored-task TASK` | Task の state や ruling に書いてあったのに活用しなかった。過去の decision が一つに絞れるときは `--ignored-decision` も添える | candidate を作らず、活用されなかった知識としてカウント |
 | `--ignored-source FILE` | CLAUDE.md、AGENTS.md、skill に書いてあったのに活用しなかった。場所は `~` かリポジトリからのパス、または `skill <name>` で書く | 同上 |
 
 ~~~bash
 mashu pain --what "Deployed twice" --prevention "Check the release ledger"
 mashu pain --what "Deployed twice" --prevention "Check the release ledger" --violated 5e6f7a8b
-mashu pain --what "Re-proposed a settled change" --prevention "Weigh the task decisions" --ignored-task 1a2b3c4d
+mashu pain --what "Re-proposed a settled change" --prevention "Weigh the task rulings" --ignored-task 1a2b3c4d
 mashu pain --what "Bad export" --prevention "Validate the manifest" --prevention-kind work --task 1a2b3c4d
 ~~~
 
@@ -312,7 +312,7 @@ Temporary Context     400 token
 
 topic の見出しの行も Memory の容量に数える。Scope を持たない topic の行は always に、Scope を持つ topic の行はその Scope に入る。Task の card の予算は配信のときに効き、書き込みは拒否しない。最後の活動が新しい Task から順に card を載せ、入りきらない Task は短い ID、名前、最後の活動日だけを並べる。
 
-上限と Memory 本文の字数（既定 120 字）は、デスクトップアプリの設定の「配信量の上限」か、TUI の Settings の Delivery limits で変更できる。値は DB の `setting` テーブルにある。書き込みの判定と `session_bootstrap` は呼ばれるたびにこの値を読むので、変更は保存した直後から有効となる。MCP server が agent に示す上限の数字だけは起動時に読むので、次に開くセッションから変更が反映される。上限を現在の使用量より下げても記録は消えないが、超えている間は量を増やす書き込みが拒否される。Task の card は古いものから配信されなくなり、`task_get` は有効な decision を新しい順に詰めて、入りきらない古いものを返さなくなる。
+上限と Memory 本文の字数（既定 120 字）は、デスクトップアプリの設定の「配信量の上限」か、TUI の Settings の Delivery limits で変更できる。値は DB の `setting` テーブルにある。書き込みの判定と `session_bootstrap` は呼ばれるたびにこの値を読むので、変更は保存した直後から有効となる。MCP server が agent に示す上限の数字だけは起動時に読むので、次に開くセッションから変更が反映される。上限を現在の使用量より下げても記録は消えないが、超えている間は量を増やす書き込みが拒否される。Task の card は古いものから配信されなくなる。Task ごとの User の裁定の件数（既定 10）と 1 件の字数（既定 120 字）も同じ画面で変えられ、件数を下げても今ある裁定は消えず、増やす書き込みだけが拒否される。
 
 ## Scope と route
 
@@ -376,7 +376,7 @@ mashu task touch 1a2b3c4d
 
 `mashu project create` で `--scope` を省くと、今のディレクトリの route が指す Scope を使う。route の無いディレクトリでは拒否するので、すべての Scope に card を配る Project は `--scope -` で作る。`mashu task create` で `--project` を省くと、route から一つに決まる Project か、open な Project が一つだけならそれを使う。
 
-Task の Current State は goal、approach、status、open questions、blockers、next actions からなる。agent が書く attempt（試したことと結果）、decision（判断と理由）、artifact（外部成果物の場所）と、close のときの checkpoint は、履歴として別に残る。
+Task の Current State は goal、approach、status、open questions、blockers、next actions からなる。Task が次のセッションへ渡すのは、この Current State と、User の裁定（ruling）と、artifact（外部成果物の場所）だけである。ruling は User がその作業について決めたことで、agent は User の言葉の原文を添えないと書けない。取り下げにも、その ruling についての User の言葉が要る。試したことや見つけたこと、測定、退けた案はプロジェクトの文書に書き、artifact で指す。agent が書いた過去の attempt と decision は消さずに残り、`mashu task show` や GUI で読めるが、agent には返らない。close のときの checkpoint は履歴として別に残る。
 
 - open な Task は、活動が 14 日途切れると dormant になり、bootstrap から外れる。`mashu task touch` で活動期限を延長すると戻る
 - User は CLI、TUI、デスクトップアプリで Task を作り、touch し、close し、reopen し、Current State を修正できる
@@ -403,9 +403,9 @@ MCP tool は 18 個存在する。引数と制限は各 tool の説明として�
 | Memory | `memory_change_withdraw` | 不要となった proposal を取り下げる |
 | Project State | `project_list` | Project と Task の件数を確認する |
 | Project State | `task_create` | 類似した open な Task が無いか確かめてから Task を作成する |
-| Project State | `task_get` | Current State の全文と有効な decision を読む。Task を続ける前に必ず呼ぶ |
-| Project State | `task_search` | Task の名前、Current State、decision を検索する |
-| Project State | `task_checkpoint` | Current State を書き換え、attempt、decision、artifact を追記する。agent が Task を書く唯一の tool |
+| Project State | `task_get` | Current State の全文と、User の裁定を User の言葉つきですべて読む。Task を続ける前に必ず呼ぶ |
+| Project State | `task_search` | Task の名前、Current State、User の裁定を検索する |
+| Project State | `task_checkpoint` | Current State を書き換え、User の裁定の記録と取り下げ、artifact の追記をする。agent が Task を書く唯一の tool |
 | Project State | `task_propose_close` | Task の終了を理由つきで提案する |
 | Project State | `task_withdraw_close_proposal` | 終了の提案を取り下げる |
 

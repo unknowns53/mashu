@@ -64,7 +64,14 @@ def _state_columns(row):
 
 def _history_counts(cur):
     counts = {}
-    for table in ("task_checkpoint", "attempt", "decision", "artifact_reference"):
+    for table in (
+        "task_checkpoint",
+        "attempt",
+        "decision",
+        "ruling",
+        "ruling_withdrawal",
+        "artifact_reference",
+    ):
         cur.execute(f"SELECT count(*) AS n FROM {table}")
         counts[table] = cur.fetchone()["n"]
     return counts
@@ -113,9 +120,10 @@ def test_a_checkpoint_renames_the_task_unless_the_name_reads_like_another(cur, t
     )
 
 
+RULE = {"ruling": "the baseline is Standard", "user_instruction": "人間の基準を Standard にしろ"}
+
 ITEMS = {
-    "attempts": [{"attempt": "try the narrow fix", "result": "too narrow"}],
-    "decisions": [{"decision": "keep one module"}],
+    "rulings": [{"ruling": "keep one module", "user_instruction": "一つにまとめて"}],
     "artifacts": [{"kind": "file", "locator": "results/table.csv"}],
 }
 
@@ -178,7 +186,7 @@ def test_a_checkpoint_renews_the_lease_and_is_refused_once_the_task_is_closed(cu
     lease = "SELECT active_until, last_activity_at FROM task WHERE task_id = %s"
     expire(cur, task_id)
     before = cur.execute(lease, (task_id,)).fetchone()
-    checkpoint(cur, task, attempts=[{"attempt": "try a"}])
+    checkpoint(cur, task, rulings=[RULE])
     after = cur.execute(lease, (task_id,)).fetchone()
     assert after["active_until"] > before["active_until"]
     assert after["last_activity_at"] > before["last_activity_at"]
@@ -188,97 +196,191 @@ def test_a_checkpoint_renews_the_lease_and_is_refused_once_the_task_is_closed(cu
         checkpoint(cur, closed, "too late")
 
 
-def test_decisions_form_a_same_task_supersedes_chain(cur, task, task_id):
-    first = checkpoint(cur, task, decisions=[{"decision": "use one module"}])["decisions"][0]
-    later = {"decision": "keep the module boundary", "supersedes_ids": [first["decision_id"]]}
-    second = checkpoint(cur, tasks.task_get(cur, task_id), decisions=[later])["decisions"][0]
-    other = new_task(cur, "different task", "history")
-
-    with pytest.raises(MashuError):
-        checkpoint(cur, other, decisions=[{**later, "decision": "cannot cross the boundary"}])
-
-    decisions = task_history.decision_list(cur, task_id)
-    assert [row["decision_id"] for row in decisions] == [
-        second["decision_id"],
-        first["decision_id"],
-    ]
-    assert decisions[0]["supersedes_ids"] == [first["decision_id"]]
-
-
-def _decide(cur, task_id, count, *, supersedes=()):
-    """Write `count` decisions in checkpoints of the most one write may carry."""
+def _rule(cur, task_id, count, *, start=0):
+    """Write `count` rulings, each with words of its own, as many per write as one carries."""
     written = []
-    supersedes = list(supersedes)
-    for start in range(0, count, task_history.CHECKPOINT_ITEM_MAX["decisions"]):
-        size = min(task_history.CHECKPOINT_ITEM_MAX["decisions"], count - start)
-        items = [{"decision": f"decision {start + n}"} for n in range(size)]
-        if supersedes:
-            items[0]["supersedes_ids"] = supersedes
-            supersedes = []
-        written += checkpoint(cur, tasks.task_get(cur, task_id), decisions=items)["decisions"]
+    most = task_history.CHECKPOINT_ITEM_MAX["rulings"]
+    for first in range(start, start + count, most):
+        items = [
+            {"ruling": f"ruling {n}", "user_instruction": f"rule {n}"}
+            for n in range(first, min(first + most, start + count))
+        ]
+        written += checkpoint(cur, tasks.task_get(cur, task_id), rulings=items)["rulings"]
     return written
 
 
-def test_one_decision_folds_several_into_one(cur, task, task_id):
-    folded = _decide(cur, task_id, 3)
-    ids = [row["decision_id"] for row in folded]
+def test_a_ruling_carries_the_users_words_and_comes_with_every_task_get(cur, task, task_id):
+    written = checkpoint(cur, task, rulings=[{**RULE, "ruling": "  the baseline is Standard  "}])
+    ruling = written["rulings"][0]
+    assert (ruling["ruling"], ruling["user_instruction"]) == (
+        "the baseline is Standard",
+        "人間の基準を Standard にしろ",
+    )
 
-    merged = _decide(cur, task_id, 1, supersedes=[*ids, ids[0]])[0]
+    got = task_history.expanded_task(cur, task_id)
+    assert got["rulings"] == [
+        {
+            "ruling_id": ruling["ruling_id"],
+            "on": ruling["created_at"].date(),
+            "ruling": "the baseline is Standard",
+            "user_said": "人間の基準を Standard にしろ",
+        }
+    ]
+    assert "past_record" not in got
+    detail = _replaced_details(cur, task_id)[-1]
+    assert detail["ruling_ids"] == [str(ruling["ruling_id"])]
+    cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'ruling_recorded'")
+    assert cur.fetchone()["n"] == 1
 
-    assert merged["supersedes_ids"] == ids
-    in_force = task_history.decisions_in_force(cur, task_id)["decisions_in_force"]
-    assert [row["decision_id"] for row in in_force] == [merged["decision_id"]]
-    assert task_history.decision_list(cur, task_id)[0]["supersedes_ids"] == sorted(ids)
+
+@pytest.mark.parametrize(
+    ("item", "message"),
+    [
+        ({"ruling": "judge against Hard"}, "missing required key"),
+        ({"ruling": "judge against Hard", "user_instruction": "   "}, "missing required key"),
+        ({"user_instruction": "Hard で"}, "missing required key"),
+        ({**RULE, "reason": "agents used to write one"}, "unknown key"),
+    ],
+)
+def test_a_ruling_without_the_users_words_is_refused(cur, task, item, message):
+    with pytest.raises(MalformedRequestError, match=message):
+        checkpoint(cur, task, rulings=[item])
+    assert _history_counts(cur)["ruling"] == 0
 
 
-def test_one_checkpoint_carries_at_most_its_share_of_attempts_and_decisions(cur, task):
-    most = task_history.CHECKPOINT_ITEM_MAX
+def test_the_users_setting_bounds_a_rulings_length(cur, task):
+    settings.set_limits(cur, {"ruling_chars": 20}, actor="user")
+    with pytest.raises(MalformedRequestError) as refused:
+        checkpoint(cur, task, rulings=[{**RULE, "ruling": "x" * 21}])
+    assert refused.value.over_limit == [
+        {"field": "rulings[0].ruling", "limit": 20, "actual": 21, "unit": "chars"}
+    ]
+    checkpoint(cur, task, rulings=[{**RULE, "ruling": "x" * 20}])
+
+
+def test_a_task_at_the_users_cap_takes_a_ruling_only_for_one_withdrawn(cur, task, task_id):
+    settings.set_limits(cur, {"ruling_count": 3}, actor="user")
+    held = _rule(cur, task_id, 3)
+
+    with pytest.raises(OverLimitError) as refused:
+        _rule(cur, task_id, 1, start=3)
+    answer = server._failure(refused.value)
+    assert (answer["field"], answer["limit"], answer["actual"]) == ("rulings", 3, 4)
+    assert "withdraw_rulings" in answer["error"]
+
+    replaced = checkpoint(
+        cur,
+        tasks.task_get(cur, task_id),
+        rulings=[{"ruling": "a new rule", "user_instruction": "これで行こう"}],
+        withdraw_rulings=[
+            {"ruling_id": str(held[0]["ruling_id"]), "user_instruction": "0 はもういい"}
+        ],
+    )
+    assert replaced["withdrawn_rulings"][0]["ruling_id"] == held[0]["ruling_id"]
+    assert task_history.ruling_count(cur, [task_id])[task_id] == 3
+    cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'ruling_withdrawn'")
+    assert cur.fetchone()["n"] == 1
+
+
+def test_a_task_over_a_lowered_cap_keeps_what_it_holds_and_may_swap(cur, task, task_id):
+    held = _rule(cur, task_id, 4)
+    settings.set_limits(cur, {"ruling_count": 2}, actor="user")
+
+    with pytest.raises(OverLimitError):
+        _rule(cur, task_id, 1, start=4)
+    checkpoint(
+        cur,
+        tasks.task_get(cur, task_id),
+        rulings=[{"ruling": "swap", "user_instruction": "入れ替えて"}],
+        withdraw_rulings=[{"ruling_id": str(held[0]["ruling_id"]), "user_instruction": "外して"}],
+    )
+    assert task_history.ruling_count(cur, [task_id])[task_id] == 4
+
+
+def test_a_withdrawal_cannot_borrow_the_words_of_a_ruling_added_with_it(cur, task, task_id):
+    held = _rule(cur, task_id, 1)[0]
+    with pytest.raises(RefusedError, match="same words"):
+        checkpoint(
+            cur,
+            tasks.task_get(cur, task_id),
+            rulings=[
+                {"ruling": "measure 160 battles", "user_instruction": "Hard ではかってもよい"}
+            ],
+            withdraw_rulings=[
+                {"ruling_id": str(held["ruling_id"]), "user_instruction": "Hard ではかってもよい"}
+            ],
+        )
+    assert task_history.ruling_count(cur, [task_id])[task_id] == 1
+
+
+def test_a_withdrawal_names_a_ruling_of_this_task_still_in_force(cur, task, task_id):
+    held = _rule(cur, task_id, 1)[0]
+    other = new_task(cur, "different task", "history")
+    withdraw = {"ruling_id": str(held["ruling_id"]), "user_instruction": "取り下げて"}
+
+    with pytest.raises(MashuError, match="another task"):
+        checkpoint(cur, other, withdraw_rulings=[withdraw])
+    with pytest.raises(MashuError, match="no ruling"):
+        checkpoint(
+            cur,
+            tasks.task_get(cur, task_id),
+            withdraw_rulings=[{**withdraw, "ruling_id": str(uuid4())}],
+        )
+    checkpoint(cur, tasks.task_get(cur, task_id), withdraw_rulings=[withdraw])
+    with pytest.raises(MashuError, match="already withdrawn"):
+        checkpoint(cur, tasks.task_get(cur, task_id), withdraw_rulings=[withdraw])
+
+    got = task_history.expanded_task(cur, task_id, withdrawn_rulings=True)
+    assert got["rulings"] == []
+    assert got["withdrawn_rulings"][0]["withdrawn_because"] == "取り下げて"
+
+
+def test_one_checkpoint_carries_at_most_its_share_of_rulings(cur, task):
+    most = task_history.CHECKPOINT_ITEM_MAX["rulings"]
     with pytest.raises(MalformedRequestError) as refused:
         checkpoint(
             cur,
             task,
-            attempts=[{"attempt": f"try {n}"} for n in range(most["attempts"] + 1)],
-            decisions=[{"decision": f"keep {n}"} for n in range(most["decisions"] + 1)],
+            rulings=[{**RULE, "user_instruction": f"rule {n}"} for n in range(most + 1)],
             artifacts=[{"kind": "file", "locator": f"f{n}"} for n in range(5)],
         )
     assert refused.value.over_limit == [
-        {"field": name, "limit": most[name], "actual": most[name] + 1, "unit": "items"}
-        for name in ("attempts", "decisions")
+        {"field": "rulings", "limit": most, "actual": most + 1, "unit": "items"}
     ]
 
 
-def test_a_task_full_of_decisions_takes_one_more_only_by_superseding(cur, task, task_id):
-    cap = task_history.DECISIONS_IN_FORCE_MAX
-    written = _decide(cur, task_id, cap)
+def test_attempts_and_decisions_stay_as_a_record_task_get_only_counts(cur, task, task_id):
+    cur.execute(
+        "INSERT INTO attempt (task_id, attempt, created_by) VALUES (%s, 'tried', 'agent')",
+        (task_id,),
+    )
+    cur.execute(
+        "INSERT INTO decision (task_id, decision, created_by) VALUES (%s, '160 battles', 'agent')",
+        (task_id,),
+    )
+    got = task_history.expanded_task(cur, task_id)
+    assert got["past_record"]["attempts"] == 1 and got["past_record"]["decisions"] == 1
+    assert got["past_record"]["read_with"] == f"mashu task show {task_id}"
+    assert "attempts" not in got and "decisions" not in got
 
-    with pytest.raises(OverLimitError) as refused:
-        _decide(cur, task_id, 1)
-    answer = server._failure(refused.value)
-    assert (answer["field"], answer["limit"]) == ("decisions in force", cap)
-    assert answer["actual"] == cap + 1
-    assert "supersedes_ids" in answer["error"]
-
-    replaced = _decide(cur, task_id, 1, supersedes=[written[0]["decision_id"]])
-    assert task_history.decision_count(cur, [task_id])[task_id] == cap
-    assert replaced[0]["supersedes_ids"] == [written[0]["decision_id"]]
+    shown = task_history.expanded_task(cur, task_id, attempts=True, decisions=True)
+    assert [row["decision"] for row in shown["decisions"]] == ["160 battles"]
 
 
-def test_a_task_already_over_the_cap_may_hold_or_lower_its_count(cur, task, task_id):
-    cap = task_history.DECISIONS_IN_FORCE_MAX
-    old = [uuid4() for _ in range(cap + 3)]
-    for ident in old:
-        cur.execute(
-            "INSERT INTO decision (decision_id, task_id, decision, created_by) "
-            "VALUES (%s, %s, 'written before the cap', 'agent')",
-            (ident, task_id),
-        )
-
-    with pytest.raises(OverLimitError):
-        _decide(cur, task_id, 1)
-    _decide(cur, task_id, 1, supersedes=old[:1])
-    assert task_history.decision_count(cur, [task_id])[task_id] == cap + 3
-    _decide(cur, task_id, 1, supersedes=old[1:4])
-    assert task_history.decision_count(cur, [task_id])[task_id] == cap + 1
+def test_rulings_are_searched_with_the_users_words_those_in_force_first(cur, task, task_id):
+    held = _rule(cur, task_id, 1)[0]
+    checkpoint(
+        cur,
+        tasks.task_get(cur, task_id),
+        rulings=[{"ruling": "ruling kept", "user_instruction": "rule kept"}],
+        withdraw_rulings=[{"ruling_id": str(held["ruling_id"]), "user_instruction": "drop it"}],
+    )
+    found = tasks.ruling_search(cur, "rule")
+    assert [(row["ruling"], row["withdrawn"]) for row in found] == [
+        ("ruling kept", False),
+        ("ruling 0", True),
+    ]
+    assert found[0]["user_said"] == "rule kept"
 
 
 def test_close_freezes_the_last_state_with_the_closing_actor(cur, task, task_id):
@@ -349,57 +451,36 @@ def test_a_windows_home_is_written_from_tilde_in_each_spelling_an_agent_uses(mon
     ]
 
 
-def test_checkpoint_writes_attempts_decisions_and_artifacts_with_the_state(cur, task, task_id):
+def test_checkpoint_writes_rulings_and_artifacts_with_the_state(cur, task, task_id):
     first = checkpoint(
         cur,
         task,
-        decisions=[{"decision": "use one module"}],
         artifacts=[{"kind": "file", "locator": "results/table.csv", "label": "the table"}],
     )
-    earlier, linked = first["decisions"][0], first["artifacts"][0]
+    linked = first["artifacts"][0]
     checkpointed = checkpoint(
         cur,
         first,
         "history arrives with the checkpoint",
         status_text="checkpoint carries its history",
-        attempts=[
-            {"attempt": "append rows in separate calls", "result": "too many calls"},
-            {"attempt": "one call", "reason": "fewer verbs", "next": "measure it"},
-        ],
-        decisions=[
-            {
-                "decision": "keep the module boundary",
-                "reason": "the CLI still reads the rows",
-                "supersedes_ids": [str(earlier["decision_id"])],
-            }
-        ],
+        rulings=[RULE],
         artifacts=[{"kind": "git_commit", "locator": "9d12f5a", "label": "fold history"}],
     )
 
-    assert [row["attempt"] for row in checkpointed["attempts"]] == [
-        "append rows in separate calls",
-        "one call",
-    ]
-    assert checkpointed["attempts"][1]["next"] == "measure it"
-    assert checkpointed["decisions"][0]["supersedes_ids"] == [earlier["decision_id"]]
     assert checkpointed["artifacts"][0]["label"] == "fold history"
     assert checkpointed["state"]["status_text"] == "checkpoint carries its history"
-    assert len(task_history.decision_list(cur, task_id)) == 2
     assert checkpointed["unchecked"] is False
     assert task_history.checkpoint_list(cur, task_id) == []
 
     detail = _replaced_details(cur, task_id)[-1]
     assert detail["what_changed"] == "history arrives with the checkpoint"
-    assert detail["attempt_ids"] == [str(row["attempt_id"]) for row in checkpointed["attempts"]]
-    assert detail["decision_ids"] == [str(checkpointed["decisions"][0]["decision_id"])]
+    assert detail["ruling_ids"] == [str(checkpointed["rulings"][0]["ruling_id"])]
     assert detail["reference_ids"] == [str(checkpointed["artifacts"][0]["reference_id"])]
     assert str(linked["reference_id"]) not in detail["reference_ids"]
 
-    expanded = task_history.expanded_task(cur, task_id, attempts=True, artifacts=True)
-    assert len(expanded["attempts"]) == 2
+    expanded = task_history.expanded_task(cur, task_id, artifacts=True)
     assert len(expanded["artifacts"]) == 2
     assert expanded["artifacts"][0]["created_at"] > expanded["artifacts"][1]["created_at"]
-    assert "decisions" not in expanded
     assert "checkpoints" not in expanded
     assert "task" in expanded and "state" in expanded
 
@@ -409,31 +490,20 @@ def test_checkpoint_writes_attempts_decisions_and_artifacts_with_the_state(cur, 
     [
         (
             {
-                "attempts": [{"attempt": "fine"}, {"attempt": "x" * 301}],
-                "decisions": [{"decision": "would be recorded"}],
+                "rulings": [RULE, {**RULE, "user_instruction": "x" * 301}],
                 "artifacts": [{"kind": "file", "locator": "src/main.py"}],
             },
-            r"^attempts\[1\]\.attempt is 301 chars and the limit is 300",
+            r"^rulings\[1\]\.user_instruction is 301 chars and the limit is 300",
         ),
-        (
-            {"attempts": [{"attempt": "try", "result": "x" * 501}]},
-            r"^attempts\[0\]\.result is 501 chars",
-        ),
-        (
-            {"attempts": [{"attempt": "try", "reason": "x" * 501}]},
-            r"^attempts\[0\]\.reason is 501 chars",
-        ),
-        (
-            {"attempts": [{"attempt": "try", "next": "x" * 301}]},
-            r"^attempts\[0\]\.next is 301 chars",
-        ),
-        ({"attempts": [{"attempt": "try", "outcome": "worked"}]}, "unknown key"),
-        ({"decisions": [{"reason": "no decision given"}]}, "missing required"),
+        ({"rulings": [{**RULE, "outcome": "worked"}]}, "unknown key"),
+        ({"rulings": [{"ruling": "no words given"}]}, "missing required"),
         ({"artifacts": [{"kind": "file"}]}, "missing required"),
         ({"artifacts": [{"kind": "tarball", "locator": "a.tgz"}]}, r"artifacts\[0\]\.kind"),
-        ({"decisions": [{"decision": "d", "supersedes_ids": ["not-a-uuid"]}]}, "UUID"),
-        ({"decisions": [{"decision": "d", "supersedes_ids": "not-a-list"}]}, "list of"),
-        ({"attempts": ["just a string"]}, "must be an object"),
+        (
+            {"withdraw_rulings": [{"ruling_id": "not-a-uuid", "user_instruction": "drop"}]},
+            "UUID",
+        ),
+        ({"rulings": ["just a string"]}, "must be an object"),
     ],
 )
 def test_one_refused_item_leaves_the_checkpoint_unwritten(cur, task, task_id, items, message):
@@ -482,7 +552,7 @@ def test_one_refused_checkpoint_answers_with_every_problem_over_mcp(mcp, dsn):
         expect_updated_at=made["state"]["updated_at"].isoformat(),
         what_changed="x" * (task_history.HISTORY_LIMITS["what_changed"] + 1),
         next_actions=too_many,
-        attempts=[{"result": "the attempt itself is missing"}],
+        rulings=[{"ruling": "the user's words are missing"}],
     )
     assert refused["ok"] is False
     assert [(p["field"], p["limit"]) for p in refused["over_limit"]] == [
@@ -490,7 +560,46 @@ def test_one_refused_checkpoint_answers_with_every_problem_over_mcp(mcp, dsn):
         ("next_actions", tasks.LIST_MAX_ITEMS),
     ]
     assert len(refused["problems"]) == 3
-    assert refused["problems"][2].startswith("attempts[0]")
+    assert refused["problems"][2].startswith("rulings[0]")
+
+
+@pytest.mark.parametrize("retired", ["attempts", "decisions"])
+def test_a_checkpoint_still_carrying_attempts_or_decisions_is_refused_with_where_they_go(
+    mcp, dsn, retired
+):
+    with db.transaction(dsn) as cur:
+        new_project(cur, "history")
+        made = new_task(cur, "record the task history", "history")
+    refused = mcp(
+        "task_checkpoint",
+        task_id=str(made["task"]["task_id"]),
+        expect_updated_at=made["state"]["updated_at"].isoformat(),
+        status_text="should not land",
+        **{retired: [{"attempt": "tried"}]},
+    )
+    assert refused["ok"] is False
+    assert "`approach`" in refused["error"] and "`rulings`" in refused["error"]
+    with db.transaction(dsn) as cur:
+        assert tasks.task_get(cur, made["task"]["task_id"])["state"]["status_text"] is None
+
+
+def test_a_ruling_cap_refusal_is_counted_over_mcp(mcp, dsn):
+    with db.transaction(dsn) as cur:
+        settings.set_limits(cur, {"ruling_count": 1}, actor="user")
+        new_project(cur, "history")
+        made = new_task(cur, "record the task history", "history")
+        held = checkpoint(cur, made, rulings=[RULE])
+    refused = mcp(
+        "task_checkpoint",
+        task_id=str(made["task"]["task_id"]),
+        expect_updated_at=held["state"]["updated_at"].isoformat(),
+        rulings=[{"ruling": "one more", "user_instruction": "これも"}],
+    )
+    assert (refused["ok"], refused["field"]) == (False, "rulings")
+    assert refused["refusal_recorded"] is True
+    with db.transaction(dsn) as cur:
+        cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'ruling_cap_refused'")
+        assert cur.fetchone()["n"] == 1
 
 
 def test_frozen_checkpoints_written_before_still_come_back_from_task_get(mcp, dsn):
