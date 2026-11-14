@@ -1,8 +1,8 @@
-// Settings: store health, what a session receives, scopes, topics, routes, delivery limits,
+// Settings: store health, mistakes made despite existing knowledge, what a session receives, scopes, topics, routes, delivery limits,
 // the checkpoint interval, the schema, versions and updates, starting at login, and the window's language.
 "use strict";
 
-const SECTIONS = ["health", "bootstrap", "scopes", "topics", "routes", "limits", "interval", "schema", "version", "startup", "display"];
+const SECTIONS = ["health", "missed", "bootstrap", "scopes", "topics", "routes", "limits", "interval", "schema", "version", "startup", "display"];
 
 const settings = { section: "health", editing: null, bootstrapCwd: "", bootstrap: null };
 
@@ -125,9 +125,47 @@ async function healthSection() {
       null,
       fieldList([
         [t("health.ledger"), t("health.n", { n: health.ledger_30d })],
-        [t("health.missed"), missedText(health)],
+        [t("health.missed"), h("span", null, missedText(health), " ", button(t("missed.list"), () => pickSection("missed"), { kind: "quiet small" }))],
       ])
     ),
+  ];
+}
+
+/** Where the knowledge was; `repeats` counts the mistakes that named the same place. */
+function missedPlace(place) {
+  const repeats = place.repeats > 1 ? t("missed.repeats", { n: place.repeats }) : null;
+  if (place.kind === "source") return [t("missed.source"), [tilde(place.source), repeats].filter(Boolean).join(" · ")];
+  const memory = place.kind === "memory";
+  const parts = memory
+    ? [excerpt(place.content, 80), named("health.route", place.route), place.status === "retired" ? t("memory.view.retired") : null, repeats]
+    : [place.name, t(`work.view.${place.view}`), repeats];
+  const open = memory ? () => openMemory(place.memory_id, place.status) : () => openTask(place.task_id, place.view);
+  return [
+    t(memory ? "missed.memory" : "missed.task"),
+    h("span", null, parts.filter(Boolean).join(" · "), " ", button(t("missed.open"), () => open().catch(fail), { kind: "quiet small" })),
+  ];
+}
+
+async function missedSection() {
+  const { pains } = await call("settings.missed");
+  const list = (rows) => entries(rows, (row) => [
+      [day(row.created_at), short(row.ledger_id), row.created_by && who(row.created_by)].filter(Boolean).join(" · "),
+      row.what,
+      ...row.places.map(missedPlace),
+      [t("evidence.prevention"), row.prevention],
+      row.filed_task
+        ? [
+            t("missed.filed"),
+            h("span", null, row.filed_task_name, " ", button(t("missed.open"), () => openTask(row.filed_task, row.filed_task_view).catch(fail), { kind: "quiet small" })),
+          ]
+        : null,
+    ]);
+  const recent = pains.filter((row) => row.recent);
+  const earlier = pains.filter((row) => !row.recent);
+  return [
+    h("h1", { class: "title", text: t("health.missed") }),
+    section(t("health.recent"), recent.length, list(recent)),
+    earlier.length ? section(t("missed.earlier"), earlier.length, list(earlier)) : null,
   ];
 }
 
@@ -524,6 +562,7 @@ function displaySection() {
 
 const SECTION_VIEWS = {
   health: healthSection,
+  missed: missedSection,
   bootstrap: async () => bootstrapSection(),
   scopes: scopesSection,
   topics: topicsSection,

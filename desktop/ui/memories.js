@@ -94,6 +94,19 @@ function shownMemories() {
   return memOrder.place(sortRows(found, memSort.state, memorySortValue), memoryId, key);
 }
 
+/** Open a rule from elsewhere, such as a mistake listed in Settings. */
+async function openMemory(memoryId, status) {
+  const view = status === "retired" ? "retired" : "active";
+  mem.view = view;
+  memSeg.select(view);
+  mem.query = "";
+  memList.pane.querySelector("[data-search]").value = "";
+  mem.selected = memoryId;
+  mem.panel = null;
+  mem.creating = null;
+  await show("memories");
+}
+
 function pickMemory(id) {
   mem.selected = id;
   mem.panel = null;

@@ -100,7 +100,11 @@ function pickWork(id) {
 async function openTask(taskId, view = "active") {
   work.view = view;
   workSeg.select(view);
+  work.query = "";
+  workList.pane.querySelector("[data-search]").value = "";
   work.selected = taskId;
+  work.panel = null;
+  work.creating = null;
   await show("work");
 }
 

@@ -23,6 +23,19 @@ from mashu import (
 #: How suspected delivery failures are split in status.
 DELIVERY_FAILURE_ROUTES = ("pushed", "topic_unread", "topic_read", "guard", "unknown")
 
+# How the rule behind a delivery_failure_suspected event reached the session. A topic rule that
+# failed unread points at its trigger; one that failed after being read points at its wording,
+# so the two are counted apart (memory 10). An unread topic linked to an action is the one the
+# PreToolUse hook stands behind, so it counts as guard.
+FAILURE_ROUTE_SQL = """CASE
+    WHEN detail->>'delivery' IN ('always', 'scope') THEN 'pushed'
+    WHEN detail->>'delivery' = 'guard' THEN 'guard'
+    WHEN detail->>'topic_read' = 'true' THEN 'topic_read'
+    WHEN detail->>'topic_action' IS NOT NULL THEN 'guard'
+    WHEN detail->>'topic_read' = 'false' THEN 'topic_unread'
+    ELSE 'unknown'
+END"""
+
 
 @dataclass(frozen=True)
 class StatusSnapshot:
@@ -152,6 +165,86 @@ def bootstrap_preview(cur: psycopg.Cursor, *, cwd: str, actor: str) -> dict[str,
     )
 
 
+def missed_knowledge(cur: psycopg.Cursor) -> list[dict[str, Any]]:
+    """The pains that knowledge already held should have prevented, newest first.
+
+    One report can name a Memory and a task or file together, so each pain carries every
+    place it named. `repeats` counts the pains that named the same place, this one included.
+    `recent` uses the window the status counts use, so the two agree.
+    """
+    cur.execute(
+        f"""
+        WITH missed AS (
+            SELECT e.ledger_id, e.event_type, e.memory_id,
+                   (e.detail->>'task_id')::uuid AS task_id, e.detail->>'source' AS source,
+                   CASE WHEN e.event_type = 'delivery_failure_suspected'
+                        THEN {FAILURE_ROUTE_SQL} END AS route
+            FROM event_log e
+            WHERE e.event_type IN ('delivery_failure_suspected', 'knowledge_unused')
+        )
+        SELECT x.*, m.content AS memory_content, m.status AS memory_status,
+               t.name AS task_name,
+               CASE WHEN t.task_id IS NULL THEN NULL WHEN t.status = 'closed' THEN 'closed'
+                    WHEN now() > t.active_until THEN 'dormant' ELSE 'active' END AS task_view,
+               count(*) OVER (PARTITION BY x.memory_id) AS memory_repeats,
+               count(*) OVER (PARTITION BY x.task_id) AS task_repeats,
+               count(*) OVER (PARTITION BY x.source) AS source_repeats
+        FROM missed x
+        LEFT JOIN memory m ON m.memory_id = x.memory_id
+        LEFT JOIN task t ON t.task_id = x.task_id
+        """
+    )
+    places: dict[Any, list[dict[str, Any]]] = {}
+    for row in cur.fetchall():
+        named = places.setdefault(row["ledger_id"], [])
+        if row["memory_id"] is not None:
+            named.append(
+                {
+                    "kind": "memory",
+                    "memory_id": row["memory_id"],
+                    "content": row["memory_content"],
+                    "status": row["memory_status"],
+                    "route": row["route"],
+                    "repeats": row["memory_repeats"],
+                }
+            )
+        if row["task_id"] is not None:
+            named.append(
+                {
+                    "kind": "task",
+                    "task_id": row["task_id"],
+                    "name": row["task_name"],
+                    "view": row["task_view"],
+                    "repeats": row["task_repeats"],
+                }
+            )
+        if row["source"] is not None:
+            named.append(
+                {"kind": "source", "source": row["source"], "repeats": row["source_repeats"]}
+            )
+    if not places:
+        return []
+    cur.execute(
+        """
+        SELECT l.ledger_id, l.created_at, l.created_by, l.what, l.prevention,
+               EXISTS (
+                   SELECT 1 FROM event_log e
+                   WHERE e.ledger_id = l.ledger_id
+                     AND e.event_type IN ('delivery_failure_suspected', 'knowledge_unused')
+                     AND e.created_at >= now() - interval '30 days'
+               ) AS recent,
+               l.prevention_kind, l.filed_task, t.name AS filed_task_name,
+               CASE WHEN t.task_id IS NULL THEN NULL WHEN t.status = 'closed' THEN 'closed'
+                    WHEN now() > t.active_until THEN 'dormant' ELSE 'active' END AS filed_task_view
+        FROM ledger l LEFT JOIN task t ON t.task_id = l.filed_task
+        WHERE l.ledger_id = ANY(%s)
+        ORDER BY l.created_at DESC, l.ledger_id
+        """,
+        (list(places),),
+    )
+    return [{**row, "places": places[row["ledger_id"]]} for row in cur.fetchall()]
+
+
 def status_snapshot(cur: psycopg.Cursor) -> StatusSnapshot:
     """Collect the store health numbers used by both status views."""
     schema_pending = tuple(migrate.pending(cur))
@@ -171,20 +264,9 @@ def status_snapshot(cur: psycopg.Cursor) -> StatusSnapshot:
     pending = cur.fetchone()
     cur.execute("SELECT count(*) AS n FROM ledger WHERE created_at >= now() - interval '30 days'")
     ledger_30d = cur.fetchone()["n"]
-    # A topic rule that failed unread points at its trigger; one that failed after being
-    # read points at its wording, so the two are counted apart (memory 10). An unread topic linked
-    # to an action is the one the PreToolUse hook stands behind, so it counts as guard.
     cur.execute(
-        """
-        SELECT CASE
-                   WHEN detail->>'delivery' IN ('always', 'scope') THEN 'pushed'
-                   WHEN detail->>'delivery' = 'guard' THEN 'guard'
-                   WHEN detail->>'topic_read' = 'true' THEN 'topic_read'
-                   WHEN detail->>'topic_action' IS NOT NULL THEN 'guard'
-                   WHEN detail->>'topic_read' = 'false' THEN 'topic_unread'
-                   ELSE 'unknown'
-               END AS route,
-               count(*) AS n
+        f"""
+        SELECT {FAILURE_ROUTE_SQL} AS route, count(*) AS n
         FROM event_log
         WHERE event_type = 'delivery_failure_suspected'
           AND created_at >= now() - interval '30 days'

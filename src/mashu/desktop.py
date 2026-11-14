@@ -529,6 +529,10 @@ def health(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     }
 
 
+def missed(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    return {"pains": application.missed_knowledge(cur)}
+
+
 def bootstrap_preview(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     """What a session opened in the directory given receives; it is recorded as served."""
     return application.bootstrap_preview(cur, cwd=_text(args, "cwd"), actor=ACTOR)
@@ -694,6 +698,7 @@ OPERATIONS: dict[str, Operation] = {
     "task.reopen": task_reopen,
     "project.save": project_save,
     "settings.health": health,
+    "settings.missed": missed,
     "settings.bootstrap": bootstrap_preview,
     "scope.list": scope_list,
     "scope.save": scope_save,
@@ -730,6 +735,7 @@ READS = frozenset(
         "work.tasks",
         "work.projects",
         "settings.health",
+        "settings.missed",
         "scope.list",
         "topic.list",
         "route.list",
