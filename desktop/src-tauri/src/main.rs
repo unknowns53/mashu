@@ -366,6 +366,14 @@ fn main() {
                 api.prevent_close();
             }
         })
-        .run(context)
-        .expect("error while running Mashu");
+        .build(context)
+        .expect("error while building Mashu")
+        .run(|_app, _event| {
+            // On macOS, clicking the Dock icon of a running app raises Reopen and no window
+            // event, so the window hidden on close is shown again from here.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                show(_app);
+            }
+        });
 }

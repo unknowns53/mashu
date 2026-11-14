@@ -190,7 +190,7 @@ remote-shell command \b(cluster-wrapper|scheduler-cmd)\b
 | 作業（Work） | active、dormant、closed の Task と Project。Task の作成、編集、lease（活動期限）の延長、close、reopen と、Project の作成と編集 |
 | 設定（Settings） | 容量と最近の記録、Bootstrap preview、Scope と Topic と Route の編集、checkpoint の間隔、配信量の上限、migration の適用、表示の言語、バージョンと更新 |
 
-編集は、詳細の表示をその場で入力欄に変えて行う。⌘/Ctrl + Enter で保存し、Esc で取り消す。一覧は ↑↓ か j/k で移動し、/ で検索欄へ移る。retire した規則を書き戻す操作、似た Task がある中での Task の作成、削除、migration の適用は、理由や候補を見せて確認してから実行する。Bootstrap preview は入力したディレクトリで開くセッションに配信される内容を示し、TUI と同様に記録される。ウィンドウを閉じてもトレイに残り、終了するときはトレイのメニューの Quit を使う。設定の「起動」で「ログイン時に起動」にチェックを入れると、ログインのたびにアプリが起動する。表示の言語は日本語と英語を切り替えられる。CLI と TUI の文言は英語だけである。
+編集は、詳細の表示をその場で入力欄に変えて行う。⌘/Ctrl + Enter で保存し、Esc で取り消す。一覧は ↑↓ か j/k で移動し、/ で検索欄へ移る。retire した規則を書き戻す操作、似た Task がある中での Task の作成、削除、migration の適用は、理由や候補を見せて確認してから実行する。Bootstrap preview は入力したディレクトリで開くセッションに配信される内容を示し、TUI と同様に記録される。ウィンドウを閉じてもトレイに残り、トレイのアイコンか、macOS では Dock のアイコンを押すと再び開く。終了するときはトレイのメニューの Quit を使う。設定の「起動」で「ログイン時に起動」にチェックを入れると、ログインのたびにアプリが起動する。表示の言語は日本語と英語を切り替えられる。CLI と TUI の文言は英語だけである。
 
 TUI は四つの領域（Attention、Memories、Work、Settings & health）を持ち、デスクトップアプリとほぼ同じことができる。矢印か j/k で移動し、Enter で開き、Esc か ← で一段戻る。q はどの画面からでも Mashu を終了し、? はその画面のキーの説明を出す。`e` で編集欄が開くので、その場で直して Enter で保存する。`VISUAL` か `EDITOR` を設定していれば、そのエディタで開く。
 
