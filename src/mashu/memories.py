@@ -95,6 +95,22 @@ def topic_home(cur: psycopg.Cursor, delivery: str, topic_id: UUID | None) -> UUI
     return topics.lock_open_topic(cur, topic_id)["scope_id"]
 
 
+def delivered_scope(
+    cur: psycopg.Cursor, delivery: str, scope_id: UUID | None, topic_id: UUID | None
+) -> UUID | None:
+    """The scope_id a Memory row keeps for its delivery.
+
+    An always rule reaches every session, so a scope named with it (a candidate's place of
+    origin, a scope picked before the delivery changed) is dropped rather than kept as a home
+    that would hold the scope against removal.
+    """
+    if delivery == "always":
+        return None
+    if delivery == "topic":
+        return topic_home(cur, delivery, topic_id)
+    return scope_id
+
+
 def _retired_conflicts(
     cur: psycopg.Cursor, content: str, acknowledged_conflicts: list[UUID] | None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -199,8 +215,7 @@ def remember(
     check_body(content, limit=settings.limit(cur, "content_limit"), why=why)
     check_delivery(delivery, scope_id, topic_id)
     others = _check_other_scopes(delivery, scope_id, also_scope_ids)
-    if delivery == "topic":
-        scope_id = topic_home(cur, delivery, topic_id)
+    scope_id = delivered_scope(cur, delivery, scope_id, topic_id)
 
     verdict = redact.gate({"content": content, "why": why})
 
@@ -637,9 +652,7 @@ def restore(
     ]
     if active:
         raise MashuError("a similar active Memory already exists; resolve that Memory first")
-    home = current["scope_id"]
-    if current["delivery"] == "topic":
-        home = topic_home(cur, "topic", current["topic_id"])
+    home = delivered_scope(cur, current["delivery"], current["scope_id"], current["topic_id"])
     admission = capacity.check_admission(
         cur,
         content=current["content"],
@@ -707,8 +720,7 @@ def set_delivery(
         raise MashuError("pass a scope or clear it, not both")
     home = None if clear_scope else (current["scope_id"] if scope_id is None else scope_id)
     check_delivery(delivery, home, topic_id)
-    if delivery == "topic":
-        home = topic_home(cur, delivery, topic_id)
+    home = delivered_scope(cur, delivery, home, topic_id)
     before = other_scopes(cur, memory_id)
     if also_scope_ids is None:
         kept = delivery == "scope" and current["delivery"] == "scope"

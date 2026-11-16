@@ -13,7 +13,6 @@ from mashu import (
     migrate,
     projects,
     settings,
-    task_history,
     tasks,
     temporary,
     topics,
@@ -56,12 +55,18 @@ def active_states(cur: psycopg.Cursor, scope_id: UUID | None = None) -> list[dic
     """The active tasks whose state this session is entitled to, in a fixed order."""
     cur.execute(
         "SELECT to_regclass('task') IS NOT NULL AS tasks, "
-        "to_regclass('task_close_proposal') IS NOT NULL AS proposals"
+        "to_regclass('task_close_proposal') IS NOT NULL AS proposals, "
+        "to_regclass('ruling') IS NOT NULL AS rulings"
     )
     available = cur.fetchone()
     if not available["tasks"]:
         return []
-    rows = tasks.task_list(cur, activity="active", include_proposals=available["proposals"])
+    rows = tasks.task_list(
+        cur,
+        activity="active",
+        include_proposals=available["proposals"],
+        include_rulings=available["rulings"],
+    )
     homes = {
         row["project_id"]: row["scope_id"]
         for row in projects.list_projects(cur, include_archived=True)
@@ -97,12 +102,6 @@ def session_bootstrap(
     # Topic lines sit in the Memory seats.
     topic_tokens = pushed_cost([row["line"] for row in index])
     memory_tokens = pushed_cost([row["content"] for row in always + scoped]) + topic_tokens
-    ruled = task_history.ruling_count(cur, [row["task"]["task_id"] for row in states])
-    for row in states:
-        row["state"] = {
-            **row["state"],
-            "rulings_count": ruled.get(row["task"]["task_id"], 0),
-        }
     costed = [
         {
             "task_id": row["task"]["task_id"],

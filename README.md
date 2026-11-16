@@ -471,7 +471,9 @@ User が配信先の変更を指示した      → memory_redeliver
 | `MASHU_GUARD_ACTIONS` | PreToolUse hook が action を判定する規則のファイルの場所。既定は `.mashu-guard-actions` |
 | `MASHU_EXE` | デスクトップアプリが起動する `mashu` の実行ファイル |
 | `MASHU_TEST_DB` | テスト用の DB の名前。既定は `mashu_test` |
-| `MASHU_TOTAL_CAPACITY`、`MASHU_CAPACITY`、`MASHU_ALWAYS_CAPACITY`、`MASHU_PROJECT_CAPACITY`、`MASHU_CARD_OVERFLOW_CAPACITY`、`MASHU_DECISION_CAPACITY`、`MASHU_TASK_CARD_CAPACITY`、`MASHU_TASK_DETAIL_CAPACITY`、`MASHU_TEMPORARY_CAPACITY`、`MASHU_TOPIC_CAPACITY`、`MASHU_CONTENT_LIMIT` | 容量と本文の字数の既定値を差し替える。DB の `setting` テーブルに値がある上限には無効 |
+| `MASHU_TOTAL_CAPACITY`、`MASHU_CAPACITY`、`MASHU_ALWAYS_CAPACITY`、`MASHU_PROJECT_CAPACITY`、`MASHU_CARD_OVERFLOW_CAPACITY`、`MASHU_TASK_CARD_CAPACITY`、`MASHU_TASK_DETAIL_CAPACITY`、`MASHU_TEMPORARY_CAPACITY`、`MASHU_TOPIC_CAPACITY`、`MASHU_CONTENT_LIMIT`、`MASHU_RULING_COUNT`、`MASHU_RULING_CHARS`、`MASHU_RULING_WORDS_CHARS` | 容量、本文の字数、Task ごとの ruling の件数と字数の既定値を差し替える。DB の `setting` テーブルに値がある上限には無効 |
+| `MASHU_TASK_LEASE_DAYS` | Task の lease（活動期限）の日数。既定は 14 |
+| `MASHU_MATCH_THRESHOLD` | 重複や類似を判定する trigram の類似度の閾値。既定は 0.45 |
 
 ## デスクトップアプリの仕組み
 

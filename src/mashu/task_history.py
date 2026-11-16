@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 
-from mashu import approvals, events, redact, settings, tasks
+from mashu import approvals, events, projects, redact, settings, tasks
 from mashu.errors import (
     MalformedRequestError,
     MashuError,
@@ -411,6 +411,7 @@ def checkpoint(
         name=name,
         session=session,
         history={key: value for key, value in history.items() if value},
+        rulings_count=current["rulings_count"] - len(withdrawal_items) + len(ruling_items),
         **given,
     )
     result = {
@@ -427,6 +428,11 @@ def checkpoint(
             for ident, item in zip(reference_ids, artifact_items, strict=True)
         ],
     }
+    if ruling_items or withdrawal_items:
+        # task_update read the task before these rows existed; the card now names them.
+        fresh = tasks.task_get(cur, task_id)
+        home = projects.require_project(cur, fresh["task"]["project_id"])
+        result.update({**fresh, "card_share": tasks.card_share(cur, home)})
     for verdict in verdicts:
         report = _gate_report(verdict)
         result["unchecked"] = bool(result.get("unchecked")) or report["unchecked"]
@@ -570,7 +576,7 @@ def rulings_in_force(cur: psycopg.Cursor, task_id: UUID) -> list[dict[str, Any]]
 
 
 def ruling_count(cur: psycopg.Cursor, task_ids: list[UUID]) -> dict[UUID, int]:
-    """How many rulings are in force on each task, for the card's details line."""
+    """How many rulings are in force on each task."""
     return _in_force_count(cur, task_ids)
 
 

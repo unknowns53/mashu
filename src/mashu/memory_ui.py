@@ -458,15 +458,6 @@ def _delivery_answers(
         scope_name = entered_scope.text or scope_default
         if scope_name is None:
             return None
-    elif scope_default:
-        # An always rule may keep the scope it belonged to; '-' drops it, as mashu deliver
-        # --no-scope does. A rule reaching several scopes keeps the first, its home scope.
-        home = _names(scope_default)[0]
-        kept_scope = screen.editline(f"  scope it belongs to [enter={home}, - drops it]: ", home)
-        if isinstance(kept_scope, screen.Cancelled):
-            return None
-        kept = kept_scope.text or home
-        scope_name = None if kept == "-" else kept
     return chosen, scope_name, topic
 
 

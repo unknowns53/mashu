@@ -213,7 +213,7 @@ mashu task close                     決定の画面。open な Task を一覧�
 mashu task close <id>... --outcome   outcome: completed / abandoned / superseded
 ```
 
-close 時は最終 checkpoint を固定して残し、Task を bootstrap から除外する。state のスナップショットを保存するのはこのときだけで、行は終了時点の Current State と、`closed as <outcome>: <理由>` の what_changed を持つ（5.6 節）。ruling / artifact と過去の記録は保持する。closed の再開は `mashu task reopen <id>`（User のみ）。
+close 時は最終 checkpoint を固定して残し、Task を bootstrap から除外する。state のスナップショットを保存するのはこのときだけで、行は終了時点の Current State と、`closed as <outcome>: <理由>` の what_changed を持つ（5.6 節）。理由は提案と同じく 500 字までで、接頭辞を足して what_changed の上限 500 字を超える分は what_changed の写しだけを切り詰める。全文は task の close_reason に残る。ruling / artifact と過去の記録は保持する。closed の再開は `mashu task reopen <id>`（User のみ）。
 
 ### 6.1 Close Proposal — 判定は渡さない、転記だけ消す
 
@@ -374,15 +374,17 @@ Work の `c` は選択中の Task だけを同じ close decision screen で開�
 
 ## 13. スキーマ
 
-Memory の 12 表に Project State の 10 表を加えて 22 表。
+Memory の 12 表と Project State の 11 表に、両者が使う 2 表を加えて 25 表。
 
 ```text
 Memory:        scope route ledger trace memory memory_scope memory_revision topic
                nomination memory_change temporary_context event_log
 
-Project State: project task task_state task_checkpoint
+Project State: project task task_state task_checkpoint task_close_proposal
                ruling ruling_withdrawal artifact_reference
                attempt decision decision_supersession（記録。もう書かない）
+
+共通:          setting（User が変えた上限と間隔） schema_migration（適用済みの migration）
 ```
 
 `ledger` は `prevention_kind` と `filed_task` を持ち（9 節）、CHECK が両者を結ぶ（`filed_task` が非 NULL なら `prevention_kind='work'`）。`ledger` の行は append-only なので、**提出先は行が書かれる前に決まり、後から書き込むことはできない**。矛盾した行を後から直す手段が無いことが、規約ではなく制約で持つ理由である。`ledger` の `ignored_task_id`、`ignored_decision_id`、`ignored_source`（有ったのに使われなかった知識の場所、15 節）は、decision だけを指す行を CHECK で拒む。`ignored_decision_id` は過去の decision を指す CLI 用の引数として残り、MCP の `pain_report` は受け取らない。`memory`、`memory_revision`、`nomination`、`temporary_context` の本文は、空白しか含まない値を CHECK で拒む。

@@ -295,15 +295,6 @@ function deliveryPanel(detail) {
         form({
           fields: [
             { name: "delivery", label: t("delivery.title"), kind: "radio", options: deliveryOptions(), value: detail.delivery },
-            {
-              name: "scope",
-              label: t("delivery.area"),
-              kind: "select",
-              options: areaOptions(choices, t("delivery.area_none")),
-              value: reached[0] || "",
-              hint: t("delivery.area_hint"),
-              show: (values) => values.delivery === "always",
-            },
             { name: "scopes", label: t("delivery.areas"), kind: "checks", options: areaChecks(choices), value: reached, show: isScope },
             ...topicFields(choices, detail.topic_id, isTopic),
           ],
@@ -313,7 +304,6 @@ function deliveryPanel(detail) {
               await call("memory.delivery", {
                 memory_id: detail.memory_id,
                 delivery: values.delivery,
-                scope: values.delivery === "always" ? values.scope || null : null,
                 ...(isScope(values) ? { scopes: values.scopes } : {}),
                 ...topicArgs(isTopic(values) ? values : {}),
               });

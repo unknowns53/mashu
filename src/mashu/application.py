@@ -358,8 +358,9 @@ def dashboard_counts(cur: psycopg.Cursor) -> dict[str, int]:
     temporary_contexts = cur.fetchone()["n"]
     cur.execute("SELECT count(*) AS n FROM project WHERE archived_at IS NULL")
     project_count = cur.fetchone()["n"]
-    cur.execute("SELECT count(*) AS n FROM scope")
-    scope_count = cur.fetchone()["n"]
+    # Read whole rows so a store without archived_at (before 0021) still counts.
+    cur.execute("SELECT * FROM scope")
+    scope_count = sum(1 for row in cur.fetchall() if not row.get("archived_at"))
     cur.execute("SELECT count(*) AS n FROM route")
     route_count = cur.fetchone()["n"]
 

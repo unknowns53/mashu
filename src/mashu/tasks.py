@@ -83,6 +83,7 @@ _STATE_KEYS = (
     "next_actions",
     "updated_at",
     "updated_by",
+    "rulings_count",
 )
 
 #: How a state is titled wherever it is shown.
@@ -91,6 +92,13 @@ _HEADINGS = {
     "dormant": "Last known state as of {date}",
     "closed": "Final state as of {date}",
 }
+
+#: Rulings in force on the task, which its card names; every read that costs a card carries it.
+_RULINGS_COUNT = """
+(SELECT count(*) FROM ruling r
+ WHERE r.task_id = t.task_id
+   AND NOT EXISTS (SELECT 1 FROM ruling_withdrawal w WHERE w.ruling_id = r.ruling_id))::int
+"""
 
 _ACTIVITY = """
 CASE WHEN t.status = 'closed'    THEN 'closed'
@@ -110,14 +118,16 @@ _NO_PROPOSAL_COLUMNS = """
 """
 
 
-def _task_row(include_proposals: bool) -> str:
+def _task_row(include_proposals: bool, include_rulings: bool = True) -> str:
     proposal_columns = _PROPOSAL_COLUMNS if include_proposals else _NO_PROPOSAL_COLUMNS
     proposal_join = _PROPOSAL_JOIN if include_proposals else ""
+    rulings_count = _RULINGS_COUNT if include_rulings else "0"
     return f"""
 SELECT t.*, p.name AS project_name, {_ACTIVITY} AS activity,
        clock_timestamp() - ts.updated_at AS state_age,
        ts.goal, ts.approach, ts.status_text, ts.open_questions, ts.blockers,
        ts.next_actions, ts.updated_at, ts.updated_by,
+       {rulings_count} AS rulings_count,
 {proposal_columns}
 FROM task t
 JOIN project p ON p.project_id = t.project_id
@@ -127,7 +137,6 @@ JOIN task_state ts ON ts.task_id = t.task_id
 
 
 _TASK_ROW = _task_row(True)
-_TASK_ROW_NO_PROPOSALS = _task_row(False)
 
 
 def _floor() -> float:
@@ -239,8 +248,8 @@ def replaced_state(current: dict[str, Any], **given: Any) -> dict[str, Any]:
     """The state a replacement leaves: each field given replaces, each omitted one stays."""
     return _state_of(
         **{
-            field: current[field] if given.get(field) is None else given[field]
-            for field in EDITABLE_FIELDS
+            field: current.get(field) if given.get(field) is None else given[field]
+            for field in (*EDITABLE_FIELDS, "rulings_count")
         }
     )
 
@@ -253,6 +262,8 @@ def _state_of(**fields: Any) -> dict[str, Any]:
         "open_questions": _clean_list(fields.get("open_questions")),
         "blockers": _clean_list(fields.get("blockers")),
         "next_actions": _clean_list(fields.get("next_actions")),
+        # Not a column of task_state; the card names it, so the budget check needs it.
+        "rulings_count": fields.get("rulings_count") or 0,
     }
 
 
@@ -289,7 +300,8 @@ def _card_lines(name: str, state: dict[str, Any]) -> list[tuple[str, str]]:
         if count:
             singular, plural = CARD_COUNT_LABELS[field]
             available.append(f"{count} {singular if count == 1 else plural}")
-    # Counted by the reader that has the history at hand; a state row alone carries none.
+    # Every task read counts the rulings in force; a state built for a write carries the
+    # count that write leaves.
     ruled = state.get("rulings_count") or 0
     if ruled:
         available.append(f"{ruled} user ruling{'' if ruled == 1 else 's'}")
@@ -405,8 +417,12 @@ def task_list(
     project: UUID | str | None = None,
     activity: str = "active",
     include_proposals: bool = True,
+    include_rulings: bool = True,
 ) -> list[dict[str, Any]]:
-    """Tasks in one activity, newest activity first."""
+    """Tasks in one activity, newest activity first.
+
+    The include flags let a store with pending migrations be read without the tables it lacks.
+    """
     if activity not in ("active", "dormant", "open", "closed", "all"):
         raise MashuError(f"unknown activity '{activity}'")
     project_id = projects.require_project(cur, project)["project_id"] if project else None
@@ -417,7 +433,7 @@ def task_list(
         "closed": "t.status = 'closed'",
         "all": "TRUE",
     }[activity]
-    task_row = _TASK_ROW if include_proposals else _TASK_ROW_NO_PROPOSALS
+    task_row = _task_row(include_proposals, include_rulings)
     cur.execute(
         f"""
         {task_row}
@@ -437,6 +453,7 @@ SELECT * FROM (
            clock_timestamp() - ts.updated_at AS state_age,
            ts.goal, ts.approach, ts.status_text, ts.open_questions, ts.blockers,
            ts.next_actions, ts.updated_at, ts.updated_by,
+       {_RULINGS_COUNT} AS rulings_count,
            greatest(
                similarity(t.name, %(name)s),
                CASE WHEN %(goal)s = '' OR coalesce(ts.goal, '') = '' THEN 0
@@ -579,6 +596,7 @@ SELECT * FROM (
            clock_timestamp() - ts.updated_at AS state_age,
            ts.goal, ts.approach, ts.status_text, ts.open_questions, ts.blockers,
            ts.next_actions, ts.updated_at, ts.updated_by,
+       {_RULINGS_COUNT} AS rulings_count,
            greatest(
                similarity(t.name, %(query)s),
                similarity(coalesce(ts.goal, ''), %(query)s),
@@ -674,9 +692,9 @@ def ruling_search(
 
 # the budget (5.3, 8)
 
-_ACTIVE_STATES = """
+_ACTIVE_STATES = f"""
 SELECT t.task_id, t.name, t.last_activity_at, p.scope_id, ts.goal, ts.approach, ts.status_text,
-       ts.open_questions, ts.blockers, ts.next_actions
+       ts.open_questions, ts.blockers, ts.next_actions, {_RULINGS_COUNT} AS rulings_count
 FROM task t
 JOIN project p ON p.project_id = t.project_id
 JOIN task_state ts ON ts.task_id = t.task_id
@@ -815,12 +833,15 @@ def task_update(
     project: UUID | str | None = None,
     session: UUID | None = None,
     history: dict[str, Any] | None = None,
+    rulings_count: int | None = None,
 ) -> dict[str, Any]:
     """Replace the fields given, keeping each omitted one; "" or [] clears a field.
 
     Optionally edits the task's label and project too. `session` names the MCP server
     process writing, and `history` is what task_checkpoint wrote with this state; both are
     kept on the state-replaced event, since a write freezes no checkpoint row.
+    `rulings_count` is how many rulings stand once that history is written, which the card
+    budget is checked against; left out, it is the count the task holds now.
     """
     if expect_updated_at.utcoffset() is None:
         # An offset-less time never equals the stored one, so it would read as a lost race.
@@ -842,6 +863,7 @@ def task_update(
         open_questions=open_questions,
         blockers=blockers,
         next_actions=next_actions,
+        rulings_count=rulings_count,
     )
     _check_limits(
         state,
@@ -935,7 +957,7 @@ def append_next_action(
     _lock(cur)
     task = _require_open(cur, task_id)
     current = task_get(cur, task_id)
-    state = _state_of(**{field: current["state"][field] for field in EDITABLE_FIELDS})
+    state = replaced_state(current["state"])
     if text in state["next_actions"]:
         return {**current, "appended": False, "reason": "this next action is already on the task"}
     state["next_actions"] = [*state["next_actions"], text]
@@ -985,7 +1007,7 @@ def lock_close_snapshot(cur: psycopg.Cursor, task_id: UUID) -> dict[str, Any]:
 
 # ending, which is a person's judgement (6)
 
-#: What a proposed reason may run to.
+#: What a reason for ending a task may run to, proposed or given at close.
 PROPOSAL_REASON_MAX = 500
 
 
@@ -1056,6 +1078,8 @@ def close(
     if outcome not in OUTCOMES:
         raise MashuError(f"outcome must be one of {', '.join(OUTCOMES)}")
     reason = reason.strip() if reason and reason.strip() else None
+    if reason and len(reason) > PROPOSAL_REASON_MAX:
+        raise MalformedRequestError([OverLimit("reason", PROPOSAL_REASON_MAX, len(reason))])
     _lock(cur)
     task = _require_open(cur, task_id)
     cur.execute(
@@ -1064,9 +1088,14 @@ def close(
     )
     proposal = cur.fetchone()
     verdict = _gate({"reason": reason})
-    what_changed = f"closed as {outcome}" + (f": {reason}" if reason else "")
     from mashu import task_history
 
+    # The checkpoint's what_changed has its own ceiling, which a reason at its limit passes
+    # once the prefix is added. Only that copy is cut; close_reason keeps the whole text.
+    what_changed = f"closed as {outcome}" + (f": {reason}" if reason else "")
+    ceiling = task_history.HISTORY_LIMITS["what_changed"]
+    if len(what_changed) > ceiling:
+        what_changed = what_changed[: ceiling - 1] + "…"
     task_history._freeze_current(cur, task_id, actor=actor, what_changed=what_changed)
     cur.execute(
         """

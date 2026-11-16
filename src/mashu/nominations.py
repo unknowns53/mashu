@@ -528,8 +528,7 @@ def admit(
     )
 
     memories.check_delivery(delivery, home, topic_id)
-    if delivery == "topic":
-        home = memories.topic_home(cur, delivery, topic_id)
+    home = memories.delivered_scope(cur, delivery, home, topic_id)
 
     verdict = redact.gate({"content": final})
     if verdict.unchecked:

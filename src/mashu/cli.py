@@ -341,6 +341,10 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     return 0
 
 
+#: An always rule keeps no scope (memory 4), so a scope named with it would be dropped unseen.
+ALWAYS_TAKES_NO_SCOPE = "an always rule reaches every session, so it takes no --scope"
+
+
 def cmd_remember(args: argparse.Namespace) -> int:
     if args.until is not None:
         if (
@@ -367,6 +371,8 @@ def cmd_remember(args: argparse.Namespace) -> int:
             "omit --scope and --delivery"
         )
     delivery = args.delivery or ("topic" if args.topic else "scope" if args.scope else "always")
+    if delivery == "always" and args.scope:
+        raise MashuError(ALWAYS_TAKES_NO_SCOPE)
     # memories.remember holds the same limit; checked here so the refusal names the flag.
     with db.transaction(args.dsn) as cur:
         limit = settings.limit(cur, "content_limit")
@@ -1094,6 +1100,8 @@ def cmd_review(args: argparse.Namespace) -> int:
                 if (args.scope or nomination.get("scope_id"))
                 else "always"
             )
+            if delivery == "always" and args.scope:
+                raise MashuError(ALWAYS_TAKES_NO_SCOPE)
             request_id = args.request_id or uuid4()
             row = nominations.admit(
                 cur,
@@ -1129,6 +1137,8 @@ def cmd_review(args: argparse.Namespace) -> int:
 
 
 def cmd_deliver(args: argparse.Namespace) -> int:
+    if args.scope and args.delivery == "always":
+        raise MashuError(ALWAYS_TAKES_NO_SCOPE)
     if args.scope and len(args.scope) > 1 and args.delivery != "scope":
         raise MashuError("only scope delivery takes more than one --scope")
     with db.transaction(args.dsn) as cur:
@@ -1143,7 +1153,6 @@ def cmd_deliver(args: argparse.Namespace) -> int:
             delivery=args.delivery,
             actor=ACTOR,
             scope_id=scope_id,
-            clear_scope=args.no_scope,
             topic_id=_topic(cur, args.topic),
             also_scope_ids=others if args.scope and args.delivery == "scope" else None,
         )
@@ -2120,11 +2129,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="a scope it reaches, for scope; repeat for several, and scopes left out stop "
         "receiving it",
-    )
-    deliver.add_argument(
-        "--no-scope",
-        action="store_true",
-        help="drop the scope it carried, so an always rule belongs to no scope",
     )
     deliver.set_defaults(func=cmd_deliver)
 

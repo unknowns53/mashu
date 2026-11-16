@@ -144,6 +144,9 @@ def revise(
     if not content:
         raise MashuError("temporary context cannot be empty")
     verdict = redact.gate({"content": content})
+    # convert_to_memory takes this lock before the row; taking them in the same order here
+    # keeps the two from waiting on each other.
+    cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (capacity.LOCK_NAMESPACE, LOCK_TEMPORARY))
     cur.execute(
         "SELECT * FROM temporary_context WHERE context_id = %s AND expires_at > now() FOR UPDATE",
         (context_id,),

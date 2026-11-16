@@ -120,12 +120,18 @@ def main() -> int:
     if not action:
         return 0
 
-    session = str(event.get("session_id") or "unknown")
+    # The id becomes a file name, so nothing in it may name another directory.
+    session = re.sub(r"[^A-Za-z0-9_-]", "_", str(event.get("session_id") or "unknown"))
     marker = MARKERS / f"{session}.{action}.{generation(event.get('transcript_path'))}"
     # The rules are shown once per session and compaction; a stop on every first call
     # cost more tempo than it saved.
     if marker.exists() or marker.with_name(marker.name + FOLLOWED).exists():
         return 0
+
+    # The scope is routed from the session's directory, which the hook may not run in.
+    where = event.get("cwd")
+    if not where or not pathlib.Path(where).is_dir():
+        where = None
 
     try:
         done = subprocess.run(
@@ -133,6 +139,7 @@ def main() -> int:
             capture_output=True,
             text=True,
             timeout=20,
+            cwd=where,
         )
     except (OSError, subprocess.SubprocessError):
         # A guard that cannot run does not block the work.

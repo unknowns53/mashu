@@ -279,13 +279,12 @@ def test_a_condition_repeating_a_withdrawn_rule_converts_only_after_explicit_yes
     assert standing == ([] if active else [context["context_id"]])
 
 
-@pytest.mark.parametrize(("typed", "kept"), [("", True), ("-", False)])
-def test_a_rule_made_always_keeps_its_scope_unless_it_is_dropped(dsn, monkeypatch, typed, kept):
+def test_a_rule_made_always_drops_its_scope(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
         home = scopes.require_scope(cur, "deployments")["scope_id"]
     memory = remember(dsn, delivery="scope", scope_id=home)
-    keys(monkeypatch, "d", "always", typed, "q")
+    keys(monkeypatch, "d", "always", "q")
 
     assert memory_ui.run(dsn) == 0
     row = memory_row(dsn, memory["memory_id"])
-    assert (row["delivery"], row["scope_id"]) == ("always", home if kept else None)
+    assert (row["delivery"], row["scope_id"]) == ("always", None)

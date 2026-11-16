@@ -114,7 +114,8 @@ def test_an_admission_may_reword_the_rule_and_choose_where_it_lands(cur, scope_i
     )
     assert memory["content"] == "run the migration first"
     assert memory["delivery"] == "always"
-    assert memory["scope_id"] == str(scope_id)
+    # The candidate's scope is where it came from; an always rule keeps none.
+    assert memory["scope_id"] is None
 
 
 def test_a_pending_candidate_can_be_reworded_without_being_decided(cur):

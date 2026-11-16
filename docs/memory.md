@@ -82,7 +82,7 @@ append-only の記録で、1 エントリが一度の痛みに対応する。
 | フィールド | 内容 |
 |---|---|
 | content | push される全文。規則だけを一文で書き、新しく書く本文は 1 件 `content_limit`（既定 120 字）まで |
-| scope_id | 所属 Scope。無指定は全域を意味する（delivery = `always` の規則と、Scope を持たない topic の規則がこれに当たる）。delivery = `scope` の規則は、`memory_scope` に挙げたほかの Scope にも届く |
+| scope_id | 所属 Scope。無指定は全域を意味する（delivery = `always` の規則と、Scope を持たない topic の規則がこれに当たる）。`always` の規則は所属 Scope を持たず、DB の CHECK が拒む。候補の Scope や、配信を変える前の Scope は、`always` で書くときに落とす。CLI で `always` に `--scope` を添えると拒否する。delivery = `scope` の規則は、`memory_scope` に挙げたほかの Scope にも届く |
 | delivery | `always` / `scope` / `topic:<name>` |
 | evidence | 根拠となる `ledger` の行への参照（1 件以上、必須）。参照先が実在する `ledger` の行であることは DB のトリガが検証する。`ledger` は append-only なので、書き込み時に実在した参照は失われない |
 | status | `active` / `retired` |
