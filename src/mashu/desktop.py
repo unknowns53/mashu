@@ -318,6 +318,7 @@ def memory_remember(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
         topic=_topic(args),
         acknowledged=_uuids(args, "acknowledged"),
         actor=ACTOR,
+        scope_names=_lines(args, "scopes"),
     )
 
 
@@ -359,6 +360,7 @@ def memory_delivery(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
         scope_name=_optional(args, "scope"),
         topic=_topic(args),
         actor=ACTOR,
+        scope_names=_lines(args, "scopes") if args.get("scopes") is not None else None,
     )
 
 
@@ -542,19 +544,16 @@ def scope_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     return {"scopes": scopes.list_scopes(cur)}
 
 
+def scope_remove(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    return scopes.remove_scope(cur, _uuid(args, "scope_id"), actor=ACTOR)
+
+
 def scope_save(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    """Create or edit a scope; `includes`, when sent, is the whole list of scopes it includes."""
     scope_id = _uuid_or_none(args, "scope_id")
     name, summary = _text(args, "name"), _optional(args, "summary")
-    included = _lines(args, "includes") if args.get("includes") is not None else None
     if scope_id is None:
-        row = scopes.create_scope(cur, name=name, summary=summary, actor=ACTOR)
-    else:
-        row = scopes.update_scope(cur, scope_id, name=name, summary=summary, actor=ACTOR)
-    if included is not None:
-        wanted = [scopes.require_scope(cur, other)["scope_id"] for other in included]
-        row["includes"] = scopes.set_includes(cur, row["scope_id"], wanted, actor=ACTOR)["includes"]
-    return row
+        return scopes.create_scope(cur, name=name, summary=summary, actor=ACTOR)
+    return scopes.update_scope(cur, scope_id, name=name, summary=summary, actor=ACTOR)
 
 
 def topic_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
@@ -709,6 +708,7 @@ OPERATIONS: dict[str, Operation] = {
     "settings.bootstrap": bootstrap_preview,
     "scope.list": scope_list,
     "scope.save": scope_save,
+    "scope.remove": scope_remove,
     "topic.list": topic_list,
     "topic.save": topic_save,
     "topic.remove": topic_remove,

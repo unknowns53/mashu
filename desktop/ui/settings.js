@@ -195,12 +195,7 @@ function bootstrapSection() {
 function bootstrapView(answer) {
   const rules = (rows) => entries(rows, (row) => [null, row.content]);
   return [
-    h("p", {
-      class: "sub",
-      text:
-        `${t("bootstrap.area")}: ${answer.scope || t("bootstrap.unrouted")}` +
-        ((answer.includes || []).length ? ` · ${t("bootstrap.includes")}: ${answer.includes.join(", ")}` : ""),
-    }),
+    h("p", { class: "sub", text: `${t("bootstrap.area")}: ${answer.scope || t("bootstrap.unrouted")}` }),
     h(
       "div",
       { class: "meters preview-total" },
@@ -216,19 +211,12 @@ function bootstrapView(answer) {
 
 async function scopesSection() {
   const { scopes } = await call("scope.list");
-  // Inclusion is one level deep: a scope others include cannot include, and only scopes that
-  // include nothing can be included.
-  const includable = (row) =>
-    scopes.filter((other) => (!row || other.scope_id !== row.scope_id) && !other.includes.length).map((other) => [other.name, other.name]);
   const edit = (row) =>
     editInSection({
       title: row ? row.name : t("scope.new"),
       fields: [
         { name: "name", label: t("scope.name"), value: row ? row.name : "" },
         { name: "summary", label: t("scope.summary"), kind: "area", rows: 2, value: row ? row.summary : "" },
-        ...(row && row.included_by.length
-          ? []
-          : [{ name: "includes", label: t("scope.includes"), kind: "checks", options: includable(row), value: row ? row.includes : [], hint: t("scope.includes_hint") }]),
       ],
       submit: row ? t("common.save") : t("common.create"),
       done: t("scope.saved"),
@@ -239,21 +227,26 @@ async function scopesSection() {
         return "";
       },
     });
+  const remove = async (row) => {
+    const yes = await confirmDialog({ title: t("scope.remove_confirm"), lines: [row.name, t("scope.remove_note")], confirm: t("common.remove"), danger: true });
+    if (!yes) return;
+    act(async () => {
+      const removed = await call("scope.remove", { scope_id: row.scope_id });
+      return removed.removed === "archived" ? t("scope.archived") : "";
+    }, t("scope.removed"));
+  };
   return [
     sectionHead(t("settings.scopes"), button(t("scope.new"), () => edit(null))),
     table(
-      [t("scope.name"), t("scope.rules"), t("scope.tokens"), t("scope.includes"), t("scope.summary")],
+      [t("scope.name"), t("scope.rules"), t("scope.tokens"), t("scope.summary")],
       scopes,
       (row) => [
         [row.name, "name"],
         [String(row.n_active), row.n_active ? "num" : "num zero"],
         [`${row.push_tokens} token`, row.push_tokens ? "num" : "num zero"],
-        row.included_by.length
-          ? [t("scope.included_by", { names: row.included_by.join(", ") }), "muted"]
-          : [row.includes.join(", "), "name"],
         [row.summary || "", "muted"],
       ],
-      (row) => [button(t("common.edit"), () => edit(row), { kind: "quiet small" })]
+      (row) => [button(t("common.edit"), () => edit(row), { kind: "quiet small" }), button(t("common.remove"), () => remove(row), { kind: "quiet small danger" })]
     ),
   ];
 }

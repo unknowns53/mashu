@@ -56,7 +56,7 @@ _HELP_KEYS = "  space read on   q quit   any other key goes back"
 #: Each delivery in one plain line, shown wherever a person chooses one.
 DELIVERY_CHOICES = (
     ("always", "every session, at start"),
-    ("scope", "sessions in one Scope, at start"),
+    ("scope", "sessions in the chosen Scopes, at start"),
     ("topic", "its trigger is listed at start; read when that work begins"),
 )
 
@@ -448,9 +448,9 @@ def _delivery_answers(
             return None
     elif chosen == "scope":
         prompt = (
-            f"  scope name [enter={scope_default}]: "
+            f"  scope names, comma-separated [enter={scope_default}]: "
             if scope_default
-            else "  scope name [required]: "
+            else "  scope names, comma-separated [required]: "
         )
         entered_scope = screen.editline(prompt, scope_default or "")
         if isinstance(entered_scope, screen.Cancelled):
@@ -460,13 +460,12 @@ def _delivery_answers(
             return None
     elif scope_default:
         # An always rule may keep the scope it belonged to; '-' drops it, as mashu deliver
-        # --no-scope does.
-        kept_scope = screen.editline(
-            f"  scope it belongs to [enter={scope_default}, - drops it]: ", scope_default
-        )
+        # --no-scope does. A rule reaching several scopes keeps the first, its home scope.
+        home = _names(scope_default)[0]
+        kept_scope = screen.editline(f"  scope it belongs to [enter={home}, - drops it]: ", home)
         if isinstance(kept_scope, screen.Cancelled):
             return None
-        kept = kept_scope.text or scope_default
+        kept = kept_scope.text or home
         scope_name = None if kept == "-" else kept
     return chosen, scope_name, topic
 
@@ -549,6 +548,11 @@ def _restore(dsn: str | None, row: dict[str, Any]) -> tuple[str, bool]:
             return screen.danger(f"  {refusal}"), False
 
 
+def _names(entered: str | None) -> list[str]:
+    """The scope names typed into one comma-separated answer."""
+    return [name.strip() for name in (entered or "").split(",") if name.strip()]
+
+
 def _set_delivery(dsn: str | None, row: dict[str, Any]) -> str:
     answers = _delivery_answers(
         row["delivery"],
@@ -567,6 +571,7 @@ def _set_delivery(dsn: str | None, row: dict[str, Any]) -> str:
             scope_name=scope_name,
             topic=topic,
             actor=ACTOR,
+            scope_names=_names(scope_name) if delivery == "scope" else None,
         )
     label = f"topic:{topic['name']}" if topic else changed["delivery"]
     return screen.success(f"  ✓ delivery {_short(row['memory_id'])}  {label}")
@@ -608,6 +613,7 @@ def _remember(dsn: str | None) -> tuple[str, UUID | None]:
                     topic=topic,
                     acknowledged=acknowledged,
                     actor=ACTOR,
+                    scope_names=_names(scope_name) if delivery == "scope" else (),
                 )
             message = screen.success(f"  ✓ remembered {_short(row['memory_id'])}")
             for warning in row.get("retirement_warnings", []):

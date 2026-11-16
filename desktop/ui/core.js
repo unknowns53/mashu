@@ -1006,6 +1006,11 @@ function areaOptions(choices, none) {
   return [["", none], ...choices.scopes.map((name) => [name, name])];
 }
 
+/** Every area as an option of a checks field. */
+function areaChecks(choices) {
+  return choices.scopes.map((name) => [name, name]);
+}
+
 function deliveryText(row) {
   if (row.delivery === "topic") return `${t("delivery.topic")}: ${row.topic_name}`;
   if (row.delivery === "scope") return `${t("delivery.scope")}: ${row.scope_name || "-"}`;

@@ -75,8 +75,8 @@ def task_project_choices(cur: psycopg.Cursor, *, cwd: str | None) -> ProjectChoi
         scope_name = scope["name"] if scope else None
         cur.execute(
             "SELECT project_id, name FROM project "
-            "WHERE scope_id = ANY(%s) AND archived_at IS NULL ORDER BY name",
-            (list(routing.visible(cur, scope_id)),),
+            "WHERE scope_id = %s AND archived_at IS NULL ORDER BY name",
+            (scope_id,),
         )
         scoped = cur.fetchall()
         if scoped:

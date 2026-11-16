@@ -4,7 +4,9 @@ import os
 
 import pytest
 
+from conftest import new_project, remember, retire
 from mashu import routing, scopes
+from mashu.errors import MashuError
 
 
 def test_the_longest_prefix_wins(cur, scope_id):
@@ -61,3 +63,45 @@ def test_a_windows_route_covers_the_tree_below_it(cur, scope_id):
     assert routing.resolve(cur, "C:\\Work\\Project\\md\\run-01") == (scope_id, True)
     assert routing.resolve(cur, "c:/work/project/dft") == (scope_id, True)
     assert routing.resolve(cur, "C:\\Work\\Project-old") == (None, False)
+
+
+@pytest.mark.parametrize(
+    ("use", "outcome"),
+    [
+        (None, "deleted"),
+        ("route", "refused"),
+        ("active memory", "refused"),
+        ("other scope of an active memory", "refused"),
+        ("retired memory", "archived"),
+        ("project", "refused"),
+    ],
+)
+def test_a_scope_is_removed_only_once_nothing_delivers_through_it(cur, scope_id, use, outcome):
+    target = scopes.create_scope(cur, name="removable", actor="user")["scope_id"]
+    if use == "route":
+        routing.add_route(cur, path_prefix="/work/removable", scope_id=target, actor="user")
+    elif use == "active memory":
+        remember(cur, "a rule kept for the removable scope", scope_id=target, delivery="scope")
+    elif use == "other scope of an active memory":
+        remember(
+            cur,
+            "a rule kept for both scopes",
+            scope_id=scope_id,
+            delivery="scope",
+            also_scope_ids=[target],
+        )
+    elif use == "retired memory":
+        rule = remember(cur, "a rule once kept here", scope_id=target, delivery="scope")
+        retire(cur, rule)
+    elif use == "project":
+        new_project(cur, "a project filed here", scope_id=target)
+
+    if outcome == "refused":
+        with pytest.raises(MashuError, match="still has"):
+            scopes.remove_scope(cur, target, actor="user")
+        return
+    assert scopes.remove_scope(cur, target, actor="user")["removed"] == outcome
+    assert "removable" not in [row["name"] for row in scopes.list_scopes(cur)]
+    if outcome == "archived":
+        with pytest.raises(MashuError, match="archived"):
+            scopes.require_scope(cur, "removable")

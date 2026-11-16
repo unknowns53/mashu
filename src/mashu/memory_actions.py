@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -21,6 +22,20 @@ BLOCKING_KINDS = ("withdrawn", "legacy")
 def scope_id_named(cur: psycopg.Cursor, name: str | None) -> UUID | None:
     """The named scope's id, or None for no scope."""
     return scopes.require_scope(cur, name)["scope_id"] if name else None
+
+
+def scope_ids_named(
+    cur: psycopg.Cursor, names: Sequence[str], *, home: UUID | None = None
+) -> tuple[UUID | None, list[UUID]]:
+    """The home scope and the other scopes of a rule delivered to the named scopes.
+
+    The current home scope stays home while it is named; otherwise the first named one is.
+    """
+    ids = list(dict.fromkeys(scopes.require_scope(cur, name)["scope_id"] for name in names if name))
+    if not ids:
+        return None, []
+    first = home if home in ids else ids[0]
+    return first, [scope_id for scope_id in ids if scope_id != first]
 
 
 def topic_id_for(cur: psycopg.Cursor, choice: dict[str, Any] | None, *, actor: str) -> UUID | None:
@@ -54,21 +69,24 @@ def remember(
     topic: dict[str, Any] | None,
     acknowledged: list[UUID] | None,
     actor: str,
+    scope_names: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """Write a rule the person states directly.
+    """Write a rule the person states directly; `scope_names` delivers a scope rule to each.
 
     Raises RetiredConflictError naming the retirements it repeats until acknowledged lists
     exactly those, so the person reads why they were retired before writing it back.
     """
+    home, others = scope_ids_named(cur, scope_names) if scope_names else (None, [])
     return memories.remember(
         cur,
         content=content,
         actor=actor,
-        scope_id=scope_id_named(cur, scope_name),
+        scope_id=home if scope_names else scope_id_named(cur, scope_name),
         delivery=delivery,
         topic_id=topic_id_for(cur, topic, actor=actor),
         acknowledged_conflicts=acknowledged,
         why=why,
+        also_scope_ids=others,
     )
 
 
@@ -80,9 +98,20 @@ def set_delivery(
     scope_name: str | None,
     topic: dict[str, Any] | None,
     actor: str,
+    scope_names: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """Move a rule to another delivery; no scope named drops the one it had."""
-    scope_id = scope_id_named(cur, scope_name)
+    """Move a rule to another delivery; no scope named drops the one it had.
+
+    `scope_names` is every scope a scope rule reaches, so one left out stops receiving it.
+    """
+    others: list[UUID] | None = None
+    if scope_names is not None and delivery == "scope":
+        current = memories.get_memory(cur, memory_id)
+        scope_id, others = scope_ids_named(
+            cur, scope_names, home=current["scope_id"] if current else None
+        )
+    else:
+        scope_id = scope_id_named(cur, scope_name)
     return memories.set_delivery(
         cur,
         memory_id,
@@ -92,6 +121,7 @@ def set_delivery(
         clear_scope=scope_id is None,
         topic_id=topic_id_for(cur, topic, actor=actor),
         approval_source={"kind": "user_direct"},
+        also_scope_ids=others,
     )
 
 

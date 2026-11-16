@@ -82,7 +82,7 @@ append-only の記録で、1 エントリが一度の痛みに対応する。
 | フィールド | 内容 |
 |---|---|
 | content | push される全文。規則だけを一文で書き、新しく書く本文は 1 件 `content_limit`（既定 120 字）まで |
-| scope_id | 所属 Scope。無指定は全域を意味する（delivery = `always` の規則と、Scope を持たない topic の規則がこれに当たる） |
+| scope_id | 所属 Scope。無指定は全域を意味する（delivery = `always` の規則と、Scope を持たない topic の規則がこれに当たる）。delivery = `scope` の規則は、`memory_scope` に挙げたほかの Scope にも届く |
 | delivery | `always` / `scope` / `topic:<name>` |
 | evidence | 根拠となる `ledger` の行への参照（1 件以上、必須）。参照先が実在する `ledger` の行であることは DB のトリガが検証する。`ledger` は append-only なので、書き込み時に実在した参照は失われない |
 | status | `active` / `retired` |
@@ -140,7 +140,7 @@ Agent 用の検索は無いので、溢れた分を逃がす先は無い。**容
 
 **delivery が `always` の規則には、全体の容量の内側にもう一段低い上限（既定 800 token、`always_capacity`）を置く。**always の 1 token は、どの scope も使えない 1 token である。共有の上限だけを持たせると、`always` の規則は決して溢れない。溢れる代わりに、scope が必要とするはずの余地を、大半のセッションには要らなかった規則で静かに使い切る。scope の側は何一つ拒否されないまま予算だけが無くなるので、どこにも失敗が現れない。
 
-**Scope が別の Scope を取り込むとき（5 節）、そのセッションに push される量は、always と自分の Scope と取り込む Scope の合計である。**容量はこの合計で判定する。取り込まれる Scope への規則の追加は、その Scope を取り込むすべての Scope のセッションで判定する。取り込みを足す操作も、各セッションの Memory と Temporary Context を増やす書き込みなので、同じ容量で判定し、超えるなら拒否する。取り込みを外す操作は量を減らすだけなので判定しない。`mashu scope` の `push_tokens` はその Scope 自身の規則の量、`opening` は取り込む Scope を足したセッションの量である。
+**複数の Scope に届く scope の規則は、届く Scope のそれぞれの容量に数える。**本文の改訂、復帰、届く Scope を増やす配信の変更は、届くすべての Scope のセッションで判定する。
 
 **行数で数える代理指標は使わない。**規則の長さは一定でないので、件数は予算の代理にならない。
 
@@ -179,7 +179,7 @@ Agent に知識を届ける経路は、すべて存在の push から始まる�
 | delivery | 誰に届くか | いつ届くか | 受け持つ失敗 | 例 |
 |---|---|---|---|---|
 | `always` | 全セッション | 開始時（bootstrap） | どの作業でも破ると損害が出る規律の不達 | 検証の証拠なしに完了と言わない |
-| `scope` | route が当たるセッションと、その Scope を取り込む Scope のセッション | 開始時（bootstrap） | 無関係な領域の規則が `always` の規則を希釈する | 特定の計算機環境の接続規律、特定ソフトの落とし穴 |
+| `scope` | 選んだ Scope のどれかに route が当たるセッション | 開始時（bootstrap） | 無関係な領域の規則が `always` の規則を希釈する | 特定の計算機環境の接続規律、特定ソフトの落とし穴 |
 | `topic:<name>` | 見出しは topic の Scope が当たるセッション（Scope が無ければ全セッション）、本文はその作業に入ったセッション | 見出しは開始時（bootstrap）、本文は作業に入るとき（`memory_list(topic=...)`） | 一部の作業でしか要らない規則が、その作業をしない大半のセッションで配信の容量を使う | 特定プロジェクトの難易度較正の規律、音声処理の落とし穴 |
 
 軸は二つある。**scope は「どこで」を絞り、topic は「何の作業のあいだか」を絞る。**「いつ」は topic の action が受け持つ。
@@ -188,9 +188,9 @@ Agent に知識を届ける経路は、すべて存在の push から始まる�
 - bootstrap と guard の違いは提示の時機である。開始時に読んだ規則が、数十ターン後の判断の瞬間には効いていないことがある。action を持つ topic は、その規則を判断の直前に、呼び出しの文脈へ足す形で示す
 - scope と topic の違いは、規則が効く条件の種類である。scope の条件は cwd で決まる場所だが、同じ場所でも作業の種類によって要る規則は変わる。scope に置かれがちな規則の多くは、特定の作業をしているときだけ効く。それを scope に置くと、その作業をしないセッションにも毎回本文を押し込むことになる。topic は名前・規則数・発動条件の一行だけを push し、本文は条件に当たる作業に入るときに Agent が読む
 
-**Scope は別の Scope を取り込める。**常時は要らないが複数の場所で効く規則は、共有の Scope（例 `app-dev`）に一件だけ置き、それが効く場所の Scope がその共有の Scope を取り込む。取り込む Scope のセッションには、取り込まれた Scope の scope の記憶、topic の見出しと guard、Task card、Temporary Context も、自分の Scope のものと同じく届く。規則を Scope ごとに複製すると、同じ文が配信の容量を Scope の数だけ使い、改訂も retire も一件ずつになる。取り込みは一段に限り、別の Scope を取り込む Scope は取り込まれず、取り込まれる Scope は別の Scope を取り込まない。セッションに届く Scope の集合を一目で読める大きさに保つためで、DB のトリガが強制する。取り込みの設定は User だけが CLI・TUI・デスクトップアプリから行い、MCP の tool は持たない。`memory_list(scope=...)` は、取り込みを足さずにその Scope 自身の記憶を返す。
+**scope の規則は複数の Scope に届けられる。**常時は要らないが、いくつかのリポジトリで効く規則は、一件のまま届く Scope を選ぶ。Scope ごとに複製すると、同じ文が配信の容量を Scope の数だけ使い、改訂も retire も一件ずつになる。規則は所属 Scope（`memory.scope_id`）を一つ持ち、それ以外の届け先を `memory_scope` に持つ。候補・提案・`ledger` の行は所属 Scope だけを運ぶ。届く Scope を選ぶのは User の直接操作（`mashu deliver` と `mashu remember` の `--scope` の繰り返し、TUI、デスクトップアプリ）である。所属 Scope を外すと、残りの最初の Scope が所属 Scope になる。配信先を always か topic へ移すか、所属 Scope を別の Scope へ移すと、それ以外の届け先は DB のトリガが外す。所属 Scope を保つ本文の改訂・replace の後継・復帰は、それ以外の届け先も保つ。`memory_list(scope=...)` は、その Scope に届く記憶を返す。
 
-guard は topic の Scope に従う。action を持つ topic が Scope を持つ場合、発火はその Scope のセッションと、その Scope を取り込む Scope のセッションに限られる。
+guard は topic の Scope に従う。action を持つ topic が Scope を持つ場合、発火はその Scope のセッションに限られる。
 
 topic は本文を pull で届ける。検索による pull が起動されないのは、Agent が自分の知らないことを知らないからである。topic は見出しと発動条件を毎回 push するので、Agent は何があり、いつ読むべきかを知っている。これは Task card が採る二段構造、つまり存在は push し、詳細は既知の名前から決定的に pull する形（`docs/project-state.md` 8 節）と同じである。残る失敗は、Agent がいまの作業を発動条件に結びつけ損ねることであり、10 節の観測で数える。
 
@@ -209,13 +209,13 @@ topic は本文を pull で届ける。検索による pull が起動されな�
 1. **フックのあるクライアントでは、harness が配る**。SessionStart フック（`startup` / `resume` / `compact`）が `mashu bootstrap` の出力をそのまま文脈へ入れる。モデルが指示を読んで従うかどうかに依存しない。`compact` を含むのは、圧縮が同じ失敗の第二の扉だからである（session_id は変わらず、契約上 bootstrap は一度しか呼ばれず、push が書いた文脈のほうが落ちる）
 2. **フックの無いクライアント（Codex CLI）向けに、指示ファイルへ 2 行の shim を置く**。「Mashu MCP が接続されていればセッション開始時に一度 `session_bootstrap` を呼ぶ。SessionStart フックが既に配信していれば不要」。指示ファイルを痩せさせる方針との衝突は、2 行という量で受け止める
 
-フックが失敗したときは何も出力せず終了する。したがって「出たら呼ばない、出なければ呼ぶ」が自然に成立し、二重配信も無配信も起きない。同じ理由で、bootstrap はコードより古い store でも失敗してはならない。未適用の migration が足す表や列は読まずに残りを配り、未適用であることを返す。取り込みの表がまだ無い store では、現在 Scope だけを配る。topic の表がまだ無い store では、topic の見出しを空にして返す。topic の action 列がまだ無い store では、見出しはそのまま返し、guard は何も返さない。指示ファイル側に書くのはこの 2 行だけで、pain / nominate の規律は引き続き server の instructions が運ぶ。
+フックが失敗したときは何も出力せず終了する。したがって「出たら呼ばない、出なければ呼ぶ」が自然に成立し、二重配信も無配信も起きない。同じ理由で、bootstrap はコードより古い store でも失敗してはならない。未適用の migration が足す表や列は読まずに残りを配り、未適用であることを返す。`memory_scope` がまだ無い store では、所属 Scope だけで配る。topic の表がまだ無い store では、topic の見出しを空にして返す。topic の action 列がまだ無い store では、見出しはそのまま返し、guard は何も返さない。指示ファイル側に書くのはこの 2 行だけで、pain / nominate の規律は引き続き server の instructions が運ぶ。
 
 返すもの。
 
 - delivery = `always` の記憶（全文）
-- 現在 Scope と、それが取り込む Scope の記憶（全文）。Scope は route（cwd 対応表）か引数で決まり、取り込む Scope の名前も返す
-- このセッションに見える topic の見出し（名前・規則数・発動条件）。Scope を持たない topic と、現在 Scope と取り込む Scope の topic が見え、active な規則を持たない topic は載らない。本文は載らない
+- 現在 Scope に届く記憶（全文）。所属 Scope がほかでも、届け先に現在 Scope を含む記憶はここに入る。Scope は route（cwd 対応表）か引数で決まる
+- このセッションに見える topic の見出し（名前・規則数・発動条件）。Scope を持たない topic と現在 Scope の topic が見え、active な規則を持たない topic は載らない。本文は載らない
 - active な Task の card（`docs/project-state.md` 8 節。各行に最終確認日時が本文として付く。dormant / closed は載らない）
 - 有効な Temporary Context
 - pending の候補件数（1 件でもあれば一行で知らせる）
@@ -241,7 +241,7 @@ bootstrap は「セッションの前提」を、guard は「判断の直前」�
 
 Temporary Context は User だけが CLI / TUI から作る。Agent が書く経路は無い。開始時点で expiry を指定した条件は、期限到来時に追加承認なしで配信対象から外れる。Memory 専用の expiry や汎用条件 engine は作らない。
 
-Memories TUI の `c` は、active な always / scope Memory と Temporary Context を相互変換する。Memory からの変換では期限を必須とし、元の Memory を `relocated` として移動先 ID とともに記録してから、本文と Scope を保った Temporary Context を作る。逆変換では Temporary Context をその時点で終了し、同じ本文と Scope の active Memory を作る。無関係な withdrawn / legacy conflict は上書きせず、容量の判定が拒否した場合は元の行を有効なまま残す。topic は、発動条件という配送条件を Temporary Context へ移せないため対象外とする。
+Memories TUI の `c` は、active な always / scope Memory と Temporary Context を相互変換する。Temporary Context は Scope を一つしか持たないので、複数の Scope に届く Memory は変換せずに拒否する。Memory からの変換では期限を必須とし、元の Memory を `relocated` として移動先 ID とともに記録してから、本文と Scope を保った Temporary Context を作る。逆変換では Temporary Context をその時点で終了し、同じ本文と Scope の active Memory を作る。無関係な withdrawn / legacy conflict は上書きせず、容量の判定が拒否した場合は元の行を有効なまま残す。topic は、発動条件という配送条件を Temporary Context へ移せないため対象外とする。
 
 同じ画面の `r` は、選んだ Temporary Context を確認のうえその時点で終了する。誤って登録した条件を、期限まで配信させ続けないためである。行は削除せず、期限到来と同じく `expires_at` を現在時刻にして配信対象から外し、`temporary_ended` の event を残す。
 
@@ -253,13 +253,13 @@ Memories TUI の `c` は、active な always / scope Memory と Temporary Contex
 |---|---|
 | `session_bootstrap` | 5.1 節の内容を返す。セッション開始時に一度 |
 | `pain_report` | incident を `ledger` へ記録し、類似の `ledger` の行・tombstone・active な記憶を返す。候補を生成する。`rule` の `prevention` は候補の本文になるので本文の上限（既定 120 字）までとし、理由や経緯は `what` に書く。incident は誤った作業が実際に出たことに限る。届いていた規則が守られなかったときは `violated_memory_id` でその active Memory を指す（3 節の照合 0）。Task の state や ruling にあったときは `ignored_task_id`、指示ファイルや skill にあったときは `ignored_source` で指し、候補を作らない |
-| `memory_list` | 指定 Scope の active な記憶を列挙する。`always`（または `global`）は全セッションへ push される記憶を返す。`topic` を渡すと、その topic の発動条件・source（vault のノートなら `source_path` と `source_exists`）と規則の本文を返し、読んだことをセッション単位で event_log に残す |
+| `memory_list` | 指定 Scope に届く active な記憶を列挙する。`always`（または `global`）は全セッションへ push される記憶を返す。`topic` を渡すと、その topic の発動条件・source（vault のノートなら `source_path` と `source_exists`）と規則の本文を返し、読んだことをセッション単位で event_log に残す |
 | `memory_get` | 指定した Memory の本文、revision、evidence、retire の情報を返す。retire された Memory の本文は明示取得でのみ読む |
 | `memory_nominate` | Agent 自身の replace 提案の後継を pending 候補として作るだけで採用しない。kind = `proposed` で記録し、他の候補に合流しない。本文は上限（既定 120 字）までで、理由は `why` に渡す |
 | `memory_admit` | 承認根拠を必須にして採用する。本文を渡すと候補の作成と採用を 1 回で行い（本文は 120 字まで、理由は `why`）、合流した既存候補や未対応の withdrawn / legacy conflict があれば採用せず候補を返す。候補 ID で採用するときは読み取った nomination version を必須にする。まだ無い topic は発動条件つき（原典を指すなら `topic_source` も）で指定すると記憶とともに作る。実行者 Agent と `user_instruction` の出所を別に保存し、request replay には初回応答を返す |
 | `memory_change_propose` | Agent 自身の retire / replace / restore / redeliver 案を作成・更新する。redeliver は本文を変えずに配信条件だけを変え、まだ無い topic を名前と発動条件つきで指定すると適用時にその topic を作る。replace は後継 nomination version と配信条件を固定する |
 | `memory_change_apply` | proposal version、対象 revision、conflict、承認根拠、request ID を照合して一度だけ適用する |
-| `memory_redeliver` | User が指示した配信条件の変更を、redeliver 案の作成と適用まで一つの transaction で行う。指示の引用と会話参照を evidence にし、request replay には初回応答を返す |
+| `memory_redeliver` | User が指示した配信条件の変更を、redeliver 案の作成と適用まで一つの transaction で行う。Scope は一つだけ取り、所属 Scope が変わらなければほかの届け先を保つ。指示の引用と会話参照を evidence にし、request replay には初回応答を返す |
 | `memory_change_instructed` | User が指示した retire / replace / restore を、案の作成と適用まで一つの transaction で行う。replace の後継候補もその場で作る。指示の引用と会話参照を evidence にし、request replay には初回応答を返す |
 | `memory_change_withdraw` | 不要になった pending Memory change を理由つきで取り下げる |
 
@@ -283,9 +283,9 @@ Project State 系 Tool は `docs/project-state.md` 12.1 節に記す。
 | `mashu pain` | incident の手動記録（CLI から）。`--violated <id>` は守られなかった active Memory を、`--ignored-task <id>` は使われなかった state の Task を、`--ignored-source <file>` は使われなかった指示ファイルや skill を指す |
 | `mashu ledger` | `ledger` の閲覧 |
 | `mashu guard <action>` | guard の照会。action に結びついた topic の規則を表示し、規則があれば終了コード 2 を返す。PreToolUse フックが読み、呼び出しの文脈に足す。`--outcome same\|changed --topic <name>` は `guard_followed` を書く口で、今のフックは呼ばない |
-| `mashu deliver <id> <delivery>` | delivery の変更。topic へは `--topic <name>` で移す |
+| `mashu deliver <id> <delivery>` | delivery の変更。topic へは `--topic <name>` で移す。scope へは届く Scope ごとに `--scope <name>` を繰り返し、挙げなかった Scope には届かなくなる |
 | `mashu topic` | topic の一覧・作成・編集・削除（User のみ）。active な規則が無い topic だけを消せる。一度も使われていなければ削除し、retire された規則や提案が参照していれば archive する。`mashu topic show <name>` で規則の本文を読む。`--edit <name> --action <act>` で action に結びつけ、`--no-action` で外す。一覧と show は結びついた action を `before: <act>` と示す。`--source <path>`（`--add` / `--edit`）で原典を指し、`--source -` で外す |
-| `mashu scope` / `mashu route` | Scope の一覧と cwd 対応表（User のみ作成）。`mashu scope --edit <name> --include <other>` / `--drop <other>` で取り込む Scope を変える |
+| `mashu scope` / `mashu route` | Scope の一覧と cwd 対応表（User のみ作成）。`mashu scope --remove <name>` は、active な記憶・route・未完了の Project や topic・有効な Temporary Context・pending の候補や提案が残る Scope を、残っているものを示して拒否する。一度も使われていなければ削除し、過去の記録が参照していれば archive する。archive した Scope は一覧から外れ、名前は再利用できない |
 | `mashu bootstrap` | push される内容と token を表示 |
 | `mashu admin migrate` | migration 実行 |
 
@@ -306,12 +306,12 @@ id を取る引数は、表示される短縮 ID（先頭 8 文字）の前方�
 ## 8. スキーマ（12 表）
 
 ```
-scope             Scope の一覧。User のみ作成
-scope_include     Scope が取り込む Scope。一段だけ。User のみ作成
+scope             Scope の一覧。User のみ作成・削除。過去の記録が参照する Scope は archive する
 route             cwd から scope への対応表
 ledger            痛みの記録。append-only
 trace             書き込まれない既存の行だけを持つ。ledger.from_trace も同じ
 memory            記憶。active / retired と retire の種別・後継・移動先
+memory_scope      scope の記憶が所属 Scope のほかに届く Scope
 topic             作業の種類ごとの規則のまとまり。名前・Scope・発動条件・action・原典（source）。User が作る。Agent は明示指示つきの採用・配信変更に伴ってだけ作る
 memory_revision   本文の改訂履歴。append-only
 nomination        昇格候補。pending / admitted / declined

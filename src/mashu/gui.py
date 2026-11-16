@@ -294,7 +294,7 @@ def _memory_list(cur: psycopg.Cursor, query: dict[str, str]) -> str:
     status = _choice(query, "status", ("active", "retired"))
     delivery = _choice(query, "delivery", ("", *memories.DELIVERIES))
     every = application.memory_view(cur, status)
-    scope_names = sorted({row["scope_name"] for row in every if row["scope_name"]})
+    scope_names = sorted({name for row in every for name in row["scope_names"]})
     topic_names = sorted({row["topic_name"] for row in every if row["topic_name"]})
     scope = _choice(query, "scope", ("", *scope_names))
     topic = _choice(query, "topic", ("", *topic_names))
@@ -303,7 +303,7 @@ def _memory_list(cur: psycopg.Cursor, query: dict[str, str]) -> str:
         row
         for row in every
         if (not delivery or row["delivery"] == delivery)
-        and (not scope or row["scope_name"] == scope)
+        and (not scope or scope in row["scope_names"])
         and (not topic or row["topic_name"] == topic)
         and (not needle or _matches(needle, row["content"], row["memory_id"]))
     ]

@@ -12,8 +12,6 @@ from mashu import (
     memories,
     migrate,
     projects,
-    routing,
-    scopes,
     settings,
     task_history,
     tasks,
@@ -68,10 +66,9 @@ def active_states(cur: psycopg.Cursor, scope_id: UUID | None = None) -> list[dic
         row["project_id"]: row["scope_id"]
         for row in projects.list_projects(cur, include_archived=True)
     }
-    # Unscoped projects apply everywhere. Scoped projects stay in their delivery boundary, which
-    # takes in the scopes this one includes; an unrouted session receives only the unscoped rows.
-    visible = routing.visible(cur, scope_id)
-    return [row for row in rows if homes.get(row["task"]["project_id"]) in (None, *visible)]
+    # Unscoped projects apply everywhere. Scoped projects stay in their delivery boundary;
+    # an unrouted session therefore receives only the unscoped rows.
+    return [row for row in rows if homes.get(row["task"]["project_id"]) in (None, scope_id)]
 
 
 def session_bootstrap(
@@ -85,8 +82,7 @@ def session_bootstrap(
     """Everything a session in this scope is told, and what it cost to tell it."""
     limits = settings.limits(cur)
     always = memories.always_memories(cur)
-    visible = routing.visible(cur, scope_id)
-    scoped = memories.scope_push_memories(cur, visible) if visible else []
+    scoped = memories.scope_push_memories(cur, scope_id) if scope_id is not None else []
     index = topics.session_index(cur, scope_id)
     states = active_states(cur, scope_id)
     contexts = temporary.active_temporary(cur, scope_id=scope_id)
@@ -182,7 +178,6 @@ def session_bootstrap(
         "topics": index,
         "topic_instruction": topics.INSTRUCTION if index else None,
         "scope": scope_name,
-        "includes": scopes.included_names(cur, scope_id),
         "routed": routed,
         "states": state_rows,
         "task_instruction": TASK_DETAIL_INSTRUCTION if state_rows else None,

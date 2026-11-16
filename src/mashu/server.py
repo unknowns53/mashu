@@ -56,8 +56,8 @@ INSTRUCTIONS = (
     "Call session_bootstrap first unless a SessionStart hook already delivered Mashu in this "
     "session. When the work at hand matches a bootstrap topic's trigger, call memory_list "
     "with that topic before starting it. "
-    "Memory holds standing rules only, pushed to every session (always), to one place "
-    "(scope), or when one kind of work starts (topic). A task keeps only the user's "
+    "Memory holds standing rules only, pushed to every session (always), to chosen "
+    "places (scope), or when one kind of work starts (topic). A task keeps only the user's "
     "rulings, each with their words; findings, measurements, and rejected options go in "
     "project docs. "
     "Before continuing a task from a card, call task_get with its full id and check old "
@@ -783,7 +783,10 @@ def build_server() -> Any:
             "scope with `scope` (default: the Memory's current scope), or topic with `topic`: an "
             "existing topic keeps its own scope, and a new one also needs `topic_trigger` (one "
             "sentence saying when to read it) with `scope` naming where it is listed, or omit it "
-            "for every session. It is recorded as an applied redeliver proposal."
+            "for every session. It is recorded as an applied redeliver proposal. A scope "
+            "Memory can reach several scopes (`scope_names` in memory_get); it keeps the others "
+            "while its scope stays the same, and a move to another scope delivers it there only. "
+            "Choosing several scopes is the user's, in the desktop app or `mashu deliver`."
         )
     )
     def memory_redeliver(

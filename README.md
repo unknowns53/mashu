@@ -214,9 +214,9 @@ mashu remember "Use the deployment scope" --scope deployment
 mashu remember "Keep the win rate between 40 and 60 percent" --topic difficulty
 ~~~
 
-配信先は、何も指定しなければ always、`--scope` を指定すれば scope、`--topic` を指定すれば topic になる。配信先の違いは[配信の仕組み](#配信の仕組み)で説明する。
+配信先は、何も指定しなければ always、`--scope` を指定すれば scope、`--topic` を指定すれば topic になる。`--scope` を繰り返すと、その規則は指定したすべての Scope に届く。配信先の違いは[配信の仕組み](#配信の仕組み)で説明する。
 
-期限付きの条件は `--until` で Temporary Context として登録する。review は不要で、期限が来ると無効になる。期限は最長 14 日で、`--until` は `--scope`、`--delivery`、`--topic`、`--force` と一緒には使えない。TUI の Memories で `c` を押すと、always か scope の Memory と Temporary Context を相互に変換できる。topic の Memory は、発動条件を失うので変換できない。
+期限付きの条件は `--until` で Temporary Context として登録する。review は不要で、期限が来ると無効になる。期限は最長 14 日で、`--until` は `--scope`、`--delivery`、`--topic`、`--force` と一緒には使えない。TUI の Memories で `c` を押すと、always か scope の Memory と Temporary Context を相互に変換できる。topic の Memory は発動条件を、複数の Scope に届く Memory はほかの Scope を失うので、変換できない。
 
 ~~~bash
 mashu remember "The staging host is down" --until 2d
@@ -280,7 +280,7 @@ agent は自分が何を知らないかを知らないので、検索に任せ�
 | 配信先 | 届くセッション | 届く時点 | 向いている規則 |
 |---|---|---|---|
 | always | すべて | 開始時 | どの作業でも守る規則 |
-| scope | route が一致するディレクトリで開いたセッションと、その Scope を取り込む Scope のセッション | 開始時 | 特定のプロジェクトか、いくつかのプロジェクトだけで必要な規則 |
+| scope | 選んだ Scope のどれかに route が一致するディレクトリで開いたセッション | 開始時 | 特定のプロジェクトか、いくつかのプロジェクトだけで必要な規則 |
 | topic | topic の Scope が一致するセッション。Scope が無ければすべて | 開始時には見出しの一行だけを配信。本文は agent がその作業を開始するときに読む | 特定作業の間だけ必要な規則 |
 
 scope は「どこで」を絞り、topic は「何の作業のあいだか」を絞る。topic は本文を push しないが、見出しと発動条件は毎回届くので、agent は何があっていつ読むべきかを把握した状態で本文を読むことができる。
@@ -288,7 +288,7 @@ scope は「どこで」を絞り、topic は「何の作業のあいだか」�
 `session_bootstrap` は次の順に返す。
 
 1. always の Memory
-2. 現在の Scope と、それが取り込む Scope の Memory
+2. 現在の Scope の Memory
 3. topic の見出し（名前、規則の数、発動条件）
 4. active な Task の card（完全な Task ID、名前、goal、status、詳細の件数、最終確認日時）
 5. 有効な Temporary Context
@@ -302,7 +302,7 @@ topic の本文と source、Task の approach、open questions、blockers、next
 
 ~~~text
 全体                 4000 token
-Memory               2000 token（always は 800 まで。各 Scope は always と取り込む Scope と合わせて 2000 まで）
+Memory               2000 token（always は 800 まで。各 Scope は always と合わせて 2000 まで）
 Task cards            800 token / session（1 Task 200。入りきらない Task は名前だけを 200 まで）
 Task detail           800 token / Task（常時は配信しない）
 Decisions in force    800 token / Task（task_get が全文に足して返す。常時は配信しない）
@@ -328,16 +328,15 @@ mashu route --ignore /work/scratch
 mashu route --remove /work/service
 ~~~
 
-常時は要らないが、いくつかのプロジェクトで効く規則は、共有の Scope に一件だけ置き、各プロジェクトの Scope からその Scope を取り込む。取り込む Scope のセッションには、取り込まれた Scope の Memory、topic の見出し、Task の card、Temporary Context も届く。取り込みは一段だけで、別の Scope を取り込む Scope は取り込めない。容量は、always と自分の Scope と取り込む Scope の合計で判定し、超える取り込みは拒否する。デスクトップアプリでは設定の Scope の編集画面で、TUI では Settings の Scopes で `i` を押して変える。
+scope の Memory は、複数の Scope に届けられる。いくつかのリポジトリで同じ規則を使うときは、Memory を一件だけ置き、配信先でそれぞれのリポジトリの Scope を選ぶ。デスクトップアプリでは配信先の画面で Scope をチェックし、TUI ではカンマ区切りで名前を入れる。容量は、届く Scope のそれぞれで判定する。
 
 ~~~bash
-mashu scope --add app-dev --about "Rules shared by the app repositories"
-mashu scope --edit enrai --include app-dev
-mashu scope --edit enrai --drop app-dev
-mashu deliver <id> scope --scope app-dev
+mashu deliver 1a2b3c4d scope --scope enrai --scope marimo
 ~~~
 
-Project は Task の所属先で、Scope とは別の概念である。Project が Scope を持つと、その Task の card はその Scope と、その Scope を取り込む Scope のセッションに配信される。
+Scope は `mashu scope --remove <name>`、TUI の `x`、デスクトップアプリの削除で消せる。active な Memory、route、未完了の Project や topic、有効な Temporary Context、review を待つ candidate や変更の提案が残っている Scope は、残っているものを示して拒否する。一度も使われていない Scope は削除し、過去の記録が参照している Scope は一覧から外して保管する。保管した Scope の名前は再利用できない。
+
+Project は Task の所属先で、Scope とは別の概念である。Project が Scope を持つと、その Task の card はその Scope のセッションにだけ配信される。
 
 ## Topic
 
@@ -454,7 +453,7 @@ User が配信先の変更を指示した      → memory_redeliver
 | `mashu deliver REF always\|scope\|topic` | Memory の配信先を変更する |
 | `mashu retire REF --reason REASON` | Memory を retire する。似た規則が出現すると、この理由を表示して確認を求める |
 | `mashu restore REF --reason REASON` | retire した Memory を戻す |
-| `mashu scope`、`mashu route`、`mashu topic` | Scope、route、topic を一覧し、編集する |
+| `mashu scope`、`mashu route`、`mashu topic` | Scope、route、topic を一覧し、編集し、削除する |
 | `mashu project`、`mashu task` | Project と Task を一覧し、編集する |
 | `mashu guard ACTION` | ACTION に結びついた topic の規則を表示する。PreToolUse hook が呼ぶ |
 | `mashu serve` | MCP server を起動する |

@@ -308,9 +308,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         print(f"schema    {len(unapplied)} MIGRATION(S) PENDING: {', '.join(unapplied)}")
         print("          writes against the new columns fail until 'mashu admin migrate'")
     routed_text = str(answer.get("routed", False)).lower()
-    included = answer.get("includes") or []
-    including = f"  includes={','.join(included)}" if included else ""
-    print(f"scope     {answer.get('scope') or '-'}  routed={routed_text}{including}")
+    print(f"scope     {answer.get('scope') or '-'}  routed={routed_text}")
     _print_memory_rows(answer.get("always", []), heading="always")
     _print_memory_rows(answer.get("scoped", []), heading="scoped")
     if answer.get("topics"):
@@ -377,7 +375,7 @@ def cmd_remember(args: argparse.Namespace) -> int:
     while True:
         try:
             with db.transaction(args.dsn) as cur:
-                scope_id = _scope(cur, args.scope)
+                scope_id, others = memory_actions.scope_ids_named(cur, args.scope or [])
                 row = memories.remember(
                     cur,
                     content=args.body,
@@ -387,6 +385,7 @@ def cmd_remember(args: argparse.Namespace) -> int:
                     topic_id=_topic(cur, args.topic),
                     acknowledged_conflicts=acknowledged,
                     why=args.why,
+                    also_scope_ids=others,
                 )
             break
         except RetiredConflictError as conflict:
@@ -650,7 +649,9 @@ def _print_evidence(cur: Any, evidence: list[UUID] | None) -> None:
 def _show_memory(cur: Any, memory_id: UUID) -> None:
     cur.execute(
         """
-        SELECT m.*, s.name AS scope_name, t.name AS topic_name, t.trigger AS topic_trigger
+        SELECT m.*, """
+        + memories.SCOPE_NAMES
+        + """, t.name AS topic_name, t.trigger AS topic_trigger
         FROM memory m
         LEFT JOIN scope s ON s.scope_id = m.scope_id
         LEFT JOIN topic t ON t.topic_id = m.topic_id
@@ -866,12 +867,16 @@ def cmd_memories(args: argparse.Namespace) -> int:
         scope_id = _scope(cur, args.scope) if args.scope else None
         cur.execute(
             """
-            SELECT m.*, s.name AS scope_name, t.name AS topic_name
+            SELECT m.*, """
+            + memories.SCOPE_NAMES
+            + """, t.name AS topic_name
             FROM memory m
             LEFT JOIN scope s ON s.scope_id = m.scope_id
             LEFT JOIN topic t ON t.topic_id = m.topic_id
             WHERE m.status = %(status)s
-              AND (%(scope)s::uuid IS NULL OR m.scope_id = %(scope)s::uuid)
+              AND (%(scope)s::uuid IS NULL OR m.scope_id = %(scope)s::uuid
+                   OR m.memory_id IN
+                      (SELECT memory_id FROM memory_scope WHERE scope_id = %(scope)s::uuid))
             ORDER BY m.delivery, s.name, t.name, m.created_at
             """,
             {"status": status, "scope": scope_id},
@@ -1124,17 +1129,26 @@ def cmd_review(args: argparse.Namespace) -> int:
 
 
 def cmd_deliver(args: argparse.Namespace) -> int:
+    if args.scope and len(args.scope) > 1 and args.delivery != "scope":
+        raise MashuError("only scope delivery takes more than one --scope")
     with db.transaction(args.dsn) as cur:
+        memory_id = _memory_ref(cur, args.memory_id)
+        current = memories.get_memory(cur, memory_id)
+        scope_id, others = memory_actions.scope_ids_named(
+            cur, args.scope or [], home=current["scope_id"] if current else None
+        )
         row = memories.set_delivery(
             cur,
-            _memory_ref(cur, args.memory_id),
+            memory_id,
             delivery=args.delivery,
             actor=ACTOR,
-            scope_id=_scope(cur, args.scope) if args.scope else None,
+            scope_id=scope_id,
             clear_scope=args.no_scope,
             topic_id=_topic(cur, args.topic),
+            also_scope_ids=others if args.scope and args.delivery == "scope" else None,
         )
-    print(f"delivery  {row['memory_id']}  {row['delivery']}")
+        reached = memories.memory_details(cur, memory_id)["scope_name"]
+    print(f"delivery  {row['memory_id']}  {row['delivery']}  {reached or ''}".rstrip())
     return 0
 
 
@@ -1203,37 +1217,25 @@ def cmd_guard(args: argparse.Namespace) -> int:
 
 
 def cmd_scope(args: argparse.Namespace) -> int:
-    if (args.include or args.drop) and args.edit is None:
-        raise MashuError("--include and --drop change the scope named by --edit")
-    if args.edit is not None and not (args.include or args.drop):
-        raise MashuError("--edit needs --include or --drop")
-    if args.edit is not None and args.add is not None:
-        raise MashuError("pass --add or --edit, not both")
+    if args.add is not None and args.remove is not None:
+        raise MashuError("pass --add or --remove, not both")
     with db.transaction(args.dsn) as cur:
+        if args.remove is not None:
+            target = scopes.require_scope(cur, args.remove)
+            removed = scopes.remove_scope(cur, target["scope_id"], actor=ACTOR)
+            print(f"{removed['removed']}  {target['name']}")
+            return 0
         if args.add is not None:
             row = scopes.create_scope(cur, name=args.add, summary=args.about, actor=ACTOR)
-        elif args.edit is not None:
-            target = scopes.require_scope(cur, args.edit)
-            held = list(routing.visible(cur, target["scope_id"])[1:])
-            added = [scopes.require_scope(cur, name)["scope_id"] for name in args.include]
-            dropped = {scopes.require_scope(cur, name)["scope_id"] for name in args.drop}
-            wanted = [s for s in [*held, *added] if s not in dropped]
-            changed = scopes.set_includes(cur, target["scope_id"], wanted, actor=ACTOR)
         else:
             rows = scopes.list_scopes(cur)
     if args.add is not None:
         _gate_warnings(row)
         print(f"created  {row['name']}")
         return 0
-    if args.edit is not None:
-        print(f"{changed['scope']} includes {', '.join(changed['includes']) or 'no other scope'}")
-        return 0
-    print("name                         active  push_tokens  opening  includes")
+    print("name                         active  push_tokens")
     for row in rows:
-        print(
-            f"{row['name'][:28]:28}  {row['n_active']:6}  {row['push_tokens']:11}  "
-            f"{row['opening_tokens']:7}  {', '.join(row['includes']) or '-'}"
-        )
+        print(f"{row['name'][:28]:28}  {row['n_active']:6}  {row['push_tokens']:11}")
     return 0
 
 
@@ -1848,7 +1850,11 @@ def build_parser() -> argparse.ArgumentParser:
             "chars), kept on its evidence and never pushed"
         ),
     )
-    remember.add_argument("--scope", help="deliver it to this scope only")
+    remember.add_argument(
+        "--scope",
+        action="append",
+        help="deliver it to this scope; repeat to deliver it to several scopes",
+    )
     remember.add_argument(
         "--delivery",
         choices=memories.DELIVERIES,
@@ -2093,12 +2099,14 @@ def build_parser() -> argparse.ArgumentParser:
         "deliver",
         "move a memory between the opening, a scope, and a topic",
         description=(
-            "Change where an active memory is delivered. Scope delivery requires --scope; "
-            "topic delivery requires --topic."
+            "Change where an active memory is delivered. Scope delivery takes one --scope "
+            "per scope it reaches, and the scopes left out stop receiving it; topic delivery "
+            "requires --topic."
         ),
         examples=(
             "mashu deliver 1a2b3c4d always",
             "mashu deliver 1a2b3c4d scope --scope deployment",
+            "mashu deliver 1a2b3c4d scope --scope enrai --scope marimo",
             "mashu deliver 1a2b3c4d topic --topic difficulty",
         ),
     )
@@ -2107,7 +2115,12 @@ def build_parser() -> argparse.ArgumentParser:
         "delivery", choices=memories.DELIVERIES, help="where it is delivered from now on"
     )
     deliver.add_argument("--topic", help="the topic it is read with, for topic")
-    deliver.add_argument("--scope", help="the scope it belongs to, for scope")
+    deliver.add_argument(
+        "--scope",
+        action="append",
+        help="a scope it reaches, for scope; repeat for several, and scopes left out stop "
+        "receiving it",
+    )
     deliver.add_argument(
         "--no-scope",
         action="store_true",
@@ -2153,30 +2166,21 @@ def build_parser() -> argparse.ArgumentParser:
         "scope",
         "the scope register",
         description=(
-            "List scopes, or create one with --add and an optional --about. --edit with "
-            "--include or --drop changes the scopes it includes: a session routed to a scope "
-            "also receives the memories, topics, task cards, and temporary context of the "
-            "scopes it includes. Inclusion is one level deep, so a scope that includes others "
-            "cannot be included. push_tokens is what a scope's own rules cost; opening adds "
-            "the scopes it includes. Creation and inclusion are User-only."
+            "List scopes, create one with --add and an optional --about, or remove one with "
+            "--remove. Removing needs a scope with no active memories, routes, open projects or "
+            "topics, standing temporary context, or pending candidates and changes: one never "
+            "used is deleted, one that past records name is archived. Both are User-only."
         ),
         examples=(
             "mashu scope",
             "mashu scope --add deployment",
             'mashu scope --add deployment --about "Production releases"',
-            "mashu scope --edit enrai --include app-dev",
-            "mashu scope --edit enrai --drop app-dev",
+            "mashu scope --remove deployment",
         ),
     )
     scope.add_argument("--add", metavar="NAME", help="create a scope with this name")
+    scope.add_argument("--remove", metavar="NAME", help="delete or archive this scope")
     scope.add_argument("--about", metavar="LINE", help="what the scope covers")
-    scope.add_argument("--edit", metavar="NAME", help="the scope whose includes change")
-    scope.add_argument(
-        "--include", metavar="NAME", action="append", default=[], help="include this scope"
-    )
-    scope.add_argument(
-        "--drop", metavar="NAME", action="append", default=[], help="stop including this scope"
-    )
     scope.set_defaults(func=cmd_scope)
 
     topic = _command(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -12,7 +12,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import routing, settings
+from mashu import settings
 from mashu.errors import MashuError
 from mashu.tokens import ROW_OVERHEAD, pushed_cost
 
@@ -26,9 +26,19 @@ LOCK_PAIN = 2
 LOCK_RETIREMENT = 5
 
 _PUSHED = """
-SELECT memory_id, delivery, scope_id, topic_id, content FROM memory
+SELECT memory_id, delivery, scope_id, topic_id, content, {also} AS also FROM memory
 WHERE status = 'active' AND delivery IN ('always', 'scope', 'topic')
 """
+
+#: The other scopes each pushed row reaches, or none on a store without the table.
+_ALSO = "ARRAY(SELECT ms.scope_id FROM memory_scope ms WHERE ms.memory_id = memory.memory_id)"
+_NO_ALSO = "'{}'::uuid[]"
+
+
+def _has_other_scopes(cur: psycopg.Cursor) -> bool:
+    cur.execute("SELECT to_regclass('memory_scope') IS NOT NULL AS present")
+    return cur.fetchone()["present"]
+
 
 _TOPICS = """
 SELECT topic_id, name, trigger, scope_id FROM topic WHERE archived_at IS NULL
@@ -43,12 +53,10 @@ def topic_line(name: str, rules: int, trigger: str) -> str:
 
 @dataclass(frozen=True)
 class _Opening:
-    """The pushed rows, the topics they may sit in, and each scope's opening (itself and the
-    scopes it includes), as stored or as a write would leave them."""
+    """The pushed rows and the topics they may sit in, as stored or as a write would leave them."""
 
     rows: tuple[dict[str, Any], ...]
     topics: dict[Any, dict[str, Any]]
-    closure: dict[Any, tuple[Any, ...]]
 
     def without_memory(self, memory_id: UUID | None) -> _Opening:
         if memory_id is None:
@@ -66,16 +74,14 @@ class _Opening:
 
 
 def _opening(cur: psycopg.Cursor) -> _Opening:
-    cur.execute(_PUSHED)
+    cur.execute(_PUSHED.format(also=_ALSO if _has_other_scopes(cur) else _NO_ALSO))
     rows = tuple(cur.fetchall())
     cur.execute(_TOPICS)
-    topics = {row["topic_id"]: row for row in cur.fetchall()}
-    return _Opening(rows=rows, topics=topics, closure=routing.openings(cur))
+    return _Opening(rows=rows, topics={row["topic_id"]: row for row in cur.fetchall()})
 
 
 def _measure(opening: _Opening) -> dict[str, Any]:
-    """Every session's share, each scope's own share, each scope's opening with the scopes it
-    includes, and each topic's unpushed bodies."""
+    """Every session's share, each scope's share, and each topic's unpushed bodies."""
     always: list[str] = []
     scoped: dict[Any, list[str]] = {}
     bodies: dict[Any, list[str]] = {}
@@ -83,7 +89,8 @@ def _measure(opening: _Opening) -> dict[str, Any]:
         if row["delivery"] == "always":
             always.append(row["content"])
         elif row["delivery"] == "scope":
-            scoped.setdefault(row["scope_id"], []).append(row["content"])
+            for scope_id in (row["scope_id"], *row.get("also", ())):
+                scoped.setdefault(scope_id, []).append(row["content"])
         elif row["topic_id"] in opening.topics:
             bodies.setdefault(row["topic_id"], []).append(row["content"])
     for topic_id, contents in bodies.items():
@@ -93,27 +100,18 @@ def _measure(opening: _Opening) -> dict[str, Any]:
             always.append(line)
         else:
             scoped.setdefault(topic["scope_id"], []).append(line)
-    own = {scope_id: pushed_cost(contents) for scope_id, contents in scoped.items()}
-    closure = {**{scope_id: (scope_id,) for scope_id in own}, **opening.closure}
     return {
         "always": pushed_cost(always),
-        "own": own,
-        "scopes": {
-            scope_id: total
-            for scope_id, members in closure.items()
-            if (total := sum(own.get(member, 0) for member in members))
-        },
+        "scopes": {scope_id: pushed_cost(contents) for scope_id, contents in scoped.items()},
         "bodies": {topic_id: pushed_cost(contents) for topic_id, contents in bodies.items()},
     }
 
 
 def bootstrap_totals(cur: psycopg.Cursor) -> dict[str, Any]:
-    """What the opening currently costs: everywhere, per scope's own rules, per scope's
-    opening with the scopes it includes, and at its worst."""
+    """What the opening currently costs: everywhere, per scope, and at its worst."""
     measured = _measure(_opening(cur))
     return {
         "always": measured["always"],
-        "own": measured["own"],
         "scopes": measured["scopes"],
         "worst": measured["always"] + max(measured["scopes"].values(), default=0),
     }
@@ -148,7 +146,7 @@ class _Doors:
 _DOORS = {
     "cli": _Doors(
         retire="`mashu retire <id> --reason <why>` for a rule that has stopped earning its seat",
-        scope="`mashu deliver <id> scope --scope <name>` for one that only governs one place",
+        scope="`mashu deliver <id> scope --scope <name>` for one that governs only some places",
         topic="`mashu deliver <id> topic --topic <name>` for one needed only during one kind "
         "of work",
         elsewhere="`mashu deliver <id> topic --topic <other>`, or always or scope",
@@ -156,7 +154,7 @@ _DOORS = {
     "mcp": _Doors(
         retire="memory_change_propose with operation='retire' for a rule that has stopped "
         "earning its seat",
-        scope="memory_redeliver with delivery='scope' for one that only governs one place",
+        scope="memory_redeliver with delivery='scope' for one that governs only some places",
         topic="memory_redeliver with delivery='topic' for one needed only during one kind of work",
         elsewhere="memory_redeliver with another topic, or always or scope",
         note=" Each changes an existing Memory, so it needs the user's instruction; a retire "
@@ -345,24 +343,6 @@ def lock(cur: psycopg.Cursor) -> None:
 _lock = lock
 
 
-def check_openings(cur: psycopg.Cursor, closure: dict[UUID, tuple[UUID, ...]]) -> dict[str, Any]:
-    """Whether scopes can include what `closure` says without overfilling an opening.
-
-    The caller holds the lock from `lock`, taken before it read the openings it changed.
-    """
-    before = _opening(cur)
-    return _judge(
-        before,
-        replace(before, closure=closure),
-        without=before,
-        cost=0,
-        what="the included scopes",
-        scope_id=None,
-        everywhere=True,
-        limits=settings.limits(cur),
-    )
-
-
 def check_admission(
     cur: psycopg.Cursor,
     *,
@@ -371,13 +351,18 @@ def check_admission(
     scope_id: UUID | None = None,
     exclude_memory_id: UUID | None = None,
     topic_id: UUID | None = None,
+    also_scope_ids: Sequence[UUID] | None = None,
 ) -> dict[str, Any]:
     """Whether this content can take a seat, and what it would cost if it did.
 
     A topic Memory is weighed twice: its body against the topic's own bound, and its
-    topic's index line against the opening that line is pushed into.
+    topic's index line against the opening that line is pushed into. A scope Memory is weighed
+    in its home scope and in each of `also_scope_ids`; left out, an existing Memory that keeps
+    its home scope is weighed in the other scopes it already reaches.
     """
     _lock(cur)
+    if also_scope_ids is None:
+        also_scope_ids = _kept_others(cur, exclude_memory_id, delivery, scope_id)
     cost = pushed_cost([content])
     before = _opening(cur)
     without = before.without_memory(exclude_memory_id)
@@ -402,6 +387,7 @@ def check_admission(
         "scope_id": scope_id,
         "topic_id": topic_id if delivery == "topic" else None,
         "content": content,
+        "also": tuple(also_scope_ids) if delivery == "scope" else (),
     }
     return _judge(
         before,
@@ -415,6 +401,22 @@ def check_admission(
         topic_id=topic_id if delivery == "topic" else None,
         detail=detail,
     )
+
+
+def _kept_others(
+    cur: psycopg.Cursor, memory_id: UUID | None, delivery: str, scope_id: UUID | None
+) -> tuple[UUID, ...]:
+    """The other scopes a Memory keeps through a write that leaves its home scope as it was."""
+    if memory_id is None or delivery != "scope" or not _has_other_scopes(cur):
+        return ()
+    cur.execute(
+        """
+        SELECT ms.scope_id FROM memory_scope ms JOIN memory m ON m.memory_id = ms.memory_id
+        WHERE ms.memory_id = %s AND m.delivery = 'scope' AND m.scope_id = %s
+        """,
+        (memory_id, scope_id),
+    )
+    return tuple(row["scope_id"] for row in cur.fetchall())
 
 
 def check_topic_edit(

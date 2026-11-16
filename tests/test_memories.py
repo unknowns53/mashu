@@ -6,7 +6,19 @@ from uuid import uuid4
 import pytest
 
 from conftest import remember, retire
-from mashu import cli, config, db, match, memories, nominations, server, temporary, topics
+from mashu import (
+    cli,
+    config,
+    db,
+    match,
+    memories,
+    memory_changes,
+    nominations,
+    scopes,
+    server,
+    temporary,
+    topics,
+)
 from mashu.errors import MalformedRequestError, MashuError, RefusedError, RetiredConflictError
 
 RULE = "never report a run as finished without the output that proves it"
@@ -168,7 +180,7 @@ def test_listing_a_scope_shows_what_lives_there_by_whatever_route(cur, scope_id)
 
     listed = {row["memory_id"] for row in memories.active_memories(cur, scope_id=scope_id)}
     assert listed == {pushed["memory_id"], pinned["memory_id"]}
-    assert [row["memory_id"] for row in memories.scope_push_memories(cur, [scope_id])] == [
+    assert [row["memory_id"] for row in memories.scope_push_memories(cur, scope_id)] == [
         pushed["memory_id"]
     ]
 
@@ -543,3 +555,51 @@ def test_the_store_itself_holds_no_blank_body(cur, statement):
     memory = remember(cur, RULE)
     with pytest.raises(psycopg.errors.CheckViolation), cur.connection.transaction():
         cur.execute(statement, {"memory": memory["memory_id"]})
+
+
+def test_the_other_scopes_of_a_rule_follow_it_until_it_moves(cur, scope_id):
+    other = scopes.create_scope(cur, name="the other repository", actor="user")["scope_id"]
+    third = scopes.create_scope(cur, name="a third repository", actor="user")["scope_id"]
+    old = remember(
+        cur,
+        "check the export checksum before opening the payload",
+        scope_id=scope_id,
+        delivery="scope",
+        also_scope_ids=[other],
+    )
+
+    with pytest.raises(MashuError, match="several scopes"):
+        memories.convert_to_temporary(cur, old["memory_id"], days=3, actor="user")
+
+    retire(cur, old)
+    memories.restore(
+        cur,
+        old["memory_id"],
+        reason="still needed",
+        actor="user",
+        approval_source={"kind": "user_direct"},
+    )
+    assert memories.other_scopes(cur, old["memory_id"]) == [other]
+
+    instruction = "Replace that rule"
+    replaced = memory_changes.change_instructed(
+        cur,
+        old["memory_id"],
+        operation="replace",
+        request_id=uuid4(),
+        approval={
+            "kind": "user_instruction",
+            "instruction": instruction,
+            "conversation_ref": "conversation:turn-1",
+            "conflict_ids": [],
+            "conflict_instruction": None,
+            "reversal_instruction": None,
+        },
+        actor="agent",
+        content="validate the export envelope checksum before opening its payload",
+    )
+    successor = replaced["memory"]["memory_id"]
+    assert memories.other_scopes(cur, successor) == [other]
+
+    memories.set_delivery(cur, successor, delivery="scope", scope_id=third, actor="user")
+    assert memories.other_scopes(cur, successor) == []

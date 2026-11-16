@@ -45,7 +45,7 @@ _HELP = """
   n            Scopes, Topics, Routes: add one
   e            Scopes, Topics, Routes, Delivery limits: edit the selected one
   d            Delivery limits: return the selected limit to its default
-  x            Topics, Routes: remove the selected one, after confirmation
+  x            Scopes, Topics, Routes: remove the selected one, after confirmation
   i            Routes: add an ignored path
   m            Schema/migrations: apply pending migrations, after confirmation
   ← or Esc     go back one level
@@ -180,12 +180,7 @@ def _memory_lines(label: str, rows: list[dict[str, Any]]) -> list[str]:
 
 def _bootstrap_text(answer: dict[str, Any]) -> str:
     routed = "yes" if answer.get("routed") else "no"
-    included = answer.get("includes") or []
-    including = f"  ·  includes {', '.join(included)}" if included else ""
-    lines = [
-        f"  Scope              {answer.get('scope') or '—'}  ·  routed {routed}{including}",
-        "",
-    ]
+    lines = [f"  Scope              {answer.get('scope') or '—'}  ·  routed {routed}", ""]
     pending = answer.get("schema_pending") or []
     if pending:
         lines.extend([f"  Schema             {len(pending)} migration(s) pending", ""])
@@ -306,20 +301,11 @@ def _scope_rows(dsn: str | None) -> list[dict[str, Any]]:
 
 def _scope_detail(row: dict[str, Any]) -> str:
     summary = row.get("summary") or "No summary written."
-    if row["included_by"]:
-        inclusion = f"  included by {', '.join(row['included_by'])}"
-    elif row["includes"]:
-        inclusion = (
-            f"  includes {', '.join(row['includes'])}  ·  {row['opening_tokens']} tokens with them"
-        )
-    else:
-        inclusion = "  includes no other scope"
     return "\n".join(
         (
             f"  ── {row['name']}",
             screen.wrap(summary, indent="  "),
             f"  {row['n_active']} active memories  ·  {row['push_tokens']} pushed tokens",
-            inclusion,
         )
     )
 
@@ -342,7 +328,7 @@ def _scopes_page(dsn: str | None) -> None:
             )
             lines.append(screen.selected(line) if index == at else line)
         detail = _scope_detail(rows[at]) if rows else "  No scopes yet. Press n to create one."
-        keys = "  n new scope   e edit   i includes   " + _LIST_KEYS.strip()
+        keys = "  n new scope   e edit   x remove   " + _LIST_KEYS.strip()
         screen.paint(
             screen.list_with_preview(_title("Scopes"), lines, at, detail, keys, note, more="")
         )
@@ -385,23 +371,18 @@ def _scopes_page(dsn: str | None) -> None:
                 note = f"  edited scope {name or row['name']}"
             except MashuError as error:
                 note = f"  {error}"
-        elif key == "i":
+        elif key == "x":
             if not rows:
-                note = "  there is no scope to edit"
+                note = "  there is no scope to remove"
                 continue
             row = rows[at]
-            selected = row["scope_id"]
-            answer = _replacement("included scopes, comma-separated", ", ".join(row["includes"]))
-            if isinstance(answer, screen.Cancelled):
-                note = "  includes unchanged"
+            if not _confirm(f"remove scope {row['name']}?"):
+                note = "  scope kept"
                 continue
-            names = [part.strip() for part in (answer or "").split(",") if part.strip()]
             try:
                 with db.transaction(dsn) as cur:
-                    wanted = [scopes.require_scope(cur, name)["scope_id"] for name in names]
-                    changed = scopes.set_includes(cur, row["scope_id"], wanted, actor=ACTOR)
-                listed = ", ".join(changed["includes"]) or "no other scope"
-                note = f"  {changed['scope']} includes {listed}"
+                    removed = scopes.remove_scope(cur, row["scope_id"], actor=ACTOR)
+                note = f"  {removed['removed']} scope {row['name']}"
             except MashuError as error:
                 note = f"  {error}"
         elif key == "n":

@@ -11,6 +11,7 @@ import psycopg
 from mashu import (
     bootstrap,
     capacity,
+    memories,
     migrate,
     routing,
     scopes,
@@ -78,7 +79,9 @@ def memory_view(cur: psycopg.Cursor, view: str) -> list[dict[str, Any]]:
     else:
         cur.execute(
             """
-            SELECT m.*, s.name AS scope_name,
+            SELECT m.*, """
+            + memories.SCOPE_NAMES
+            + """,
                    t.name AS topic_name, t.trigger AS topic_trigger
             FROM memory m
             LEFT JOIN scope s ON s.scope_id = m.scope_id

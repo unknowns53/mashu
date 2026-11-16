@@ -567,6 +567,20 @@ def admit(
         (final, home, delivery, topic_id, list(nomination["evidence"]), actor),
     )
     memory = cur.fetchone()
+    if exclude_memory_id is not None and delivery == "scope":
+        # A successor in its predecessor's home scope keeps reaching the scopes it reached;
+        # capacity.check_admission above weighed it there.
+        cur.execute("SELECT to_regclass('memory_scope') IS NOT NULL AS present")
+        if cur.fetchone()["present"]:
+            cur.execute(
+                """
+                INSERT INTO memory_scope (memory_id, scope_id, created_by)
+                SELECT %s, ms.scope_id, %s
+                FROM memory_scope ms JOIN memory m ON m.memory_id = ms.memory_id
+                WHERE ms.memory_id = %s AND m.delivery = 'scope' AND m.scope_id = %s
+                """,
+                (memory["memory_id"], actor, exclude_memory_id, home),
+            )
     cur.execute(
         "INSERT INTO memory_revision (memory_id, content, actor, note) VALUES (%s, %s, %s, %s)",
         (memory["memory_id"], final, actor, f"admitted from nomination {nomination_id}"),

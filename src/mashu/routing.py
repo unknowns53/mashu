@@ -1,4 +1,4 @@
-"""Resolve a working directory to its configured scope, and a scope to what it includes."""
+"""Resolve a working directory to its configured scope."""
 
 from __future__ import annotations
 
@@ -123,43 +123,3 @@ def resolve(cur: psycopg.Cursor, cwd: str | None) -> tuple[UUID | None, bool]:
         if here == prefix or here.startswith(prefix.rstrip("/") + "/"):
             return row["scope_id"], True
     return None, False
-
-
-def _include_table(cur: psycopg.Cursor) -> bool:
-    # Bootstrap and guard run from hooks, so a store without the migration must still answer.
-    cur.execute("SELECT to_regclass('scope_include') IS NOT NULL AS present")
-    return cur.fetchone()["present"]
-
-
-def openings(cur: psycopg.Cursor) -> dict[UUID, tuple[UUID, ...]]:
-    """Every scope with the scopes a session routed to it receives, itself first."""
-    cur.execute("SELECT scope_id FROM scope")
-    seen: dict[UUID, list[UUID]] = {row["scope_id"]: [row["scope_id"]] for row in cur.fetchall()}
-    if _include_table(cur):
-        cur.execute(
-            """
-            SELECT i.scope_id, i.included_scope_id FROM scope_include i
-            JOIN scope s ON s.scope_id = i.included_scope_id
-            ORDER BY s.name
-            """
-        )
-        for row in cur.fetchall():
-            seen[row["scope_id"]].append(row["included_scope_id"])
-    return {scope_id: tuple(ids) for scope_id, ids in seen.items()}
-
-
-def visible(cur: psycopg.Cursor, scope_id: UUID | None) -> tuple[UUID, ...]:
-    """The scopes whose knowledge a session in this scope receives; none when unrouted."""
-    if scope_id is None:
-        return ()
-    if not _include_table(cur):
-        return (scope_id,)
-    cur.execute(
-        """
-        SELECT i.included_scope_id FROM scope_include i
-        JOIN scope s ON s.scope_id = i.included_scope_id
-        WHERE i.scope_id = %s ORDER BY s.name
-        """,
-        (scope_id,),
-    )
-    return (scope_id, *(row["included_scope_id"] for row in cur.fetchall()))

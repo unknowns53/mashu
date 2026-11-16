@@ -7,7 +7,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import capacity, events, redact, routing, temporary
+from mashu import capacity, events, redact
 from mashu.errors import MashuError
 
 
@@ -18,8 +18,10 @@ def create_scope(
     if not name.strip():
         raise MashuError("a scope needs a name")
     verdict = redact.gate({"name": name, "summary": summary})
-    if get_scope(cur, name) is not None:
-        raise MashuError(f"scope '{name}' already exists")
+    taken = get_scope(cur, name)
+    if taken is not None:
+        archived = " as an archived scope" if taken.get("archived_at") else ""
+        raise MashuError(f"scope '{name}' already exists{archived}")
     cur.execute(
         "INSERT INTO scope (name, summary, created_by) VALUES (%s, %s, %s) RETURNING *",
         (name, summary, actor),
@@ -85,10 +87,13 @@ def require_scope(cur: psycopg.Cursor, name: str, *, also: tuple[str, ...] = ())
     `also` names what the caller accepts beside scopes, listed first among the valid names.
     """
     row = get_scope(cur, name)
-    if row is not None:
+    if row is not None and not row.get("archived_at"):
         return row
-    cur.execute("SELECT name FROM scope ORDER BY name")
-    known = [*also, *(r["name"] for r in cur.fetchall())]
+    if row is not None:
+        raise MashuError(f"scope '{name}' is archived; past records name it, so it stays unused")
+    # SELECT * rather than naming archived_at, so a store without that column still answers.
+    cur.execute("SELECT * FROM scope ORDER BY name")
+    known = [*also, *(r["name"] for r in cur.fetchall() if not r.get("archived_at"))]
     listed = f"{'valid names' if also else 'existing scopes'}: {', '.join(known) or 'none yet'}"
     cur.execute("SELECT 1 FROM topic WHERE name = %s AND archived_at IS NULL", (name,))
     if cur.fetchone() is not None:
@@ -99,111 +104,112 @@ def require_scope(cur: psycopg.Cursor, name: str, *, also: tuple[str, ...] = ())
     raise MashuError(f"no scope named '{name}' ({listed})")
 
 
-def included_names(cur: psycopg.Cursor, scope_id: UUID | None) -> list[str]:
-    """The names of the scopes this one includes, for showing a session what it receives."""
-    if scope_id is None:
-        return []
-    ids = routing.visible(cur, scope_id)[1:]
-    if not ids:
-        return []
-    cur.execute("SELECT name FROM scope WHERE scope_id = ANY(%s) ORDER BY name", (list(ids),))
-    return [row["name"] for row in cur.fetchall()]
+#: What keeps a scope in use, with the words a refusal names it by.
+_HOLDS = (
+    (
+        "active memories",
+        "SELECT count(*) FROM memory WHERE status = 'active' AND (scope_id = %(id)s OR "
+        "memory_id IN (SELECT memory_id FROM memory_scope WHERE scope_id = %(id)s))",
+    ),
+    ("routes", "SELECT count(*) FROM route WHERE scope_id = %(id)s"),
+    (
+        "open projects",
+        "SELECT count(*) FROM project WHERE scope_id = %(id)s AND archived_at IS NULL",
+    ),
+    ("open topics", "SELECT count(*) FROM topic WHERE scope_id = %(id)s AND archived_at IS NULL"),
+    (
+        "temporary contexts",
+        "SELECT count(*) FROM temporary_context WHERE scope_id = %(id)s AND expires_at > now()",
+    ),
+    (
+        "pending candidates",
+        "SELECT count(*) FROM nomination WHERE scope_id = %(id)s AND status = 'pending'",
+    ),
+    (
+        "pending memory changes",
+        "SELECT count(*) FROM memory_change "
+        "WHERE successor_scope_id = %(id)s AND status = 'pending'",
+    ),
+)
+
+#: Every table whose rows name a scope by scope_id; any such row makes removal an archive.
+_NAMED_BY = (
+    "ledger",
+    "trace",
+    "memory",
+    "memory_scope",
+    "nomination",
+    "temporary_context",
+    "project",
+    "topic",
+)
 
 
-def set_includes(
-    cur: psycopg.Cursor, scope_id: UUID, included: list[UUID], *, actor: str
-) -> dict[str, Any]:
-    """Make this scope include exactly these scopes, refusing what would overfill an opening.
+def remove_scope(cur: psycopg.Cursor, scope_id: UUID, *, actor: str) -> dict[str, Any]:
+    """Delete a scope nothing has named, or archive one that past records name.
 
-    Dropping an include only makes openings lighter, so only the added ones are weighed.
+    A scope still in use is refused with what holds it, so nothing is left delivered nowhere.
     """
-    wanted = list(dict.fromkeys(included))
-    if scope_id in wanted:
-        raise MashuError("a scope cannot include itself")
-    # Serialise with every capacity check, which reads the openings this write changes.
     capacity.lock(cur)
-    current = routing.openings(cur)
-    if scope_id not in current:
+    cur.execute("SELECT * FROM scope WHERE scope_id = %s FOR UPDATE", (scope_id,))
+    row = cur.fetchone()
+    if row is None or row.get("archived_at"):
         raise MashuError(f"no scope {scope_id}")
-    names = _names(cur)
-    for other in wanted:
-        if other not in current:
-            raise MashuError(f"no scope {other}")
-    if wanted:
-        includers = [s for s, ids in current.items() if scope_id in ids[1:]]
-        if includers:
-            raise MashuError(
-                f"scope '{names[scope_id]}' is included by "
-                f"{', '.join(repr(names[s]) for s in includers)}, so it cannot include others; "
-                "inclusion is one level deep"
-            )
-        nested = [other for other in wanted if len(current[other]) > 1]
-        if nested:
-            raise MashuError(
-                f"{', '.join(repr(names[s]) for s in nested)} include other scopes, so "
-                f"'{names[scope_id]}' cannot include them; inclusion is one level deep"
-            )
-    before = list(current[scope_id][1:])
-    added = [other for other in wanted if other not in before]
-    if added:
-        after = {**current, scope_id: (scope_id, *wanted)}
-        verdict = capacity.check_openings(cur, after)
-        if not verdict["ok"]:
-            raise MashuError(verdict["refusal"])
-        temporary.check_openings(cur, after)
-
-    cur.execute(
-        "DELETE FROM scope_include WHERE scope_id = %s AND NOT (included_scope_id = ANY(%s))",
-        (scope_id, wanted),
+    held = []
+    for label, sql in _HOLDS:
+        cur.execute(sql, {"id": scope_id})
+        n = cur.fetchone()["count"]
+        if n:
+            held.append(f"{n} {label}")
+    if held:
+        raise MashuError(
+            f"scope '{row['name']}' still has {', '.join(held)}; move, retire, or remove them first"
+        )
+    named = " OR ".join(
+        f"EXISTS (SELECT 1 FROM {table} WHERE scope_id = %(id)s)" for table in _NAMED_BY
     )
-    for other in added:
+    cur.execute(
+        "SELECT EXISTS (SELECT 1 FROM memory_change WHERE successor_scope_id = %(id)s) OR "
+        + named
+        + " AS named",
+        {"id": scope_id},
+    )
+    detail = {"scope_id": str(scope_id), "name": row["name"]}
+    if cur.fetchone()["named"]:
         cur.execute(
-            "INSERT INTO scope_include (scope_id, included_scope_id, created_by) "
-            "VALUES (%s, %s, %s)",
-            (scope_id, other, actor),
+            "UPDATE scope SET archived_at = now() WHERE scope_id = %s RETURNING *", (scope_id,)
         )
-    if added or len(wanted) != len(before):
-        events.record(
-            cur,
-            "scope_includes_set",
-            actor,
-            detail={
-                "scope_id": str(scope_id),
-                "from": [names[s] for s in before],
-                "to": [names[s] for s in wanted],
-            },
-        )
-    return {"scope": names[scope_id], "includes": sorted(names[s] for s in wanted)}
-
-
-def _names(cur: psycopg.Cursor) -> dict[UUID, str]:
-    cur.execute("SELECT scope_id, name FROM scope")
-    return {row["scope_id"]: row["name"] for row in cur.fetchall()}
+        archived = cur.fetchone()
+        events.record(cur, "scope_archived", actor, detail=detail)
+        return {**archived, "removed": "archived"}
+    cur.execute("DELETE FROM scope WHERE scope_id = %s RETURNING *", (scope_id,))
+    deleted = cur.fetchone()
+    events.record(cur, "scope_deleted", actor, detail=detail)
+    return {**deleted, "removed": "deleted"}
 
 
 def list_scopes(cur: psycopg.Cursor) -> list[dict[str, Any]]:
-    """Every scope with what it holds, what it adds to a session, and what it includes."""
+    """Every scope not archived, with what it currently holds and what it costs to open."""
     cur.execute("SELECT * FROM scope ORDER BY name")
-    rows = cur.fetchall()
+    rows = [row for row in cur.fetchall() if not row.get("archived_at")]
 
     cur.execute(
         """
-        SELECT scope_id, count(*) AS n FROM memory
-        WHERE status = 'active' AND scope_id IS NOT NULL
+        SELECT scope_id, count(DISTINCT memory_id) AS n FROM (
+            SELECT scope_id, memory_id FROM memory
+            WHERE status = 'active' AND scope_id IS NOT NULL
+            UNION ALL
+            SELECT ms.scope_id, ms.memory_id FROM memory_scope ms
+            JOIN memory m ON m.memory_id = ms.memory_id
+            WHERE m.status = 'active'
+        ) reached
         GROUP BY scope_id
         """
     )
     active = {row["scope_id"]: row["n"] for row in cur.fetchall()}
-    totals = capacity.bootstrap_totals(cur)
-    names = {row["scope_id"]: row["name"] for row in rows}
-    shape = routing.openings(cur)
+    pushed = capacity.bootstrap_totals(cur)["scopes"]
 
     for row in rows:
         row["n_active"] = active.get(row["scope_id"], 0)
-        row["push_tokens"] = totals["own"].get(row["scope_id"], 0)
-        row["opening_tokens"] = totals["scopes"].get(row["scope_id"], 0)
-        row["includes"] = [names[s] for s in shape.get(row["scope_id"], ())[1:]]
-        row["included_by"] = sorted(
-            names[s] for s, ids in shape.items() if row["scope_id"] in ids[1:]
-        )
+        row["push_tokens"] = pushed.get(row["scope_id"], 0)
     return rows

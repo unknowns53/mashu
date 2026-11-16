@@ -125,6 +125,59 @@ def _retired_conflicts(
     return retirement_matches, overruled
 
 
+#: The scopes a Memory reaches, its home scope first, for a query naming memory m and its home
+#: scope s. scope_name joins them for listings; scope_names keeps them apart for forms.
+SCOPE_NAMES = """
+    array_remove(ARRAY[s.name] || ARRAY(
+        SELECT x.name FROM memory_scope ms JOIN scope x ON x.scope_id = ms.scope_id
+        WHERE ms.memory_id = m.memory_id ORDER BY x.name
+    ), NULL) AS scope_names,
+    array_to_string(array_remove(ARRAY[s.name] || ARRAY(
+        SELECT x.name FROM memory_scope ms JOIN scope x ON x.scope_id = ms.scope_id
+        WHERE ms.memory_id = m.memory_id ORDER BY x.name
+    ), NULL), ', ') AS scope_name
+"""
+
+
+def _has_other_scopes(cur: psycopg.Cursor) -> bool:
+    # Bootstrap runs from the SessionStart hook, so a store without the table must still answer.
+    cur.execute("SELECT to_regclass('memory_scope') IS NOT NULL AS present")
+    return cur.fetchone()["present"]
+
+
+def other_scopes(cur: psycopg.Cursor, memory_id: UUID) -> list[UUID]:
+    """The scopes a scope Memory reaches besides its home scope."""
+    if not _has_other_scopes(cur):
+        return []
+    cur.execute(
+        "SELECT scope_id FROM memory_scope WHERE memory_id = %s ORDER BY scope_id", (memory_id,)
+    )
+    return [row["scope_id"] for row in cur.fetchall()]
+
+
+def _check_other_scopes(delivery: str, home: UUID | None, others: Sequence[UUID]) -> list[UUID]:
+    """The other scopes once checked against the delivery and the home scope."""
+    others = list(dict.fromkeys(others))
+    if others and delivery != "scope":
+        raise MashuError(f"only a scope memory reaches several scopes, not a {delivery} one")
+    return [scope_id for scope_id in others if scope_id != home]
+
+
+def _write_other_scopes(
+    cur: psycopg.Cursor, memory_id: UUID, others: Sequence[UUID], *, actor: str
+) -> None:
+    cur.execute(
+        "DELETE FROM memory_scope WHERE memory_id = %s AND NOT (scope_id = ANY(%s))",
+        (memory_id, list(others)),
+    )
+    for scope_id in others:
+        cur.execute(
+            "INSERT INTO memory_scope (memory_id, scope_id, created_by) VALUES (%s, %s, %s) "
+            "ON CONFLICT DO NOTHING",
+            (memory_id, scope_id, actor),
+        )
+
+
 def remember(
     cur: psycopg.Cursor,
     *,
@@ -135,14 +188,17 @@ def remember(
     topic_id: UUID | None = None,
     acknowledged_conflicts: list[UUID] | None = None,
     why: str | None = None,
+    also_scope_ids: Sequence[UUID] = (),
 ) -> dict[str, Any]:
     """Write a rule straight into the active set, with the writing as its evidence.
 
     `why` becomes the evidence row's account, where the reason is kept without being pushed.
+    A scope rule also reaches `also_scope_ids` besides `scope_id`.
     """
     why = (why or "").strip() or None
     check_body(content, limit=settings.limit(cur, "content_limit"), why=why)
     check_delivery(delivery, scope_id, topic_id)
+    others = _check_other_scopes(delivery, scope_id, also_scope_ids)
     if delivery == "topic":
         scope_id = topic_home(cur, delivery, topic_id)
 
@@ -158,7 +214,12 @@ def remember(
     else:
         approval_source = {"kind": "user_direct"}
     admission = capacity.check_admission(
-        cur, content=content, delivery=delivery, scope_id=scope_id, topic_id=topic_id
+        cur,
+        content=content,
+        delivery=delivery,
+        scope_id=scope_id,
+        topic_id=topic_id,
+        also_scope_ids=others,
     )
     if not admission["ok"]:
         raise RefusedError(admission["refusal"])
@@ -185,11 +246,15 @@ def remember(
         (content, scope_id, delivery, topic_id, [ledger_id], actor),
     )
     memory = cur.fetchone()
+    if others:
+        _write_other_scopes(cur, memory["memory_id"], others, actor=actor)
     cur.execute(
         "INSERT INTO memory_revision (memory_id, content, actor, note) VALUES (%s, %s, %s, %s)",
         (memory["memory_id"], content, actor, _EXPLICIT_WHAT),
     )
     detail: dict[str, Any] = {"delivery": delivery, "approval_source": approval_source}
+    if others:
+        detail["also_scope_ids"] = [str(scope_id) for scope_id in others]
     if topic_id is not None:
         detail["topic_id"] = str(topic_id)
     if overruled:
@@ -238,7 +303,9 @@ def memory_details(cur: psycopg.Cursor, memory_id: UUID) -> dict[str, Any] | Non
     """
     cur.execute(
         """
-        SELECT m.*, s.name AS scope_name,
+        SELECT m.*, """
+        + SCOPE_NAMES
+        + """,
                t.name AS topic_name, t.trigger AS topic_trigger,
                r.revision_id AS current_revision_id,
                r.created_at AS revision_created_at
@@ -401,6 +468,11 @@ def convert_to_temporary(
     if current["delivery"] == "topic":
         raise MashuError(
             "a topic memory cannot become temporary because its topic's trigger would be lost"
+        )
+    if other_scopes(cur, memory_id):
+        raise MashuError(
+            "this memory reaches several scopes and a temporary context has one; "
+            "deliver it to one scope first"
         )
     scope_id = current["scope_id"] if current["delivery"] == "scope" else None
     context = temporary.put_temporary(
@@ -574,6 +646,7 @@ def restore(
         delivery=current["delivery"],
         scope_id=home,
         topic_id=current["topic_id"],
+        also_scope_ids=other_scopes(cur, memory_id) if current["delivery"] == "scope" else (),
     )
     if not admission["ok"]:
         raise RefusedError(admission["refusal"])
@@ -621,8 +694,14 @@ def set_delivery(
     clear_scope: bool = False,
     topic_id: UUID | None = None,
     approval_source: dict[str, Any] | None = None,
+    also_scope_ids: Sequence[UUID] | None = None,
 ) -> dict[str, Any]:
-    """Move a rule between the opening, one scope's opening, and a topic."""
+    """Move a rule between the opening, the openings of some scopes, and a topic.
+
+    `also_scope_ids` names every scope a scope rule reaches besides its home scope. Left out,
+    a rule that stays in the same home scope keeps the others it had, and a moved rule drops
+    them, as the store does for any move.
+    """
     current = _require_active(cur, memory_id)
     if clear_scope and scope_id is not None:
         raise MashuError("pass a scope or clear it, not both")
@@ -630,6 +709,12 @@ def set_delivery(
     check_delivery(delivery, home, topic_id)
     if delivery == "topic":
         home = topic_home(cur, delivery, topic_id)
+    before = other_scopes(cur, memory_id)
+    if also_scope_ids is None:
+        kept = delivery == "scope" and current["delivery"] == "scope"
+        others = before if kept and home == current["scope_id"] else []
+    else:
+        others = _check_other_scopes(delivery, home, also_scope_ids)
 
     admission = capacity.check_admission(
         cur,
@@ -638,6 +723,7 @@ def set_delivery(
         scope_id=home,
         exclude_memory_id=memory_id,
         topic_id=topic_id,
+        also_scope_ids=others,
     )
     if not admission["ok"]:
         raise RefusedError(admission["refusal"])
@@ -652,7 +738,12 @@ def set_delivery(
         (delivery, home, topic_id, memory_id),
     )
     row = cur.fetchone()
+    if before or others:
+        _write_other_scopes(cur, memory_id, others, actor=actor)
     detail: dict[str, Any] = {"from": current["delivery"], "to": delivery}
+    if before or others:
+        detail["from_also_scope_ids"] = sorted(str(scope_id) for scope_id in before)
+        detail["to_also_scope_ids"] = sorted(str(scope_id) for scope_id in others)
     if current["topic_id"] is not None or topic_id is not None:
         detail["from_topic_id"] = str(current["topic_id"]) if current["topic_id"] else None
         detail["to_topic_id"] = str(topic_id) if topic_id else None
@@ -672,15 +763,25 @@ def always_memories(cur: psycopg.Cursor) -> list[dict[str, Any]]:
     return cur.fetchall()
 
 
-def scope_push_memories(cur: psycopg.Cursor, scope_ids: Sequence[UUID]) -> list[dict[str, Any]]:
-    """The scope rules a session receives from its own scope and the scopes it includes."""
+def _in_scope(cur: psycopg.Cursor) -> str:
+    """The condition that a memory row reaches the scope %(scope)s, as home or as another."""
+    if not _has_other_scopes(cur):
+        return "scope_id = %(scope)s"
+    return (
+        "(scope_id = %(scope)s OR memory_id IN "
+        "(SELECT memory_id FROM memory_scope WHERE scope_id = %(scope)s))"
+    )
+
+
+def scope_push_memories(cur: psycopg.Cursor, scope_id: UUID) -> list[dict[str, Any]]:
+    """The scope rules a session in this scope receives, whether it is their home or not."""
     cur.execute(
-        """
+        f"""
         SELECT * FROM memory
-        WHERE status = 'active' AND delivery = 'scope' AND scope_id = ANY(%s)
+        WHERE status = 'active' AND delivery = 'scope' AND {_in_scope(cur)}
         ORDER BY created_at, memory_id
         """,
-        (list(scope_ids),),
+        {"scope": scope_id},
     )
     return cur.fetchall()
 
@@ -688,11 +789,11 @@ def scope_push_memories(cur: psycopg.Cursor, scope_ids: Sequence[UUID]) -> list[
 def active_memories(cur: psycopg.Cursor, *, scope_id: UUID) -> list[dict[str, Any]]:
     """Everything alive in one scope, whatever route it takes to a session."""
     cur.execute(
-        """
+        f"""
         SELECT * FROM memory
-        WHERE status = 'active' AND scope_id = %s
+        WHERE status = 'active' AND {_in_scope(cur)}
         ORDER BY delivery, created_at, memory_id
         """,
-        (scope_id,),
+        {"scope": scope_id},
     )
     return cur.fetchall()

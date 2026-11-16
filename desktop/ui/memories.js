@@ -289,6 +289,8 @@ function deliveryPanel(detail) {
   loadChoices()
     .then((choices) => {
       const isTopic = (values) => values.delivery === "topic";
+      const isScope = (values) => values.delivery === "scope";
+      const reached = detail.scope_names || [];
       panel.append(
         form({
           fields: [
@@ -298,10 +300,11 @@ function deliveryPanel(detail) {
               label: t("delivery.area"),
               kind: "select",
               options: areaOptions(choices, t("delivery.area_none")),
-              value: detail.scope_name || "",
+              value: reached[0] || "",
               hint: t("delivery.area_hint"),
-              show: (values) => !isTopic(values),
+              show: (values) => values.delivery === "always",
             },
+            { name: "scopes", label: t("delivery.areas"), kind: "checks", options: areaChecks(choices), value: reached, show: isScope },
             ...topicFields(choices, detail.topic_id, isTopic),
           ],
           onCancel: () => memTogglePanel("delivery"),
@@ -310,7 +313,8 @@ function deliveryPanel(detail) {
               await call("memory.delivery", {
                 memory_id: detail.memory_id,
                 delivery: values.delivery,
-                scope: isTopic(values) ? null : values.scope || null,
+                scope: values.delivery === "always" ? values.scope || null : null,
+                ...(isScope(values) ? { scopes: values.scopes } : {}),
                 ...topicArgs(isTopic(values) ? values : {}),
               });
               mem.panel = null;
@@ -493,13 +497,7 @@ function newMemoryForm(target) {
             { name: "content", label: t("memory.rule"), kind: "area", rows: 3, max: mem.contentLimit, hint: t("memory.rule_hint"), big: true },
             { name: "why", label: t("memory.why"), kind: "area", rows: 3, hint: t("memory.why_hint") },
             { name: "delivery", label: t("delivery.title"), kind: "radio", options: deliveryOptions(), value: "always" },
-            {
-              name: "scope",
-              label: t("delivery.area"),
-              kind: "select",
-              options: areaOptions(choices, t("delivery.area_none")),
-              show: (values) => values.delivery === "scope",
-            },
+            { name: "scopes", label: t("delivery.areas"), kind: "checks", options: areaChecks(choices), value: [], show: (values) => values.delivery === "scope" },
             ...topicFields(choices, "", isTopic),
           ],
           submit: t("common.add"),
@@ -514,7 +512,7 @@ function newMemoryForm(target) {
                   content: values.content,
                   why: values.why,
                   delivery: values.delivery,
-                  scope: values.delivery === "scope" ? values.scope || null : null,
+                  scopes: values.delivery === "scope" ? values.scopes : [],
                   ...topicArgs(isTopic(values) ? values : {}),
                   acknowledged,
                 }).then((result) => {

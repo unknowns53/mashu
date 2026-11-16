@@ -8,7 +8,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import capacity, config, events, projects, redact, routing, settings
+from mashu import capacity, config, events, projects, redact, settings
 from mashu.errors import (
     ClosedTaskError,
     DuplicateTaskError,
@@ -700,30 +700,14 @@ def active_state_costs(cur: psycopg.Cursor) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda row: row["tokens"], reverse=True)
 
 
-def _by_opening(
-    rows: list[dict[str, Any]], closure: dict[UUID, tuple[UUID, ...]]
-) -> dict[UUID, list[dict[str, Any]]]:
-    """The scoped states each scope's session receives, its included scopes' among them."""
-    buckets: dict[UUID, list[dict[str, Any]]] = {}
-    for row in rows:
-        if row["scope_id"] is not None:
-            buckets.setdefault(row["scope_id"], []).append(row)
-    shape = {**{scope_id: (scope_id,) for scope_id in buckets}, **closure}
-    return {
-        scope_id: [row for member in members for row in buckets.get(member, [])]
-        for scope_id, members in shape.items()
-    }
-
-
 def pushed_totals(cur: psycopg.Cursor) -> dict[str, Any]:
-    """What active state costs everywhere, per scope with what it includes, and at its worst."""
+    """What active state costs everywhere, per scope, and at its worst."""
     rows = active_state_costs(cur)
     unscoped = sum(row["tokens"] for row in rows if row["scope_id"] is None)
-    scoped = {
-        scope_id: sum(row["tokens"] for row in members)
-        for scope_id, members in _by_opening(rows, routing.openings(cur)).items()
-        if members
-    }
+    scoped: dict[UUID, int] = {}
+    for row in rows:
+        if row["scope_id"] is not None:
+            scoped[row["scope_id"]] = scoped.get(row["scope_id"], 0) + row["tokens"]
     return {
         "unscoped": unscoped,
         "scopes": scoped,
@@ -733,22 +717,21 @@ def pushed_totals(cur: psycopg.Cursor) -> dict[str, Any]:
 
 
 def _budget_competitors(
-    rows: list[dict[str, Any]],
-    *,
-    scope_id: UUID | None,
-    closure: dict[UUID, tuple[UUID, ...]],
+    rows: list[dict[str, Any]], *, scope_id: UUID | None
 ) -> tuple[list[dict[str, Any]], str]:
-    """The states delivered beside a write, in the heaviest session that receives it."""
+    """The states delivered beside a write, using the heaviest scope for global state."""
     unscoped = [row for row in rows if row["scope_id"] is None]
-    opened = _by_opening(rows, closure)
     if scope_id is not None:
-        # A state in an included scope is pushed in every scope that includes it.
-        opened = {
-            key: members for key, members in opened.items() if scope_id in closure.get(key, (key,))
-        }
-    heaviest = max(opened.values(), key=lambda bucket: sum(r["tokens"] for r in bucket), default=[])
-    if scope_id is not None and len(opened) == 1:
-        return [*unscoped, *heaviest], "this scope"
+        scoped = [row for row in rows if row["scope_id"] == scope_id]
+        return [*unscoped, *scoped], "this scope"
+
+    buckets: dict[UUID, list[dict[str, Any]]] = {}
+    for row in rows:
+        if row["scope_id"] is not None:
+            buckets.setdefault(row["scope_id"], []).append(row)
+    heaviest = max(
+        buckets.values(), key=lambda bucket: sum(r["tokens"] for r in bucket), default=[]
+    )
     return [*unscoped, *heaviest], "the busiest scope"
 
 
@@ -775,9 +758,7 @@ def card_share(cur: psycopg.Cursor, project: dict[str, Any]) -> dict[str, Any]:
     A write is never refused for the scope's share; the oldest cards fall out of delivery
     instead, and the writer is told which, so a needless task shows what it hid.
     """
-    rows, boundary = _budget_competitors(
-        active_state_costs(cur), scope_id=project["scope_id"], closure=routing.openings(cur)
-    )
+    rows, boundary = _budget_competitors(active_state_costs(cur), scope_id=project["scope_id"])
     capacity = settings.limit(cur, "project_capacity")
     _, unseated = seat_cards(rows, capacity)
     return {
