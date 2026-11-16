@@ -308,7 +308,9 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         print(f"schema    {len(unapplied)} MIGRATION(S) PENDING: {', '.join(unapplied)}")
         print("          writes against the new columns fail until 'mashu admin migrate'")
     routed_text = str(answer.get("routed", False)).lower()
-    print(f"scope     {answer.get('scope') or '-'}  routed={routed_text}")
+    included = answer.get("includes") or []
+    including = f"  includes={','.join(included)}" if included else ""
+    print(f"scope     {answer.get('scope') or '-'}  routed={routed_text}{including}")
     _print_memory_rows(answer.get("always", []), heading="always")
     _print_memory_rows(answer.get("scoped", []), heading="scoped")
     if answer.get("topics"):
@@ -1201,18 +1203,37 @@ def cmd_guard(args: argparse.Namespace) -> int:
 
 
 def cmd_scope(args: argparse.Namespace) -> int:
+    if (args.include or args.drop) and args.edit is None:
+        raise MashuError("--include and --drop change the scope named by --edit")
+    if args.edit is not None and not (args.include or args.drop):
+        raise MashuError("--edit needs --include or --drop")
+    if args.edit is not None and args.add is not None:
+        raise MashuError("pass --add or --edit, not both")
     with db.transaction(args.dsn) as cur:
         if args.add is not None:
             row = scopes.create_scope(cur, name=args.add, summary=args.about, actor=ACTOR)
+        elif args.edit is not None:
+            target = scopes.require_scope(cur, args.edit)
+            held = list(routing.visible(cur, target["scope_id"])[1:])
+            added = [scopes.require_scope(cur, name)["scope_id"] for name in args.include]
+            dropped = {scopes.require_scope(cur, name)["scope_id"] for name in args.drop}
+            wanted = [s for s in [*held, *added] if s not in dropped]
+            changed = scopes.set_includes(cur, target["scope_id"], wanted, actor=ACTOR)
         else:
             rows = scopes.list_scopes(cur)
     if args.add is not None:
         _gate_warnings(row)
         print(f"created  {row['name']}")
         return 0
-    print("name                         active  push_tokens")
+    if args.edit is not None:
+        print(f"{changed['scope']} includes {', '.join(changed['includes']) or 'no other scope'}")
+        return 0
+    print("name                         active  push_tokens  opening  includes")
     for row in rows:
-        print(f"{row['name'][:28]:28}  {row['n_active']:6}  {row['push_tokens']:11}")
+        print(
+            f"{row['name'][:28]:28}  {row['n_active']:6}  {row['push_tokens']:11}  "
+            f"{row['opening_tokens']:7}  {', '.join(row['includes']) or '-'}"
+        )
     return 0
 
 
@@ -2132,16 +2153,30 @@ def build_parser() -> argparse.ArgumentParser:
         "scope",
         "the scope register",
         description=(
-            "List scopes, or create one with --add and an optional --about. Creation is User-only."
+            "List scopes, or create one with --add and an optional --about. --edit with "
+            "--include or --drop changes the scopes it includes: a session routed to a scope "
+            "also receives the memories, topics, task cards, and temporary context of the "
+            "scopes it includes. Inclusion is one level deep, so a scope that includes others "
+            "cannot be included. push_tokens is what a scope's own rules cost; opening adds "
+            "the scopes it includes. Creation and inclusion are User-only."
         ),
         examples=(
             "mashu scope",
             "mashu scope --add deployment",
             'mashu scope --add deployment --about "Production releases"',
+            "mashu scope --edit enrai --include app-dev",
+            "mashu scope --edit enrai --drop app-dev",
         ),
     )
     scope.add_argument("--add", metavar="NAME", help="create a scope with this name")
     scope.add_argument("--about", metavar="LINE", help="what the scope covers")
+    scope.add_argument("--edit", metavar="NAME", help="the scope whose includes change")
+    scope.add_argument(
+        "--include", metavar="NAME", action="append", default=[], help="include this scope"
+    )
+    scope.add_argument(
+        "--drop", metavar="NAME", action="append", default=[], help="stop including this scope"
+    )
     scope.set_defaults(func=cmd_scope)
 
     topic = _command(

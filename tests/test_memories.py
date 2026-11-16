@@ -168,7 +168,7 @@ def test_listing_a_scope_shows_what_lives_there_by_whatever_route(cur, scope_id)
 
     listed = {row["memory_id"] for row in memories.active_memories(cur, scope_id=scope_id)}
     assert listed == {pushed["memory_id"], pinned["memory_id"]}
-    assert [row["memory_id"] for row in memories.scope_push_memories(cur, scope_id)] == [
+    assert [row["memory_id"] for row in memories.scope_push_memories(cur, [scope_id])] == [
         pushed["memory_id"]
     ]
 

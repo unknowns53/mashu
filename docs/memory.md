@@ -140,6 +140,8 @@ Agent 用の検索は無いので、溢れた分を逃がす先は無い。**容
 
 **delivery が `always` の規則には、全体の容量の内側にもう一段低い上限（既定 800 token、`always_capacity`）を置く。**always の 1 token は、どの scope も使えない 1 token である。共有の上限だけを持たせると、`always` の規則は決して溢れない。溢れる代わりに、scope が必要とするはずの余地を、大半のセッションには要らなかった規則で静かに使い切る。scope の側は何一つ拒否されないまま予算だけが無くなるので、どこにも失敗が現れない。
 
+**Scope が別の Scope を取り込むとき（5 節）、そのセッションに push される量は、always と自分の Scope と取り込む Scope の合計である。**容量はこの合計で判定する。取り込まれる Scope への規則の追加は、その Scope を取り込むすべての Scope のセッションで判定する。取り込みを足す操作も、各セッションの Memory と Temporary Context を増やす書き込みなので、同じ容量で判定し、超えるなら拒否する。取り込みを外す操作は量を減らすだけなので判定しない。`mashu scope` の `push_tokens` はその Scope 自身の規則の量、`opening` は取り込む Scope を足したセッションの量である。
+
 **行数で数える代理指標は使わない。**規則の長さは一定でないので、件数は予算の代理にならない。
 
 `always` への追加で拒否されたものには、scope 規則には無い出口が一つある。一箇所でしか効かない規則なら、どこで効くかを言えばよい（`mashu deliver <id> scope --scope <name>`）。
@@ -177,7 +179,7 @@ Agent に知識を届ける経路は、すべて存在の push から始まる�
 | delivery | 誰に届くか | いつ届くか | 受け持つ失敗 | 例 |
 |---|---|---|---|---|
 | `always` | 全セッション | 開始時（bootstrap） | どの作業でも破ると損害が出る規律の不達 | 検証の証拠なしに完了と言わない |
-| `scope` | route が当たるセッションだけ | 開始時（bootstrap） | 無関係な領域の規則が `always` の規則を希釈する | 特定の計算機環境の接続規律、特定ソフトの落とし穴 |
+| `scope` | route が当たるセッションと、その Scope を取り込む Scope のセッション | 開始時（bootstrap） | 無関係な領域の規則が `always` の規則を希釈する | 特定の計算機環境の接続規律、特定ソフトの落とし穴 |
 | `topic:<name>` | 見出しは topic の Scope が当たるセッション（Scope が無ければ全セッション）、本文はその作業に入ったセッション | 見出しは開始時（bootstrap）、本文は作業に入るとき（`memory_list(topic=...)`） | 一部の作業でしか要らない規則が、その作業をしない大半のセッションで配信の容量を使う | 特定プロジェクトの難易度較正の規律、音声処理の落とし穴 |
 
 軸は二つある。**scope は「どこで」を絞り、topic は「何の作業のあいだか」を絞る。**「いつ」は topic の action が受け持つ。
@@ -186,7 +188,9 @@ Agent に知識を届ける経路は、すべて存在の push から始まる�
 - bootstrap と guard の違いは提示の時機である。開始時に読んだ規則が、数十ターン後の判断の瞬間には効いていないことがある。action を持つ topic は、その規則を判断の直前に、呼び出しの文脈へ足す形で示す
 - scope と topic の違いは、規則が効く条件の種類である。scope の条件は cwd で決まる場所だが、同じ場所でも作業の種類によって要る規則は変わる。scope に置かれがちな規則の多くは、特定の作業をしているときだけ効く。それを scope に置くと、その作業をしないセッションにも毎回本文を押し込むことになる。topic は名前・規則数・発動条件の一行だけを push し、本文は条件に当たる作業に入るときに Agent が読む
 
-guard は topic の Scope に従う。action を持つ topic が Scope を持つ場合、発火はその Scope のセッションに限られる。
+**Scope は別の Scope を取り込める。**常時は要らないが複数の場所で効く規則は、共有の Scope（例 `app-dev`）に一件だけ置き、それが効く場所の Scope がその共有の Scope を取り込む。取り込む Scope のセッションには、取り込まれた Scope の scope の記憶、topic の見出しと guard、Task card、Temporary Context も、自分の Scope のものと同じく届く。規則を Scope ごとに複製すると、同じ文が配信の容量を Scope の数だけ使い、改訂も retire も一件ずつになる。取り込みは一段に限り、別の Scope を取り込む Scope は取り込まれず、取り込まれる Scope は別の Scope を取り込まない。セッションに届く Scope の集合を一目で読める大きさに保つためで、DB のトリガが強制する。取り込みの設定は User だけが CLI・TUI・デスクトップアプリから行い、MCP の tool は持たない。`memory_list(scope=...)` は、取り込みを足さずにその Scope 自身の記憶を返す。
+
+guard は topic の Scope に従う。action を持つ topic が Scope を持つ場合、発火はその Scope のセッションと、その Scope を取り込む Scope のセッションに限られる。
 
 topic は本文を pull で届ける。検索による pull が起動されないのは、Agent が自分の知らないことを知らないからである。topic は見出しと発動条件を毎回 push するので、Agent は何があり、いつ読むべきかを知っている。これは Task card が採る二段構造、つまり存在は push し、詳細は既知の名前から決定的に pull する形（`docs/project-state.md` 8 節）と同じである。残る失敗は、Agent がいまの作業を発動条件に結びつけ損ねることであり、10 節の観測で数える。
 
@@ -205,13 +209,13 @@ topic は本文を pull で届ける。検索による pull が起動されな�
 1. **フックのあるクライアントでは、harness が配る**。SessionStart フック（`startup` / `resume` / `compact`）が `mashu bootstrap` の出力をそのまま文脈へ入れる。モデルが指示を読んで従うかどうかに依存しない。`compact` を含むのは、圧縮が同じ失敗の第二の扉だからである（session_id は変わらず、契約上 bootstrap は一度しか呼ばれず、push が書いた文脈のほうが落ちる）
 2. **フックの無いクライアント（Codex CLI）向けに、指示ファイルへ 2 行の shim を置く**。「Mashu MCP が接続されていればセッション開始時に一度 `session_bootstrap` を呼ぶ。SessionStart フックが既に配信していれば不要」。指示ファイルを痩せさせる方針との衝突は、2 行という量で受け止める
 
-フックが失敗したときは何も出力せず終了する。したがって「出たら呼ばない、出なければ呼ぶ」が自然に成立し、二重配信も無配信も起きない。同じ理由で、bootstrap はコードより古い store でも失敗してはならない。未適用の migration が足す表や列は読まずに残りを配り、未適用であることを返す。topic の表がまだ無い store では、topic の見出しを空にして返す。topic の action 列がまだ無い store では、見出しはそのまま返し、guard は何も返さない。指示ファイル側に書くのはこの 2 行だけで、pain / nominate の規律は引き続き server の instructions が運ぶ。
+フックが失敗したときは何も出力せず終了する。したがって「出たら呼ばない、出なければ呼ぶ」が自然に成立し、二重配信も無配信も起きない。同じ理由で、bootstrap はコードより古い store でも失敗してはならない。未適用の migration が足す表や列は読まずに残りを配り、未適用であることを返す。取り込みの表がまだ無い store では、現在 Scope だけを配る。topic の表がまだ無い store では、topic の見出しを空にして返す。topic の action 列がまだ無い store では、見出しはそのまま返し、guard は何も返さない。指示ファイル側に書くのはこの 2 行だけで、pain / nominate の規律は引き続き server の instructions が運ぶ。
 
 返すもの。
 
 - delivery = `always` の記憶（全文）
-- 現在 Scope の記憶（全文）。Scope は route（cwd 対応表）か引数で決まる
-- このセッションに見える topic の見出し（名前・規則数・発動条件）。Scope を持たない topic と現在 Scope の topic が見え、active な規則を持たない topic は載らない。本文は載らない
+- 現在 Scope と、それが取り込む Scope の記憶（全文）。Scope は route（cwd 対応表）か引数で決まり、取り込む Scope の名前も返す
+- このセッションに見える topic の見出し（名前・規則数・発動条件）。Scope を持たない topic と、現在 Scope と取り込む Scope の topic が見え、active な規則を持たない topic は載らない。本文は載らない
 - active な Task の card（`docs/project-state.md` 8 節。各行に最終確認日時が本文として付く。dormant / closed は載らない）
 - 有効な Temporary Context
 - pending の候補件数（1 件でもあれば一行で知らせる）
@@ -281,7 +285,7 @@ Project State 系 Tool は `docs/project-state.md` 12.1 節に記す。
 | `mashu guard <action>` | guard の照会。action に結びついた topic の規則を表示し、規則があれば終了コード 2 を返す。PreToolUse フックが読み、呼び出しの文脈に足す。`--outcome same\|changed --topic <name>` は `guard_followed` を書く口で、今のフックは呼ばない |
 | `mashu deliver <id> <delivery>` | delivery の変更。topic へは `--topic <name>` で移す |
 | `mashu topic` | topic の一覧・作成・編集・削除（User のみ）。active な規則が無い topic だけを消せる。一度も使われていなければ削除し、retire された規則や提案が参照していれば archive する。`mashu topic show <name>` で規則の本文を読む。`--edit <name> --action <act>` で action に結びつけ、`--no-action` で外す。一覧と show は結びついた action を `before: <act>` と示す。`--source <path>`（`--add` / `--edit`）で原典を指し、`--source -` で外す |
-| `mashu scope` / `mashu route` | Scope の一覧と cwd 対応表（User のみ作成） |
+| `mashu scope` / `mashu route` | Scope の一覧と cwd 対応表（User のみ作成）。`mashu scope --edit <name> --include <other>` / `--drop <other>` で取り込む Scope を変える |
 | `mashu bootstrap` | push される内容と token を表示 |
 | `mashu admin migrate` | migration 実行 |
 
@@ -299,10 +303,11 @@ id を取る引数は、表示される短縮 ID（先頭 8 文字）の前方�
 
 `show` は Memory・candidate・`ledger` の行を ID から非対話で読む経路である。dashboard の Memories でも Memory の evidence と revision history を読めるが、candidate と `ledger` の行は対象にしない。`ledger` の参照は記憶が配信の容量を使う理由そのものであり、どちらの経路でも retire の前に確認できる状態を保つ。
 
-## 8. スキーマ（11 表）
+## 8. スキーマ（12 表）
 
 ```
 scope             Scope の一覧。User のみ作成
+scope_include     Scope が取り込む Scope。一段だけ。User のみ作成
 route             cwd から scope への対応表
 ledger            痛みの記録。append-only
 trace             書き込まれない既存の行だけを持つ。ledger.from_trace も同じ

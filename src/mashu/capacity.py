@@ -12,7 +12,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import settings
+from mashu import routing, settings
 from mashu.errors import MashuError
 from mashu.tokens import ROW_OVERHEAD, pushed_cost
 
@@ -43,10 +43,12 @@ def topic_line(name: str, rules: int, trigger: str) -> str:
 
 @dataclass(frozen=True)
 class _Opening:
-    """The pushed rows and the topics they may sit in, as stored or as a write would leave them."""
+    """The pushed rows, the topics they may sit in, and each scope's opening (itself and the
+    scopes it includes), as stored or as a write would leave them."""
 
     rows: tuple[dict[str, Any], ...]
     topics: dict[Any, dict[str, Any]]
+    closure: dict[Any, tuple[Any, ...]]
 
     def without_memory(self, memory_id: UUID | None) -> _Opening:
         if memory_id is None:
@@ -67,11 +69,13 @@ def _opening(cur: psycopg.Cursor) -> _Opening:
     cur.execute(_PUSHED)
     rows = tuple(cur.fetchall())
     cur.execute(_TOPICS)
-    return _Opening(rows=rows, topics={row["topic_id"]: row for row in cur.fetchall()})
+    topics = {row["topic_id"]: row for row in cur.fetchall()}
+    return _Opening(rows=rows, topics=topics, closure=routing.openings(cur))
 
 
 def _measure(opening: _Opening) -> dict[str, Any]:
-    """Every session's share, each scope's share, and each topic's unpushed bodies."""
+    """Every session's share, each scope's own share, each scope's opening with the scopes it
+    includes, and each topic's unpushed bodies."""
     always: list[str] = []
     scoped: dict[Any, list[str]] = {}
     bodies: dict[Any, list[str]] = {}
@@ -89,18 +93,27 @@ def _measure(opening: _Opening) -> dict[str, Any]:
             always.append(line)
         else:
             scoped.setdefault(topic["scope_id"], []).append(line)
+    own = {scope_id: pushed_cost(contents) for scope_id, contents in scoped.items()}
+    closure = {**{scope_id: (scope_id,) for scope_id in own}, **opening.closure}
     return {
         "always": pushed_cost(always),
-        "scopes": {scope_id: pushed_cost(contents) for scope_id, contents in scoped.items()},
+        "own": own,
+        "scopes": {
+            scope_id: total
+            for scope_id, members in closure.items()
+            if (total := sum(own.get(member, 0) for member in members))
+        },
         "bodies": {topic_id: pushed_cost(contents) for topic_id, contents in bodies.items()},
     }
 
 
 def bootstrap_totals(cur: psycopg.Cursor) -> dict[str, Any]:
-    """What the opening currently costs: everywhere, per scope, and at its worst."""
+    """What the opening currently costs: everywhere, per scope's own rules, per scope's
+    opening with the scopes it includes, and at its worst."""
     measured = _measure(_opening(cur))
     return {
         "always": measured["always"],
+        "own": measured["own"],
         "scopes": measured["scopes"],
         "worst": measured["always"] + max(measured["scopes"].values(), default=0),
     }
@@ -324,8 +337,30 @@ def _judge(
     }
 
 
-def _lock(cur: psycopg.Cursor) -> None:
+def lock(cur: psycopg.Cursor) -> None:
+    """Hold the seat check's lock until the transaction ends."""
     cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (LOCK_NAMESPACE, LOCK_ADMISSION))
+
+
+_lock = lock
+
+
+def check_openings(cur: psycopg.Cursor, closure: dict[UUID, tuple[UUID, ...]]) -> dict[str, Any]:
+    """Whether scopes can include what `closure` says without overfilling an opening.
+
+    The caller holds the lock from `lock`, taken before it read the openings it changed.
+    """
+    before = _opening(cur)
+    return _judge(
+        before,
+        replace(before, closure=closure),
+        without=before,
+        cost=0,
+        what="the included scopes",
+        scope_id=None,
+        everywhere=True,
+        limits=settings.limits(cur),
+    )
 
 
 def check_admission(

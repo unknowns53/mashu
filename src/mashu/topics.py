@@ -8,7 +8,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import approvals, capacity, events, redact, vault
+from mashu import approvals, capacity, events, redact, routing, vault
 from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
@@ -460,6 +460,7 @@ def session_index(cur: psycopg.Cursor, scope_id: UUID | None) -> list[dict[str, 
     cur.execute("SELECT to_regclass('topic') IS NOT NULL AS present")
     if not cur.fetchone()["present"]:
         return []
+    visible = routing.visible(cur, scope_id)
     return [
         {
             "topic": row["name"],
@@ -468,7 +469,7 @@ def session_index(cur: psycopg.Cursor, scope_id: UUID | None) -> list[dict[str, 
             "line": row["line"],
         }
         for row in list_topics(cur)
-        if row["rules"] and row["scope_id"] in (None, scope_id)
+        if row["rules"] and row["scope_id"] in (None, *visible)
     ]
 
 
@@ -508,9 +509,9 @@ def action_rules(
         """
         SELECT * FROM topic
         WHERE action = %(action)s AND archived_at IS NULL
-          AND (scope_id IS NULL OR scope_id = %(scope)s::uuid)
+          AND (scope_id IS NULL OR scope_id = ANY(%(scopes)s::uuid[]))
         """,
-        {"action": action, "scope": scope_id},
+        {"action": action, "scopes": list(routing.visible(cur, scope_id))},
     )
     topic = cur.fetchone()
     if topic is None:

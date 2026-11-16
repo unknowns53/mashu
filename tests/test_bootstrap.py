@@ -50,6 +50,32 @@ def test_a_scope_rule_waits_for_a_session_in_that_scope(cur, scope_id):
     assert [row["content"] for row in here["scoped"]] == [LOCAL]
 
 
+def test_a_scope_receives_what_the_scopes_it_includes_deliver(cur, scope_id):
+    shared = scopes.create_scope(cur, name="shared", actor="user")["scope_id"]
+    elsewhere = scopes.create_scope(cur, name="somewhere else", actor="user")["scope_id"]
+    scopes.set_includes(cur, scope_id, [shared], actor="user")
+    memories.remember(cur, content=LOCAL, actor="user", scope_id=shared, delivery="scope")
+    subject = topics.create_topic(
+        cur, name="delegation", trigger="Before delegating", scope_id=shared, actor="user"
+    )
+    memories.remember(
+        cur, content=PINNED, actor="user", delivery="topic", topic_id=subject["topic_id"]
+    )
+    topics.update_topic(cur, subject["topic_id"], actor="user", action="delegate")
+    temporary.put_temporary(cur, content=THIS_WEEK, actor="user", days=3, scope_id=shared)
+
+    here = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
+    assert here["includes"] == ["shared"]
+    assert [row["content"] for row in here["scoped"]] == [LOCAL]
+    assert [row["topic"] for row in here["topics"]] == ["delegation"]
+    assert [row["content"] for row in here["temporary"]] == [THIS_WEEK]
+    assert topics.action_rules(cur, "delegate", scope_id)[0] is not None
+
+    there = bootstrap.session_bootstrap(cur, actor="agent", scope_id=elsewhere)
+    assert (there["scoped"], there["topics"], there["temporary"]) == ([], [], [])
+    assert topics.action_rules(cur, "delegate", elsewhere) == (None, [])
+
+
 def test_the_conditions_of_the_week_come_with_the_opening(cur, scope_id):
     temporary.put_temporary(cur, content="the licence server is offline", actor="user", days=3)
     got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
@@ -192,6 +218,13 @@ def test_the_calling_guidance_fits_before_the_client_truncates_it():
 
 def test_an_opening_and_the_hook_reader_survive_pending_topic_migrations(cur, scope_id):
     memories.remember(cur, content="Always rule", actor="user")
+    memories.remember(cur, content=LOCAL, actor="user", scope_id=scope_id, delivery="scope")
+    cur.execute("DROP TABLE scope_include")
+    cur.execute("DELETE FROM schema_migration WHERE filename = %s", ("0020_scope_include.sql",))
+    unincluded = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
+    assert [row["content"] for row in unincluded["scoped"]] == [LOCAL]
+    assert unincluded["includes"] == []
+
     subject = topics.create_topic(cur, name="delegation", trigger="Before delegating", actor="user")
     memories.remember(
         cur, content=PINNED, actor="user", delivery="topic", topic_id=subject["topic_id"]
@@ -199,6 +232,7 @@ def test_an_opening_and_the_hook_reader_survive_pending_topic_migrations(cur, sc
     topics.update_topic(cur, subject["topic_id"], actor="user", action="delegate")
     linked = bootstrap.session_bootstrap(cur, actor="agent")["topics"]
     assert [row["topic"] for row in linked] == ["delegation"]
+    assert topics.action_rules(cur, "delegate", scope_id)[0] is not None
 
     cur.execute("ALTER TABLE topic DROP COLUMN action")
     cur.execute("DELETE FROM schema_migration WHERE filename = %s", ("0011_guard_into_topics.sql",))
@@ -217,7 +251,11 @@ def test_an_opening_and_the_hook_reader_survive_pending_topic_migrations(cur, sc
 
     assert [row["content"] for row in got["always"]] == ["Always rule"]
     assert got["topics"] == []
-    assert got["schema_pending"] == ["0010_topics.sql", "0011_guard_into_topics.sql"]
+    assert got["schema_pending"] == [
+        "0010_topics.sql",
+        "0011_guard_into_topics.sql",
+        "0020_scope_include.sql",
+    ]
 
 
 @pytest.mark.parametrize("missing", ["0004_project_state.sql", "0007_close_proposal.sql"])

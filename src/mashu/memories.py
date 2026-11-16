@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
@@ -671,14 +672,15 @@ def always_memories(cur: psycopg.Cursor) -> list[dict[str, Any]]:
     return cur.fetchall()
 
 
-def scope_push_memories(cur: psycopg.Cursor, scope_id: UUID) -> list[dict[str, Any]]:
+def scope_push_memories(cur: psycopg.Cursor, scope_ids: Sequence[UUID]) -> list[dict[str, Any]]:
+    """The scope rules a session receives from its own scope and the scopes it includes."""
     cur.execute(
         """
         SELECT * FROM memory
-        WHERE status = 'active' AND delivery = 'scope' AND scope_id = %s
+        WHERE status = 'active' AND delivery = 'scope' AND scope_id = ANY(%s)
         ORDER BY created_at, memory_id
         """,
-        (scope_id,),
+        (list(scope_ids),),
     )
     return cur.fetchall()
 

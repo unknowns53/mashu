@@ -280,7 +280,7 @@ agent は自分が何を知らないかを知らないので、検索に任せ�
 | 配信先 | 届くセッション | 届く時点 | 向いている規則 |
 |---|---|---|---|
 | always | すべて | 開始時 | どの作業でも守る規則 |
-| scope | route が一致するディレクトリで開いたセッション | 開始時 | 特定のプロジェクトだけで必要な規則 |
+| scope | route が一致するディレクトリで開いたセッションと、その Scope を取り込む Scope のセッション | 開始時 | 特定のプロジェクトか、いくつかのプロジェクトだけで必要な規則 |
 | topic | topic の Scope が一致するセッション。Scope が無ければすべて | 開始時には見出しの一行だけを配信。本文は agent がその作業を開始するときに読む | 特定作業の間だけ必要な規則 |
 
 scope は「どこで」を絞り、topic は「何の作業のあいだか」を絞る。topic は本文を push しないが、見出しと発動条件は毎回届くので、agent は何があっていつ読むべきかを把握した状態で本文を読むことができる。
@@ -288,7 +288,7 @@ scope は「どこで」を絞り、topic は「何の作業のあいだか」�
 `session_bootstrap` は次の順に返す。
 
 1. always の Memory
-2. 現在の Scope の Memory
+2. 現在の Scope と、それが取り込む Scope の Memory
 3. topic の見出し（名前、規則の数、発動条件）
 4. active な Task の card（完全な Task ID、名前、goal、status、詳細の件数、最終確認日時）
 5. 有効な Temporary Context
@@ -302,7 +302,7 @@ topic の本文と source、Task の approach、open questions、blockers、next
 
 ~~~text
 全体                 4000 token
-Memory               2000 token（always は 800 まで。各 Scope は always と合わせて 2000 まで）
+Memory               2000 token（always は 800 まで。各 Scope は always と取り込む Scope と合わせて 2000 まで）
 Task cards            800 token / session（1 Task 200。入りきらない Task は名前だけを 200 まで）
 Task detail           800 token / Task（常時は配信しない）
 Decisions in force    800 token / Task（task_get が全文に足して返す。常時は配信しない）
@@ -328,7 +328,16 @@ mashu route --ignore /work/scratch
 mashu route --remove /work/service
 ~~~
 
-Project は Task の所属先で、Scope とは別の概念である。Project が Scope を持つと、その Task の card はその Scope のセッションにだけ配信される。
+常時は要らないが、いくつかのプロジェクトで効く規則は、共有の Scope に一件だけ置き、各プロジェクトの Scope からその Scope を取り込む。取り込む Scope のセッションには、取り込まれた Scope の Memory、topic の見出し、Task の card、Temporary Context も届く。取り込みは一段だけで、別の Scope を取り込む Scope は取り込めない。容量は、always と自分の Scope と取り込む Scope の合計で判定し、超える取り込みは拒否する。デスクトップアプリでは設定の Scope の編集画面で、TUI では Settings の Scopes で `i` を押して変える。
+
+~~~bash
+mashu scope --add app-dev --about "Rules shared by the app repositories"
+mashu scope --edit enrai --include app-dev
+mashu scope --edit enrai --drop app-dev
+mashu deliver <id> scope --scope app-dev
+~~~
+
+Project は Task の所属先で、Scope とは別の概念である。Project が Scope を持つと、その Task の card はその Scope と、その Scope を取り込む Scope のセッションに配信される。
 
 ## Topic
 

@@ -7,7 +7,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import capacity, events, redact
+from mashu import capacity, events, redact, routing, temporary
 from mashu.errors import MashuError
 
 
@@ -99,8 +99,90 @@ def require_scope(cur: psycopg.Cursor, name: str, *, also: tuple[str, ...] = ())
     raise MashuError(f"no scope named '{name}' ({listed})")
 
 
+def included_names(cur: psycopg.Cursor, scope_id: UUID | None) -> list[str]:
+    """The names of the scopes this one includes, for showing a session what it receives."""
+    if scope_id is None:
+        return []
+    ids = routing.visible(cur, scope_id)[1:]
+    if not ids:
+        return []
+    cur.execute("SELECT name FROM scope WHERE scope_id = ANY(%s) ORDER BY name", (list(ids),))
+    return [row["name"] for row in cur.fetchall()]
+
+
+def set_includes(
+    cur: psycopg.Cursor, scope_id: UUID, included: list[UUID], *, actor: str
+) -> dict[str, Any]:
+    """Make this scope include exactly these scopes, refusing what would overfill an opening.
+
+    Dropping an include only makes openings lighter, so only the added ones are weighed.
+    """
+    wanted = list(dict.fromkeys(included))
+    if scope_id in wanted:
+        raise MashuError("a scope cannot include itself")
+    # Serialise with every capacity check, which reads the openings this write changes.
+    capacity.lock(cur)
+    current = routing.openings(cur)
+    if scope_id not in current:
+        raise MashuError(f"no scope {scope_id}")
+    names = _names(cur)
+    for other in wanted:
+        if other not in current:
+            raise MashuError(f"no scope {other}")
+    if wanted:
+        includers = [s for s, ids in current.items() if scope_id in ids[1:]]
+        if includers:
+            raise MashuError(
+                f"scope '{names[scope_id]}' is included by "
+                f"{', '.join(repr(names[s]) for s in includers)}, so it cannot include others; "
+                "inclusion is one level deep"
+            )
+        nested = [other for other in wanted if len(current[other]) > 1]
+        if nested:
+            raise MashuError(
+                f"{', '.join(repr(names[s]) for s in nested)} include other scopes, so "
+                f"'{names[scope_id]}' cannot include them; inclusion is one level deep"
+            )
+    before = list(current[scope_id][1:])
+    added = [other for other in wanted if other not in before]
+    if added:
+        after = {**current, scope_id: (scope_id, *wanted)}
+        verdict = capacity.check_openings(cur, after)
+        if not verdict["ok"]:
+            raise MashuError(verdict["refusal"])
+        temporary.check_openings(cur, after)
+
+    cur.execute(
+        "DELETE FROM scope_include WHERE scope_id = %s AND NOT (included_scope_id = ANY(%s))",
+        (scope_id, wanted),
+    )
+    for other in added:
+        cur.execute(
+            "INSERT INTO scope_include (scope_id, included_scope_id, created_by) "
+            "VALUES (%s, %s, %s)",
+            (scope_id, other, actor),
+        )
+    if added or len(wanted) != len(before):
+        events.record(
+            cur,
+            "scope_includes_set",
+            actor,
+            detail={
+                "scope_id": str(scope_id),
+                "from": [names[s] for s in before],
+                "to": [names[s] for s in wanted],
+            },
+        )
+    return {"scope": names[scope_id], "includes": sorted(names[s] for s in wanted)}
+
+
+def _names(cur: psycopg.Cursor) -> dict[UUID, str]:
+    cur.execute("SELECT scope_id, name FROM scope")
+    return {row["scope_id"]: row["name"] for row in cur.fetchall()}
+
+
 def list_scopes(cur: psycopg.Cursor) -> list[dict[str, Any]]:
-    """Every scope with what it currently holds and what it costs to open."""
+    """Every scope with what it holds, what it adds to a session, and what it includes."""
     cur.execute("SELECT * FROM scope ORDER BY name")
     rows = cur.fetchall()
 
@@ -112,9 +194,16 @@ def list_scopes(cur: psycopg.Cursor) -> list[dict[str, Any]]:
         """
     )
     active = {row["scope_id"]: row["n"] for row in cur.fetchall()}
-    pushed = capacity.bootstrap_totals(cur)["scopes"]
+    totals = capacity.bootstrap_totals(cur)
+    names = {row["scope_id"]: row["name"] for row in rows}
+    shape = routing.openings(cur)
 
     for row in rows:
         row["n_active"] = active.get(row["scope_id"], 0)
-        row["push_tokens"] = pushed.get(row["scope_id"], 0)
+        row["push_tokens"] = totals["own"].get(row["scope_id"], 0)
+        row["opening_tokens"] = totals["scopes"].get(row["scope_id"], 0)
+        row["includes"] = [names[s] for s in shape.get(row["scope_id"], ())[1:]]
+        row["included_by"] = sorted(
+            names[s] for s, ids in shape.items() if row["scope_id"] in ids[1:]
+        )
     return rows

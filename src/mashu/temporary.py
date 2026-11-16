@@ -7,7 +7,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import capacity, config, events, redact, settings
+from mashu import capacity, config, events, redact, routing, settings
 from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
@@ -41,10 +41,22 @@ def _cost(rows: list[dict[str, Any]]) -> int:
     return pushed_cost([row["content"] for row in rows])
 
 
+def _by_opening(
+    scoped: dict[Any, list[dict[str, Any]]], closure: dict[Any, tuple[Any, ...]]
+) -> dict[Any, list[dict[str, Any]]]:
+    """The scoped conditions each scope's session receives, its included scopes' among them."""
+    shape = {**{scope_id: (scope_id,) for scope_id in scoped}, **closure}
+    return {
+        scope_id: [row for member in members for row in scoped.get(member, [])]
+        for scope_id, members in shape.items()
+    }
+
+
 def pushed_totals(cur: psycopg.Cursor) -> dict[str, Any]:
     """What the standing conditions cost: everywhere, per scope, and at worst."""
     always, scoped = _standing(cur)
-    scopes = {scope_id: _cost(rows) for scope_id, rows in scoped.items()}
+    opened = _by_opening(scoped, routing.openings(cur))
+    scopes = {scope_id: _cost(rows) for scope_id, rows in opened.items() if rows}
     always_cost = _cost(always)
     return {
         "always": always_cost,
@@ -72,11 +84,12 @@ def _check_room(
             key: [row for row in rows if row["context_id"] != exclude_context_id]
             for key, rows in scoped.items()
         }
-    if scope_id is None:
-        heaviest = max(scoped.values(), key=_cost, default=[])
-        against = always + heaviest
-    else:
-        against = always + scoped.get(scope_id, [])
+    closure = routing.openings(cur)
+    opened = _by_opening(scoped, closure)
+    if scope_id is not None:
+        # A condition in an included scope is pushed in every scope that includes it.
+        opened = {key: rows for key, rows in opened.items() if scope_id in closure.get(key, (key,))}
+    against = always + max(opened.values(), key=_cost, default=[])
 
     cost = pushed_cost([content])
     projected = _cost(against) + cost
@@ -95,6 +108,23 @@ def _check_room(
         f"{len(against)} standing one(s)). Nothing retires here: {waiting}"
         "say this one shorter."
     )
+
+
+def check_openings(cur: psycopg.Cursor, closure: dict[UUID, tuple[UUID, ...]]) -> None:
+    """Refuse a change of included scopes that would overfill a scope's temporary share."""
+    cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (capacity.LOCK_NAMESPACE, LOCK_TEMPORARY))
+    always, scoped = _standing(cur)
+    was = _by_opening(scoped, routing.openings(cur))
+    now = _by_opening(scoped, closure)
+    ceiling = settings.limit(cur, "temporary_capacity")
+    for scope_id, rows in now.items():
+        projected = _cost(always + rows)
+        if projected > ceiling and projected > _cost(always + was.get(scope_id, [])):
+            raise RefusedError(
+                f"the temporary share seats {ceiling} tokens and including these scopes would "
+                f"take one session to {projected}. End a temporary context first, or wait for "
+                "one to lapse."
+            )
 
 
 def put_temporary(
@@ -247,9 +277,9 @@ def active_temporary(cur: psycopg.Cursor, *, scope_id: UUID | None = None) -> li
         """
         SELECT * FROM temporary_context
         WHERE expires_at > now()
-          AND (scope_id IS NULL OR scope_id = %(scope)s::uuid)
+          AND (scope_id IS NULL OR scope_id = ANY(%(scopes)s::uuid[]))
         ORDER BY expires_at
         """,
-        {"scope": scope_id},
+        {"scopes": list(routing.visible(cur, scope_id))},
     )
     return cur.fetchall()

@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 
 from conftest import remember
-from mashu import capacity, config, memories, scopes, temporary, topics
-from mashu.errors import RefusedError
+from mashu import capacity, config, memories, routing, scopes, temporary, topics
+from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
 # Equal-length contents make the capacity arithmetic predictable.
@@ -34,6 +34,38 @@ def test_a_full_scope_refuses_the_next_rule_and_says_by_how_much(cur, scope_id, 
         remember(cur, NEW_RULE, scope_id=scope_id, delivery="scope")
 
 
+def test_a_rule_in_an_included_scope_is_weighed_in_every_scope_that_includes_it(
+    cur, scope_id, monkeypatch
+):
+    monkeypatch.setenv("MASHU_CAPACITY", "400")
+    shared = scopes.create_scope(cur, name="shared", actor="user")["scope_id"]
+    fill(cur, scope_id, 3)
+    scopes.set_includes(cur, scope_id, [shared], actor="user")
+
+    monkeypatch.setenv("MASHU_CAPACITY", str(pushed_cost(RULES[:3]) + 1))
+    got = capacity.check_admission(cur, content=NEW_RULE, delivery="scope", scope_id=shared)
+    assert got["ok"] is False
+    assert got["projected"] == pushed_cost([*RULES[:3], NEW_RULE])
+
+    # Including the shared scope is refused once its rules no longer fit beside the others.
+    scopes.set_includes(cur, scope_id, [], actor="user")
+    remember(cur, NEW_RULE, scope_id=shared, delivery="scope")
+    with pytest.raises(MashuError, match="seats"):
+        scopes.set_includes(cur, scope_id, [shared], actor="user")
+    assert routing.visible(cur, scope_id) == (scope_id,)
+
+
+def test_inclusion_is_one_level_deep(cur, scope_id):
+    shared = scopes.create_scope(cur, name="shared", actor="user")["scope_id"]
+    deeper = scopes.create_scope(cur, name="deeper", actor="user")["scope_id"]
+    scopes.set_includes(cur, scope_id, [shared], actor="user")
+
+    with pytest.raises(MashuError, match="one level deep"):
+        scopes.set_includes(cur, shared, [deeper], actor="user")
+    with pytest.raises(MashuError, match="one level deep"):
+        scopes.set_includes(cur, deeper, [scope_id], actor="user")
+
+
 def test_an_always_rule_is_weighed_against_the_fullest_scope(cur, scope_id, monkeypatch):
     monkeypatch.setenv("MASHU_CAPACITY", "400")
     light = scopes.create_scope(cur, name="a light scope", actor="user")["scope_id"]
@@ -56,7 +88,7 @@ def test_an_always_rule_is_weighed_against_the_fullest_scope(cur, scope_id, monk
 def test_a_rule_being_rewritten_is_not_competing_with_itself(cur, scope_id, monkeypatch):
     monkeypatch.setenv("MASHU_CAPACITY", "400")
     fill(cur, scope_id, 5)
-    subject = memories.scope_push_memories(cur, scope_id)[0]
+    subject = memories.scope_push_memories(cur, [scope_id])[0]
 
     # Exactly enough room for four of the five plus the replacement.
     monkeypatch.setenv("MASHU_CAPACITY", str(pushed_cost(RULES[:4]) + pushed_cost([NEW_RULE])))
@@ -139,7 +171,7 @@ def test_a_dated_condition_is_not_weighed_against_the_seats(cur, scope_id, monke
     temporary.put_temporary(cur, content=CONDITION_EVERYWHERE, actor="user", days=3)
 
     totals = capacity.bootstrap_totals(cur)
-    assert totals == {"always": 0, "scopes": {}, "worst": 0}
+    assert totals == {"always": 0, "own": {}, "scopes": {}, "worst": 0}
 
     monkeypatch.setenv("MASHU_CAPACITY", str(pushed_cost([NEW_RULE])))
     assert capacity.check_admission(cur, content=NEW_RULE, delivery="always")["ok"] is True

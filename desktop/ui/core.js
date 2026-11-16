@@ -811,8 +811,9 @@ function reference(id, text, length = 40) {
 /**
  * A form in place of what a pane showed. Each field is {name, label, kind, value, options,
  * hint, max, maxItems, rows, show, big}: kind is text, area, lines (one item per line),
- * select, radio, or number; show(values) hides the field while it returns false; options
- * are [value, label, description]. Returns the form node.
+ * select, radio, checks (any number of options, valued as a list), or number; show(values)
+ * hides the field while it returns false; options are [value, label, description]. Returns
+ * the form node.
  */
 function form({ title, fields, submit, onSubmit, onCancel, kind = "primary" }) {
   const node = h("form", { class: "form" });
@@ -827,7 +828,8 @@ function form({ title, fields, submit, onSubmit, onCancel, kind = "primary" }) {
     } else if (field.kind === "select") {
       input = h("select", null, field.options.map(([value, label]) => h("option", { value, text: label })));
       if (field.value !== undefined && field.value !== null) input.value = field.value;
-    } else if (field.kind === "radio") {
+    } else if (field.kind === "radio" || field.kind === "checks") {
+      const many = field.kind === "checks";
       input = h(
         "div",
         { class: "radio-list" },
@@ -835,7 +837,12 @@ function form({ title, fields, submit, onSubmit, onCancel, kind = "primary" }) {
           h(
             "label",
             null,
-            h("input", { type: "radio", name: `f-${field.name}`, value, checked: value === field.value }),
+            h("input", {
+              type: many ? "checkbox" : "radio",
+              name: `f-${field.name}`,
+              value,
+              checked: many ? (field.value || []).includes(value) : value === field.value,
+            }),
             h("span", null, h("div", { class: "what", text: label }), description ? h("div", { class: "why", text: description }) : null)
           )
         )
@@ -845,8 +852,9 @@ function form({ title, fields, submit, onSubmit, onCancel, kind = "primary" }) {
       if (field.step) input.step = field.step;
       input.value = field.value ?? "";
     }
+    // A label around a list of options would toggle the first option on a click of its title.
     const label = h(
-      "label",
+      field.kind === "checks" ? "div" : "label",
       { class: "field" },
       h("span", { class: "label" }, h("span", { text: field.label }), field.max || field.maxItems ? counter : null),
       input,
@@ -856,6 +864,7 @@ function form({ title, fields, submit, onSubmit, onCancel, kind = "primary" }) {
     node.append(label);
   }
   const valueOf = ({ field, input }) => {
+    if (field.kind === "checks") return [...input.querySelectorAll("input:checked")].map((box) => box.value);
     if (field.kind === "radio") {
       const chosen = input.querySelector("input:checked");
       return chosen ? chosen.value : "";
@@ -917,7 +926,7 @@ function form({ title, fields, submit, onSubmit, onCancel, kind = "primary" }) {
   });
   requestAnimationFrame(() => {
     for (const area of node.querySelectorAll("textarea")) grow(area);
-    const first = node.querySelector("textarea, input:not([type=radio]), select");
+    const first = node.querySelector("textarea, input:not([type=radio]):not([type=checkbox]), select");
     if (first) {
       first.focus();
       if (first.setSelectionRange && first.value) first.setSelectionRange(first.value.length, first.value.length);

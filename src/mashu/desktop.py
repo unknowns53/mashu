@@ -543,11 +543,18 @@ def scope_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 
 def scope_save(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    """Create or edit a scope; `includes`, when sent, is the whole list of scopes it includes."""
     scope_id = _uuid_or_none(args, "scope_id")
     name, summary = _text(args, "name"), _optional(args, "summary")
+    included = _lines(args, "includes") if args.get("includes") is not None else None
     if scope_id is None:
-        return scopes.create_scope(cur, name=name, summary=summary, actor=ACTOR)
-    return scopes.update_scope(cur, scope_id, name=name, summary=summary, actor=ACTOR)
+        row = scopes.create_scope(cur, name=name, summary=summary, actor=ACTOR)
+    else:
+        row = scopes.update_scope(cur, scope_id, name=name, summary=summary, actor=ACTOR)
+    if included is not None:
+        wanted = [scopes.require_scope(cur, other)["scope_id"] for other in included]
+        row["includes"] = scopes.set_includes(cur, row["scope_id"], wanted, actor=ACTOR)["includes"]
+    return row
 
 
 def topic_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
