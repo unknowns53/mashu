@@ -207,9 +207,10 @@ jobs:
           fi
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false "${kind[@]}"
 
-      # Once a release is out, no prerelease of that version or older is chosen again, so they go
-      # with their tags: v4.2.0 removes v4.2.0-beta.1 and v4.1.9-rc.1 and keeps v4.2.1-beta.1. Older
-      # prereleases spelled 4.1.3b1 lose the letter and number too, since sort -V puts them after 4.1.3.
+      # Once a release is out, --pre no longer chooses a prerelease of that version or older, so those
+      # are deleted with their tags: v4.2.0 deletes v4.2.0-beta.1 and v4.1.9-rc.1 and keeps
+      # v4.2.1-beta.1. A prerelease spelled the older way, such as 4.1.3b1, is compared without its
+      # letter and number, since sort -V puts 4.1.3b1 after 4.1.3.
       - name: Delete released prereleases
         if: ${{ !contains(github.ref_name, '-') }}
         run: |

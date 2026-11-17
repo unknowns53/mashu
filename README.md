@@ -503,14 +503,14 @@ User が配信先の変更を指示した      → memory_redeliver
 
 checkout に commit していない変更があるとき、main 以外のブランチにいるとき、main にタグに無いコミットがあるときは、何も変えずに理由を示す。途中で失敗しても、もう一度「更新」を押せば続きから進む。手元でビルドしたアプリは checkout だけを更新するので、アプリは `cargo run` で起動し直す。Windows のアプリは backend を `.venv\Scripts\python.exe -m mashu` で起動する。MCP server を `mashu.exe` で登録した agent のセッションが開いていると `uv sync` が失敗するので、そのセッションを閉じてから更新するか、[MCP server を登録する](#mcp-server-を登録する)の手順で `python.exe` から登録し直す。
 
-同じ更新はスクリプトでも実行できる。checkout で次を実行すると、最新の正式版に対して上の 3 段階を同じ順に行い、終わったらアプリを起動し直す。アプリは、Mac では `/Applications/Mashu.app` を入れ替え、Windows ではインストーラで入れ直す。ダウンロードした配布物は、Release の `SHA256SUMS` と照合してから使う。
+同じ更新はスクリプトでも実行できる。checkout で以下を実行すると、上記の 3 段階を同じ順に実行し、最後にアプリを再起動する。アプリは、Mac では `/Applications/Mashu.app` を置き換え、Windows ではインストーラで再インストールする。スクリプトは、ダウンロードした配布物を Release の `SHA256SUMS` と照合してから使用する。
 
 | 入れるもの | macOS | Windows |
 |---|---|---|
 | 最新の正式版 | `tools/update.sh` | `tools\update.ps1` |
 | プレリリースを含む最新のリリース | `tools/update.sh --pre` | `tools\update.ps1 -Pre` |
 
-アプリの設定で別の checkout を指定しているときは、何も変えずにその checkout を示す。アプリからの更新は、入っているアプリのバージョンにかかわらず、`4.2.0-beta.1` のようなプレリリースを更新先に選ばない。プレリリースを入れられるのは `--pre` だけである。プレリリースを入れたアプリも、それより新しい正式版が出れば、アプリから更新できる。
+アプリの設定で別の checkout を指定している場合、スクリプトは何も変更せずに、指定されている checkout を表示する。アプリからの更新は、導入済みのアプリのバージョンにかかわらず、`4.2.0-beta.1` のようなプレリリースを更新先に選択しない。プレリリースを導入できるのは `--pre`（Windows では `-Pre`）のみである。プレリリースを導入したアプリも、それより新しい正式版が公開されれば、アプリから更新できる。
 
 ### 手元でビルドする
 
@@ -548,11 +548,11 @@ main への push と pull request では、GitHub Actions の CI（`.github/work
 
 ### リリース
 
-バージョン番号は `src/mashu/__init__.py` の `__version__` だけに書き、pyproject.toml はそこから読む。バージョンは SemVer で書く。`3.0.1` のように数字だけなら正式なリリースで、`3.1.0-beta.2` のように `-alpha.N`、`-beta.N`、`-rc.N` が付けばプレリリースである。SemVer のうちこの 3 つの書き方だけを使うのは、Python も同じ文字列をバージョンとして読める（`3.1.0-beta.2` は `3.1.0b2` と読む）からである。
+バージョン番号は `src/mashu/__init__.py` の `__version__` だけに書き、pyproject.toml はそこから読む。バージョンは SemVer で書く。`3.0.1` のように数字だけなら正式なリリースで、`3.1.0-beta.2` のように `-alpha.N`、`-beta.N`、`-rc.N` が付けばプレリリースである。SemVer のうちこの 3 つの書き方のみを使うのは、Python も同じ文字列をバージョンとして解釈できる（`3.1.0-beta.2` は `3.1.0b2` と解釈する）からである。
 
 リリースは、main の checkout で `tools/release.sh <version>` を実行して作成する。スクリプトはバージョンを書き換えて main へ commit と push をし、main の CI が通るのを待ってから `v<version>` のタグを push する。タグの CI は、タグのバージョンが `__version__` と一致すること、そのコミットが main にあって CI を通っていることを確認してから、GitHub Release を下書きで作成する。続いて Mac と Windows のアプリをビルドし、更新用の配布物、その署名、両方を載せた `latest.json` を下書きに加える。最後に、`tools/update.sh` と `tools/update.ps1` が照合に使う `SHA256SUMS` を加えてから公開する。
 
-バージョンに `-` があるタグは、プレリリースとして公開し、Latest にしない。アプリの updater は Latest のリリースの `latest.json` を読み、更新の通知と `tools/update.sh` も正式版だけを選ぶので、プレリリースを公開しても、利用者が更新で受け取るものは変わらない。正式なリリースを公開すると、CI は、`-` より前のバージョンがそれと同じか古い、v で始まるプレリリースを、タグごと消す。たとえば `v4.2.0` を出すと `v4.2.0-beta.1` は消え、`v4.2.1-beta.1` は残る。消したプレリリースは、より新しい正式版があるので、`--pre` でも選ばれない。
+バージョンに `-` を含むタグは、プレリリースとして公開し、Latest にしない。アプリの updater は Latest のリリースの `latest.json` を読むので、プレリリースを公開しても、利用者が更新で受け取るものは変わらない（[更新](#更新)を参照）。正式なリリースを公開すると、`-` より前のバージョンがそれと同じか古いプレリリースは、`--pre` でも選ばれなくなる。そのため CI は、v で始まるそれらのプレリリースをタグごと削除する。たとえば `v4.2.0` を公開すると `v4.2.0-beta.1` は削除され、`v4.2.1-beta.1` は残る。
 
 アプリの updater は、`tauri.conf.json` の公開鍵で配布物の署名を確認する。秘密鍵はリポジトリの secret `TAURI_SIGNING_PRIVATE_KEY` に置き、パスフレーズを付けたときは `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` にも置く。無いとアプリのビルドが失敗する。
 
@@ -572,7 +572,7 @@ tests/                       実際の PostgreSQL に対するテスト
 tools/sessionstart_guard.py  SessionStart hook
 tools/pretooluse_guard.py    action 付き topic を示す PreToolUse hook
 tools/release.sh             バージョンを更新してタグと GitHub Release を作成
-tools/update.sh, update.ps1  checkout とアプリをリリースへ更新（--pre でプレリリース）
+tools/update.sh, update.ps1  checkout とアプリをリリースへ更新。--pre でプレリリースを導入
 hooks/                       pre-commit と commit-msg
 .github/workflows/ci.yml     GitHub Actions の CI
 ~~~
