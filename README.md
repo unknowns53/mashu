@@ -188,7 +188,7 @@ remote-shell command \b(cluster-wrapper|scheduler-cmd)\b
 | 判断待ち（Inbox） | candidate、Memory change proposal、close の提案を一覧に並べる。candidate の採用、却下、保留と文面の編集、proposal の適用、却下、取り下げ、close の提案の受け入れ。topic へ採用するときは、その場で新しい topic を作成できる |
 | メモリ（Memory） | active と retired の Memory、Temporary Context の一覧と検索。根拠と revision を表示する。直接の登録、本文と理由の編集、配信先の変更、retire と復元、Temporary Context との相互変換 |
 | 作業（Work） | active、dormant、closed の Task と Project。Task の作成、編集、lease（活動期限）の延長、close、reopen と、Project の作成と編集 |
-| 設定（Settings） | 容量と最近の記録、Bootstrap preview、Scope と Topic と Route の編集、checkpoint の間隔、配信量の上限、migration の適用、表示の言語、バージョンと更新 |
+| 設定（Settings） | 容量と最近の記録、Bootstrap preview、Scope と Topic と Route の編集、配信量の上限、migration の適用、表示の言語、バージョンと更新 |
 
 編集は、詳細の表示をその場で入力欄に変えて行う。⌘/Ctrl + Enter で保存し、Esc で取り消す。一覧は ↑↓ か j/k で移動し、/ で検索欄へ移る。retire した規則を書き戻す操作、似た Task がある中での Task の作成、削除、migration の適用は、理由や候補を見せて確認してから実行する。Bootstrap preview は入力したディレクトリで開くセッションに配信される内容を示し、TUI と同様に記録される。設定の「知識があったのに起きた失敗」は、メモリ、タスク、指示ファイルに知識があったのに起きた失敗を新しい順に並べ、知識があった場所と、同じ場所が名指された件数を示す。メモリとタスクはそこから開ける。ウィンドウを閉じてもトレイに残り、トレイのアイコンか、macOS では Dock のアイコンを押すと再び開く。終了するときはトレイのメニューの Quit を使う。設定の「起動」で「ログイン時に起動」にチェックを入れると、ログインのたびにアプリが起動する。表示の言語は日本語と英語を切り替えられる。CLI と TUI の文言は英語だけである。
 
@@ -429,7 +429,7 @@ User が配信先の変更を指示した      → memory_redeliver
 ~~~
 
 - `task_checkpoint` には、次のセッションが必要なものだけを渡す。User の裁定とその取り下げ、外部成果物の場所、goal と approach と blockers の変更、作業を止める前の状態が該当する。進捗、試行の結果、測定、採用しなかった案は commit とプロジェクトの文書に記載する
-- 同じセッションが同じ Task を書くのは、一定の間隔ごとに一回を目安とする。間隔の中の二回目も記録し、応答に `warning` を付ける。間隔は既定で 30 分で、TUI の Settings & health の Checkpoint interval で 0〜1440 分に設定でき、0 にすると警告しない
+- 同じセッションが同じ Task を書くのは、作業を止める前の一回を目安とする。すぐにまた書きたくなった内容は進捗か測定なので、commit か文書に記載する。続けて書いた二回目も、拒否や警告はしない
 - 作業が終わったと思ったら `task_propose_close` で提案する。status に書くと User が読んで close を打ち直すことになるが、提案なら一回のキー操作で受理される。終わったと見なすのは User がマージや受け入れをしたあとである。提案後に state を書くと提案が古くなるので、checkpoint を先に打ち、提案を最後にする
 - agent 自身が考えた Memory の変更は proposal に留める。Temporary Context の登録、Memory の直接の操作、review は原則として User だけが行う
 

@@ -32,7 +32,6 @@ _TOP_ITEMS = (
     ("Topics", "rules read when one kind of work begins"),
     ("Routes", "directory trees mapped to scopes or ignored"),
     ("Delivery limits", "how much a session receives and how large one entry may be"),
-    ("Checkpoint interval", "how often one session may write a task's state"),
     ("Schema/migrations", "database version and pending changes"),
 )
 
@@ -805,37 +804,6 @@ def _limits_page(dsn: str | None) -> None:
                 note = f"  {error}"
 
 
-def _interval_text(minutes: int) -> str:
-    if minutes == 0:
-        return "  One session may write a task's state as often as it likes."
-    return (
-        f"  One session is expected to write a task's state once every {minutes} minutes.\n"
-        "  A second write inside that time is kept and answered with a warning,\n"
-        "  and the session's next MCP call reads a changed value."
-    )
-
-
-def _interval_page(dsn: str | None) -> str:
-    """Ask for the new value as soon as the page opens; the menu shows the outcome."""
-    note = ""
-    while True:
-        with db.transaction(dsn) as cur:
-            minutes = settings.checkpoint_interval_minutes(cur)
-        body = _interval_text(minutes) + (f"\n\n{note}" if note else "")
-        screen.paint(f"{_title('Checkpoint interval')}\n\n{body}\n")
-        answer = screen.editline("  minutes (0 for no limit): ", str(minutes))
-        if isinstance(answer, screen.Cancelled) or answer.text in ("", str(minutes)):
-            return f"  checkpoint interval unchanged at {minutes} minutes"
-        try:
-            with db.transaction(dsn) as cur:
-                settings.set_checkpoint_interval_minutes(cur, int(answer.text), actor=ACTOR)
-            return f"  checkpoint interval set to {int(answer.text)} minutes"
-        except ValueError:
-            note = f"  {answer.text!r} is not a whole number of minutes"
-        except MashuError as error:
-            note = f"  {error}"
-
-
 def _schema_pending(dsn: str | None) -> list[str]:
     with db.transaction(dsn) as cur:
         return migration.pending(cur)
@@ -901,7 +869,6 @@ _PAGES: tuple[Callable[[str | None], str | None], ...] = (
     _topics_page,
     _routes_page,
     _limits_page,
-    _interval_page,
     _schema_page,
 )
 

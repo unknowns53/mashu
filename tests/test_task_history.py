@@ -139,47 +139,14 @@ def test_a_refused_state_write_leaves_its_history_unwritten(cur, task):
     assert set(_history_counts(cur).values()) == {0}
 
 
-def test_a_second_write_inside_the_interval_is_kept_with_a_warning(cur, task, task_id):
+def test_a_session_writing_a_task_again_soon_is_kept_without_a_warning(cur, task, task_id):
     session = uuid4()
     first = checkpoint(cur, task, status_text="measured once", session=session)
-    assert "warning" not in first
-
     again = {**task, "state": first["state"]}
     second = checkpoint(cur, again, approach="a new approach", session=session, **ITEMS)
-    assert "inside the 30-minute interval" in second["warning"]
+    assert "warning" not in first and "warning" not in second
     assert tasks.task_get(cur, task_id)["state"]["approach"] == "a new approach"
     assert set(_history_counts(cur).values()) != {0}
-
-    other = checkpoint(
-        cur, {**task, "state": second["state"]}, status_text="another session", session=uuid4()
-    )
-    assert "warning" not in other
-    by_hand = checkpoint(cur, {**task, "state": other["state"]}, status_text="no session")
-    assert "warning" not in by_hand
-
-
-def test_a_zero_interval_lets_every_checkpoint_through(cur, task):
-    settings.set_checkpoint_interval_minutes(cur, 0, actor="user")
-    session = uuid4()
-    first = checkpoint(cur, task, status_text="one", session=session)
-    second = checkpoint(cur, {**task, "state": first["state"]}, status_text="two", session=session)
-    assert second["state"]["status_text"] == "two"
-    assert "warning" not in second
-
-
-def test_the_interval_set_last_decides_and_a_store_without_it_runs_on_the_default(
-    cur, task, old_store
-):
-    settings.set_checkpoint_interval_minutes(cur, 5, actor="user")
-    session = uuid4()
-    written = checkpoint(cur, task, status_text="one", session=session)
-    again = checkpoint(cur, {**task, "state": written["state"]}, status_text="two", session=session)
-    assert "inside the 5-minute interval" in again["warning"]
-    with pytest.raises(MashuError, match="0 to 1440 minutes"):
-        settings.set_checkpoint_interval_minutes(cur, 1441, actor="user")
-
-    with db.transaction(old_store("0015_setting.sql")) as old:
-        assert settings.checkpoint_interval_minutes(old) == 30
 
 
 def test_a_checkpoint_renews_the_lease_and_is_refused_once_the_task_is_closed(cur, task, task_id):

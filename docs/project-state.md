@@ -186,7 +186,7 @@ kind は `git_commit` / `git_branch` / `file` / `document` / `obsidian` / `issue
 
 Agent が次のセッションへ作業を引き継ぐために打つ。渡すのは、User の裁定とその取り下げ、外部成果物の原典、goal・approach・blockers の変更、作業を止めるときと中断するときの状態である。進捗、試行の結果、測定、退けた案、次の一手の変更は渡さない。それらは commit とプロジェクトの文書が持つ。`task_checkpoint` は **Agent が Task の state を書く唯一の動詞である**。渡したフィールドだけを置き換え、省いたフィールドは前の値を保ち、空文字か空リストでフィールドを空にする。`name` を渡せば Task 名も変える（重複照合つき）。
 
-**一つのセッションが一つの Task に書くのは、間隔（既定 30 分）に一度を目安とする。**測定を回す Agent は数分ごとに status と次の一手を変え、そのたびに書く理由があると読んで、進捗の報告を checkpoint に書き続ける。間隔の中の書き込みも記録し、応答に `warning` を付けて、進捗や測定ならその場で commit か文書へ置くよう伝える。拒否はしない。拒否すると、一回目の書き込みのあとに User が下した裁定が次のセッションへ届かない。中身によって警告を外すこともしない。例外があると、警告を避けるために中身を作って書く動機が生まれる。成功の応答も警告も、次に書ける時刻を示さない。時刻を示すと、Agent は書きたい中身をその時刻まで取っておいて送るので、書き込みは減らずに遅れるだけになる。セッションの区別は MCP server のプロセスごとの id で行い、CLI と User の編集には間隔をかけない。間隔は User が Settings 画面で 0〜1440 分に変え、0 で警告を外す。MCP server は起動したときの環境を持ち続けるので、値は環境変数でなく `setting` テーブルに置き、書き込みのたびに読む。
+**一つのセッションが一つの Task に書くのは、作業を止める前の一度を目安とする。**測定を回す Agent は数分ごとに status と次の一手を変え、そのたびに書く理由があると判断しやすい。そこで tool の説明で、すぐにまた書きたくなった内容は進捗か測定なので、その場で commit か文書へ置くよう指示する。続けて書いた二回目に警告は付けない。書き込みのたびに追加される履歴は ruling と artifact のみなので、status の書き換えが続いても残るのは最後の state であり、警告で防ぐべき害が無い。また、続けて書いた二回目は、一回目のあとに User が下した裁定を記録していることが多い。そこに警告を付けると、残すべき書き込みを余分なものとして扱うことになる。拒否はなおさらしない。拒否すると、その裁定が次のセッションへ配信されない。書き込みの event には MCP server のプロセスごとの id を session として記録し、同じセッションが何度書いたかを後から集計できるようにする。
 
 裁定・取り下げ・外部成果物の原典は同じ呼び出しの `rulings` / `withdraw_rulings` / `artifacts` で渡す。state の置換とそれらの追記は一つの transaction で行い、文字上限・件数の上限・入口拒否・kind・取り下げの対象・楽観チェック・予算の検査は最初の行を書く前にすべてかけ、形の誤りと上限の超過は行とフィールドをまたいで一度の拒否にまとめて返す。一行でも拒否されれば state も履歴も書かない。履歴を書くための動詞を別に覚えさせずに済む。
 
@@ -362,7 +362,7 @@ mashu task close <id>... [--outcome ...] / reopen <id>
 mashu pain --prevention-kind {rule,work} [--task <id>]   9 節の二つの形
 ```
 
-dashboard は Attention / Memories / Work / Settings & health の四領域を持ち、各画面から戻るたびに件数を再集計する。Attention は review、close proposal、dormant Task を扱う。Work は active / dormant / closed Task と Project を閲覧・検索し、Current State、proposal、全履歴、artifact を表示する。User は Task の create / touch / close / reopen に加え、open Task の名前・所属 Project・Current State と Project の名前・Scope を編集できる。編集入力は現在値を入力バッファへ入れて開き、全文の再入力ではなく既存値の部分修正として扱う。現在値を人が訂正する経路であり、ruling・checkpoint・artifact と過去の記録は編集しない。Settings & health は status、現在の cwd に対する bootstrap preview、Scope と route の作成・編集・削除、checkpoint の間隔、migration を扱う。
+dashboard は Attention / Memories / Work / Settings & health の四領域を持ち、各画面から戻るたびに件数を再集計する。Attention は review、close proposal、dormant Task を扱う。Work は active / dormant / closed Task と Project を閲覧・検索し、Current State、proposal、全履歴、artifact を表示する。User は Task の create / touch / close / reopen に加え、open Task の名前・所属 Project・Current State と Project の名前・Scope を編集できる。編集入力は現在値を入力バッファへ入れて開き、全文の再入力ではなく既存値の部分修正として扱う。現在値を人が訂正する経路であり、ruling・checkpoint・artifact と過去の記録は編集しない。Settings & health は status、現在の cwd に対する bootstrap preview、Scope と route の作成・編集・削除、配信量の上限、migration を扱う。
 
 Work の `c` は選択中の Task だけを同じ close decision screen で開く。専用一覧、Work、CLI の `task close <id> --outcome ...` は、明示 outcome と proposal acceptance を別操作にする。proposal acceptance は画面に出した proposal と state を transaction 内で再照合する。stale 確認は proposal を受理するときだけで、reason の入力中に Ctrl+C を受けたら変更しない。
 
@@ -384,7 +384,7 @@ Project State: project task task_state task_checkpoint task_close_proposal
                ruling ruling_withdrawal artifact_reference
                attempt decision decision_supersession（記録。もう書かない）
 
-共通:          setting（User が変えた上限と間隔） schema_migration（適用済みの migration）
+共通:          setting（User が変えた上限） schema_migration（適用済みの migration）
 ```
 
 `ledger` は `prevention_kind` と `filed_task` を持ち（9 節）、CHECK が両者を結ぶ（`filed_task` が非 NULL なら `prevention_kind='work'`）。`ledger` の行は append-only なので、**提出先は行が書かれる前に決まり、後から書き込むことはできない**。矛盾した行を後から直す手段が無いことが、規約ではなく制約で持つ理由である。`ledger` の `ignored_task_id`、`ignored_decision_id`、`ignored_source`（有ったのに使われなかった知識の場所、15 節）は、decision だけを指す行を CHECK で拒む。`ignored_decision_id` は過去の decision を指す CLI 用の引数として残り、MCP の `pain_report` は受け取らない。`memory`、`memory_revision`、`nomination`、`temporary_context` の本文は、空白しか含まない値を CHECK で拒む。

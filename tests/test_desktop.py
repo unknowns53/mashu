@@ -408,11 +408,7 @@ def test_projects_scopes_topics_and_routes_are_kept_from_the_settings_pages(dsn)
     assert [row["name"] for row in ask(dsn, "work.projects")["result"]["projects"]] == ["tray app"]
 
 
-def test_the_checkpoint_interval_keeps_to_its_bounds_and_health_reads_without_writing(dsn):
-    assert ask(dsn, "interval.set", minutes=15)["result"]["minutes"] == 15
-    assert not ask(dsn, "interval.set", minutes=-1)["ok"]
-    assert ask(dsn, "interval.get")["result"]["minutes"] == 15
-
+def test_health_reads_without_writing(dsn):
     health = ask(dsn, "settings.health")["result"]
     assert health["capacities"]["always"] > 0
     assert health["missed_30d"] == 0

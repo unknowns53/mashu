@@ -8,7 +8,6 @@ from mashu import (
     nominations,
     routing,
     scopes,
-    settings,
     settings_ui,
     tasks,
     temporary,
@@ -160,20 +159,6 @@ def test_routes_can_be_edited_added_ignored_and_removed(dsn, monkeypatch):
     kept = [(row["path_prefix"], row["scope_id"]) for row in rows]
     assert kept == [("/tmp/new", None), ("/tmp/i", None)]
     assert rows[0]["route_id"] == route["route_id"]
-
-
-def test_the_checkpoint_interval_is_changed_only_to_whole_minutes_in_range(dsn, monkeypatch):
-    answers(monkeypatch, "soon", "2000", "15")
-
-    assert settings_ui._interval_page(dsn) == "  checkpoint interval set to 15 minutes"
-
-    with db.transaction(dsn) as cur:
-        assert settings.checkpoint_interval_minutes(cur) == 15
-        cur.execute("SELECT actor, detail FROM event_log WHERE event_type = 'setting_changed'")
-        changes = cur.fetchall()
-    assert [(row["actor"], row["detail"]["from"], row["detail"]["to"]) for row in changes] == [
-        ("user", 30, 15)
-    ]
 
 
 def test_schema_apply_is_confirmed_and_reports_a_noop(dsn, monkeypatch, capsys):
