@@ -1,3 +1,3 @@
 """Mashu knowledge and project-state service."""
 
-__version__ = "4.1.3"
+__version__ = "5.0.0-beta.1"
