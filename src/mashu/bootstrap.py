@@ -11,7 +11,6 @@ from mashu import (
     events,
     memories,
     migrate,
-    projects,
     settings,
     tasks,
     temporary,
@@ -51,7 +50,7 @@ def _unseated_text(line: dict[str, Any]) -> str:
     return f"{line['task']} {line['name']} ({line['last_activity']:%Y-%m-%d})"
 
 
-def active_states(cur: psycopg.Cursor, scope_id: UUID | None = None) -> list[dict[str, Any]]:
+def active_states(cur: psycopg.Cursor, project_id: UUID | None = None) -> list[dict[str, Any]]:
     """The active tasks whose state this session is entitled to, in a fixed order."""
     cur.execute(
         "SELECT to_regclass('task') IS NOT NULL AS tasks, "
@@ -67,30 +66,61 @@ def active_states(cur: psycopg.Cursor, scope_id: UUID | None = None) -> list[dic
         include_proposals=available["proposals"],
         include_rulings=available["rulings"],
     )
-    homes = {
-        row["project_id"]: row["scope_id"]
-        for row in projects.list_projects(cur, include_archived=True)
+    # A task reaches only the sessions of its own project; an unrouted session receives none.
+    if project_id is None:
+        return []
+    return [row for row in rows if row["task"]["project_id"] == project_id]
+
+
+def _behind_projects(cur: psycopg.Cursor, *, actor: str, ceiling: int) -> dict[str, Any]:
+    """An empty opening that names the pending migrations, for a store that predates projects."""
+    schema_pending = migrate.pending(cur)
+    events.record(cur, "bootstrap_schema_behind", actor, detail={"pending": schema_pending})
+    return {
+        "always": [],
+        "project_rules": [],
+        "topics": [],
+        "topic_instruction": None,
+        "project": None,
+        "routed": False,
+        "states": [],
+        "task_instruction": None,
+        "unseated": [],
+        "unseated_more": 0,
+        "unseated_instruction": None,
+        "temporary": [],
+        "pending": 0,
+        "memory_tokens": 0,
+        "topic_tokens": 0,
+        "card_tokens": 0,
+        "project_tokens": 0,
+        "temporary_tokens": 0,
+        "tokens": 0,
+        "capacity": ceiling,
+        "over_budget": False,
+        "schema_pending": schema_pending,
     }
-    # Unscoped projects apply everywhere. Scoped projects stay in their delivery boundary;
-    # an unrouted session therefore receives only the unscoped rows.
-    return [row for row in rows if homes.get(row["task"]["project_id"]) in (None, scope_id)]
 
 
 def session_bootstrap(
     cur: psycopg.Cursor,
     *,
     actor: str,
-    scope_id: UUID | None = None,
-    scope_name: str | None = None,
+    project_id: UUID | None = None,
+    project_name: str | None = None,
     routed: bool = False,
 ) -> dict[str, Any]:
-    """Everything a session in this scope is told, and what it cost to tell it."""
+    """Everything a session in this project is told, and what it cost to tell it."""
     limits = settings.limits(cur)
+    if migrate.before_projects(cur):
+        return _behind_projects(cur, actor=actor, ceiling=limits["total_capacity"])
     always = memories.always_memories(cur)
-    scoped = memories.scope_push_memories(cur, scope_id) if scope_id is not None else []
-    index = topics.session_index(cur, scope_id)
-    states = active_states(cur, scope_id)
-    contexts = temporary.active_temporary(cur, scope_id=scope_id)
+    project_rules = (
+        memories.project_push_memories(cur, project_id) if project_id is not None else []
+    )
+    index = topics.session_index(cur, project_id)
+    states = active_states(cur, project_id)
+    contexts = temporary.active_temporary(cur, project_id=project_id)
 
     cur.execute("SELECT count(*) AS n FROM nomination WHERE status = 'pending'")
     pending = cur.fetchone()["n"]
@@ -101,7 +131,7 @@ def session_bootstrap(
     # Counted apart because they are refused apart (project-state 8).
     # Topic lines sit in the Memory seats.
     topic_tokens = pushed_cost([row["line"] for row in index])
-    memory_tokens = pushed_cost([row["content"] for row in always + scoped]) + topic_tokens
+    memory_tokens = pushed_cost([row["content"] for row in always + project_rules]) + topic_tokens
     costed = [
         {
             "task_id": row["task"]["task_id"],
@@ -145,7 +175,7 @@ def session_bootstrap(
             "cards": project_tokens,
             "unseated": len(unseated),
             "temporary": temporary_tokens,
-            "scope": scope_name,
+            "project_name": project_name,
         },
     )
     if over:
@@ -173,10 +203,12 @@ def session_bootstrap(
         )
     return {
         "always": [{"memory_id": r["memory_id"], "content": r["content"]} for r in always],
-        "scoped": [{"memory_id": r["memory_id"], "content": r["content"]} for r in scoped],
+        "project_rules": [
+            {"memory_id": r["memory_id"], "content": r["content"]} for r in project_rules
+        ],
         "topics": index,
         "topic_instruction": topics.INSTRUCTION if index else None,
-        "scope": scope_name,
+        "project": project_name,
         "routed": routed,
         "states": state_rows,
         "task_instruction": TASK_DETAIL_INSTRUCTION if state_rows else None,

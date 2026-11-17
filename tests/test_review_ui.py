@@ -118,7 +118,7 @@ def test_search_matches_every_documented_field_case_insensitively():
     row = {
         "nomination_id": "AbCd-1234",
         "kind": "User_Explicit",
-        "scope_name": "Deployments",
+        "project_name": "Deployments",
         "content": "Keep the standby warm",
         "evidence_rows": [{"what": "The RELEASE stalled", "prevention": "Check the Canary first"}],
     }

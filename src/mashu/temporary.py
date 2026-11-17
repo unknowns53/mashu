@@ -21,7 +21,7 @@ _TOO_LONG = (
 )
 
 _UNEXPIRED = """
-SELECT context_id, scope_id, content, expires_at
+SELECT context_id, project_id, content, expires_at
 FROM temporary_context WHERE expires_at > now()
 """
 
@@ -29,12 +29,14 @@ FROM temporary_context WHERE expires_at > now()
 def _standing(cur: psycopg.Cursor) -> tuple[list[dict[str, Any]], dict[Any, list[dict[str, Any]]]]:
     """The conditions still applying, in the two buckets they are weighed in."""
     always: list[dict[str, Any]] = []
-    scoped: dict[Any, list[dict[str, Any]]] = {}
+    by_project: dict[Any, list[dict[str, Any]]] = {}
     cur.execute(_UNEXPIRED)
     for row in cur.fetchall():
-        bucket = always if row["scope_id"] is None else scoped.setdefault(row["scope_id"], [])
+        bucket = (
+            always if row["project_id"] is None else by_project.setdefault(row["project_id"], [])
+        )
         bucket.append(row)
-    return always, scoped
+    return always, by_project
 
 
 def _cost(rows: list[dict[str, Any]]) -> int:
@@ -42,15 +44,15 @@ def _cost(rows: list[dict[str, Any]]) -> int:
 
 
 def pushed_totals(cur: psycopg.Cursor) -> dict[str, Any]:
-    """What the standing conditions cost: everywhere, per scope, and at worst."""
-    always, scoped = _standing(cur)
-    scopes = {scope_id: _cost(rows) for scope_id, rows in scoped.items()}
+    """What the standing conditions cost: everywhere, per project, and at worst."""
+    always, by_project = _standing(cur)
+    projects = {project_id: _cost(rows) for project_id, rows in by_project.items()}
     always_cost = _cost(always)
     return {
         "always": always_cost,
-        "scopes": scopes,
-        "worst": always_cost + max(scopes.values(), default=0),
-        "count": len(always) + sum(len(rows) for rows in scoped.values()),
+        "projects": projects,
+        "worst": always_cost + max(projects.values(), default=0),
+        "count": len(always) + sum(len(rows) for rows in by_project.values()),
     }
 
 
@@ -58,25 +60,25 @@ def _check_room(
     cur: psycopg.Cursor,
     *,
     content: str,
-    scope_id: UUID | None,
+    project_id: UUID | None,
     exclude_context_id: UUID | None = None,
 ) -> None:
     """Refuse a condition the share has no room for."""
     # Lock before checking capacity and hold it through the write.
     cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (capacity.LOCK_NAMESPACE, LOCK_TEMPORARY))
 
-    always, scoped = _standing(cur)
+    always, by_project = _standing(cur)
     if exclude_context_id is not None:
         always = [row for row in always if row["context_id"] != exclude_context_id]
-        scoped = {
+        by_project = {
             key: [row for row in rows if row["context_id"] != exclude_context_id]
-            for key, rows in scoped.items()
+            for key, rows in by_project.items()
         }
-    if scope_id is None:
-        heaviest = max(scoped.values(), key=_cost, default=[])
+    if project_id is None:
+        heaviest = max(by_project.values(), key=_cost, default=[])
         against = always + heaviest
     else:
-        against = always + scoped.get(scope_id, [])
+        against = always + by_project.get(project_id, [])
 
     cost = pushed_cost([content])
     projected = _cost(against) + cost
@@ -103,7 +105,7 @@ def put_temporary(
     content: str,
     actor: str,
     days: float,
-    scope_id: UUID | None = None,
+    project_id: UUID | None = None,
 ) -> dict[str, Any]:
     """Record a condition together with the moment it stops being one."""
     if not 0 < days <= config.TEMPORARY_MAX_DAYS:
@@ -113,15 +115,15 @@ def put_temporary(
     verdict = redact.gate({"content": content})
 
     # Pushed, so it is weighed before it is written (project-state 8).
-    _check_room(cur, content=content, scope_id=scope_id)
+    _check_room(cur, content=content, project_id=project_id)
 
     cur.execute(
         """
-        INSERT INTO temporary_context (content, scope_id, created_by, expires_at)
+        INSERT INTO temporary_context (content, project_id, created_by, expires_at)
         VALUES (%s, %s, %s, now() + make_interval(secs => %s))
         RETURNING *
         """,
-        (content, scope_id, actor, float(days) * 86400.0),
+        (content, project_id, actor, float(days) * 86400.0),
     )
     row = cur.fetchone()
     events.record(cur, "temporary_recorded", actor, detail={"days": days})
@@ -136,10 +138,10 @@ def revise(
     context_id: UUID,
     *,
     content: str,
-    scope_id: UUID | None,
+    project_id: UUID | None,
     actor: str,
 ) -> dict[str, Any]:
-    """Replace a standing condition's editable text and scope, keeping its expiry."""
+    """Replace a standing condition's editable text and project, keeping its expiry."""
     content = (content or "").strip()
     if not content:
         raise MashuError("temporary context cannot be empty")
@@ -158,15 +160,15 @@ def revise(
     _check_room(
         cur,
         content=content,
-        scope_id=scope_id,
+        project_id=project_id,
         exclude_context_id=context_id,
     )
     cur.execute(
         """
-        UPDATE temporary_context SET content = %s, scope_id = %s
+        UPDATE temporary_context SET content = %s, project_id = %s
         WHERE context_id = %s RETURNING *
         """,
-        (content, scope_id, context_id),
+        (content, project_id, context_id),
     )
     row = cur.fetchone()
     events.record(
@@ -175,8 +177,8 @@ def revise(
         actor,
         detail={
             "context_id": str(context_id),
-            "from_scope_id": str(current["scope_id"]) if current["scope_id"] else None,
-            "to_scope_id": str(scope_id) if scope_id else None,
+            "from_project_id": str(current["project_id"]) if current["project_id"] else None,
+            "to_project_id": str(project_id) if project_id else None,
         },
     )
     return {**row, **({"unchecked": True} if verdict.unchecked else {})}
@@ -220,12 +222,12 @@ def convert_to_memory(
     current = cur.fetchone()
     if current is None:
         raise MashuError(f"no standing temporary context {context_id}")
-    delivery = "scope" if current["scope_id"] else "always"
+    delivery = "project" if current["project_id"] else "always"
     memory = memories.remember(
         cur,
         content=current["content"],
         actor=actor,
-        scope_id=current["scope_id"],
+        project_id=current["project_id"],
         delivery=delivery,
         acknowledged_conflicts=acknowledged_conflicts,
     )
@@ -244,15 +246,17 @@ def convert_to_memory(
     return {"temporary": ended, "memory": memory}
 
 
-def active_temporary(cur: psycopg.Cursor, *, scope_id: UUID | None = None) -> list[dict[str, Any]]:
+def active_temporary(
+    cur: psycopg.Cursor, *, project_id: UUID | None = None
+) -> list[dict[str, Any]]:
     """What still applies here. Expired rows are filtered, never deleted."""
     cur.execute(
         """
         SELECT * FROM temporary_context
         WHERE expires_at > now()
-          AND (scope_id IS NULL OR scope_id = %(scope)s::uuid)
+          AND (project_id IS NULL OR project_id = %(project)s::uuid)
         ORDER BY expires_at
         """,
-        {"scope": scope_id},
+        {"project": project_id},
     )
     return cur.fetchall()

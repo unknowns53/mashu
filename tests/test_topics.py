@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 
 from conftest import remember, retire
-from mashu import bootstrap, capacity, config, memories, nominations, scopes, topics, vault
+from mashu import bootstrap, capacity, config, memories, nominations, projects, topics, vault
 from mashu.errors import MashuError, RefusedError
 from mashu.tokens import pushed_cost
 
@@ -15,8 +15,8 @@ PLACEMENT = "never place two strong pieces adjacent in the initial layout"
 ALWAYS = "report a finished run only with the output that proves it"
 
 
-def topic(cur, name="difficulty", *, scope_id=None, trigger=TRIGGER):
-    return topics.create_topic(cur, name=name, trigger=trigger, scope_id=scope_id, actor="user")
+def topic(cur, name="difficulty", *, project_id=None, trigger=TRIGGER):
+    return topics.create_topic(cur, name=name, trigger=trigger, project_id=project_id, actor="user")
 
 
 def filed(cur, subject, content=LEVER):
@@ -30,12 +30,12 @@ def line(subject, rules):
 # bootstrap pushes the index, never the bodies
 
 
-def test_bootstrap_lists_a_visible_topic_line_and_never_its_rules(cur, scope_id):
-    subject = topic(cur, scope_id=scope_id)
+def test_bootstrap_lists_a_visible_topic_line_and_never_its_rules(cur, project_id):
+    subject = topic(cur, project_id=project_id)
     filed(cur, subject)
     filed(cur, subject, PLACEMENT)
 
-    got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
+    got = bootstrap.session_bootstrap(cur, actor="agent", project_id=project_id)
 
     assert [row["line"] for row in got["topics"]] == [
         f"difficulty (2 rules): {TRIGGER}",
@@ -47,27 +47,27 @@ def test_bootstrap_lists_a_visible_topic_line_and_never_its_rules(cur, scope_id)
     assert got["memory_tokens"] == got["topic_tokens"]
 
 
-def test_empty_archived_and_other_scope_topics_are_not_listed(cur, scope_id):
-    elsewhere = scopes.create_scope(cur, name="elsewhere", actor="user")["scope_id"]
-    topic(cur, "empty one", scope_id=scope_id)
+def test_empty_archived_and_other_project_topics_are_not_listed(cur, project_id):
+    elsewhere = projects.create_project(cur, name="elsewhere", actor="user")["project_id"]
+    topic(cur, "empty one", project_id=project_id)
     archived = topic(cur, "archived one")
     topics.archive_topic(cur, archived["topic_id"], actor="user")
-    away = topic(cur, "away", scope_id=elsewhere)
+    away = topic(cur, "away", project_id=elsewhere)
     filed(cur, away)
 
-    here = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
+    here = bootstrap.session_bootstrap(cur, actor="agent", project_id=project_id)
     assert here["topics"] == [] and here["topic_instruction"] is None
     unrouted = bootstrap.session_bootstrap(cur, actor="agent")
     assert unrouted["topics"] == []
-    there = bootstrap.session_bootstrap(cur, actor="agent", scope_id=elsewhere)
+    there = bootstrap.session_bootstrap(cur, actor="agent", project_id=elsewhere)
     assert [row["topic"] for row in there["topics"]] == ["away"]
 
 
 # pulling a topic
 
 
-def test_reading_a_topic_records_the_session_and_a_person_reading_records_nothing(cur, scope_id):
-    subject = topic(cur, scope_id=scope_id)
+def test_reading_a_topic_records_the_session_and_a_person_reading_records_nothing(cur, project_id):
+    subject = topic(cur, project_id=project_id)
     first = filed(cur, subject)
     second = filed(cur, subject, PLACEMENT)
     session = uuid4()
@@ -79,7 +79,7 @@ def test_reading_a_topic_records_the_session_and_a_person_reading_records_nothin
     got = topics.read_for_session(cur, "difficulty", actor="agent", session=session)
 
     assert got["topic"]["trigger"] == TRIGGER
-    assert got["topic"]["scope"] == "test scope"
+    assert got["topic"]["project"] == "test project"
     assert {row["memory_id"] for row in got["memories"]} == {
         first["memory_id"],
         second["memory_id"],
@@ -122,24 +122,24 @@ def test_topic_names_and_triggers_are_one_bounded_line(cur):
         topic(cur, "難易度")
 
 
-def test_editing_a_topic_moves_its_rules_scope_with_it(cur, scope_id):
+def test_editing_a_topic_moves_its_rules_project_with_it(cur, project_id):
     subject = topic(cur)
     rule = filed(cur, subject)
-    assert rule["scope_id"] is None
+    assert rule["project_id"] is None
 
-    topics.update_topic(cur, subject["topic_id"], actor="user", scope_id=scope_id)
-    assert memories.get_memory(cur, rule["memory_id"])["scope_id"] == scope_id
-    listed = memories.active_memories(cur, scope_id=scope_id)
+    topics.update_topic(cur, subject["topic_id"], actor="user", project_id=project_id)
+    assert memories.get_memory(cur, rule["memory_id"])["project_id"] == project_id
+    listed = memories.active_memories(cur, project_id=project_id)
     assert [row["memory_id"] for row in listed] == [rule["memory_id"]]
 
-    topics.update_topic(cur, subject["topic_id"], actor="user", clear_scope=True)
-    assert memories.get_memory(cur, rule["memory_id"])["scope_id"] is None
+    topics.update_topic(cur, subject["topic_id"], actor="user", clear_project=True)
+    assert memories.get_memory(cur, rule["memory_id"])["project_id"] is None
     cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'topic_updated'")
     assert cur.fetchone()["n"] == 2
 
-    # A retired rule is restored into its topic and the scope the topic has by then.
+    # A retired rule is restored into its topic and the project the topic has by then.
     retire(cur, rule, "the lever moved", "withdrawn")
-    topics.update_topic(cur, subject["topic_id"], actor="user", scope_id=scope_id)
+    topics.update_topic(cur, subject["topic_id"], actor="user", project_id=project_id)
     restored = memories.restore(
         cur,
         rule["memory_id"],
@@ -147,11 +147,11 @@ def test_editing_a_topic_moves_its_rules_scope_with_it(cur, scope_id):
         actor="user",
         approval_source={"kind": "user_direct"},
     )
-    assert restored["scope_id"] == scope_id and restored["topic_id"] == subject["topic_id"]
+    assert restored["project_id"] == project_id and restored["topic_id"] == subject["topic_id"]
 
 
-def test_one_action_leads_to_one_open_topic_served_where_it_is_listed(cur, scope_id):
-    subject = topic(cur, scope_id=scope_id)
+def test_one_action_leads_to_one_open_topic_served_where_it_is_listed(cur, project_id):
+    subject = topic(cur, project_id=project_id)
     rule = filed(cur, subject)
     other = topic(cur, "delegation", trigger="Before delegating")
     with pytest.raises(MashuError, match="action is letters"):
@@ -160,34 +160,34 @@ def test_one_action_leads_to_one_open_topic_served_where_it_is_listed(cur, scope
     with pytest.raises(MashuError, match="already applies before delegate"):
         topics.update_topic(cur, other["topic_id"], actor="user", action="delegate")
 
-    elsewhere = scopes.create_scope(cur, name="elsewhere", actor="user")["scope_id"]
+    elsewhere = projects.create_project(cur, name="elsewhere", actor="user")["project_id"]
     assert topics.action_rules(cur, "delegate", elsewhere) == (None, [])
-    linked, rules = topics.action_rules(cur, "delegate", scope_id)
+    linked, rules = topics.action_rules(cur, "delegate", project_id)
     assert linked["topic_id"] == subject["topic_id"]
     assert [row["memory_id"] for row in rules] == [rule["memory_id"]]
 
     topics.update_topic(cur, subject["topic_id"], actor="user", clear_action=True)
     topics.update_topic(cur, other["topic_id"], actor="user", action="delegate")
-    assert topics.action_rules(cur, "delegate", scope_id)[0]["topic_id"] == other["topic_id"]
+    assert topics.action_rules(cur, "delegate", project_id)[0]["topic_id"] == other["topic_id"]
 
 
 # capacity
 
 
-def test_a_topic_line_counts_in_the_layer_it_lands_in(cur, scope_id):
+def test_a_topic_line_counts_in_the_layer_it_lands_in(cur, project_id):
     everywhere = topic(cur)
     assert capacity.bootstrap_totals(cur)["always"] == 0  # an empty topic pushes nothing
     filed(cur, everywhere)
     totals = capacity.bootstrap_totals(cur)
     assert totals["always"] == pushed_cost([line(everywhere, 1)])
-    assert totals["scopes"] == {}
+    assert totals["projects"] == {}
 
-    scoped = topic(cur, "placement", scope_id=scope_id)
-    filed(cur, scoped)
-    filed(cur, scoped, PLACEMENT)
+    listed = topic(cur, "placement", project_id=project_id)
+    filed(cur, listed)
+    filed(cur, listed, PLACEMENT)
     totals = capacity.bootstrap_totals(cur)
     assert totals["always"] == pushed_cost([line(everywhere, 1)])
-    assert totals["scopes"] == {scope_id: pushed_cost([line(scoped, 2)])}
+    assert totals["projects"] == {project_id: pushed_cost([line(listed, 2)])}
 
 
 def test_the_first_rule_of_a_topic_is_refused_when_its_line_does_not_fit(cur, monkeypatch):
@@ -205,8 +205,8 @@ def test_the_first_rule_of_a_topic_is_refused_when_its_line_does_not_fit(cur, mo
     assert "has 3 tokens free" in str(refused.value)
 
 
-def test_a_scoped_topic_line_is_refused_against_its_scope_seat(cur, scope_id, monkeypatch):
-    subject = topic(cur, scope_id=scope_id)
+def test_a_project_topic_line_is_refused_against_its_project_seat(cur, project_id, monkeypatch):
+    subject = topic(cur, project_id=project_id)
     monkeypatch.setenv("MASHU_CAPACITY", "10")
     with pytest.raises(RefusedError, match="the opening seats 10 tokens"):
         filed(cur, subject)
@@ -242,16 +242,18 @@ def test_a_trigger_edit_is_weighed_where_the_line_lands(cur, monkeypatch):
     topics.update_topic(cur, subject["topic_id"], actor="user", trigger="Before tuning")
 
 
-def test_writes_that_shrink_the_opening_pass_when_it_is_already_over(cur, scope_id, monkeypatch):
+def test_writes_that_shrink_the_opening_pass_when_it_is_already_over(cur, project_id, monkeypatch):
     kept = remember(cur, ALWAYS)
     other = remember(cur, PLACEMENT)
-    subject = topic(cur, scope_id=scope_id)
+    subject = topic(cur, project_id=project_id)
     monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", "10")
 
     # Over the layer already, and still a shorter body, a move out, and a move into a
-    # scoped topic all go through: each leaves the layer lighter than it was.
+    # project topic all go through: each leaves the layer lighter than it was.
     memories.revise(cur, kept["memory_id"], content="prove a finished run", actor="user")
-    memories.set_delivery(cur, other["memory_id"], delivery="scope", scope_id=scope_id, actor="u")
+    memories.set_delivery(
+        cur, other["memory_id"], delivery="project", project_id=project_id, actor="u"
+    )
     moved = memories.set_delivery(
         cur, kept["memory_id"], delivery="topic", topic_id=subject["topic_id"], actor="user"
     )
@@ -261,7 +263,7 @@ def test_writes_that_shrink_the_opening_pass_when_it_is_already_over(cur, scope_
     with pytest.raises(RefusedError, match="the always layer seats 10"):
         remember(cur, "one more line for everyone")
     global_topic = topic(cur, "everywhere", trigger="Before any long work")
-    short = remember(cur, "x", scope_id=scope_id, delivery="scope")
+    short = remember(cur, "x", project_id=project_id, delivery="project")
     memories.set_delivery(cur, short["memory_id"], delivery="always", actor="user")
     with pytest.raises(RefusedError, match="the always layer seats 10"):
         memories.set_delivery(
@@ -276,13 +278,13 @@ def test_writes_that_shrink_the_opening_pass_when_it_is_already_over(cur, scope_
 # writing into a topic
 
 
-def test_remember_files_a_rule_under_its_topic_with_the_topic_scope(cur, scope_id):
-    subject = topic(cur, scope_id=scope_id)
-    elsewhere = scopes.create_scope(cur, name="elsewhere", actor="user")["scope_id"]
-    row = remember(cur, LEVER, delivery="topic", topic_id=subject["topic_id"], scope_id=elsewhere)
+def test_remember_files_a_rule_under_its_topic_with_the_topic_project(cur, project_id):
+    subject = topic(cur, project_id=project_id)
+    elsewhere = projects.create_project(cur, name="elsewhere", actor="user")["project_id"]
+    row = remember(cur, LEVER, delivery="topic", topic_id=subject["topic_id"], project_id=elsewhere)
     assert row["delivery"] == "topic"
     assert row["topic_id"] == subject["topic_id"]
-    assert row["scope_id"] == scope_id
+    assert row["project_id"] == project_id
     detail = memories.memory_details(cur, row["memory_id"])
     assert detail["topic_name"] == "difficulty" and detail["topic_trigger"] == TRIGGER
 
@@ -312,8 +314,8 @@ def test_delivery_moves_into_and_out_of_a_topic_but_a_topic_rule_never_turns_tem
     assert details[1]["from_topic_id"] == str(subject["topic_id"])
 
 
-def test_admission_files_a_candidate_under_a_topic_and_its_scope(cur, scope_id):
-    subject = topic(cur, scope_id=scope_id)
+def test_admission_files_a_candidate_under_a_topic_and_its_project(cur, project_id):
+    subject = topic(cur, project_id=project_id)
     answer = nominations.remember_explicit(
         cur,
         content=LEVER,
@@ -326,7 +328,7 @@ def test_admission_files_a_candidate_under_a_topic_and_its_scope(cur, scope_id):
     assert answer["admitted"] is True
     assert answer["memory"]["delivery"] == "topic"
     assert answer["memory"]["topic_id"] == str(subject["topic_id"])
-    assert answer["memory"]["scope_id"] == str(scope_id)
+    assert answer["memory"]["project_id"] == str(project_id)
 
     nomination = nominations.nominate_user_explicit(cur, content=PLACEMENT, actor="agent")[
         "nomination"
@@ -342,7 +344,7 @@ def test_admission_files_a_candidate_under_a_topic_and_its_scope(cur, scope_id):
         request_id=uuid4(),
     )
     assert admitted["topic_id"] == str(subject["topic_id"])
-    assert admitted["scope_id"] == str(scope_id)
+    assert admitted["project_id"] == str(project_id)
 
 
 # the MCP boundary
@@ -352,7 +354,7 @@ def test_memory_list_and_admit_reach_a_topic_by_name_for_this_server_session(mcp
     from mashu import db
 
     assert "exactly one" in mcp("memory_list")["error"]
-    assert "exactly one" in mcp("memory_list", scope="a", topic="b")["error"]
+    assert "exactly one" in mcp("memory_list", project="a", topic="b")["error"]
     name = f"topic {uuid4().hex[:8]}"
     with db.transaction(dsn) as cur:
         subject = topic(cur, name, trigger="Before touching the exporter")
@@ -363,7 +365,7 @@ def test_memory_list_and_admit_reach_a_topic_by_name_for_this_server_session(mcp
     assert first["ok"] is True
     assert first["topic"]["name"] == name
     assert len(first["memories"]) == 1
-    assert f"memory_list(topic='{name}')" in mcp("memory_list", scope=name)["error"]
+    assert f"memory_list(topic='{name}')" in mcp("memory_list", project=name)["error"]
 
     with db.transaction(dsn) as cur:
         cur.execute(
@@ -400,7 +402,7 @@ def test_memory_admit_opens_a_new_topic_only_with_its_trigger_and_only_if_the_ru
     }
     missing = mcp("memory_admit", request_id=str(uuid4()), content=LEVER, **base)
     assert missing["ok"] is False
-    assert "topic_trigger" in missing["error"] and "scope" in missing["error"]
+    assert "topic_trigger" in missing["error"] and "project" in missing["error"]
 
     monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", "5")
     refused = mcp(
@@ -417,17 +419,17 @@ def test_memory_admit_opens_a_new_topic_only_with_its_trigger_and_only_if_the_ru
     assert stopped["admitted"] is False
     with db.transaction(dsn) as cur:
         assert topics.get_topic(cur, "release") is None
-        scope = scopes.create_scope(cur, name="enrai", actor="user")
+        project = projects.create_project(cur, name="enrai", actor="user")
 
     request = {"request_id": str(uuid4()), "content": LEVER, "topic_trigger": trigger, **base}
-    made = mcp("memory_admit", scope="enrai", **request)
+    made = mcp("memory_admit", project="enrai", **request)
     assert made["ok"] is True
-    assert mcp("memory_admit", scope="enrai", **request) == made
+    assert mcp("memory_admit", project="enrai", **request) == made
     with db.transaction(dsn) as cur:
         opened = topics.get_topic(cur, "release")
         cur.execute("SELECT detail FROM event_log WHERE event_type = 'topic_created'")
         created = cur.fetchone()["detail"]
-    assert (opened["trigger"], opened["scope_id"]) == (trigger, scope["scope_id"])
+    assert (opened["trigger"], opened["project_id"]) == (trigger, project["project_id"])
     assert made["memory"]["topic_id"] == str(opened["topic_id"])
     assert created["approval_source"]["instruction"] == base["instruction"]
 

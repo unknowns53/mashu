@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 
-from mashu import memories, memory_changes, nominations, scopes, temporary, topics
+from mashu import memories, memory_changes, nominations, projects, temporary, topics
 from mashu.errors import ChangedSinceReadError, MashuError
 
 #: The kind a person's own retirement records. superseded and relocated are recorded by the
@@ -19,30 +19,32 @@ RETIREMENT_KIND = "withdrawn"
 BLOCKING_KINDS = ("withdrawn", "legacy")
 
 
-def scope_id_named(cur: psycopg.Cursor, name: str | None) -> UUID | None:
-    """The named scope's id, or None for no scope."""
-    return scopes.require_scope(cur, name)["scope_id"] if name else None
+def project_id_named(cur: psycopg.Cursor, name: str | None) -> UUID | None:
+    """The named project's id, or None for no project."""
+    return projects.require_project(cur, name)["project_id"] if name else None
 
 
-def scope_ids_named(
+def project_ids_named(
     cur: psycopg.Cursor, names: Sequence[str], *, home: UUID | None = None
 ) -> tuple[UUID | None, list[UUID]]:
-    """The home scope and the other scopes of a rule delivered to the named scopes.
+    """The home project and the other projects of a rule delivered to the named projects.
 
-    The current home scope stays home while it is named; otherwise the first named one is.
+    The current home project stays home while it is named; otherwise the first named one is.
     """
-    ids = list(dict.fromkeys(scopes.require_scope(cur, name)["scope_id"] for name in names if name))
+    ids = list(
+        dict.fromkeys(projects.require_project(cur, name)["project_id"] for name in names if name)
+    )
     if not ids:
         return None, []
     first = home if home in ids else ids[0]
-    return first, [scope_id for scope_id in ids if scope_id != first]
+    return first, [project_id for project_id in ids if project_id != first]
 
 
 def topic_id_for(cur: psycopg.Cursor, choice: dict[str, Any] | None, *, actor: str) -> UUID | None:
     """The chosen topic's id, creating a described topic inside the caller's write.
 
     A choice is {"topic_id": id}, {"name": an open topic's name}, or a new topic described
-    by name, trigger, and optionally scope_name.
+    by name, trigger, and optionally project_name.
     """
     if choice is None:
         return None
@@ -54,7 +56,7 @@ def topic_id_for(cur: psycopg.Cursor, choice: dict[str, Any] | None, *, actor: s
         cur,
         name=choice["name"],
         trigger=choice["trigger"],
-        scope_id=scope_id_named(cur, choice.get("scope_name")),
+        project_id=project_id_named(cur, choice.get("project_name")),
         actor=actor,
     )["topic_id"]
 
@@ -65,28 +67,28 @@ def remember(
     content: str,
     why: str | None,
     delivery: str,
-    scope_name: str | None,
+    project_name: str | None,
     topic: dict[str, Any] | None,
     acknowledged: list[UUID] | None,
     actor: str,
-    scope_names: Sequence[str] = (),
+    project_names: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """Write a rule the person states directly; `scope_names` delivers a scope rule to each.
+    """Write a rule the person states directly; `project_names` delivers a project rule to each.
 
     Raises RetiredConflictError naming the retirements it repeats until acknowledged lists
     exactly those, so the person reads why they were retired before writing it back.
     """
-    home, others = scope_ids_named(cur, scope_names) if scope_names else (None, [])
+    home, others = project_ids_named(cur, project_names) if project_names else (None, [])
     return memories.remember(
         cur,
         content=content,
         actor=actor,
-        scope_id=home if scope_names else scope_id_named(cur, scope_name),
+        project_id=home if project_names else project_id_named(cur, project_name),
         delivery=delivery,
         topic_id=topic_id_for(cur, topic, actor=actor),
         acknowledged_conflicts=acknowledged,
         why=why,
-        also_scope_ids=others,
+        also_project_ids=others,
     )
 
 
@@ -95,33 +97,33 @@ def set_delivery(
     memory_id: UUID,
     *,
     delivery: str,
-    scope_name: str | None,
+    project_name: str | None,
     topic: dict[str, Any] | None,
     actor: str,
-    scope_names: Sequence[str] | None = None,
+    project_names: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """Move a rule to another delivery; no scope named drops the one it had.
+    """Move a rule to another delivery; no project named drops the one it had.
 
-    `scope_names` is every scope a scope rule reaches, so one left out stops receiving it.
+    `project_names` is every project a project rule reaches, so one left out stops receiving it.
     """
     others: list[UUID] | None = None
-    if scope_names is not None and delivery == "scope":
+    if project_names is not None and delivery == "project":
         current = memories.get_memory(cur, memory_id)
-        scope_id, others = scope_ids_named(
-            cur, scope_names, home=current["scope_id"] if current else None
+        project_id, others = project_ids_named(
+            cur, project_names, home=current["project_id"] if current else None
         )
     else:
-        scope_id = scope_id_named(cur, scope_name)
+        project_id = project_id_named(cur, project_name)
     return memories.set_delivery(
         cur,
         memory_id,
         delivery=delivery,
         actor=actor,
-        scope_id=scope_id,
-        clear_scope=scope_id is None,
+        project_id=project_id,
+        clear_project=project_id is None,
         topic_id=topic_id_for(cur, topic, actor=actor),
         approval_source={"kind": "user_direct"},
-        also_scope_ids=others,
+        also_project_ids=others,
     )
 
 
@@ -162,16 +164,20 @@ def retire(cur: psycopg.Cursor, memory_id: UUID, *, reason: str, actor: str) -> 
 
 
 def add_temporary(cur: psycopg.Cursor, *, content: str, days: float, actor: str) -> dict[str, Any]:
-    """Record a temporary context for every scope; editing it can give it one."""
-    return temporary.put_temporary(cur, content=content, actor=actor, days=days, scope_id=None)
+    """Record a temporary context for every project; editing it can give it one."""
+    return temporary.put_temporary(cur, content=content, actor=actor, days=days, project_id=None)
 
 
 def revise_temporary(
-    cur: psycopg.Cursor, context_id: UUID, *, content: str, scope_name: str | None, actor: str
+    cur: psycopg.Cursor, context_id: UUID, *, content: str, project_name: str | None, actor: str
 ) -> dict[str, Any]:
-    """Rewrite a standing temporary context; no scope named means every scope."""
+    """Rewrite a standing temporary context; no project named means every project."""
     return temporary.revise(
-        cur, context_id, content=content, scope_id=scope_id_named(cur, scope_name), actor=actor
+        cur,
+        context_id,
+        content=content,
+        project_id=project_id_named(cur, project_name),
+        actor=actor,
     )
 
 

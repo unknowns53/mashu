@@ -9,7 +9,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import projects, references, routing, scopes, task_history, tasks
+from mashu import projects, references, routing, task_history, tasks
 from mashu.errors import MashuError
 
 _PROPOSAL_FIELDS = ("outcome", "reason", "state_at", "proposed_at", "proposed_by")
@@ -18,7 +18,7 @@ _PROPOSAL_FIELDS = ("outcome", "reason", "state_at", "proposed_at", "proposed_by
 @dataclass(frozen=True)
 class ProjectChoices:
     projects: list[dict[str, Any]]
-    scope_name: str | None
+    project_name: str | None
 
 
 def close_task(
@@ -66,23 +66,19 @@ def keep_open(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, An
 
 
 def task_project_choices(cur: psycopg.Cursor, *, cwd: str | None) -> ProjectChoices:
-    """List open projects in the routed scope, or all open projects as a fallback."""
-    scope_id, _ = routing.resolve(cur, cwd)
-    scope_name = None
-    if scope_id is not None:
-        cur.execute("SELECT name FROM scope WHERE scope_id = %s", (scope_id,))
-        scope = cur.fetchone()
-        scope_name = scope["name"] if scope else None
-        cur.execute(
-            "SELECT project_id, name FROM project "
-            "WHERE scope_id = %s AND archived_at IS NULL ORDER BY name",
-            (scope_id,),
-        )
-        scoped = cur.fetchall()
-        if scoped:
-            return ProjectChoices(scoped, scope_name)
-    cur.execute("SELECT project_id, name FROM project WHERE archived_at IS NULL ORDER BY name")
-    return ProjectChoices(cur.fetchall(), None)
+    """The project this directory is routed to, or every open project as a fallback."""
+    project_id, _ = routing.resolve(cur, cwd)
+    # SELECT * rather than naming archived_at, so a store without that column still answers.
+    cur.execute("SELECT * FROM project ORDER BY name")
+    open_projects = [
+        {"project_id": row["project_id"], "name": row["name"]}
+        for row in cur.fetchall()
+        if not row.get("archived_at")
+    ]
+    routed = [row for row in open_projects if row["project_id"] == project_id]
+    if routed:
+        return ProjectChoices(routed, routed[0]["name"])
+    return ProjectChoices(open_projects, None)
 
 
 def task_view(cur: psycopg.Cursor, activity: str) -> list[dict[str, Any]]:
@@ -122,52 +118,23 @@ def create_task(
     )
 
 
-def save_project(
-    cur: psycopg.Cursor,
-    project_id: UUID | None,
-    *,
-    name: str,
-    scope_name: str | None,
-    actor: str,
-) -> dict[str, Any]:
-    """Create a project, or rename and rehome one; no scope pushes its cards everywhere."""
-    scope_id = scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
-    if project_id is None:
-        return projects.create_project(cur, name=name, scope_id=scope_id, actor=actor)
-    return projects.update_project(cur, project_id, name=name, scope_id=scope_id, actor=actor)
-
-
 def resolve_task_project(cur: psycopg.Cursor, given: str | None, *, cwd: str | None) -> UUID:
-    """Resolve a named project or the only project available from this directory."""
+    """The project a task is filed under: the one named, or the one this directory is routed to."""
     if given:
         row = projects.get_project(cur, given)
-        if row is not None:
+        if row is not None and not row.get("archived_at"):
             return row["project_id"]
         if references.is_uuid_ref(given):
             return references.resolve_id(
-                cur,
-                given,
-                table="project",
-                column="project_id",
-                label="project",
+                cur, given, table="project", column="project_id", label="project"
             )
         return projects.require_project(cur, given)["project_id"]
 
     choices = task_project_choices(cur, cwd=cwd)
-    if len(choices.projects) == 1:
+    if choices.project_name:
         return choices.projects[0]["project_id"]
-    if len(choices.projects) > 1:
-        named = ", ".join(row["name"] for row in choices.projects)
-        if choices.scope_name:
-            raise MashuError(
-                f"scope '{choices.scope_name}' holds more than one project ({named}): "
-                "choose one with --project <name>"
-            )
-        raise MashuError(
-            f"mashu task create needs --project <name>; available projects: {named}. "
-            "Example: mashu task create <name> --project <project>"
-        )
+    named = ", ".join(row["name"] for row in choices.projects) or "none yet"
     raise MashuError(
-        "there are no open projects. Create one with 'mashu project create <name>', "
-        "then assign the task with 'mashu task create <task> --project <project>'"
+        f"this folder belongs to no project; name one with --project <name> ({named}), "
+        "or add this folder to one"
     )

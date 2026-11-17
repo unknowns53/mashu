@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import remember
-from mashu import capacity, config, memories, scopes, temporary, topics
+from mashu import capacity, config, memories, projects, temporary, topics
 from mashu.errors import RefusedError
 from mashu.tokens import pushed_cost
 
@@ -14,84 +14,88 @@ CONDITION = "the shared queue is down for maintenance until Friday"
 CONDITION_EVERYWHERE = "the licence server is offline this week"
 
 
-def fill(cur, scope_id, count):
+def fill(cur, project_id, count):
     for content in RULES[:count]:
-        remember(cur, content, scope_id=scope_id, delivery="scope")
+        remember(cur, content, project_id=project_id, delivery="project")
 
 
-def test_a_full_scope_refuses_the_next_rule_and_says_by_how_much(cur, scope_id, monkeypatch):
+def test_a_full_project_refuses_the_next_rule_and_says_by_how_much(cur, project_id, monkeypatch):
     monkeypatch.setenv("MASHU_CAPACITY", "400")
-    fill(cur, scope_id, 5)
+    fill(cur, project_id, 5)
 
     monkeypatch.setenv("MASHU_CAPACITY", "100")
-    got = capacity.check_admission(cur, content=NEW_RULE, delivery="scope", scope_id=scope_id)
+    got = capacity.check_admission(cur, content=NEW_RULE, delivery="project", project_id=project_id)
     assert got["ok"] is False
     assert str(got["capacity"]) in got["refusal"]
     assert str(got["projected"]) in got["refusal"]
     assert "mashu retire" in got["refusal"] and "topic" in got["refusal"]
 
     with pytest.raises(RefusedError, match="seats 100 tokens"):
-        remember(cur, NEW_RULE, scope_id=scope_id, delivery="scope")
+        remember(cur, NEW_RULE, project_id=project_id, delivery="project")
 
 
-def test_a_rule_for_several_scopes_reaches_and_is_weighed_in_each(cur, scope_id, monkeypatch):
+def test_a_rule_for_several_projects_reaches_and_is_weighed_in_each(cur, project_id, monkeypatch):
     monkeypatch.setenv("MASHU_CAPACITY", "400")
-    other = scopes.create_scope(cur, name="the other repository", actor="user")["scope_id"]
-    unrelated = scopes.create_scope(cur, name="unrelated", actor="user")["scope_id"]
+    other = projects.create_project(cur, name="the other repository", actor="user")["project_id"]
+    unrelated = projects.create_project(cur, name="unrelated", actor="user")["project_id"]
     fill(cur, other, 3)
-    shared = remember(cur, NEW_RULE, scope_id=scope_id, delivery="scope", also_scope_ids=[other])
+    shared = remember(
+        cur, NEW_RULE, project_id=project_id, delivery="project", also_project_ids=[other]
+    )
 
-    def delivered(scope):
-        return [row["content"] for row in memories.scope_push_memories(cur, scope)]
+    def delivered(project):
+        return [row["content"] for row in memories.project_push_memories(cur, project)]
 
-    assert NEW_RULE in delivered(scope_id) and NEW_RULE in delivered(other)
+    assert NEW_RULE in delivered(project_id) and NEW_RULE in delivered(other)
     assert NEW_RULE not in delivered(unrelated)
 
-    # A longer revision is refused in the other scope, which is the fuller one.
+    # A longer revision is refused in the other project, which is the fuller one.
     monkeypatch.setenv("MASHU_CAPACITY", str(pushed_cost([*RULES[:3], NEW_RULE])))
     with pytest.raises(RefusedError, match="seats"):
         memories.revise(cur, shared["memory_id"], content=NEW_RULE + " always", actor="user")
 
-    # Delivering it to its home scope alone leaves the other scope without it.
+    # Delivering it to its home project alone leaves the other project without it.
     memories.set_delivery(
-        cur, shared["memory_id"], delivery="scope", actor="user", also_scope_ids=[]
+        cur, shared["memory_id"], delivery="project", actor="user", also_project_ids=[]
     )
     assert NEW_RULE not in delivered(other)
-    assert memories.other_scopes(cur, shared["memory_id"]) == []
+    assert memories.other_projects(cur, shared["memory_id"]) == []
 
 
-def test_an_always_rule_is_weighed_against_the_fullest_scope(cur, scope_id, monkeypatch):
+def test_an_always_rule_is_weighed_against_the_fullest_project(cur, project_id, monkeypatch):
     monkeypatch.setenv("MASHU_CAPACITY", "400")
-    light = scopes.create_scope(cur, name="a light scope", actor="user")["scope_id"]
-    fill(cur, scope_id, 4)
+    light = projects.create_project(cur, name="a light project", actor="user")["project_id"]
+    fill(cur, project_id, 4)
     fill(cur, light, 1)
 
     got = capacity.check_admission(cur, content=NEW_RULE, delivery="always")
     heaviest = pushed_cost(RULES[:4])
     assert got["projected"] == heaviest + pushed_cost([NEW_RULE])
 
-    # The same addition weighed against the light scope alone would have fitted.
+    # The same addition weighed against the light project alone would have fitted.
     monkeypatch.setenv("MASHU_CAPACITY", str(got["projected"] - 1))
     assert capacity.check_admission(cur, content=NEW_RULE, delivery="always")["ok"] is False
     assert (
-        capacity.check_admission(cur, content=NEW_RULE, delivery="scope", scope_id=light)["ok"]
+        capacity.check_admission(cur, content=NEW_RULE, delivery="project", project_id=light)["ok"]
         is True
     )
 
 
-def test_a_rule_being_rewritten_is_not_competing_with_itself(cur, scope_id, monkeypatch):
+def test_a_rule_being_rewritten_is_not_competing_with_itself(cur, project_id, monkeypatch):
     monkeypatch.setenv("MASHU_CAPACITY", "400")
-    fill(cur, scope_id, 5)
-    subject = memories.scope_push_memories(cur, scope_id)[0]
+    fill(cur, project_id, 5)
+    subject = memories.project_push_memories(cur, project_id)[0]
 
     # Exactly enough room for four of the five plus the replacement.
     monkeypatch.setenv("MASHU_CAPACITY", str(pushed_cost(RULES[:4]) + pushed_cost([NEW_RULE])))
-    fresh = capacity.check_admission(cur, content=NEW_RULE, delivery="scope", scope_id=scope_id)
+    fresh = capacity.check_admission(
+        cur, content=NEW_RULE, delivery="project", project_id=project_id
+    )
     in_place = capacity.check_admission(
         cur,
         content=NEW_RULE,
-        delivery="scope",
-        scope_id=scope_id,
+        delivery="project",
+        project_id=project_id,
         exclude_memory_id=subject["memory_id"],
     )
     assert fresh["ok"] is False
@@ -101,20 +105,20 @@ def test_a_rule_being_rewritten_is_not_competing_with_itself(cur, scope_id, monk
     assert revised["content"] == NEW_RULE
 
 
-def test_the_totals_separate_what_every_session_pays_from_what_one_scope_does(
-    cur, scope_id, monkeypatch
+def test_the_totals_separate_what_every_session_pays_from_what_one_project_does(
+    cur, project_id, monkeypatch
 ):
     monkeypatch.setenv("MASHU_CAPACITY", "400")
-    fill(cur, scope_id, 2)
+    fill(cur, project_id, 2)
     remember(cur, NEW_RULE)
 
     totals = capacity.bootstrap_totals(cur)
     assert totals["always"] == pushed_cost([NEW_RULE])
-    assert totals["scopes"] == {scope_id: pushed_cost(RULES[:2])}
+    assert totals["projects"] == {project_id: pushed_cost(RULES[:2])}
     assert totals["worst"] == totals["always"] + pushed_cost(RULES[:2])
 
 
-def test_the_always_layer_has_a_lower_ceiling_of_its_own(cur, scope_id, monkeypatch):
+def test_the_always_layer_has_a_lower_ceiling_of_its_own(cur, project_id, monkeypatch):
     monkeypatch.setenv("MASHU_CAPACITY", "400")
     ceiling = pushed_cost(RULES[:1])
     monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", str(ceiling))
@@ -127,22 +131,26 @@ def test_the_always_layer_has_a_lower_ceiling_of_its_own(cur, scope_id, monkeypa
     # The whole opening had room for it; the layer is what refused.
     assert got["projected"] < config.capacity()
     assert f"the always layer seats {ceiling} tokens" in got["refusal"]
-    assert "mashu deliver <id> scope" in got["refusal"]
+    assert "mashu deliver <id> project" in got["refusal"]
     with pytest.raises(RefusedError, match="the always layer seats"):
         remember(cur, NEW_RULE)
 
     # The same rule, told which one place it governs, fits and is weighed against the opening.
-    scoped = capacity.check_admission(cur, content=NEW_RULE, delivery="scope", scope_id=scope_id)
-    assert scoped["ok"] is True
-    assert scoped["capacity"] == config.capacity()
+    local = capacity.check_admission(
+        cur, content=NEW_RULE, delivery="project", project_id=project_id
+    )
+    assert local["ok"] is True
+    assert local["capacity"] == config.capacity()
 
 
 def test_a_full_always_layer_says_what_a_topic_would_cost_it_in_the_callers_terms(
-    cur, scope_id, monkeypatch
+    cur, project_id, monkeypatch
 ):
     held = topics.create_topic(cur, name="held", trigger="Before tuning", actor="user")
     topics.create_topic(cur, name="empty", trigger="Before calibrating", actor="user")
-    topics.create_topic(cur, name="placed", trigger="Before placing", scope_id=scope_id, actor="u")
+    topics.create_topic(
+        cur, name="placed", trigger="Before placing", project_id=project_id, actor="u"
+    )
     remember(cur, RULES[0], delivery="topic", topic_id=held["topic_id"])
     remember(cur, RULES[1])
     monkeypatch.setenv("MASHU_ALWAYS_CAPACITY", str(capacity.bootstrap_totals(cur)["always"] + 3))
@@ -159,13 +167,13 @@ def test_a_full_always_layer_says_what_a_topic_would_cost_it_in_the_callers_term
     assert "mashu " not in refusal
 
 
-def test_a_dated_condition_is_not_weighed_against_the_seats(cur, scope_id, monkeypatch):
+def test_a_dated_condition_is_not_weighed_against_the_seats(cur, project_id, monkeypatch):
     monkeypatch.setenv("MASHU_CAPACITY", "400")
-    temporary.put_temporary(cur, content=CONDITION, actor="user", days=3, scope_id=scope_id)
+    temporary.put_temporary(cur, content=CONDITION, actor="user", days=3, project_id=project_id)
     temporary.put_temporary(cur, content=CONDITION_EVERYWHERE, actor="user", days=3)
 
     totals = capacity.bootstrap_totals(cur)
-    assert totals == {"always": 0, "scopes": {}, "worst": 0}
+    assert totals == {"always": 0, "projects": {}, "worst": 0}
 
     monkeypatch.setenv("MASHU_CAPACITY", str(pushed_cost([NEW_RULE])))
     assert capacity.check_admission(cur, content=NEW_RULE, delivery="always")["ok"] is True

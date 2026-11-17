@@ -4,18 +4,16 @@ import pytest
 
 from conftest import expire
 from mashu import db, projects, tasks
-from mashu.errors import MashuError, RefusedError, UnknownProjectError
+from mashu.errors import MashuError, RefusedError
 
 
-def test_a_project_name_is_taken_once_and_a_near_miss_is_answered_with_it(cur, scope_id):
-    first = projects.create_project(cur, name="mashu", actor="user", scope_id=scope_id)
-    assert first["scope_id"] == scope_id
-    assert first["archived_at"] is None
+def test_a_project_name_is_taken_once_and_a_near_miss_is_answered_with_it(cur):
+    projects.create_project(cur, name="mashu", actor="user")
 
     with pytest.raises(MashuError, match="already exists"):
         projects.create_project(cur, name="mashu", actor="user")
-    with pytest.raises(UnknownProjectError, match="mashu"):
-        projects.require_project(cur, "mashi")
+    with pytest.raises(MashuError, match="mashu"):
+        tasks.task_create(cur, project="mashi", name="measure compactions", actor="agent")
 
 
 def test_a_project_id_from_project_list_finds_its_project_through_mcp(mcp, dsn):
@@ -44,7 +42,8 @@ def test_a_listing_counts_what_each_project_is_carrying(cur):
     expire(cur, quiet["task"]["task_id"])
     tasks.close(cur, done["task"]["task_id"], outcome="completed", actor="user")
 
-    listed = projects.list_projects(cur)[0]
+    [listed] = projects.list_projects(cur)
     assert listed["project_id"] == project["project_id"]
-    assert (listed["n_active"], listed["n_dormant"], listed["n_closed"]) == (1, 1, 1)
+    counts = (listed["n_tasks_active"], listed["n_tasks_dormant"], listed["n_tasks_closed"])
+    assert counts == (1, 1, 1)
     assert working["activity"] == "active"

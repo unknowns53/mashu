@@ -29,7 +29,6 @@ from mashu import (
     projects,
     references,
     routing,
-    scopes,
     settings,
     task_history,
     tasks,
@@ -55,10 +54,10 @@ INSTRUCTIONS = (
     "Call session_bootstrap first unless a SessionStart hook already delivered Mashu in this "
     "session. When the work at hand matches a bootstrap topic's trigger, call memory_list "
     "with that topic before starting it. "
-    "Memory holds standing rules only, pushed to every session (always), to chosen "
-    "places (scope), or when one kind of work starts (topic). A task keeps only the user's "
-    "rulings, each with their words; findings, measurements, and rejected options go in "
-    "project docs. "
+    "Memory holds standing rules only, pushed to every session (always), to one "
+    "project's sessions (project), or when one kind of work starts (topic). A task keeps "
+    "only the user's rulings, each with their words; findings, measurements, and rejected "
+    "options go in project docs. "
     "Before continuing a task from a card, call task_get with its full id and check old "
     "state against the repository. task_checkpoint, the one task state write, carries only "
     "what the next session needs: what the user ruled, a changed goal, approach, or "
@@ -213,7 +212,7 @@ _REFUSALS = (
 )
 
 
-#: What a task write returns about the scope's card budget instead of a refusal (project-state 8).
+#: What a task write returns about the project's card budget instead of a refusal (project-state 8).
 _CARD_SHARE = (
     "`card_share`, whose `unseated` names the active tasks beside it that now get no card; "
     "propose close only for those whose goal the user has met"
@@ -358,17 +357,17 @@ def _task_ref(cur: Any, value: UUID | str) -> UUID:
     return references.resolve_id(cur, str(value), table="task", column="task_id", label="task")
 
 
-def _scope(cur: Any, name: str | None) -> tuple[UUID | None, str | None, bool]:
-    """Resolve an explicit scope or the longest route for the current cwd."""
+def _project(cur: Any, name: str | None) -> tuple[UUID | None, str | None, bool]:
+    """Resolve an explicit project or the longest route for the current cwd."""
     if name is not None:
-        row = scopes.require_scope(cur, name)
-        return row["scope_id"], row["name"], False
-    scope_id, routed = routing.resolve(cur, os.getcwd())
-    if scope_id is None:
+        row = projects.require_project(cur, name)
+        return row["project_id"], row["name"], False
+    project_id, routed = routing.resolve(cur, os.getcwd())
+    if project_id is None:
         return None, None, routed
-    cur.execute("SELECT name FROM scope WHERE scope_id = %s", (scope_id,))
+    cur.execute("SELECT name FROM project WHERE project_id = %s", (project_id,))
     row = cur.fetchone()
-    return scope_id, row["name"] if row else None, routed
+    return project_id, row["name"] if row else None, routed
 
 
 def build_server() -> Any:
@@ -381,16 +380,16 @@ def build_server() -> Any:
     session = uuid4()
 
     @server.tool()
-    def session_bootstrap(scope: str | None = None) -> dict[str, Any]:
+    def session_bootstrap(project: str | None = None) -> dict[str, Any]:
         """Return session memories, the topic index, task cards, and temporary context."""
         try:
             with db.transaction() as cur:
-                scope_id, scope_name, routed = _scope(cur, scope)
+                project_id, project_name, routed = _project(cur, project)
                 answer = bootstrap.session_bootstrap(
                     cur,
                     actor=actor(),
-                    scope_id=scope_id,
-                    scope_name=scope_name,
+                    project_id=project_id,
+                    project_name=project_name,
                     routed=routed,
                 )
                 note = (
@@ -436,7 +435,7 @@ def build_server() -> Any:
         what: str,
         prevention: str,
         kind: Annotated[str, _Choice(("incident",))] = "incident",
-        scope: str | None = None,
+        project: str | None = None,
         prevention_kind: str = "rule",
         task_id: UUID | None = None,
         violated_memory_id: UUID | str | None = None,
@@ -445,7 +444,7 @@ def build_server() -> Any:
     ) -> dict[str, Any]:
         try:
             with db.transaction() as cur:
-                scope_id, _, _ = _scope(cur, scope)
+                project_id, _, _ = _project(cur, project)
                 from mashu import ledger
 
                 answer = ledger.report_pain(
@@ -454,7 +453,7 @@ def build_server() -> Any:
                     what=what,
                     prevention=prevention,
                     actor=actor(),
-                    scope_id=scope_id,
+                    project_id=project_id,
                     prevention_kind=prevention_kind,
                     task_id=task_id,
                     session=session,
@@ -469,29 +468,29 @@ def build_server() -> Any:
             return _failure(error)
 
     @server.tool()
-    def memory_list(scope: str | None = None, topic: str | None = None) -> dict[str, Any]:
-        """List active knowledge for one named scope, or read one topic's rules.
+    def memory_list(project: str | None = None, topic: str | None = None) -> dict[str, Any]:
+        """List active knowledge for one named project, or read one topic's rules.
 
-        Pass exactly one. `scope='always'` (or `global`) lists the Memories pushed to every
+        Pass exactly one. `project='always'` (or `global`) lists the Memories pushed to every
         session. With `topic`, read the rules before starting the work its trigger names;
         bootstrap lists topics but never their rules. A topic's `source` names where its
         long form lives, from the vault or a repository root; when it is a vault note,
         `source_path` and `source_exists` say where and whether it is there.
         """
-        if (scope is None) == (topic is None):
-            return _failure(MashuError("pass exactly one of scope or topic"))
+        if (project is None) == (topic is None):
+            return _failure(MashuError("pass exactly one of project or topic"))
         try:
             with db.transaction() as cur:
                 if topic is not None:
                     answer = topics.read_for_session(cur, topic, actor=actor(), session=session)
                     return _plain({"ok": True, **answer})
-                row = scopes.get_scope(cur, scope)
-                if row is None and scope in ALWAYS_LAYER:
+                row = projects.get_project(cur, project)
+                if row is None and project in ALWAYS_LAYER:
                     found = memories.always_memories(cur)
-                    return _plain({"ok": True, "scope": "always", "memories": found})
-                row = row or scopes.require_scope(cur, scope, also=ALWAYS_LAYER[:1])
-                found = memories.active_memories(cur, scope_id=row["scope_id"])
-                return _plain({"ok": True, "scope": row["name"], "memories": found})
+                    return _plain({"ok": True, "project": "always", "memories": found})
+                row = row or projects.require_project(cur, project, also=ALWAYS_LAYER[:1])
+                found = memories.active_memories(cur, project_id=row["project_id"])
+                return _plain({"ok": True, "project": row["name"], "memories": found})
         except MashuError as error:
             return _failure(error)
 
@@ -508,16 +507,16 @@ def build_server() -> Any:
         )
     )
     def memory_nominate(
-        content: str, scope: str | None = None, why: str | None = None
+        content: str, project: str | None = None, why: str | None = None
     ) -> dict[str, Any]:
         try:
             with db.transaction() as cur:
-                scope_id, _, _ = _scope(cur, scope)
+                project_id, _, _ = _project(cur, project)
                 answer = nominations.nominate_proposed(
                     cur,
                     content=content,
                     actor=actor(),
-                    scope_id=scope_id,
+                    project_id=project_id,
                     why=why,
                 )
                 return _plain({"ok": True, **answer})
@@ -545,11 +544,11 @@ def build_server() -> Any:
             "Admit only a standing rule the user asked Mashu to keep. What the user decided for "
             "current work belongs in the task's rulings, and an expiring condition in the user's "
             "Temporary Context (`mashu remember --until`); offer those instead. Choose the "
-            "delivery by where forgetting breaks work: `always` anywhere, `scope` in one "
-            "place, `topic` in one kind of work. Left out, delivery is the scope routed from "
+            "delivery by where forgetting breaks work: `always` anywhere, `project` in one "
+            "place, `topic` in one kind of work. Left out, delivery is the project routed from "
             "the server's working directory, or always when that directory is unrouted, so "
-            "pass it, and tell the user which delivery and scope the answer shows. "
-            "Pass `content` (and optional `scope`): the "
+            "pass it, and tell the user which delivery and project the answer shows. "
+            "Pass `content` (and optional `project`): the "
             "nomination and admission happen in one call. If it joins an already pending "
             "candidate or repeats withdrawn or legacy retired Memory, it stops with "
             "`admitted: false` and returns the nomination to read; then pass that "
@@ -559,7 +558,7 @@ def build_server() -> Any:
             "For a rule the user wants read only during one kind of work, pass "
             "`delivery='topic'` and a `topic` name. A topic that does not exist yet is opened "
             "with the rule, never without it, and needs `topic_trigger` (one sentence saying "
-            "when to read it); `scope` names where it is listed, or omit it for every session. "
+            "when to read it); `project` names where it is listed, or omit it for every session. "
             "`topic_source` optionally names where the new topic's long form lives, as a path "
             "from the vault or repository root with an optional #heading."
             f"\n\n{body_contract} `why` goes with `content`, not with `nomination_id`."
@@ -575,7 +574,7 @@ def build_server() -> Any:
         conflict_ids: list[UUID] | None = None,
         conflict_instruction: str | None = None,
         delivery: str | None = None,
-        scope: str | None = None,
+        project: str | None = None,
         topic: str | None = None,
         topic_trigger: str | None = None,
         why: str | None = None,
@@ -612,19 +611,21 @@ def build_server() -> Any:
             with capacity.doors("mcp"), db.transaction() as cur:
                 topic_id, new_topic = None, None
                 if topic:
-                    listed = scopes.require_scope(cur, scope)["scope_id"] if scope else None
+                    listed = (
+                        projects.require_project(cur, project)["project_id"] if project else None
+                    )
                     topic_id, new_topic = topics.for_filing(
                         cur, topic, topic_trigger, listed, topic_source
                     )
                 if content is not None:
-                    scope_id, _, _ = _scope(cur, scope)
+                    project_id, _, _ = _project(cur, project)
                     answer = nominations.remember_explicit(
                         cur,
                         content=content,
                         actor=actor(),
                         approval=approval,
                         request_id=request_id,
-                        scope_id=scope_id,
+                        project_id=project_id,
                         delivery=delivery,
                         topic_id=topic_id,
                         new_topic=new_topic,
@@ -639,13 +640,13 @@ def build_server() -> Any:
                 nomination = cur.fetchone()
                 if nomination is None:
                     raise MashuError(f"no nomination {nomination_id}")
-                scope_id = (
-                    scopes.require_scope(cur, scope)["scope_id"]
-                    if scope
-                    else nomination["scope_id"]
+                project_id = (
+                    projects.require_project(cur, project)["project_id"]
+                    if project
+                    else nomination["project_id"]
                 )
                 chosen_delivery = delivery or (
-                    "topic" if topic_id else "scope" if scope_id else "always"
+                    "topic" if topic_id else "project" if project_id else "always"
                 )
                 result = nominations.admit(
                     cur,
@@ -653,8 +654,8 @@ def build_server() -> Any:
                     actor=actor(),
                     delivery=chosen_delivery,
                     expected_version=nomination_version,
-                    scope_id=scope_id,
-                    scope_override=True,
+                    project_id=project_id,
+                    project_override=True,
                     topic_id=topic_id,
                     approval=approval,
                     request_id=request_id,
@@ -703,9 +704,9 @@ def build_server() -> Any:
         quoting them in `observation`. All shape problems come back together in `problems`.
 
         Replace keeps the old delivery settings unless `successor_settings` gives both
-        `delivery` and `scope_id`. For `delivery='topic'` add `topic`: an existing topic
-        takes that topic's scope_id or null, and a new topic also needs `topic_trigger`
-        (one sentence saying when to read it) with `scope_id` naming where it is listed, or
+        `delivery` and `project_id`. For `delivery='topic'` add `topic`: an existing topic
+        takes that topic's project_id or null, and a new topic also needs `topic_trigger`
+        (one sentence saying when to read it) with `project_id` naming where it is listed, or
         null for every session.
         """
         try:
@@ -779,13 +780,14 @@ def build_server() -> Any:
             "call.\n\n"
             "Use it only for a move the user asked for; your own idea goes to "
             f"memory_change_propose and stays pending. {_PROVENANCE} `delivery` is always, "
-            "scope with `scope` (default: the Memory's current scope), or topic with `topic`: an "
-            "existing topic keeps its own scope, and a new one also needs `topic_trigger` (one "
-            "sentence saying when to read it) with `scope` naming where it is listed, or omit it "
-            "for every session. It is recorded as an applied redeliver proposal. A scope "
-            "Memory can reach several scopes (`scope_names` in memory_get); it keeps the others "
-            "while its scope stays the same, and a move to another scope delivers it there only. "
-            "Choosing several scopes is the user's, in the desktop app or `mashu deliver`."
+            "project with `project` (default: the Memory's current project), or topic with "
+            "`topic`: an existing topic keeps its own project, and a new one also needs "
+            "`topic_trigger` (one sentence saying when to read it) with `project` naming where "
+            "it is listed, or omit it for every session. It is recorded as an applied redeliver "
+            "proposal. A project Memory can reach several projects (`project_names` in "
+            "memory_get); it keeps the others while its project stays the same, and a move to "
+            "another project delivers it there only. Choosing several projects is the user's, "
+            "in the desktop app or `mashu deliver`."
         )
     )
     def memory_redeliver(
@@ -794,7 +796,7 @@ def build_server() -> Any:
         request_id: UUID,
         instruction: str,
         conversation_ref: str,
-        scope: str | None = None,
+        project: str | None = None,
         topic: str | None = None,
         topic_trigger: str | None = None,
     ) -> dict[str, Any]:
@@ -804,7 +806,9 @@ def build_server() -> Any:
                     cur,
                     _memory_ref(cur, memory_id),
                     delivery=delivery,
-                    scope_id=scopes.require_scope(cur, scope)["scope_id"] if scope else None,
+                    project_id=projects.require_project(cur, project)["project_id"]
+                    if project
+                    else None,
                     topic=topic,
                     topic_trigger=topic_trigger,
                     request_id=request_id,
@@ -890,10 +894,21 @@ def build_server() -> Any:
 
     @server.tool()
     def project_list(include_archived: bool = False) -> dict[str, Any]:
-        """List projects and the task counts they currently carry."""
+        """List projects, the folders their sessions open in, and the tasks they carry."""
         try:
             with db.transaction() as cur:
-                found = projects.list_projects(cur, include_archived=include_archived)
+                found = [
+                    {
+                        "project_id": row["project_id"],
+                        "name": row["name"],
+                        "folders": row["folders"],
+                        "archived_at": row.get("archived_at"),
+                        "n_active": row["n_tasks_active"],
+                        "n_dormant": row["n_tasks_dormant"],
+                        "n_closed": row["n_tasks_closed"],
+                    }
+                    for row in projects.list_projects(cur, include_archived=include_archived)
+                ]
                 return _plain({"ok": True, "projects": found})
         except MashuError as error:
             return _failure(error)
@@ -905,10 +920,10 @@ def build_server() -> Any:
             "Create a task; likely duplicates are returned unless `force` is true.\n\n"
             "Open one only for work expected to span sessions, not for a single request or a "
             "step of a larger task, and search with task_search first. Bootstrap delivers a "
-            "scope's cards newest activity first up to its card budget and only names the "
-            "older ones, so a needless task pushes real ones out of view. Projects are the "
-            "user's; when "
-            "none fits, ask the user to run `mashu project create`. `goal` names the outcome "
+            "project's cards newest activity first up to its card budget and only names the "
+            "older ones, so a needless task pushes real ones out of view. Without `project`, "
+            "the task is filed under the project this session's folder belongs to. Projects "
+            "are the user's; when none fits, ask the user to create one. `goal` names the outcome "
             "and `status_text` says where the task stands; both ride "
             "on every bootstrap card, so details go in approach or next_actions. "
             f"{state_contract} {_REFUSALS} Success and duplicate candidates return the card "
@@ -917,8 +932,8 @@ def build_server() -> Any:
         )
     )
     def task_create(
-        project: UUID | str,
         name: str,
+        project: UUID | str | None = None,
         goal: str | None = None,
         approach: str | None = None,
         status_text: str | None = None,
@@ -929,6 +944,14 @@ def build_server() -> Any:
     ) -> dict[str, Any]:
         try:
             with db.transaction() as cur:
+                if project is None:
+                    project, _, _ = _project(cur, None)
+                    if project is None:
+                        raise MashuError(
+                            "this session's folder belongs to no project; pass `project` "
+                            "(project_list names them), or ask the user to add this folder "
+                            "to one"
+                        )
                 answer = tasks.task_create(
                     cur,
                     project=project,

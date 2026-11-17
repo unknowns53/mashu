@@ -5,7 +5,7 @@ import datetime as dt
 import pytest
 
 from conftest import keys, retire
-from mashu import db, memories, memory_ui, scopes, temporary, topics
+from mashu import db, memories, memory_ui, projects, temporary, topics
 
 RULE = "never report a run as finished without the output that proves it"
 REVISED = "never report a run as finished without pasting the output that proves it"
@@ -16,7 +16,7 @@ pytestmark = pytest.mark.usefixtures("known_screen")
 @pytest.fixture
 def dsn(dsn):
     with db.transaction(dsn) as cur:
-        scopes.create_scope(cur, name="deployments", actor="user")
+        projects.create_project(cur, name="deployments", actor="user")
     return dsn
 
 
@@ -35,9 +35,13 @@ def test_views_show_active_retired_and_unexpired_temporary_rows(dsn, monkeypatch
     retired = remember(dsn, "keep the old deployment reason visible")
     with db.transaction(dsn) as cur:
         retire(cur, retired, "the deployer enforces this now")
-        scope = scopes.require_scope(cur, "deployments")
+        project = projects.require_project(cur, "deployments")
         context = temporary.put_temporary(
-            cur, content="the canary is paused", actor="user", days=2, scope_id=scope["scope_id"]
+            cur,
+            content="the canary is paused",
+            actor="user",
+            days=2,
+            project_id=project["project_id"],
         )
 
     keys(monkeypatch, "2", "3", "q")
@@ -66,19 +70,19 @@ def test_search_is_case_insensitive_zero_results_can_be_researched_and_left_clea
     assert out.count("active memories  2") >= 2
 
 
-def test_new_durable_memory_can_choose_a_scope_delivery_and_keep_its_reason(dsn, monkeypatch):
+def test_new_durable_memory_can_choose_a_project_delivery_and_keep_its_reason(dsn, monkeypatch):
     why = "a deploy once started against an unmigrated schema"
-    keys(monkeypatch, "n", RULE, why, "scope", "deployments", "q")
+    keys(monkeypatch, "n", RULE, why, "project", "deployments", "q")
 
     assert memory_ui.run(dsn) == 0
     with db.transaction(dsn) as cur:
         cur.execute("SELECT * FROM memory")
         row = cur.fetchone()
-        scope = scopes.require_scope(cur, "deployments")
+        project = projects.require_project(cur, "deployments")
         basis = memories.memory_details(cur, row["memory_id"])["basis"]
     assert row["content"] == RULE
-    assert row["delivery"] == "scope"
-    assert row["scope_id"] == scope["scope_id"]
+    assert row["delivery"] == "project"
+    assert row["project_id"] == project["project_id"]
     assert row["created_by"] == "user"
     assert [entry["what"] for entry in basis] == [why]
 
@@ -108,14 +112,14 @@ def test_cancelling_a_retirement_leaves_the_memory_active(dsn, monkeypatch):
 def test_delivery_edit_keeps_the_selection_and_its_defaults_on_empty_input(dsn, monkeypatch):
     selected = remember(dsn)
     other = remember(dsn, "spell out the timezone in scheduled jobs")
-    keys(monkeypatch, "d", "scope", "deployments", "e", REVISED, "d", "", "", "q")
+    keys(monkeypatch, "d", "project", "deployments", "e", REVISED, "d", "", "", "q")
 
     assert memory_ui.run(dsn) == 0
     row = memory_row(dsn, selected["memory_id"])
-    assert (row["content"], row["delivery"]) == (REVISED, "scope")
+    assert (row["content"], row["delivery"]) == (REVISED, "project")
     assert memory_row(dsn, other["memory_id"])["content"] == other["content"]
     with db.transaction(dsn) as cur:
-        assert row["scope_id"] == scopes.require_scope(cur, "deployments")["scope_id"]
+        assert row["project_id"] == projects.require_project(cur, "deployments")["project_id"]
         cur.execute(
             "SELECT detail FROM event_log WHERE event_type = 'delivery_changed' AND memory_id = %s",
             (selected["memory_id"],),
@@ -135,15 +139,19 @@ def test_temporary_add_is_global_and_rejects_an_out_of_range_lifetime(dsn, monke
         rows = cur.fetchall()
     assert len(rows) == 1
     assert rows[0]["content"] == "frozen for the audit"
-    assert rows[0]["scope_id"] is None
+    assert rows[0]["project_id"] is None
     assert rows[0]["created_by"] == "user"
 
 
 def test_temporary_context_can_be_edited_in_place(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
-        scope = scopes.require_scope(cur, "deployments")
+        project = projects.require_project(cur, "deployments")
         context = temporary.put_temporary(
-            cur, content="the release is frozen", actor="user", days=2, scope_id=scope["scope_id"]
+            cur,
+            content="the release is frozen",
+            actor="user",
+            days=2,
+            project_id=project["project_id"],
         )
     keys(monkeypatch, "3", "e", "the release is frozen until Friday", "-", "q")
 
@@ -151,12 +159,12 @@ def test_temporary_context_can_be_edited_in_place(dsn, monkeypatch):
 
     with db.transaction(dsn) as cur:
         cur.execute(
-            "SELECT content, scope_id FROM temporary_context WHERE context_id = %s",
+            "SELECT content, project_id FROM temporary_context WHERE context_id = %s",
             (context["context_id"],),
         )
         row = cur.fetchone()
     assert row["content"] == "the release is frozen until Friday"
-    assert row["scope_id"] is None
+    assert row["project_id"] is None
 
 
 @pytest.mark.parametrize(("answer", "standing"), [("n", 1), ("y", 0)])
@@ -229,9 +237,9 @@ def test_a_new_rule_can_open_a_new_topic_without_typing_an_id(dsn, monkeypatch):
         cur.execute("SELECT * FROM memory")
         row = cur.fetchone()
     assert topic["trigger"] == "Before a report"
-    assert topic["scope_name"] == "deployments"
+    assert topic["project_name"] == "deployments"
     assert (row["delivery"], row["topic_id"]) == ("topic", topic["topic_id"])
-    assert row["scope_id"] == topic["scope_id"]
+    assert row["project_id"] == topic["project_id"]
 
 
 def test_a_topic_picker_answer_out_of_range_changes_nothing(dsn, monkeypatch, capsys):
@@ -279,12 +287,12 @@ def test_a_condition_repeating_a_withdrawn_rule_converts_only_after_explicit_yes
     assert standing == ([] if active else [context["context_id"]])
 
 
-def test_a_rule_made_always_drops_its_scope(dsn, monkeypatch):
+def test_a_rule_made_always_drops_its_project(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
-        home = scopes.require_scope(cur, "deployments")["scope_id"]
-    memory = remember(dsn, delivery="scope", scope_id=home)
+        home = projects.require_project(cur, "deployments")["project_id"]
+    memory = remember(dsn, delivery="project", project_id=home)
     keys(monkeypatch, "d", "always", "q")
 
     assert memory_ui.run(dsn) == 0
     row = memory_row(dsn, memory["memory_id"])
-    assert (row["delivery"], row["scope_id"]) == ("always", None)
+    assert (row["delivery"], row["project_id"]) == ("always", None)

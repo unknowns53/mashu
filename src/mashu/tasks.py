@@ -34,7 +34,7 @@ OUTCOME_MEANINGS = {
 LOCK_PROJECT_STATE = 3
 
 #: The ceilings 5.3 puts on one current state. goal and status ride on every bootstrap
-#: card of the scope, so they are held to a line each. The CHECK constraints keep the
+#: card of the project, so they are held to a line each. The CHECK constraints keep the
 #: wider ceilings of 0004, because states written under them are carried forward.
 TEXT_LIMITS = {"goal": 80, "approach": 500, "status_text": 120}
 
@@ -693,7 +693,7 @@ def ruling_search(
 # the budget (5.3, 8)
 
 _ACTIVE_STATES = f"""
-SELECT t.task_id, t.name, t.last_activity_at, p.scope_id, ts.goal, ts.approach, ts.status_text,
+SELECT t.task_id, t.name, t.last_activity_at, p.project_id, ts.goal, ts.approach, ts.status_text,
        ts.open_questions, ts.blockers, ts.next_actions, {_RULINGS_COUNT} AS rulings_count
 FROM task t
 JOIN project p ON p.project_id = t.project_id
@@ -709,7 +709,7 @@ def active_state_costs(cur: psycopg.Cursor) -> list[dict[str, Any]]:
         {
             "task_id": row["task_id"],
             "name": row["name"],
-            "scope_id": row["scope_id"],
+            "project_id": row["project_id"],
             "last_activity_at": row["last_activity_at"],
             "tokens": card_cost(row["name"], row),
         }
@@ -719,38 +719,16 @@ def active_state_costs(cur: psycopg.Cursor) -> list[dict[str, Any]]:
 
 
 def pushed_totals(cur: psycopg.Cursor) -> dict[str, Any]:
-    """What active state costs everywhere, per scope, and at its worst."""
+    """What active state costs per project, and at its worst."""
     rows = active_state_costs(cur)
-    unscoped = sum(row["tokens"] for row in rows if row["scope_id"] is None)
-    scoped: dict[UUID, int] = {}
+    by_project: dict[UUID, int] = {}
     for row in rows:
-        if row["scope_id"] is not None:
-            scoped[row["scope_id"]] = scoped.get(row["scope_id"], 0) + row["tokens"]
+        by_project[row["project_id"]] = by_project.get(row["project_id"], 0) + row["tokens"]
     return {
-        "unscoped": unscoped,
-        "scopes": scoped,
-        "worst": unscoped + max(scoped.values(), default=0),
+        "projects": by_project,
+        "worst": max(by_project.values(), default=0),
         "count": len(rows),
     }
-
-
-def _budget_competitors(
-    rows: list[dict[str, Any]], *, scope_id: UUID | None
-) -> tuple[list[dict[str, Any]], str]:
-    """The states delivered beside a write, using the heaviest scope for global state."""
-    unscoped = [row for row in rows if row["scope_id"] is None]
-    if scope_id is not None:
-        scoped = [row for row in rows if row["scope_id"] == scope_id]
-        return [*unscoped, *scoped], "this scope"
-
-    buckets: dict[UUID, list[dict[str, Any]]] = {}
-    for row in rows:
-        if row["scope_id"] is not None:
-            buckets.setdefault(row["scope_id"], []).append(row)
-    heaviest = max(
-        buckets.values(), key=lambda bucket: sum(r["tokens"] for r in bucket), default=[]
-    )
-    return [*unscoped, *heaviest], "the busiest scope"
 
 
 def seat_cards(rows: list[dict[str, Any]], capacity: int) -> tuple[list, list]:
@@ -773,14 +751,14 @@ def seat_cards(rows: list[dict[str, Any]], capacity: int) -> tuple[list, list]:
 def card_share(cur: psycopg.Cursor, project: dict[str, Any]) -> dict[str, Any]:
     """Which active tasks beside this project's lose their card, after a write (project-state 8).
 
-    A write is never refused for the scope's share; the oldest cards fall out of delivery
+    A write is never refused for the project's share; the oldest cards fall out of delivery
     instead, and the writer is told which, so a needless task shows what it hid.
     """
-    rows, boundary = _budget_competitors(active_state_costs(cur), scope_id=project["scope_id"])
+    rows = [row for row in active_state_costs(cur) if row["project_id"] == project["project_id"]]
     capacity = settings.limit(cur, "project_capacity")
     _, unseated = seat_cards(rows, capacity)
     return {
-        "boundary": boundary,
+        "boundary": "this project",
         "capacity": capacity,
         "tokens": sum(row["tokens"] for row in rows),
         "unseated": [{"task_id": row["task_id"], "name": row["name"]} for row in unseated],
@@ -1127,6 +1105,8 @@ def reopen(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, Any]:
         raise MashuError(f"no task {task_id}")
     if task["status"] != "closed":
         raise MashuError(f"task '{task['name']}' is already open")
+    # An open task in a removed project could be read but never written again.
+    projects.require_project(cur, task["project_id"])
     cur.execute(
         """
         UPDATE task

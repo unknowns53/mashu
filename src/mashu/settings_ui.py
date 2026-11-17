@@ -10,8 +10,8 @@ from typing import Any
 from mashu import (
     application,
     db,
+    projects,
     routing,
-    scopes,
     screen,
     settings,
     topics,
@@ -28,9 +28,9 @@ _READ_KEYS = "  space/PgDn read on   b/PgUp page back   Home top   ← back   q 
 _TOP_ITEMS = (
     ("Health/status", "capacity, queues, recent evidence, and work"),
     ("Bootstrap preview", "what a session opened here receives"),
-    ("Scopes", "memory homes and their opening cost"),
+    ("Projects", "memory homes and their opening cost"),
     ("Topics", "rules read when one kind of work begins"),
-    ("Routes", "directory trees mapped to scopes or ignored"),
+    ("Routes", "directory trees mapped to projects or ignored"),
     ("Delivery limits", "how much a session receives and how large one entry may be"),
     ("Schema/migrations", "database version and pending changes"),
 )
@@ -41,10 +41,10 @@ _HELP = """
   space/PgDn   read the next screenful of a long page
   b/PgUp       go back one screenful
   Home/End     jump to the first or last list item
-  n            Scopes, Topics, Routes: add one
-  e            Scopes, Topics, Routes, Delivery limits: edit the selected one
+  n            Projects, Topics, Routes: add one
+  e            Projects, Topics, Routes, Delivery limits: edit the selected one
   d            Delivery limits: return the selected limit to its default
-  x            Scopes, Topics, Routes: remove the selected one, after confirmation
+  x            Projects, Topics, Routes: remove the selected one, after confirmation
   i            Routes: add an ignored path
   m            Schema/migrations: apply pending migrations, after confirmation
   ← or Esc     go back one level
@@ -68,7 +68,7 @@ class Health:
     ledger_30d: int
     delivery_failures_30d: int
     delivery_failures_by_route: dict[str, int]
-    scope_count: int
+    project_count: int
     topic_count: int
     topic_heaviest_name: str | None
     topic_heaviest_tokens: int
@@ -97,7 +97,7 @@ def _health(dsn: str | None) -> Health:
         ledger_30d=snapshot.ledger_30d,
         delivery_failures_30d=snapshot.delivery_failures_30d,
         delivery_failures_by_route=snapshot.delivery_failures_by_route,
-        scope_count=snapshot.scope_count,
+        project_count=snapshot.project_count,
         topic_count=snapshot.topic_count,
         topic_heaviest_name=snapshot.topic_heaviest_name,
         topic_heaviest_tokens=snapshot.topic_heaviest_tokens,
@@ -126,7 +126,7 @@ def _health_text(value: Health) -> str:
     else:
         schema = screen.success("up to date")
     deliveries = "  ·  ".join(
-        f"{name} {value.memory_counts.get(name, 0)}" for name in ("always", "scope", "topic")
+        f"{name} {value.memory_counts.get(name, 0)}" for name in ("always", "project", "topic")
     )
     heaviest = (
         f"  ·  heaviest {value.topic_heaviest_name} "
@@ -152,7 +152,7 @@ def _health_text(value: Health) -> str:
             f"  Evidence           {value.ledger_30d} ledger entries in 30 days",
             f"  Delivery health    {value.delivery_failures_30d} suspected failures in 30 days"
             + _routes(value.delivery_failures_by_route),
-            f"  Scopes             {value.scope_count}",
+            f"  Projects             {value.project_count}",
             f"  Topics             {value.topic_count}{heaviest}",
             f"  Tasks              {value.tasks_active} active"
             f"  ·  {value.tasks_dormant} dormant  ·  {value.tasks_closed} closed",
@@ -179,12 +179,12 @@ def _memory_lines(label: str, rows: list[dict[str, Any]]) -> list[str]:
 
 def _bootstrap_text(answer: dict[str, Any]) -> str:
     routed = "yes" if answer.get("routed") else "no"
-    lines = [f"  Scope              {answer.get('scope') or '—'}  ·  routed {routed}", ""]
+    lines = [f"  Project            {answer.get('project') or '—'}  ·  routed {routed}", ""]
     pending = answer.get("schema_pending") or []
     if pending:
         lines.extend([f"  Schema             {len(pending)} migration(s) pending", ""])
     lines.extend(_memory_lines("Always memories", answer.get("always") or []))
-    lines.extend(["", *_memory_lines("Scoped memories", answer.get("scoped") or []), ""])
+    lines.extend(["", *_memory_lines("Project rules", answer.get("project_rules") or []), ""])
     index = answer.get("topics") or []
     lines.append(f"  Topics ({len(index)})")
     if not index:
@@ -293,27 +293,29 @@ def _replacement(
     return answer.text
 
 
-def _scope_rows(dsn: str | None) -> list[dict[str, Any]]:
+def _project_rows(dsn: str | None) -> list[dict[str, Any]]:
     with db.transaction(dsn) as cur:
-        return scopes.list_scopes(cur)
+        return projects.list_projects(cur)
 
 
-def _scope_detail(row: dict[str, Any]) -> str:
+def _project_detail(row: dict[str, Any]) -> str:
     summary = row.get("summary") or "No summary written."
     return "\n".join(
         (
             f"  ── {row['name']}",
             screen.wrap(summary, indent="  "),
-            f"  {row['n_active']} active memories  ·  {row['push_tokens']} pushed tokens",
+            f"  {row['n_rules']} active memories  ·  {row['push_tokens']} pushed tokens",
         )
     )
 
 
-def _scopes_page(dsn: str | None) -> None:
+def _projects_page(dsn: str | None) -> None:
     at, note, selected = 0, "", None
     while True:
-        rows = _scope_rows(dsn)
-        kept = next((index for index, row in enumerate(rows) if row["scope_id"] == selected), None)
+        rows = _project_rows(dsn)
+        kept = next(
+            (index for index, row in enumerate(rows) if row["project_id"] == selected), None
+        )
         if kept is not None:
             at = kept
         selected = None
@@ -321,15 +323,15 @@ def _scopes_page(dsn: str | None) -> None:
         lines = []
         for index, row in enumerate(rows):
             line = screen.clip(
-                f"    {screen.pad(row['name'], 24)} {row['n_active']:>3} memories"
+                f"    {screen.pad(row['name'], 24)} {row['n_rules']:>3} memories"
                 f"  ·  {row['push_tokens']:>4} tokens",
                 screen.terminal_width(),
             )
             lines.append(screen.selected(line) if index == at else line)
-        detail = _scope_detail(rows[at]) if rows else "  No scopes yet. Press n to create one."
-        keys = "  n new scope   e edit   x remove   " + _LIST_KEYS.strip()
+        detail = _project_detail(rows[at]) if rows else "  No projects yet. Press n to create one."
+        keys = "  n new project   e edit   x remove   " + _LIST_KEYS.strip()
         screen.paint(
-            screen.list_with_preview(_title("Scopes"), lines, at, detail, keys, note, more="")
+            screen.list_with_preview(_title("Projects"), lines, at, detail, keys, note, more="")
         )
         key = screen.getkey()
         note = ""
@@ -349,62 +351,62 @@ def _scopes_page(dsn: str | None) -> None:
             at = max(0, len(rows) - 1)
         elif key == "e":
             if not rows:
-                note = "  there is no scope to edit"
+                note = "  there is no project to edit"
                 continue
             row = rows[at]
-            selected = row["scope_id"]
-            name = _replacement("scope name", row["name"], clearable=False)
+            selected = row["project_id"]
+            name = _replacement("project name", row["name"], clearable=False)
             summary = _replacement("about", row.get("summary"))
             if isinstance(name, screen.Cancelled) or isinstance(summary, screen.Cancelled):
-                note = "  scope unchanged"
+                note = "  project unchanged"
                 continue
             try:
                 with db.transaction(dsn) as cur:
-                    scopes.update_scope(
+                    projects.update_project(
                         cur,
-                        row["scope_id"],
+                        row["project_id"],
                         name=name or row["name"],
                         summary=summary,
                         actor=ACTOR,
                     )
-                note = f"  edited scope {name or row['name']}"
+                note = f"  edited project {name or row['name']}"
             except MashuError as error:
                 note = f"  {error}"
         elif key == "x":
             if not rows:
-                note = "  there is no scope to remove"
+                note = "  there is no project to remove"
                 continue
             row = rows[at]
-            if not _confirm(f"remove scope {row['name']}?"):
-                note = "  scope kept"
+            if not _confirm(f"remove project {row['name']}?"):
+                note = "  project kept"
                 continue
             try:
                 with db.transaction(dsn) as cur:
-                    removed = scopes.remove_scope(cur, row["scope_id"], actor=ACTOR)
-                note = f"  {removed['removed']} scope {row['name']}"
+                    removed = projects.remove_project(cur, row["project_id"], actor=ACTOR)
+                note = f"  {removed['removed']} project {row['name']}"
             except MashuError as error:
                 note = f"  {error}"
         elif key == "n":
-            name_answer = _answer("  scope name: ")
+            name_answer = _answer("  project name: ")
             if isinstance(name_answer, screen.Cancelled):
-                note = "  scope creation cancelled"
+                note = "  project creation cancelled"
                 continue
             if not name_answer.text:
-                note = "  a scope needs a name"
+                note = "  a project needs a name"
                 continue
             summary_answer = _answer("  about [optional]: ")
             if isinstance(summary_answer, screen.Cancelled):
-                note = "  scope creation cancelled"
+                note = "  project creation cancelled"
                 continue
             try:
                 with db.transaction(dsn) as cur:
-                    created = scopes.create_scope(
+                    created = projects.create_project(
                         cur,
                         name=name_answer.text,
                         summary=summary_answer.text or None,
                         actor=ACTOR,
                     )
-                note = f"  created scope {name_answer.text}"
+                note = f"  created project {name_answer.text}"
                 if created.get("unchecked"):
                     note += "; banned-pattern list unavailable, so nothing was checked"
                 elif created.get("malformed"):
@@ -424,7 +426,7 @@ def _rules(count: int) -> str:
 
 
 def _topic_detail(row: dict[str, Any]) -> str:
-    where = f"scope {row['scope_name']}" if row.get("scope_name") else "every session"
+    where = f"project {row['project_name']}" if row.get("project_name") else "every session"
     before = f"  ·  before: {row['action']}" if row.get("action") else ""
     return "\n".join(
         (
@@ -437,8 +439,8 @@ def _topic_detail(row: dict[str, Any]) -> str:
     )
 
 
-def _topic_scope(prompt: str, current: str | None) -> str | None | screen.Cancelled:
-    """A scope name, or None for every session; '-' clears one already set."""
+def _topic_project(prompt: str, current: str | None) -> str | None | screen.Cancelled:
+    """A project name, or None for every session; '-' clears one already set."""
     hint = "; '-' means every session" if current else "; empty means every session"
     answer = screen.editline(f"  {prompt} [edit existing{hint}]: ", current or "")
     if isinstance(answer, screen.Cancelled):
@@ -461,7 +463,7 @@ def _topics_page(dsn: str | None) -> None:
         for index, row in enumerate(rows):
             line = screen.clip(
                 f"    {screen.pad(row['name'], 24)} "
-                f"{screen.pad(row.get('scope_name') or 'every session', 16)}"
+                f"{screen.pad(row.get('project_name') or 'every session', 16)}"
                 f"{_rules(row['rules']):>9}  ·  {row['body_tokens']:>4} tokens"
                 + (f"  ·  before: {row['action']}" if row.get("action") else ""),
                 screen.terminal_width(),
@@ -496,7 +498,7 @@ def _topics_page(dsn: str | None) -> None:
             selected = row["topic_id"]
             name = _replacement("topic name", row["name"], clearable=False)
             trigger = _replacement("trigger", row["trigger"], clearable=False)
-            scope_name = _topic_scope("scope", row.get("scope_name"))
+            project_name = _topic_project("project", row.get("project_name"))
             action = _replacement(
                 "action, the tool calls whose start shows its rules "
                 "(delegate = Agent / Task subagent calls)",
@@ -506,7 +508,7 @@ def _topics_page(dsn: str | None) -> None:
                 "source, the note or document it comes from, from the vault or repository root",
                 row.get("source"),
             )
-            answers = (name, trigger, scope_name, action, source)
+            answers = (name, trigger, project_name, action, source)
             if any(isinstance(value, screen.Cancelled) for value in answers):
                 note = "  topic unchanged"
                 continue
@@ -517,7 +519,7 @@ def _topics_page(dsn: str | None) -> None:
                         row["topic_id"],
                         name=name or row["name"],
                         trigger=trigger or row["trigger"],
-                        scope_name=scope_name,
+                        project_name=project_name,
                         action=action,
                         source=source,
                         actor=ACTOR,
@@ -547,8 +549,8 @@ def _topics_page(dsn: str | None) -> None:
             if not name_answer.text:
                 note = "  a topic needs a name"
                 continue
-            scope_answer = _answer("  scope [empty means every session]: ")
-            if isinstance(scope_answer, screen.Cancelled):
+            project_answer = _answer("  project [empty means every session]: ")
+            if isinstance(project_answer, screen.Cancelled):
                 note = "  topic creation cancelled"
                 continue
             trigger_answer = _answer("  trigger [one sentence saying when to read it]: ")
@@ -562,7 +564,7 @@ def _topics_page(dsn: str | None) -> None:
                         None,
                         name=name_answer.text,
                         trigger=trigger_answer.text,
-                        scope_name=scope_answer.text or None,
+                        project_name=project_answer.text or None,
                         actor=ACTOR,
                     )
                 note = f"  created topic {name_answer.text}"
@@ -576,7 +578,7 @@ def _route_rows(dsn: str | None) -> list[dict[str, Any]]:
 
 
 def _route_line(row: dict[str, Any]) -> str:
-    destination = row.get("scope_name") or "ignored"
+    destination = row.get("project_name") or "ignored"
     return screen.clip(f"    {row['path_prefix']}  →  {destination}", screen.terminal_width())
 
 
@@ -596,13 +598,13 @@ def _routes_page(dsn: str | None) -> None:
         if rows:
             destination = (
                 "ignored intentionally"
-                if rows[at]["scope_id"] is None
-                else f"scope {rows[at]['scope_name']}"
+                if rows[at]["project_id"] is None
+                else f"project {rows[at]['project_name']}"
             )
             detail = f"  ── {rows[at]['path_prefix']}\n  {destination}"
         else:
-            detail = "  No routes yet. Add a scoped route with n or an ignored path with i."
-        keys = "  n scoped route   i ignore path   e edit   x remove   " + _LIST_KEYS.strip()
+            detail = "  No routes yet. Add a project route with n or an ignored path with i."
+        keys = "  n project route   i ignore path   e edit   x remove   " + _LIST_KEYS.strip()
         screen.paint(
             screen.list_with_preview(_title("Routes"), lines, at, detail, keys, note, more="")
         )
@@ -629,8 +631,8 @@ def _routes_page(dsn: str | None) -> None:
             row = rows[at]
             selected = row["route_id"]
             path = _replacement("directory path", row["path_prefix"], clearable=False)
-            scope_name = _replacement("scope", row.get("scope_name"))
-            if isinstance(path, screen.Cancelled) or isinstance(scope_name, screen.Cancelled):
+            project_name = _replacement("project", row.get("project_name"))
+            if isinstance(path, screen.Cancelled) or isinstance(project_name, screen.Cancelled):
                 note = "  route unchanged"
                 continue
             try:
@@ -639,10 +641,10 @@ def _routes_page(dsn: str | None) -> None:
                         cur,
                         row["route_id"],
                         path_prefix=path or row["path_prefix"],
-                        scope_name=scope_name,
+                        project_name=project_name,
                         actor=ACTOR,
                     )
-                destination = scope_name or "ignored"
+                destination = project_name or "ignored"
                 edited_path = routing.normalise(path or row["path_prefix"])
                 note = f"  edited route {edited_path} → {destination}"
             except MashuError as error:
@@ -653,24 +655,24 @@ def _routes_page(dsn: str | None) -> None:
                 note = "  route creation cancelled"
                 continue
             if not path_answer.text:
-                note = "  a scoped route needs a path and a scope"
+                note = "  a project route needs a path and a project"
                 continue
-            scope_answer = _answer("  scope name: ")
-            if isinstance(scope_answer, screen.Cancelled):
+            project_answer = _answer("  project name: ")
+            if isinstance(project_answer, screen.Cancelled):
                 note = "  route creation cancelled"
                 continue
-            if not scope_answer.text:
-                note = "  a scoped route needs both a path and a scope"
+            if not project_answer.text:
+                note = "  a project route needs both a path and a project"
                 continue
             try:
                 with db.transaction(dsn) as cur:
                     application.set_route(
                         cur,
                         path_prefix=path_answer.text,
-                        scope_name=scope_answer.text,
+                        project_name=project_answer.text,
                         actor=ACTOR,
                     )
-                note = f"  routed {routing.normalise(path_answer.text)} to {scope_answer.text}"
+                note = f"  routed {routing.normalise(path_answer.text)} to {project_answer.text}"
             except MashuError as error:
                 note = f"  {error}"
         elif key == "i":
@@ -705,7 +707,7 @@ def _routes_page(dsn: str | None) -> None:
 
 _LIMIT_LABELS = {
     "total_capacity": ("session start, everything", "rules, task cards, and temporary notes"),
-    "memory_capacity": ("session start, memories", "always and scope rules, and the topic index"),
+    "memory_capacity": ("session start, memories", "always and project rules, and the topic index"),
     "always_capacity": ("always memories", ""),
     "topic_capacity": ("one topic", "received when the topic is read"),
     "content_limit": ("one memory body", "excludes the reason"),
@@ -865,7 +867,7 @@ def _bootstrap_page(dsn: str | None) -> None:
 _PAGES: tuple[Callable[[str | None], str | None], ...] = (
     _health_page,
     _bootstrap_page,
-    _scopes_page,
+    _projects_page,
     _topics_page,
     _routes_page,
     _limits_page,

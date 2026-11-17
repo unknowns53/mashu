@@ -110,7 +110,7 @@ def _successor_snapshot(row: dict[str, Any]) -> dict[str, Any]:
         {
             "version": row["version"],
             "content": row["content"],
-            "scope_id": row["scope_id"],
+            "project_id": row["project_id"],
             "kind": row["kind"],
             "evidence": row["evidence"],
             "conflicts": row["conflicts"] or [],
@@ -119,7 +119,7 @@ def _successor_snapshot(row: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-_SETTING_KEYS = {"delivery", "scope_id"}
+_SETTING_KEYS = {"delivery", "project_id"}
 _TOPIC_KEYS = {"topic", "topic_trigger"}
 
 
@@ -136,26 +136,26 @@ def _successor_settings(
         or not set(requested) <= _SETTING_KEYS | _TOPIC_KEYS
     ):
         raise MashuError(
-            "successor_settings must specify delivery and scope_id together, "
+            "successor_settings must specify delivery and project_id together, "
             "plus topic for delivery 'topic' and topic_trigger when that topic is new"
         )
     delivery = requested["delivery"]
     if delivery not in memories.DELIVERIES:
         raise MashuError(f"successor delivery must be one of {', '.join(memories.DELIVERIES)}")
-    scope_id = requested["scope_id"]
-    if scope_id is not None:
+    project_id = requested["project_id"]
+    if project_id is not None:
         try:
-            scope_id = UUID(str(scope_id))
+            project_id = UUID(str(project_id))
         except (ValueError, TypeError, AttributeError) as error:
-            raise MashuError("successor scope_id must be a Scope UUID or null") from error
-        cur.execute("SELECT 1 FROM scope WHERE scope_id = %s", (scope_id,))
+            raise MashuError("successor project_id must be a Project UUID or null") from error
+        cur.execute("SELECT 1 FROM project WHERE project_id = %s", (project_id,))
         if cur.fetchone() is None:
-            raise MashuError(f"no successor scope {scope_id}")
-    if delivery == "scope" and scope_id is None:
-        raise MashuError("successor delivery 'scope' needs a scope_id")
+            raise MashuError(f"no successor project {project_id}")
+    if delivery == "project" and project_id is None:
+        raise MashuError("successor delivery 'project' needs a project_id")
     settings: dict[str, Any] = {
         "delivery": delivery,
-        "scope_id": scope_id,
+        "project_id": project_id,
         "topic_id": None,
         "topic_name": None,
         "topic_trigger": None,
@@ -181,14 +181,14 @@ def _successor_settings(
     if topic is None:
         raise topics.unknown(cur, name)
     topic = topics.require_topic(cur, name)
-    if scope_id is not None and scope_id != topic["scope_id"]:
+    if project_id is not None and project_id != topic["project_id"]:
         raise MashuError(
             f"topic '{topic['name']}' is read in "
-            f"{topic['scope_name'] or 'every session'}; a topic Memory takes its topic's "
-            "scope, so pass that scope_id or null"
+            f"{topic['project_name'] or 'every session'}; a topic Memory takes its topic's "
+            "project, so pass that project_id or null"
         )
     settings.update(
-        scope_id=topic["scope_id"], topic_id=topic["topic_id"], topic_name=topic["name"]
+        project_id=topic["project_id"], topic_id=topic["topic_id"], topic_name=topic["name"]
     )
     return settings
 
@@ -201,7 +201,7 @@ def stored_settings_of_memory(cur: psycopg.Cursor, memory: dict[str, Any]) -> di
         name = cur.fetchone()["name"]
     return {
         "delivery": memory["delivery"],
-        "scope_id": memory["scope_id"],
+        "project_id": memory["project_id"],
         "topic_id": memory["topic_id"],
         "topic_name": name,
         "topic_trigger": None,
@@ -214,7 +214,7 @@ def requested_settings(row: dict[str, Any]) -> dict[str, Any] | None:
         return None
     settings: dict[str, Any] = {
         "delivery": row["successor_delivery"],
-        "scope_id": row["successor_scope_id"],
+        "project_id": row["successor_project_id"],
     }
     if row["successor_topic_name"] is not None:
         settings["topic"] = row["successor_topic_name"]
@@ -247,14 +247,14 @@ def _successor_topic(
                 cur,
                 name=change["successor_topic_name"],
                 trigger=change["successor_topic_trigger"],
-                scope_id=change["successor_scope_id"],
+                project_id=change["successor_project_id"],
                 actor=actor,
                 approval_source=approval_source,
             )["topic_id"]
         if (
             existing["archived_at"] is not None
             or existing["trigger"] != change["successor_topic_trigger"]
-            or existing["scope_id"] != change["successor_scope_id"]
+            or existing["project_id"] != change["successor_project_id"]
         ):
             raise MashuError(
                 f"topic '{existing['name']}' was opened differently after this proposal was "
@@ -262,9 +262,9 @@ def _successor_topic(
             )
         return topics.lock_open_topic(cur, existing["topic_id"])["topic_id"]
     topic = topics.lock_open_topic(cur, change["successor_topic_id"])
-    if topic["scope_id"] != change["successor_scope_id"]:
+    if topic["project_id"] != change["successor_project_id"]:
         raise MashuError(
-            f"topic '{topic['name']}' moved to another scope after this proposal was read; "
+            f"topic '{topic['name']}' moved to another project after this proposal was read; "
             "read it and update the proposal"
         )
     return topic["topic_id"]
@@ -556,7 +556,7 @@ def propose(
                 (target_memory_id, target_revision_id, target_updated_at, operation,
                  retirement_kind, retire_reason, relocated_to_kind, relocated_to_id,
                  successor_nomination_id, successor_snapshot, successor_delivery,
-                 successor_scope_id, successor_topic_id, successor_topic_name,
+                 successor_project_id, successor_topic_id, successor_topic_name,
                  successor_topic_trigger, restore_reason, evidence, conflict_ids,
                  conflict_snapshot, proposed_by)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
@@ -575,7 +575,7 @@ def propose(
                 successor_nomination_id,
                 Jsonb(successor_snapshot) if successor_snapshot is not None else None,
                 successor_settings["delivery"] if successor_settings else None,
-                successor_settings["scope_id"] if successor_settings else None,
+                successor_settings["project_id"] if successor_settings else None,
                 successor_settings["topic_id"] if successor_settings else None,
                 successor_settings["topic_name"] if successor_settings else None,
                 successor_settings["topic_trigger"] if successor_settings else None,
@@ -593,7 +593,7 @@ def propose(
             SET target_revision_id = %s, target_updated_at = %s, operation = %s,
                 retirement_kind = %s, retire_reason = %s, relocated_to_kind = %s,
                 relocated_to_id = %s, successor_nomination_id = %s,
-                successor_snapshot = %s, successor_delivery = %s, successor_scope_id = %s,
+                successor_snapshot = %s, successor_delivery = %s, successor_project_id = %s,
                 successor_topic_id = %s,
                 successor_topic_name = %s, successor_topic_trigger = %s,
                 restore_reason = %s, evidence = %s,
@@ -613,7 +613,7 @@ def propose(
                 successor_nomination_id,
                 Jsonb(successor_snapshot) if successor_snapshot is not None else None,
                 successor_settings["delivery"] if successor_settings else None,
-                successor_settings["scope_id"] if successor_settings else None,
+                successor_settings["project_id"] if successor_settings else None,
                 successor_settings["topic_id"] if successor_settings else None,
                 successor_settings["topic_name"] if successor_settings else None,
                 successor_settings["topic_trigger"] if successor_settings else None,
@@ -661,12 +661,12 @@ def _delivery_label(delivery: str, topic_name: str | None) -> str:
     return delivery
 
 
-def _scope_name(cur: psycopg.Cursor, scope_id: UUID | None) -> str:
-    if scope_id is None:
+def _project_name(cur: psycopg.Cursor, project_id: UUID | None) -> str:
+    if project_id is None:
         return "every session"
-    cur.execute("SELECT name FROM scope WHERE scope_id = %s", (scope_id,))
+    cur.execute("SELECT name FROM project WHERE project_id = %s", (project_id,))
     row = cur.fetchone()
-    return row["name"] if row else str(scope_id)
+    return row["name"] if row else str(project_id)
 
 
 def _delivery_move(
@@ -676,20 +676,20 @@ def _delivery_move(
     if row["successor_delivery"] is None:
         return []
     after = _delivery_label(row["successor_delivery"], row["successor_topic_name"])
-    if row["successor_delivery"] == "scope":
-        after += f" ({_scope_name(cur, row['successor_scope_id'])})"
+    if row["successor_delivery"] == "project":
+        after += f" ({_project_name(cur, row['successor_project_id'])})"
     lines = []
     if target is not None and row["operation"] == "redeliver":
         before = _delivery_label(target["delivery"], target.get("topic_name"))
-        if target["delivery"] == "scope":
-            before += f" ({target.get('scope_name') or '-'})"
+        if target["delivery"] == "project":
+            before += f" ({target.get('project_name') or '-'})"
         lines.append(f"delivery: {before} -> {after}")
     else:
         lines.append(f"replacement delivery: {after}")
     if row["successor_topic_trigger"] is not None:
         lines.append(
             f"opens topic {row['successor_topic_name']} for "
-            f"{_scope_name(cur, row['successor_scope_id'])}: {row['successor_topic_trigger']}"
+            f"{_project_name(cur, row['successor_project_id'])}: {row['successor_topic_trigger']}"
         )
     return lines
 
@@ -702,8 +702,8 @@ def _detail(cur: psycopg.Cursor, row: dict[str, Any]) -> dict[str, Any]:
     row["destination"] = None
     if row["relocated_to_id"]:
         cur.execute(
-            "SELECT t.content, t.expires_at, s.name AS scope_name "
-            "FROM temporary_context t LEFT JOIN scope s ON s.scope_id = t.scope_id "
+            "SELECT t.content, t.expires_at, s.name AS project_name "
+            "FROM temporary_context t LEFT JOIN project s ON s.project_id = t.project_id "
             "WHERE t.context_id = %s",
             (row["relocated_to_id"],),
         )
@@ -871,8 +871,8 @@ def apply(
             actor=actor,
             delivery=change["successor_delivery"],
             expected_version=change["successor_snapshot"]["version"],
-            scope_id=change["successor_scope_id"],
-            scope_override=True,
+            project_id=change["successor_project_id"],
+            project_override=True,
             topic_id=_successor_topic(cur, change, actor, approval_source),
             approval=approval_source,
             request_id=request_id,
@@ -894,8 +894,8 @@ def apply(
             target["memory_id"],
             actor=actor,
             delivery=change["successor_delivery"],
-            scope_id=change["successor_scope_id"],
-            clear_scope=change["successor_scope_id"] is None,
+            project_id=change["successor_project_id"],
+            clear_project=change["successor_project_id"] is None,
             topic_id=_successor_topic(cur, change, actor, approval_source),
             approval_source=approval_source,
         )
@@ -951,7 +951,7 @@ def apply(
             "successor_settings": _settings_event(
                 {
                     "delivery": change["successor_delivery"],
-                    "scope_id": change["successor_scope_id"],
+                    "project_id": change["successor_project_id"],
                     "topic_id": change["successor_topic_id"],
                     "topic_name": change["successor_topic_name"],
                     "topic_trigger": change["successor_topic_trigger"],
@@ -969,7 +969,7 @@ def redeliver_instructed(
     memory_id: UUID,
     *,
     delivery: str,
-    scope_id: UUID | None,
+    project_id: UUID | None,
     topic: str | None,
     topic_trigger: str | None,
     request_id: UUID,
@@ -980,7 +980,7 @@ def redeliver_instructed(
 
     The quoted instruction and its conversation reference become the proposal's evidence,
     so the change leaves the same proposal, application, and events as proposing and then
-    applying it. Without `scope_id`, always and scope keep the Memory's scope, an existing
+    applying it. Without `project_id`, always and project keep the Memory's project, an existing
     topic gives its own, and a new topic is listed in every session. A resent request_id
     answers with the first result.
     """
@@ -988,7 +988,7 @@ def redeliver_instructed(
         {
             "memory_id": memory_id,
             "delivery": delivery,
-            "scope_id": scope_id,
+            "project_id": project_id,
             "topic": topic,
             "topic_trigger": topic_trigger,
         }
@@ -1008,7 +1008,7 @@ def redeliver_instructed(
     if "conversation_ref" not in source:
         raise MashuError("an instructed redeliver needs the conversation_ref of the instruction")
     target = _current(cur, memory_id)
-    settings: dict[str, Any] = {"delivery": delivery, "scope_id": scope_id}
+    settings: dict[str, Any] = {"delivery": delivery, "project_id": project_id}
     if delivery == "topic":
         settings["topic"] = topic
         if topic_trigger is not None:
@@ -1016,8 +1016,8 @@ def redeliver_instructed(
     else:
         if topic is not None or topic_trigger is not None:
             raise MashuError("topic and topic_trigger only apply to delivery 'topic'")
-        if scope_id is None:
-            settings["scope_id"] = target["scope_id"]
+        if project_id is None:
+            settings["project_id"] = target["project_id"]
     change = propose(
         cur,
         target_memory_id=memory_id,
@@ -1185,7 +1185,7 @@ def change_instructed(
             cur,
             content=content,
             actor=actor,
-            scope_id=target["scope_id"],
+            project_id=target["project_id"],
             why=why,
             join_pending=False,
         )["nomination"]

@@ -124,9 +124,5 @@ class DuplicateTaskError(MashuError):
         self.candidates = candidates
 
 
-class UnknownProjectError(MashuError):
-    """A project nobody has opened, answered with the ones that exist."""
-
-
 class ClosedTaskError(MashuError):
     """A write to a task a person has already ended (project-state 6)."""

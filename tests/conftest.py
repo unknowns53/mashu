@@ -122,11 +122,11 @@ def cur(test_dsn: str) -> Iterator[psycopg.Cursor]:
 
 
 @pytest.fixture
-def scope_id(cur: psycopg.Cursor):
-    """A scope to hang test rows on."""
-    from mashu.scopes import create_scope
+def project_id(cur: psycopg.Cursor):
+    """A project to hang test rows on."""
+    from mashu.projects import create_project
 
-    return create_scope(cur, name="test scope", actor="test")["scope_id"]
+    return create_project(cur, name="test project", actor="test")["project_id"]
 
 
 @pytest.fixture(autouse=True)
@@ -236,6 +236,7 @@ def apply_change(cur, change, instruction="Apply it", *, version=None, request_i
 
 
 def new_project(cur: psycopg.Cursor, name: str = "enrai", **kwargs):
+    """A project to file tasks under."""
     return projects.create_project(cur, name=name, actor="user", **kwargs)
 
 

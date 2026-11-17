@@ -40,7 +40,7 @@ _HELP = """
 
   d  include deferred candidates in the queue, marked ·, or hide them again.
 
-  /  search the queue by id, kind, scope, content, or the what/prevention in
+  /  search the queue by id, kind, project, content, or the what/prevention in
      its evidence. Search ignores case; submit an empty search to show all.
 
   j/↓ and k/↑ move one candidate. Home and End go to the first and last;
@@ -108,12 +108,12 @@ def _queue_preview(row: dict[str, Any]) -> str:
     width = screen.terminal_width()
     evidence = len(row.get("evidence_rows", []))
     conflicts = len(row.get("conflict_rows", []))
-    scope = row.get("scope_name") or "-"
+    project = row.get("project_name") or "-"
     content = " ".join((row.get("content") or "").split()) or "(empty)"
     lines = [
         screen.bold(
             f"  preview  {_short(row['nomination_id'])}  v{row['version']}  "
-            f"{row['kind']}  [{scope}]"
+            f"{row['kind']}  [{project}]"
         ),
         screen.clip(f"  {content}", width - 1),
         screen.dim(f"  evidence: {evidence}  ·  conflicts: {conflicts}"),
@@ -158,7 +158,7 @@ def _queue_screen(
         mark = "·" if row.get("deferred_at") else " "
         line = screen.clip(
             f" {mark} {_short(row['nomination_id'])}  {screen.pad(row['kind'], 12)} "
-            f"{screen.pad(row.get('scope_name') or '-', 12)} {_days(row):>3}d  {body}",
+            f"{screen.pad(row.get('project_name') or '-', 12)} {_days(row):>3}d  {body}",
             width - 1,
         )
         lines.append(screen.selected(line) if number == at else line)
@@ -175,7 +175,7 @@ def _item_text(row: dict[str, Any], place: int, total: int) -> str:
     lines = [
         screen.dim("─" * 4 + label + "─" * max(4, across - 4 - screen.cells(label))),
         screen.bold(
-            f"{row['kind']}  [{row.get('scope_name') or '-'}]  "
+            f"{row['kind']}  [{row.get('project_name') or '-'}]  "
             f"{_short(row['nomination_id'])}  v{row['version']}  "
             f"waiting {_days(row)} day(s)  tokens ~{cost}"
         ),
@@ -231,7 +231,7 @@ def _delivery(
     row: dict[str, Any], dsn: str | None = None
 ) -> tuple[str, dict[str, Any] | None] | None:
     """Where the admitted memory is delivered from, asked once, at admission."""
-    default = "scope" if row.get("scope_id") else "always"
+    default = "project" if row.get("project_id") else "always"
     print(memory_ui.delivery_legend())
     print(
         f"delivery: enter for the default ({default}), or 't NAME' for a topic ('t' alone "
@@ -331,7 +331,7 @@ def _matches_query(row: dict[str, Any], query: str) -> bool:
     fields: list[Any] = [
         row.get("nomination_id"),
         row.get("kind"),
-        row.get("scope_name"),
+        row.get("project_name"),
         row.get("content"),
     ]
     for evidence in row.get("evidence_rows", []):

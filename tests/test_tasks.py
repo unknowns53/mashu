@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import expire, new_project, new_task, update_task
-from mashu import db, scopes, tasks
+from mashu import db, projects, tasks
 from mashu.errors import (
     ClosedTaskError,
     DuplicateTaskError,
@@ -165,33 +165,34 @@ def test_a_replacement_written_against_a_replaced_state_is_rejected(cur, task):
 
 
 # the budget (5.3, 8)
-def test_unscoped_state_spends_a_seat_in_every_scope_and_is_weighed_against_the_busiest(
-    cur, scope_id, monkeypatch
+def test_a_full_project_leaves_another_projects_share_alone_and_the_busiest_is_the_worst(
+    cur, project_id, monkeypatch
 ):
-    lighter_scope = scopes.create_scope(cur, name="lighter scope", actor="user")["scope_id"]
-    new_project(cur, "busy project", scope_id=scope_id)
-    new_project(cur, "light project", scope_id=lighter_scope)
-    new_project(cur, "global project")
-    busy = new_task(cur, "busy work", "busy project", status_text="x" * 120)
+    lighter_project = projects.create_project(cur, name="lighter project", actor="user")[
+        "project_id"
+    ]
+    busy = new_task(cur, "busy work", project_id, status_text="x" * 120)
     age(cur, busy["task"]["task_id"], 2)
     busy_cost = tasks.card_cost(busy["task"]["name"], busy["state"])
-    # A scope already full leaves another scope's share untouched.
+    # A project already full leaves another project's share untouched.
     monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(busy_cost))
-    light = new_task(cur, "light work", "light project")
+    light = new_task(cur, "light work", lighter_project)
     assert light["card_share"]["unseated"] == []
 
-    global_task = new_task(cur, "global work", "global project")
-    share = global_task["card_share"]
-    assert share["boundary"] == "the busiest scope"
+    crowding = new_task(cur, "crowding work", project_id)
+    share = crowding["card_share"]
+    assert share["boundary"] == "this project"
     assert [row["name"] for row in share["unseated"]] == ["busy work"]
 
     monkeypatch.delenv("MASHU_PROJECT_CAPACITY")
-    global_cost = tasks.card_cost(global_task["task"]["name"], global_task["state"])
+    crowding_cost = tasks.card_cost(crowding["task"]["name"], crowding["state"])
     totals = tasks.pushed_totals(cur)
-    assert totals["unscoped"] == global_cost
     light_cost = tasks.card_cost(light["task"]["name"], light["state"])
-    assert totals["scopes"] == {scope_id: busy_cost, lighter_scope: light_cost}
-    assert totals["worst"] == global_cost + busy_cost
+    assert totals["projects"] == {
+        project_id: busy_cost + crowding_cost,
+        lighter_project: light_cost,
+    }
+    assert totals["worst"] == busy_cost + crowding_cost
 
 
 def test_a_write_past_the_share_goes_through_and_names_the_older_card_it_hid(

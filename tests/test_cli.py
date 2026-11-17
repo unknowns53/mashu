@@ -25,7 +25,7 @@ NAMED = "hold the terminal wide open while a long import prints, or watch it wra
 TWIN = "wipe the scratch directory between two runs of the packager, always"
 EVIDENCED = "apply a migration on the standby first; the primary is not the rehearsal"
 LISTED = "spell out the timezone in every scheduled job, even when it looks obvious"
-SCOPED = "reach for the vendored toolchain in this checkout, not whatever is on PATH"
+PROJECT_RULE = "reach for the vendored toolchain in this checkout, not whatever is on PATH"
 DEFERRED = "name the branch after the ticket, so a stale checkout tells on itself"
 SOURCED = "brief a subagent with the acceptance check before it writes a single line"
 BROKEN = "give the label printer its own spool queue apart from the office printers"
@@ -284,9 +284,11 @@ def test_a_dated_condition_is_written_by_the_command_line_and_nowhere_else(run):
     assert line.endswith(f"/{config.temporary_capacity()}")
 
 
-def test_the_work_that_is_current_is_printed_under_its_date(run, committing_dsn):
+def test_the_work_that_is_current_is_printed_under_its_date(
+    run, committing_dsn, tmp_path, monkeypatch
+):
     with db.transaction(committing_dsn) as cur:
-        projects.create_project(cur, name="the command line", actor="user")
+        projects.create_project(cur, name="the command line", path=str(tmp_path), actor="user")
         task = tasks.task_create(
             cur,
             project="the command line",
@@ -295,6 +297,7 @@ def test_the_work_that_is_current_is_printed_under_its_date(run, committing_dsn)
             actor="agent",
         )
 
+    monkeypatch.chdir(tmp_path)
     code, out, _ = run("bootstrap")
     assert code == 0
     assert "active task cards" in out
@@ -374,17 +377,17 @@ def test_the_memories_listing_holds_the_active_set_and_can_be_narrowed(run):
     _, out, _ = run("remember", LISTED)
     memory_id = remembered_id(out)
 
-    run("scope", "--add", "listing scope", "--about", "a scope to list against")
-    run("remember", SCOPED, "--scope", "listing scope")
+    run("project", "--add", "listing project", "--about", "a project to list against")
+    run("remember", PROJECT_RULE, "--project", "listing project")
 
     code, out, _ = run("memories")
     assert code == 0
-    assert LISTED in out and SCOPED in out
+    assert LISTED in out and PROJECT_RULE in out
     assert memory_id[:8] in out
 
-    code, out, _ = run("memories", "--scope", "listing scope")
+    code, out, _ = run("memories", "--project", "listing project")
     assert code == 0
-    assert SCOPED in out and LISTED not in out
+    assert PROJECT_RULE in out and LISTED not in out
 
     run("retire", memory_id[:8], "--reason", "it grew a timezone")
 
@@ -397,16 +400,14 @@ def test_the_memories_listing_holds_the_active_set_and_can_be_narrowed(run):
     assert "it grew a timezone" in out
 
 
-def test_a_project_is_never_global_by_default_and_its_scope_can_be_edited(
-    run, tmp_path, monkeypatch
-):
+def test_a_project_added_with_its_folder_files_the_tasks_opened_there(run, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    code, _, err = run("project", "create", "the unrouted project")
-    assert code == 1 and "--scope -" in err
-    run("project", "create", "the global project", "--scope", "-")
-    run("scope", "--add", "the edited scope")
-    code, out, _ = run("project", "edit", "the global project", "--scope", "the edited scope")
-    assert code == 0 and "scope the edited scope" in out
+    code, _, err = run("task", "create", "sand the gangway before the varnish")
+    assert code == 1 and "belongs to no project" in err
+    code, out, _ = run("project", "--add", "the gangway", "--folder", str(tmp_path))
+    assert code == 0 and "folder" in out
+    code, out, _ = run("task", "create", "sand the gangway before the varnish")
+    assert code == 0 and created_task(out)
 
 
 #: Unique text prevents cross-test trigram matches.
@@ -475,7 +476,7 @@ def created_task(out: str) -> str:
 
 
 def test_a_task_is_created_read_back_ended_and_reopened_through_the_command_line(run):
-    code, out, _ = run("project", "create", PARSER_PROJECT, "--scope", "-")
+    code, out, _ = run("project", "--add", PARSER_PROJECT)
     assert code == 0 and out.startswith("created")
 
     code, out, _ = run(
@@ -497,14 +498,10 @@ def test_a_task_is_created_read_back_ended_and_reopened_through_the_command_line
     assert "State as of " in out
     assert "open  active" in out
 
-    code, out, _ = run("project", "list")
+    code, out, _ = run("project")
     assert code == 0
-    assert PARSER_PROJECT in out
-
-    code, out, _ = run("project", "show", PARSER_PROJECT)
-    assert code == 0
-    assert "active=1" in out
-    assert short in out
+    [line] = [row for row in out.splitlines() if row.startswith(PARSER_PROJECT[:28])]
+    assert line.endswith("1/0/0")
 
     code, out, err = run("task", "close", short)
     assert code == 1 and out == "" and "--outcome" in err
@@ -522,7 +519,7 @@ def test_a_task_is_created_read_back_ended_and_reopened_through_the_command_line
 
 
 def test_a_task_that_reads_like_one_already_open_is_refused_with_the_candidates(run):
-    run("project", "create", DUPLICATE_PROJECT, "--scope", "-")
+    run("project", "--add", DUPLICATE_PROJECT)
     _, out, _ = run("task", "create", DUPLICATE_TASK, "--project", DUPLICATE_PROJECT)
     first = created_task(out)
 
@@ -539,7 +536,7 @@ def test_a_task_that_reads_like_one_already_open_is_refused_with_the_candidates(
 
 
 def test_the_history_and_the_artifact_locators_are_visible_on_one_task(run, committing_dsn):
-    run("project", "create", HISTORY_PROJECT, "--scope", "-")
+    run("project", "--add", HISTORY_PROJECT)
     _, out, _ = run("task", "create", HISTORY_TASK, "--project", HISTORY_PROJECT)
     short = created_task(out)
 
@@ -583,7 +580,7 @@ def test_the_history_and_the_artifact_locators_are_visible_on_one_task(run, comm
 
 
 def test_a_task_whose_lease_has_run_out_is_listed_only_when_it_is_asked_for(run, committing_dsn):
-    run("project", "create", DORMANT_PROJECT, "--scope", "-")
+    run("project", "--add", DORMANT_PROJECT)
     _, out, _ = run("task", "create", DORMANT_TASK, "--project", DORMANT_PROJECT)
     short = created_task(out)
 
@@ -648,11 +645,11 @@ def test_an_option_the_command_would_drop_is_refused(run):
     code, _, err = run("task", "close", TWIN_A, "--outcome", "completed", "--project", "x")
     assert code == 1 and "--project" in err
 
-    code, _, err = run("scope", "--add", "")
+    code, _, err = run("project", "--add", "")
     assert code == 1 and "needs a name" in err
-    scope = f"scope-{uuid4().hex[:8]}"
-    run("scope", "--add", scope)
-    code, _, err = run("route", "--add", "", "--scope", scope)
+    project = f"project-{uuid4().hex[:8]}"
+    run("project", "--add", project)
+    code, _, err = run("folder", "--add", "", "--project", project)
     assert code == 1 and "needs the directory" in err
 
 

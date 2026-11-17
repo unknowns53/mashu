@@ -42,7 +42,7 @@ Mashu
 
 ## 3. 境界の扱い
 
-**Product boundary は統合する。**repository・PostgreSQL・migration・MCP server・CLI・Scope/Route・bootstrap・event_log・token budget・PII 拒否・短縮 ID 解決は一つであり、ユーザーと Agent からは `mashu` 一つだけが見える。
+**Product boundary は統合する。**repository・PostgreSQL・migration・MCP server・CLI・Project/Route・bootstrap・event_log・token budget・PII 拒否・短縮 ID 解決は一つであり、ユーザーと Agent からは `mashu` 一つだけが見える。
 
 **Semantic boundary は分離する。**Memory と Project State は同じテーブルにも同じ lifecycle にも入れない。
 
@@ -94,13 +94,9 @@ evidence: git commit 9d12f5a
 
 ### 5.1 Project
 
-Task の所属単位。通常は repository または研究単位に対応する。
+Task の所属単位であり、そのフォルダで開いたセッションに届く規則と Task card の境界でもある。通常は repository または研究単位に対応する。Task は `task.project_id` で Project を指す。
 
-```text
-id / name / scope_id / created_at / archived_at
-```
-
-Project と Scope は同じ概念ではない。Scope は delivery / routing の境界、Project は work state の所属である。一つの Project は一つの主要 Scope を持ち、多対多への一般化は必要が実測されるまでしない。Scope を持つ Project の active Task card はその Scope だけに配信する。Scope を持たない Project の card は全 Scope 共通であり、unrouted session にはこの共通分だけを配信する。Scope を持たない Project の card は全 Scope の予算をそれぞれ使うので、作成の既定にはしない。`mashu project create` は `--scope` を省くと cwd の route が指す Scope を使い、route の無いディレクトリでは拒否する。全 Scope 共通にするには `--scope -` を明示する。Current State 全文は Scope にかかわらず、Task IDを指定した `task_get` にだけ返す。
+active Task card はその Task の Project のセッションにだけ配信し、unrouted session には配信しない。全セッションに届く Task は持たない。`task_create` は `project` を省くと、セッションの cwd が属する Project に Task を置く。デスクトップアプリの作成フォームと `mashu project --add <name> --folder <path>` は、Project と、そのフォルダから Project への route を同じ transaction で登録する。フォルダの追加と「無視するフォルダ」への登録も含めて、そのフォルダが別の Project か無視の側に属していれば上書きせずに拒否する。保管された Project の Task は reopen を拒否する。open に戻しても書き込めないからである。Current State 全文は Project にかかわらず、Task IDを指定した `task_get` にだけ返す。
 
 ### 5.2 Task
 
@@ -133,7 +129,7 @@ bootstrap card  200 estimated tokens / Task
 full detail     800 estimated tokens / Task
 ```
 
-goal と status は Scope の全セッションへ card として push されるので、他のフィールドより短く抑える。status を「何をしたか」の日誌にすると、コミットのハッシュ・パス・測定値が並び、一つの Scope の Task card の予算を使い切る。status は Task がいまどこにいるかを一、二文で言うためのフィールドで、したことは git log、コミットやパスは Artifact Reference、残りの作業は next_actions が持つ。上限は書き込む値にだけ掛け、書き換えずに引き継がれた値には掛けない。上限を締める前に書かれた state を、別のフィールドの更新のたびに書き直させないためである。DB の CHECK 制約はそのため 0004 の広い上限のまま残す。
+goal と status は Project の全セッションへ card として push されるので、他のフィールドより短く抑える。status を「何をしたか」の日誌にすると、コミットのハッシュ・パス・測定値が並び、一つの Project の Task card の予算を使い切る。status は Task がいまどこにいるかを一、二文で言うためのフィールドで、したことは git log、コミットやパスは Artifact Reference、残りの作業は next_actions が持つ。上限は書き込む値にだけ掛け、書き換えずに引き継がれた値には掛けない。上限を締める前に書かれた state を、別のフィールドの更新のたびに書き直させないためである。DB の CHECK 制約はそのため 0004 の広い上限のまま残す。
 
 上限の値は実測に合わせて変えてよい。bootstrap card は Task 名・goal・statusと、approach / open questions / blockers / next actions が存在することを示す件数だけから作る。full detail は全フィールドを含むが常時配信しない。長文が必要なら原典を Artifact Reference に置く。
 
@@ -147,7 +143,7 @@ MCP で全文の state を返すのは `task_get` だけである。検索結果
 
 **並行する置換は楽観チェックで受ける。**複数セッションが同じ Task を同時に更新しうる。`task_checkpoint` と User の state 編集は読み取り時の `updated_at` を添えて置換し、不一致なら拒否して現在の state を返す。この照合をせずに last-writer-wins で上書きすると、並行セッションの一方の作業が、何の記録も残さずに消える。
 
-**予算境界の挙動も store が持つ。**Task card の予算は Scope ごとに独立し、書き込みではなく配信で効かせる（8 節）。書き込みで拒否すると、Agent が Task を作るたびに予算が埋まり、拒否は「Task を close してほしい」という依頼として User に回るだけだからである。書き込みは拒否せず、bootstrap が最後の活動の新しい順に card を予算まで載せ、残りの Task は短い id・名前・最後の活動日だけを別の小さな予算の中で並べる。書き込みの応答は `card_share` を返し、その `unseated` が card を失った Task を名指す。Scope を持たない Project の card は全 Scope 共通分として各 Scope の配信で競い、書き込みの応答は最も重い Scope で数える。別 Scope の固有 card は競合しない。full detail の本文はこの配信予算を消費せず、1 Task 800-token の上限で別に bound する。1 枚の card の 200-token の上限は、書き込みで拒否する。予算を超えたぶんを、書き手に知らせないまま切り詰めることはしない。
+**予算境界の挙動も store が持つ。**Task card の予算は Project ごとに独立し、書き込みではなく配信で効かせる（8 節）。書き込みで拒否すると、Agent が Task を作るたびに予算が埋まり、拒否は「Task を close してほしい」という依頼として User に回るだけだからである。書き込みは拒否せず、bootstrap が最後の活動の新しい順に card を予算まで載せ、残りの Task は短い id・名前・最後の活動日だけを別の小さな予算の中で並べる。書き込みの応答は `card_share` を返し、その `unseated` が card を失った Task を名指す。別 Project の card は競合しない。full detail の本文はこの配信予算を消費せず、1 Task 800-token の上限で別に bound する。1 枚の card の 200-token の上限は、書き込みで拒否する。予算を超えたぶんを、書き手に知らせないまま切り詰めることはしない。
 
 ただし**その Task 自身の card を小さくする書き込みは、予算を超えている状態からでも通す**。予算は設定値であり、card の重さは配信の形から計算されるので、どちらも誰も行を書き換えていないのに変わりうる。つまり書き込みを経ずに予算を超えた状態が成立する。そこで一律に拒否すると、他の active Task だけで予算を超えている場合、対象を空にしても総量が予算を下回らないため拒否される。「他を縮めろ」と言いながらその縮約自体を拒むので、抜け出す手段が無くなる。入口拒否の思想は保ったまま、card を縮めて予算に近づける書き込みだけを通す。
 
@@ -257,7 +253,7 @@ dormant な Task は bootstrap に載らず、履歴は保持され、明示検�
 
 ```text
 1. Memory: always
-2. Memory: 現在 Scope
+2. Memory: 現在 Project
 3. topic の見出し（名前・規則数・発動条件。本文は memory_list(topic=...) で読む）
 4. active Task の bootstrap card（完全な Task IDと最終確認日時を明示）
 5. Temporary Context
@@ -272,14 +268,14 @@ Task card は Task 名・goal・statusをラベルつきで運び、approach / o
 
 ```text
 TOTAL            4000 tokens
-  Memory         2000（always は 800 まで。各 Scope は always と合わせて 2000 まで。topic の見出しを含む）
+  Memory         2000（always は 800 まで。各 Project は always と合わせて 2000 まで。topic の見出しを含む）
   Topic body      800 / topic（非配信）
   Task cards      800 / session（200 / Task。新しい順に載せ、残りは名前だけを 200 まで）
   Task detail     800 / Task（非配信）
   Temporary       400
 ```
 
-重要なのは、**Agent に押し込まれる総量を Mashu が一元管理し、subsystem が互いの予算を暗黙に借りない**ことである。Task card の予算が余っていても Memory がそれを恒久的に使うことはなく、その逆もしない。Memory の容量は admission 時に、Task card は 5.3 節のとおり配信時に判定する。Memory は User が採るものなので入口で絞れるが、Task は Agent が作るので、入口の拒否は User への依頼にしかならないからである。`mashu status` は card の全 Scope 合計ではなく、最も重い Scope の active な card の合計を配信の予算と並べて表示する。full detail は「入りきらないため検索へ落とす」のではない。存在と取得先を必ず push したうえで、選んだ Task の既知の IDから決定的に pull する。Memory は存在自体を忘れるため本文 push が必要だが、Work は card が取得契機を運ぶため、この二段構造を取れる。
+重要なのは、**Agent に押し込まれる総量を Mashu が一元管理し、subsystem が互いの予算を暗黙に借りない**ことである。Task card の予算が余っていても Memory がそれを恒久的に使うことはなく、その逆もしない。Memory の容量は admission 時に、Task card は 5.3 節のとおり配信時に判定する。Memory は User が採るものなので入口で絞れるが、Task は Agent が作るので、入口の拒否は User への依頼にしかならないからである。`mashu status` は card の全 Project 合計ではなく、最も重い Project の active な card の合計を配信の予算と並べて表示する。full detail は「入りきらないため検索へ落とす」のではない。存在と取得先を必ず push したうえで、選んだ Task の既知の IDから決定的に pull する。Memory は存在自体を忘れるため本文 push が必要だが、Work は card が取得契機を運ぶため、この二段構造を取れる。
 
 guard（`docs/memory.md` 5.2 節、action を持つ topic）は Durable Memory の配信機構であり、Project State はそこに使わない。
 
@@ -320,7 +316,7 @@ task_checkpoint の `rulings` は User がその作業について決めたこ�
 | Memory admission / retire / replace / restore / redeliver | 明示指示どおりの実行、または pending proposal | 直接操作 |
 | Memory revise | × | ○ |
 | Temporary Context | × | ○ |
-| Scope / Route | × | ○ |
+| Project / Route | × | ○ |
 | Topic | 明示指示どおりの採用・配信変更に伴う作成のみ | ○（適用された redeliver / replace 提案でも作られる） |
 
 ## 10. PII と入口拒否
@@ -352,7 +348,6 @@ Memory 関連 Tool は `docs/memory.md` 7.1 節に記す。`session_bootstrap` �
 mashu                           人向け dashboard。Attention / Memories / Work / Settings を開く
 mashu gui                       Task を含む一覧の読み取り専用ブラウザ表示（docs/memory.md 7.2 節）
 mashu desktop-backend           デスクトップアプリの子プロセス。Task と Project の操作を Work と close の画面と同じ関数で行う（docs/memory.md 7.2 節）
-mashu project list / create / edit <id> / show <id>
 mashu task list [--dormant] [--closed]
 mashu task show <id>            state・履歴・artifacts を全文
 mashu task create / touch <id>
@@ -362,7 +357,7 @@ mashu task close <id>... [--outcome ...] / reopen <id>
 mashu pain --prevention-kind {rule,work} [--task <id>]   9 節の二つの形
 ```
 
-dashboard は Attention / Memories / Work / Settings & health の四領域を持ち、各画面から戻るたびに件数を再集計する。Attention は review、close proposal、dormant Task を扱う。Work は active / dormant / closed Task と Project を閲覧・検索し、Current State、proposal、全履歴、artifact を表示する。User は Task の create / touch / close / reopen に加え、open Task の名前・所属 Project・Current State と Project の名前・Scope を編集できる。編集入力は現在値を入力バッファへ入れて開き、全文の再入力ではなく既存値の部分修正として扱う。現在値を人が訂正する経路であり、ruling・checkpoint・artifact と過去の記録は編集しない。Settings & health は status、現在の cwd に対する bootstrap preview、Scope と route の作成・編集・削除、配信量の上限、migration を扱う。
+dashboard は Attention / Memories / Work / Settings & health の四領域を持ち、各画面から戻るたびに件数を再集計する。Attention は review、close proposal、dormant Task を扱う。Work は active / dormant / closed Task と Project を閲覧・検索し、Current State、proposal、全履歴、artifact を表示する。User は Task の create / touch / close / reopen に加え、open Task の名前・所属 Project・Current State と Project の名前を編集できる。編集入力は現在値を入力バッファへ入れて開き、全文の再入力ではなく既存値の部分修正として扱う。現在値を人が訂正する経路であり、ruling・checkpoint・artifact と過去の記録は編集しない。Settings & health は status、現在の cwd に対する bootstrap preview、Project と route の作成・編集・削除、配信量の上限、migration を扱う。
 
 Work の `c` は選択中の Task だけを同じ close decision screen で開く。専用一覧、Work、CLI の `task close <id> --outcome ...` は、明示 outcome と proposal acceptance を別操作にする。proposal acceptance は画面に出した proposal と state を transaction 内で再照合する。stale 確認は proposal を受理するときだけで、reason の入力中に Ctrl+C を受けたら変更しない。
 
@@ -374,13 +369,13 @@ Work の `c` は選択中の Task だけを同じ close decision screen で開�
 
 ## 13. スキーマ
 
-Memory の 12 表と Project State の 11 表に、両者が使う 2 表を加えて 25 表。
+Memory の 12 表と Project State の 10 表に、両者が使う 2 表を加えて 24 表。
 
 ```text
-Memory:        scope route ledger trace memory memory_scope memory_revision topic
+Memory:        project route ledger trace memory memory_project memory_revision topic
                nomination memory_change temporary_context event_log
 
-Project State: project task task_state task_checkpoint task_close_proposal
+Project State: task task_state task_checkpoint task_close_proposal
                ruling ruling_withdrawal artifact_reference
                attempt decision decision_supersession（記録。もう書かない）
 

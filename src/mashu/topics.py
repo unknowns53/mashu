@@ -26,12 +26,12 @@ INSTRUCTION = (
 )
 
 _LISTED = """
-SELECT t.*, s.name AS scope_name,
+SELECT t.*, s.name AS project_name,
        count(m.memory_id) AS rules,
        coalesce(array_agg(m.content ORDER BY m.created_at, m.memory_id)
                 FILTER (WHERE m.memory_id IS NOT NULL), '{}') AS contents
 FROM topic t
-LEFT JOIN scope s ON s.scope_id = t.scope_id
+LEFT JOIN project s ON s.project_id = t.project_id
 LEFT JOIN memory m ON m.topic_id = t.topic_id AND m.status = 'active' AND m.delivery = 'topic'
 WHERE (%(archived)s OR t.archived_at IS NULL)
 GROUP BY t.topic_id, s.name
@@ -131,8 +131,8 @@ def _names(cur: psycopg.Cursor) -> str:
 def get_topic(cur: psycopg.Cursor, name: str) -> dict[str, Any] | None:
     cur.execute(
         """
-        SELECT t.*, s.name AS scope_name
-        FROM topic t LEFT JOIN scope s ON s.scope_id = t.scope_id
+        SELECT t.*, s.name AS project_name
+        FROM topic t LEFT JOIN project s ON s.project_id = t.project_id
         WHERE t.name = %s
         """,
         ((name or "").strip(),),
@@ -154,7 +154,7 @@ def unknown(cur: psycopg.Cursor, name: str) -> MashuError:
     """The error for a topic an agent named without what opening it takes."""
     return MashuError(
         f"no topic named '{name}' (existing topics: {_names(cur)}). To open it with this "
-        "rule, also pass topic_trigger, one sentence saying when to read it, and the scope "
+        "rule, also pass topic_trigger, one sentence saying when to read it, and the project "
         "it is listed in, or none for every session"
     )
 
@@ -163,14 +163,14 @@ def for_filing(
     cur: psycopg.Cursor,
     name: str,
     trigger: str | None,
-    scope_id: UUID | None,
+    project_id: UUID | None,
     source: str | None = None,
 ) -> tuple[UUID | None, dict[str, Any] | None]:
     """The open topic an instructed rule is filed under, or the topic it opens.
 
-    Returns the existing topic's id, or the cleaned name, trigger, scope, and source of a
+    Returns the existing topic's id, or the cleaned name, trigger, project, and source of a
     topic to open once the rule is sure to land. A trigger or source for an existing topic
-    is accepted only when it and the scope are the ones the topic has, so a resent request
+    is accepted only when it and the project are the ones the topic has, so a resent request
     reads the same.
     """
     existing = get_topic(cur, name)
@@ -179,19 +179,19 @@ def for_filing(
             raise unknown(cur, name)
         name, trigger = validate_new(name, trigger)
         cleaned = clean_source(source) if source is not None else None
-        return None, {"name": name, "trigger": trigger, "scope_id": scope_id, "source": cleaned}
+        return None, {"name": name, "trigger": trigger, "project_id": project_id, "source": cleaned}
     if source is not None and source.strip() != existing.get("source"):
         raise MashuError(
             f"topic '{existing['name']}' already exists with source "
             f"{existing.get('source') or 'none'}; omit topic_source to file under it"
         )
-    if trigger is not None and (trigger.strip(), scope_id) != (
+    if trigger is not None and (trigger.strip(), project_id) != (
         existing["trigger"],
-        existing["scope_id"],
+        existing["project_id"],
     ):
         raise MashuError(
             f"topic '{existing['name']}' already exists, read in "
-            f"{existing['scope_name'] or 'every session'} when: {existing['trigger']}; "
+            f"{existing['project_name'] or 'every session'} when: {existing['trigger']}; "
             "omit topic_trigger to file under it"
         )
     return require_topic(cur, name)["topic_id"], None
@@ -224,7 +224,7 @@ def create_topic(
     name: str,
     trigger: str,
     actor: str,
-    scope_id: UUID | None = None,
+    project_id: UUID | None = None,
     source: str | None = None,
     approval_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -240,18 +240,18 @@ def create_topic(
         raise MashuError(f"topic '{name}' already exists{state}")
     cur.execute(
         """
-        INSERT INTO topic (name, scope_id, trigger, source, created_by)
+        INSERT INTO topic (name, project_id, trigger, source, created_by)
         VALUES (%s, %s, %s, %s, %s)
         RETURNING *
         """,
-        (name, scope_id, trigger, source, actor),
+        (name, project_id, trigger, source, actor),
     )
     row = cur.fetchone()
     detail = {
         "topic_id": str(row["topic_id"]),
         "name": name,
         "trigger": trigger,
-        "scope_id": str(scope_id) if scope_id else None,
+        "project_id": str(project_id) if project_id else None,
     }
     if source is not None:
         detail["source"] = source
@@ -268,16 +268,16 @@ def update_topic(
     actor: str,
     name: str | None = None,
     trigger: str | None = None,
-    scope_id: UUID | None = None,
-    clear_scope: bool = False,
+    project_id: UUID | None = None,
+    clear_project: bool = False,
     action: str | None = None,
     clear_action: bool = False,
     source: str | None = None,
     clear_source: bool = False,
 ) -> dict[str, Any]:
     """Rename, reword, move, link, or point a topic, weighing its index line where it lands."""
-    if clear_scope and scope_id is not None:
-        raise MashuError("pass a scope or clear it, not both")
+    if clear_project and project_id is not None:
+        raise MashuError("pass a project or clear it, not both")
     if clear_action and action is not None:
         raise MashuError("pass an action or clear it, not both")
     if clear_source and source is not None:
@@ -292,7 +292,7 @@ def update_topic(
         current["name"] if name is None else name,
         current["trigger"] if trigger is None else trigger,
     )
-    home = None if clear_scope else (current["scope_id"] if scope_id is None else scope_id)
+    home = None if clear_project else (current["project_id"] if project_id is None else project_id)
     new_action = None if clear_action else (current["action"] if action is None else action)
     if new_action is not None and new_action != current["action"]:
         new_action = clean_action(new_action)
@@ -316,7 +316,7 @@ def update_topic(
     before = (
         current["name"],
         current["trigger"],
-        current["scope_id"],
+        current["project_id"],
         current["action"],
         current.get("source"),
     )
@@ -324,13 +324,13 @@ def update_topic(
         return current
 
     verdict = capacity.check_topic_edit(
-        cur, topic_id, name=new_name, trigger=new_trigger, scope_id=home
+        cur, topic_id, name=new_name, trigger=new_trigger, project_id=home
     )
     if not verdict["ok"]:
         raise RefusedError(verdict["refusal"])
     cur.execute(
         """
-        UPDATE topic SET name = %s, trigger = %s, scope_id = %s, action = %s, source = %s,
+        UPDATE topic SET name = %s, trigger = %s, project_id = %s, action = %s, source = %s,
                          updated_at = now()
         WHERE topic_id = %s
         RETURNING *
@@ -338,11 +338,11 @@ def update_topic(
         (new_name, new_trigger, home, new_action, new_source, topic_id),
     )
     row = cur.fetchone()
-    if home != current["scope_id"]:
-        # A topic Memory carries its topic's scope so matching by scope keeps finding it.
+    if home != current["project_id"]:
+        # A topic Memory carries its topic's project so matching by project keeps finding it.
         cur.execute(
             """
-            UPDATE memory SET scope_id = %s, updated_at = now()
+            UPDATE memory SET project_id = %s, updated_at = now()
             WHERE topic_id = %s AND status = 'active' AND delivery = 'topic'
             """,
             (home, topic_id),
@@ -356,14 +356,14 @@ def update_topic(
             "from": {
                 "name": current["name"],
                 "trigger": current["trigger"],
-                "scope_id": str(current["scope_id"]) if current["scope_id"] else None,
+                "project_id": str(current["project_id"]) if current["project_id"] else None,
                 "action": current["action"],
                 "source": current.get("source"),
             },
             "to": {
                 "name": new_name,
                 "trigger": new_trigger,
-                "scope_id": str(home) if home else None,
+                "project_id": str(home) if home else None,
                 "action": new_action,
                 "source": new_source,
             },
@@ -453,8 +453,8 @@ def list_topics(cur: psycopg.Cursor, *, include_archived: bool = False) -> list[
     return rows
 
 
-def session_index(cur: psycopg.Cursor, scope_id: UUID | None) -> list[dict[str, Any]]:
-    """The topics a session in this scope is told exist: open, non-empty, and visible here."""
+def session_index(cur: psycopg.Cursor, project_id: UUID | None) -> list[dict[str, Any]]:
+    """The topics a session in this project is told exist: open, non-empty, and visible here."""
     # The SessionStart hook prints nothing when bootstrap fails, so a store whose topic
     # migration is still pending must get the rest of its opening rather than an error.
     cur.execute("SELECT to_regclass('topic') IS NOT NULL AS present")
@@ -468,7 +468,7 @@ def session_index(cur: psycopg.Cursor, scope_id: UUID | None) -> list[dict[str, 
             "line": row["line"],
         }
         for row in list_topics(cur)
-        if row["rules"] and row["scope_id"] in (None, scope_id)
+        if row["rules"] and row["project_id"] in (None, project_id)
     ]
 
 
@@ -488,7 +488,7 @@ def topic_rules(cur: psycopg.Cursor, name: str) -> dict[str, Any]:
             "topic_id": topic["topic_id"],
             "name": topic["name"],
             "trigger": topic["trigger"],
-            "scope": topic["scope_name"],
+            "project": topic["project_name"],
             "action": topic.get("action"),
             **source_view(topic.get("source")),
         },
@@ -497,7 +497,7 @@ def topic_rules(cur: psycopg.Cursor, name: str) -> dict[str, Any]:
 
 
 def action_rules(
-    cur: psycopg.Cursor, action: str, scope_id: UUID | None
+    cur: psycopg.Cursor, action: str, project_id: UUID | None
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """The open topic a tool call's action leads to, if visible here, and its active rules."""
     # The PreToolUse hook reads this before every mapped tool call, so a store whose
@@ -508,9 +508,9 @@ def action_rules(
         """
         SELECT * FROM topic
         WHERE action = %(action)s AND archived_at IS NULL
-          AND (scope_id IS NULL OR scope_id = %(scope)s::uuid)
+          AND (project_id IS NULL OR project_id = %(project)s::uuid)
         """,
-        {"action": action, "scope": scope_id},
+        {"action": action, "project": project_id},
     )
     topic = cur.fetchone()
     if topic is None:

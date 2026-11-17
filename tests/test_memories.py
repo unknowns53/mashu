@@ -14,7 +14,7 @@ from mashu import (
     memories,
     memory_changes,
     nominations,
-    scopes,
+    projects,
     server,
     temporary,
     topics,
@@ -144,68 +144,68 @@ def test_superseded_links_must_exist_and_cannot_form_cycles(cur):
         retire(cur, second, "the next rule replaces it", "superseded", superseded_by=uuid4())
 
 
-def test_a_move_names_what_its_delivery_needs_and_the_act_gate_is_gone(cur, scope_id):
+def test_a_move_names_what_its_delivery_needs_and_the_act_gate_is_gone(cur, project_id):
     memory = remember(cur, RULE)
     with pytest.raises(MashuError, match="unknown delivery 'guard'"):
         memories.set_delivery(cur, memory["memory_id"], delivery="guard", actor="user")
-    with pytest.raises(MashuError, match="scope"):
-        memories.set_delivery(cur, memory["memory_id"], delivery="scope", actor="user")
+    with pytest.raises(MashuError, match="project"):
+        memories.set_delivery(cur, memory["memory_id"], delivery="project", actor="user")
     with pytest.raises(MashuError, match="clear"):
         memories.set_delivery(
             cur,
             memory["memory_id"],
             delivery="always",
             actor="user",
-            scope_id=scope_id,
-            clear_scope=True,
+            project_id=project_id,
+            clear_project=True,
         )
 
     moved = memories.set_delivery(
-        cur, memory["memory_id"], delivery="scope", actor="user", scope_id=scope_id
+        cur, memory["memory_id"], delivery="project", actor="user", project_id=project_id
     )
-    assert (moved["delivery"], moved["scope_id"]) == ("scope", scope_id)
+    assert (moved["delivery"], moved["project_id"]) == ("project", project_id)
     freed = memories.set_delivery(
-        cur, memory["memory_id"], delivery="always", actor="user", clear_scope=True
+        cur, memory["memory_id"], delivery="always", actor="user", clear_project=True
     )
-    assert freed["scope_id"] is None
+    assert freed["project_id"] is None
 
 
-def test_listing_a_scope_shows_what_lives_there_by_whatever_route(cur, scope_id):
-    pushed = remember(cur, RULE, scope_id=scope_id, delivery="scope")
+def test_listing_a_project_shows_what_lives_there_by_whatever_route(cur, project_id):
+    pushed = remember(cur, RULE, project_id=project_id, delivery="project")
     subject = topics.create_topic(
-        cur, name="delegation", trigger="Before delegating", scope_id=scope_id, actor="user"
+        cur, name="delegation", trigger="Before delegating", project_id=project_id, actor="user"
     )
     pinned = remember(cur, PINNED, delivery="topic", topic_id=subject["topic_id"])
     remember(cur, "answer in the language that was asked")
 
-    listed = {row["memory_id"] for row in memories.active_memories(cur, scope_id=scope_id)}
+    listed = {row["memory_id"] for row in memories.active_memories(cur, project_id=project_id)}
     assert listed == {pushed["memory_id"], pinned["memory_id"]}
-    assert [row["memory_id"] for row in memories.scope_push_memories(cur, scope_id)] == [
+    assert [row["memory_id"] for row in memories.project_push_memories(cur, project_id)] == [
         pushed["memory_id"]
     ]
 
 
-@pytest.mark.parametrize("scoped", [False, True])
-def test_a_memory_can_become_temporary_and_back_where_it_was_delivered(cur, scope_id, scoped):
-    placed = {"scope_id": scope_id, "delivery": "scope"} if scoped else {}
-    here = placed.get("scope_id")
+@pytest.mark.parametrize("in_project", [False, True])
+def test_a_memory_can_become_temporary_and_back_where_it_was_delivered(cur, project_id, in_project):
+    placed = {"project_id": project_id, "delivery": "project"} if in_project else {}
+    here = placed.get("project_id")
     original = remember(cur, RULE, **placed)
 
     converted = memories.convert_to_temporary(cur, original["memory_id"], days=2, actor="user")
     context = converted["temporary"]
     assert converted["memory"]["status"] == "retired"
     assert "converted to temporary context until" in converted["memory"]["retire_reason"]
-    assert context["scope_id"] == here
-    assert [row["context_id"] for row in temporary.active_temporary(cur, scope_id=here)] == [
+    assert context["project_id"] == here
+    assert [row["context_id"] for row in temporary.active_temporary(cur, project_id=here)] == [
         context["context_id"]
     ]
 
     restored = temporary.convert_to_memory(cur, context["context_id"], actor="user")
     assert restored["memory"]["content"] == RULE
     assert restored["memory"]["delivery"] == placed.get("delivery", "always")
-    assert restored["memory"]["scope_id"] == here
+    assert restored["memory"]["project_id"] == here
     assert restored["memory"]["status"] == "active"
-    assert temporary.active_temporary(cur, scope_id=here) == []
+    assert temporary.active_temporary(cur, project_id=here) == []
 
     cur.execute(
         "SELECT event_type FROM event_log WHERE event_type LIKE '%%converted%%' ORDER BY event_id"
@@ -356,7 +356,7 @@ def test_a_new_body_over_its_ceiling_is_refused_on_every_write_path(dsn, mcp, ca
         assert sorted(row["content"] for row in cur.fetchall()) == sorted([RULE, PINNED])
 
 
-def test_a_long_body_carried_over_unchanged_still_passes(cur, scope_id, monkeypatch):
+def test_a_long_body_carried_over_unchanged_still_passes(cur, project_id, monkeypatch):
     def written_before_the_ceiling(write):
         with monkeypatch.context() as before:
             before.setenv("MASHU_CONTENT_LIMIT", "10000")
@@ -394,7 +394,7 @@ def test_a_long_body_carried_over_unchanged_still_passes(cur, scope_id, monkeypa
     def redelivered(body):
         memory = written_before_the_ceiling(lambda: remember(cur, body))
         return memories.set_delivery(
-            cur, memory["memory_id"], delivery="scope", scope_id=scope_id, actor="user"
+            cur, memory["memory_id"], delivery="project", project_id=project_id, actor="user"
         )
 
     cases = [
@@ -446,18 +446,18 @@ def test_the_tools_that_take_a_body_publish_its_ceiling(monkeypatch):
 
 
 def test_memory_list_reads_the_always_layer_by_either_name_and_lists_it_when_lost(mcp, dsn):
-    from mashu import scopes
+    from mashu import projects
 
     with db.transaction(dsn) as cur:
-        scope = scopes.create_scope(cur, name="adapter", actor="user")
+        project = projects.create_project(cur, name="adapter", actor="user")
         always = remember(cur, RULE)
-        remember(cur, PINNED, delivery="scope", scope_id=scope["scope_id"])
+        remember(cur, PINNED, delivery="project", project_id=project["project_id"])
 
     for name in ("always", "global"):
-        answer = mcp("memory_list", scope=name)
-        assert answer["scope"] == "always"
+        answer = mcp("memory_list", project=name)
+        assert answer["project"] == "always"
         assert [row["memory_id"] for row in answer["memories"]] == [str(always["memory_id"])]
-    assert "valid names: always, adapter" in mcp("memory_list", scope="everywhere")["error"]
+    assert "valid names: always, adapter" in mcp("memory_list", project="everywhere")["error"]
 
 
 def test_an_empty_body_is_refused_on_every_write_path(dsn, mcp, capsys):
@@ -557,18 +557,18 @@ def test_the_store_itself_holds_no_blank_body(cur, statement):
         cur.execute(statement, {"memory": memory["memory_id"]})
 
 
-def test_the_other_scopes_of_a_rule_follow_it_until_it_moves(cur, scope_id):
-    other = scopes.create_scope(cur, name="the other repository", actor="user")["scope_id"]
-    third = scopes.create_scope(cur, name="a third repository", actor="user")["scope_id"]
+def test_the_other_projects_of_a_rule_follow_it_until_it_moves(cur, project_id):
+    other = projects.create_project(cur, name="the other repository", actor="user")["project_id"]
+    third = projects.create_project(cur, name="a third repository", actor="user")["project_id"]
     old = remember(
         cur,
         "check the export checksum before opening the payload",
-        scope_id=scope_id,
-        delivery="scope",
-        also_scope_ids=[other],
+        project_id=project_id,
+        delivery="project",
+        also_project_ids=[other],
     )
 
-    with pytest.raises(MashuError, match="several scopes"):
+    with pytest.raises(MashuError, match="several projects"):
         memories.convert_to_temporary(cur, old["memory_id"], days=3, actor="user")
 
     retire(cur, old)
@@ -579,7 +579,7 @@ def test_the_other_scopes_of_a_rule_follow_it_until_it_moves(cur, scope_id):
         actor="user",
         approval_source={"kind": "user_direct"},
     )
-    assert memories.other_scopes(cur, old["memory_id"]) == [other]
+    assert memories.other_projects(cur, old["memory_id"]) == [other]
 
     instruction = "Replace that rule"
     replaced = memory_changes.change_instructed(
@@ -599,7 +599,7 @@ def test_the_other_scopes_of_a_rule_follow_it_until_it_moves(cur, scope_id):
         content="validate the export envelope checksum before opening its payload",
     )
     successor = replaced["memory"]["memory_id"]
-    assert memories.other_scopes(cur, successor) == [other]
+    assert memories.other_projects(cur, successor) == [other]
 
-    memories.set_delivery(cur, successor, delivery="scope", scope_id=third, actor="user")
-    assert memories.other_scopes(cur, successor) == []
+    memories.set_delivery(cur, successor, delivery="project", project_id=third, actor="user")
+    assert memories.other_projects(cur, successor) == []

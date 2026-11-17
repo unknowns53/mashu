@@ -42,7 +42,7 @@ def report_pain(
     what: str,
     prevention: str,
     actor: str,
-    scope_id: UUID | None = None,
+    project_id: UUID | None = None,
     source: str | None = None,
     prevention_kind: str = "rule",
     task_id: UUID | None = None,
@@ -114,7 +114,7 @@ def report_pain(
 
     cur.execute(
         """
-        INSERT INTO ledger (kind, what, prevention, scope_id, source, created_by,
+        INSERT INTO ledger (kind, what, prevention, project_id, source, created_by,
                             prevention_kind, filed_task, violated_memory_id,
                             ignored_task_id, ignored_decision_id, ignored_source)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -124,7 +124,7 @@ def report_pain(
             kind,
             what,
             prevention,
-            scope_id,
+            project_id,
             source,
             actor,
             prevention_kind,
@@ -275,7 +275,7 @@ def report_pain(
         kind="incident",
         evidence=[ledger_id],
         actor=actor,
-        scope_id=scope_id,
+        project_id=project_id,
         conflicts=conflict_ids,
     )
     return result
@@ -373,18 +373,18 @@ def _file_work(
 
 
 def ledger_entries(
-    cur: psycopg.Cursor, *, limit: int = 20, scope_id: UUID | None = None
+    cur: psycopg.Cursor, *, limit: int = 20, project_id: UUID | None = None
 ) -> list[dict[str, Any]]:
     """The recent record, newest first."""
     cur.execute(
         """
-        SELECT l.*, s.name AS scope_name
-        FROM ledger l LEFT JOIN scope s ON s.scope_id = l.scope_id
-        WHERE (%(scope)s::uuid IS NULL OR l.scope_id = %(scope)s::uuid)
+        SELECT l.*, s.name AS project_name
+        FROM ledger l LEFT JOIN project s ON s.project_id = l.project_id
+        WHERE (%(project)s::uuid IS NULL OR l.project_id = %(project)s::uuid)
         ORDER BY l.created_at DESC, l.ledger_id
         LIMIT %(limit)s
         """,
-        {"scope": scope_id, "limit": limit},
+        {"project": project_id, "limit": limit},
     )
     return cur.fetchall()
 

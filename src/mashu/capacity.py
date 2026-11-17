@@ -26,22 +26,22 @@ LOCK_PAIN = 2
 LOCK_RETIREMENT = 5
 
 _PUSHED = """
-SELECT memory_id, delivery, scope_id, topic_id, content, {also} AS also FROM memory
-WHERE status = 'active' AND delivery IN ('always', 'scope', 'topic')
+SELECT memory_id, delivery, project_id, topic_id, content, {also} AS also FROM memory
+WHERE status = 'active' AND delivery IN ('always', 'project', 'topic')
 """
 
-#: The other scopes each pushed row reaches, or none on a store without the table.
-_ALSO = "ARRAY(SELECT ms.scope_id FROM memory_scope ms WHERE ms.memory_id = memory.memory_id)"
+#: The other projects each pushed row reaches, or none on a store without the table.
+_ALSO = "ARRAY(SELECT ms.project_id FROM memory_project ms WHERE ms.memory_id = memory.memory_id)"
 _NO_ALSO = "'{}'::uuid[]"
 
 
-def _has_other_scopes(cur: psycopg.Cursor) -> bool:
-    cur.execute("SELECT to_regclass('memory_scope') IS NOT NULL AS present")
+def _has_other_projects(cur: psycopg.Cursor) -> bool:
+    cur.execute("SELECT to_regclass('memory_project') IS NOT NULL AS present")
     return cur.fetchone()["present"]
 
 
 _TOPICS = """
-SELECT topic_id, name, trigger, scope_id FROM topic WHERE archived_at IS NULL
+SELECT topic_id, name, trigger, project_id FROM topic WHERE archived_at IS NULL
 """
 
 
@@ -74,46 +74,48 @@ class _Opening:
 
 
 def _opening(cur: psycopg.Cursor) -> _Opening:
-    cur.execute(_PUSHED.format(also=_ALSO if _has_other_scopes(cur) else _NO_ALSO))
+    cur.execute(_PUSHED.format(also=_ALSO if _has_other_projects(cur) else _NO_ALSO))
     rows = tuple(cur.fetchall())
     cur.execute(_TOPICS)
     return _Opening(rows=rows, topics={row["topic_id"]: row for row in cur.fetchall()})
 
 
 def _measure(opening: _Opening) -> dict[str, Any]:
-    """Every session's share, each scope's share, and each topic's unpushed bodies."""
+    """Every session's share, each project's share, and each topic's unpushed bodies."""
     always: list[str] = []
-    scoped: dict[Any, list[str]] = {}
+    by_project: dict[Any, list[str]] = {}
     bodies: dict[Any, list[str]] = {}
     for row in opening.rows:
         if row["delivery"] == "always":
             always.append(row["content"])
-        elif row["delivery"] == "scope":
-            for scope_id in (row["scope_id"], *row.get("also", ())):
-                scoped.setdefault(scope_id, []).append(row["content"])
+        elif row["delivery"] == "project":
+            for project_id in (row["project_id"], *row.get("also", ())):
+                by_project.setdefault(project_id, []).append(row["content"])
         elif row["topic_id"] in opening.topics:
             bodies.setdefault(row["topic_id"], []).append(row["content"])
     for topic_id, contents in bodies.items():
         topic = opening.topics[topic_id]
         line = topic_line(topic["name"], len(contents), topic["trigger"])
-        if topic["scope_id"] is None:
+        if topic["project_id"] is None:
             always.append(line)
         else:
-            scoped.setdefault(topic["scope_id"], []).append(line)
+            by_project.setdefault(topic["project_id"], []).append(line)
     return {
         "always": pushed_cost(always),
-        "scopes": {scope_id: pushed_cost(contents) for scope_id, contents in scoped.items()},
+        "projects": {
+            project_id: pushed_cost(contents) for project_id, contents in by_project.items()
+        },
         "bodies": {topic_id: pushed_cost(contents) for topic_id, contents in bodies.items()},
     }
 
 
 def bootstrap_totals(cur: psycopg.Cursor) -> dict[str, Any]:
-    """What the opening currently costs: everywhere, per scope, and at its worst."""
+    """What the opening currently costs: everywhere, per project, and at its worst."""
     measured = _measure(_opening(cur))
     return {
         "always": measured["always"],
-        "scopes": measured["scopes"],
-        "worst": measured["always"] + max(measured["scopes"].values(), default=0),
+        "projects": measured["projects"],
+        "worst": measured["always"] + max(measured["projects"].values(), default=0),
     }
 
 
@@ -137,7 +139,7 @@ class _Doors:
     """The ways out a refusal names, in the commands of the surface that made the write."""
 
     retire: str
-    scope: str
+    project: str
     topic: str
     elsewhere: str
     note: str = ""
@@ -146,17 +148,18 @@ class _Doors:
 _DOORS = {
     "cli": _Doors(
         retire="`mashu retire <id> --reason <why>` for a rule that has stopped earning its seat",
-        scope="`mashu deliver <id> scope --scope <name>` for one that governs only some places",
+        project="`mashu deliver <id> project --project <name>` for one that governs only some "
+        "places",
         topic="`mashu deliver <id> topic --topic <name>` for one needed only during one kind "
         "of work",
-        elsewhere="`mashu deliver <id> topic --topic <other>`, or always or scope",
+        elsewhere="`mashu deliver <id> topic --topic <other>`, or always or project",
     ),
     "mcp": _Doors(
         retire="memory_change_propose with operation='retire' for a rule that has stopped "
         "earning its seat",
-        scope="memory_redeliver with delivery='scope' for one that governs only some places",
+        project="memory_redeliver with delivery='project' for one that governs only some places",
         topic="memory_redeliver with delivery='topic' for one needed only during one kind of work",
-        elsewhere="memory_redeliver with another topic, or always or scope",
+        elsewhere="memory_redeliver with another topic, or always or project",
         note=" Each changes an existing Memory, so it needs the user's instruction; a retire "
         "proposal is applied with memory_change_apply.",
     ),
@@ -193,7 +196,7 @@ def _refusal_always(projected: int, cost: int, ceiling: int, what: str, detail: 
         f"the always layer seats {ceiling} tokens and "
         + _room(projected, cost, what)
         + detail
-        + f"Make room first: {out.retire}, {out.scope}, or {out.topic}."
+        + f"Make room first: {out.retire}, {out.project}, or {out.topic}."
         + out.note
     )
 
@@ -214,7 +217,7 @@ def _topic_costs(opening: _Opening) -> str:
     held = Counter(row["topic_id"] for row in opening.rows if row["delivery"] == "topic")
     costs = []
     for topic_id, topic in sorted(opening.topics.items(), key=lambda item: item[1]["name"]):
-        if topic["scope_id"] is not None:
+        if topic["project_id"] is not None:
             continue
         rules = held.get(topic_id, 0)
         before = pushed_cost([topic_line(topic["name"], rules, topic["trigger"])]) if rules else 0
@@ -225,11 +228,11 @@ def _topic_costs(opening: _Opening) -> str:
         "Filed under a topic instead, it would cost this layer only that topic's index line"
         f"{listed}. A new topic adds its whole line '<name> (1 rule): <trigger>', "
         f"{ROW_OVERHEAD} tokens plus one per 4 characters (one per CJK character), and a topic "
-        "listed in one scope costs this layer nothing. "
+        "listed in one project costs this layer nothing. "
     )
 
 
-def _line_detail(line: str, first: bool, scoped: bool) -> str:
+def _line_detail(line: str, first: bool, in_project: bool) -> str:
     """The index line a topic write pushes, said whole so its cost needs no second try."""
     told = (
         "An empty topic is not listed, so its first rule adds its whole index line"
@@ -238,14 +241,14 @@ def _line_detail(line: str, first: bool, scoped: bool) -> str:
     )
     shorter = (
         "A shorter trigger shortens that line"
-        if scoped
-        else "A shorter trigger, or listing the topic in one scope, shortens or moves that line"
+        if in_project
+        else "A shorter trigger, or listing the topic in one project, shortens or moves that line"
     )
     return f"{told} '{line}' ({pushed_cost([line])} tokens). {shorter}. "
 
 
-def _seat(measured: dict[str, Any], scope_id: Any) -> int:
-    return measured["always"] + measured["scopes"].get(scope_id, 0)
+def _seat(measured: dict[str, Any], project_id: Any) -> int:
+    return measured["always"] + measured["projects"].get(project_id, 0)
 
 
 def _judge(
@@ -255,7 +258,7 @@ def _judge(
     without: _Opening,
     cost: int,
     what: str,
-    scope_id: Any,
+    project_id: Any,
     everywhere: bool,
     limits: dict[str, int],
     topic_id: UUID | None = None,
@@ -301,7 +304,7 @@ def _judge(
             ),
         }
 
-    touched = {None, *now["scopes"], *was["scopes"]}
+    touched = {None, *now["projects"], *was["projects"]}
     heavier = [
         key for key in touched if _seat(now, key) > ceiling and _seat(now, key) > _seat(was, key)
     ]
@@ -323,9 +326,9 @@ def _judge(
         }
 
     if everywhere:
-        projected = now["always"] + max(now["scopes"].values(), default=0)
+        projected = now["always"] + max(now["projects"].values(), default=0)
     else:
-        projected = _seat(now, scope_id)
+        projected = _seat(now, project_id)
     return {
         "ok": True,
         "tokens": cost,
@@ -348,46 +351,46 @@ def check_admission(
     *,
     content: str,
     delivery: str,
-    scope_id: UUID | None = None,
+    project_id: UUID | None = None,
     exclude_memory_id: UUID | None = None,
     topic_id: UUID | None = None,
-    also_scope_ids: Sequence[UUID] | None = None,
+    also_project_ids: Sequence[UUID] | None = None,
 ) -> dict[str, Any]:
     """Whether this content can take a seat, and what it would cost if it did.
 
     A topic Memory is weighed twice: its body against the topic's own bound, and its
-    topic's index line against the opening that line is pushed into. A scope Memory is weighed
-    in its home scope and in each of `also_scope_ids`; left out, an existing Memory that keeps
-    its home scope is weighed in the other scopes it already reaches.
+    topic's index line against the opening that line is pushed into. A project Memory is weighed
+    in its home project and in each of `also_project_ids`; left out, an existing Memory that keeps
+    its home project is weighed in the other projects it already reaches.
     """
     _lock(cur)
-    if also_scope_ids is None:
-        also_scope_ids = _kept_others(cur, exclude_memory_id, delivery, scope_id)
+    if also_project_ids is None:
+        also_project_ids = _kept_others(cur, exclude_memory_id, delivery, project_id)
     cost = pushed_cost([content])
     before = _opening(cur)
     without = before.without_memory(exclude_memory_id)
 
-    if delivery not in ("always", "scope", "topic"):
+    if delivery not in ("always", "project", "topic"):
         raise MashuError(f"unknown delivery '{delivery}'")
     if delivery == "topic":
         topic = before.topics.get(topic_id)
         if topic is None:
             raise MashuError("a topic Memory needs a topic that exists and is not archived")
-        scope_id = topic["scope_id"]
+        project_id = topic["project_id"]
         rules = 1 + sum(
             1 for r in without.rows if r["delivery"] == "topic" and r["topic_id"] == topic_id
         )
         line = topic_line(topic["name"], rules, topic["trigger"])
-        detail = _line_detail(line, rules == 1, scope_id is not None)
+        detail = _line_detail(line, rules == 1, project_id is not None)
     else:
         detail = _topic_costs(without) if delivery == "always" else ""
     row = {
         "memory_id": exclude_memory_id,
         "delivery": delivery,
-        "scope_id": scope_id,
+        "project_id": project_id,
         "topic_id": topic_id if delivery == "topic" else None,
         "content": content,
-        "also": tuple(also_scope_ids) if delivery == "scope" else (),
+        "also": tuple(also_project_ids) if delivery == "project" else (),
     }
     return _judge(
         before,
@@ -395,8 +398,8 @@ def check_admission(
         without=without,
         cost=cost,
         what="this topic's index line" if delivery == "topic" else "this content",
-        scope_id=scope_id,
-        everywhere=delivery == "always" or (delivery == "topic" and scope_id is None),
+        project_id=project_id,
+        everywhere=delivery == "always" or (delivery == "topic" and project_id is None),
         limits=settings.limits(cur),
         topic_id=topic_id if delivery == "topic" else None,
         detail=detail,
@@ -404,19 +407,19 @@ def check_admission(
 
 
 def _kept_others(
-    cur: psycopg.Cursor, memory_id: UUID | None, delivery: str, scope_id: UUID | None
+    cur: psycopg.Cursor, memory_id: UUID | None, delivery: str, project_id: UUID | None
 ) -> tuple[UUID, ...]:
-    """The other scopes a Memory keeps through a write that leaves its home scope as it was."""
-    if memory_id is None or delivery != "scope" or not _has_other_scopes(cur):
+    """The other projects a Memory keeps through a write that leaves its home project as it was."""
+    if memory_id is None or delivery != "project" or not _has_other_projects(cur):
         return ()
     cur.execute(
         """
-        SELECT ms.scope_id FROM memory_scope ms JOIN memory m ON m.memory_id = ms.memory_id
-        WHERE ms.memory_id = %s AND m.delivery = 'scope' AND m.scope_id = %s
+        SELECT ms.project_id FROM memory_project ms JOIN memory m ON m.memory_id = ms.memory_id
+        WHERE ms.memory_id = %s AND m.delivery = 'project' AND m.project_id = %s
         """,
-        (memory_id, scope_id),
+        (memory_id, project_id),
     )
-    return tuple(row["scope_id"] for row in cur.fetchall())
+    return tuple(row["project_id"] for row in cur.fetchall())
 
 
 def check_topic_edit(
@@ -425,7 +428,7 @@ def check_topic_edit(
     *,
     name: str,
     trigger: str,
-    scope_id: UUID | None,
+    project_id: UUID | None,
 ) -> dict[str, Any]:
     """Whether a topic's line can change as asked; an empty topic pushes nothing."""
     _lock(cur)
@@ -433,7 +436,7 @@ def check_topic_edit(
     current = before.topics.get(topic_id)
     if current is None:
         raise MashuError("only a topic that is not archived can be edited")
-    edited = {**current, "name": name, "trigger": trigger, "scope_id": scope_id}
+    edited = {**current, "name": name, "trigger": trigger, "project_id": project_id}
     after = before.with_topic(topic_id, edited)
     rules = sum(1 for row in before.rows if row["topic_id"] == topic_id)
     line = topic_line(name, rules, trigger)
@@ -443,8 +446,8 @@ def check_topic_edit(
         without=before.with_topic(topic_id, None),
         cost=pushed_cost([line]) if rules else 0,
         what="this topic's index line",
-        scope_id=scope_id,
-        everywhere=scope_id is None,
+        project_id=project_id,
+        everywhere=project_id is None,
         limits=settings.limits(cur),
         detail=f"The edited index line reads '{line}' ({pushed_cost([line])} tokens). ",
     )

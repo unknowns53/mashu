@@ -39,6 +39,16 @@ def applied(conn: psycopg.Connection) -> set[str]:
         return applied_names(cur)
 
 
+def before_projects(cur: psycopg.Cursor) -> bool:
+    """Whether this store predates 0025, which renamed every scope table and column to project.
+
+    Reads that name project columns cannot run against such a store, so the session opening
+    reports it behind instead of failing.
+    """
+    cur.execute("SELECT to_regclass('scope') IS NOT NULL AS before")
+    return cur.fetchone()["before"]
+
+
 def pending(cur: psycopg.Cursor, directory: pathlib.Path | None = None) -> list[str]:
     """The migrations on disk this database has not applied, in order."""
     already = applied_names(cur)

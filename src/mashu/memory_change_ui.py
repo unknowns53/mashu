@@ -114,7 +114,7 @@ def _detail(row: dict[str, Any], place: int, total: int) -> str:
                 lines.extend(
                     [
                         screen.wrap(destination["content"], indent="    "),
-                        f"    destination scope: {destination['scope_name'] or '-'}",
+                        f"    destination project: {destination['project_name'] or '-'}",
                         f"    destination expires: {destination['expires_at']}",
                     ]
                 )
@@ -137,7 +137,7 @@ def _detail(row: dict[str, Any], place: int, total: int) -> str:
                 "",
             ]
         )
-        lines.append(f"    candidate scope: {row['successor_snapshot']['scope_id'] or '-'}")
+        lines.append(f"    candidate project: {row['successor_snapshot']['project_id'] or '-'}")
         lines.append(f"    candidate kind: {row['successor_snapshot']['kind']}")
         candidate_evidence = row["successor_snapshot"]["evidence"]
         lines.append(
@@ -159,7 +159,7 @@ def _detail(row: dict[str, Any], place: int, total: int) -> str:
                 [
                     screen.accent(f"  current candidate  v{successor['version']}"),
                     screen.wrap(successor["content"]),
-                    f"    current scope: {successor['scope_id'] or '-'}",
+                    f"    current project: {successor['project_id'] or '-'}",
                     "",
                 ]
             )

@@ -128,7 +128,7 @@ def main() -> int:
     if marker.exists() or marker.with_name(marker.name + FOLLOWED).exists():
         return 0
 
-    # The scope is routed from the session's directory, which the hook may not run in.
+    # The project is routed from the session's directory, which the hook may not run in.
     where = event.get("cwd")
     if not where or not pathlib.Path(where).is_dir():
         where = None

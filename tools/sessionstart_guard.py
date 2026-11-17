@@ -48,7 +48,7 @@ def main() -> int:
     except (json.JSONDecodeError, ValueError):
         event = {}
 
-    # Resolve scope from the session cwd in the hook payload.
+    # Resolve project from the session cwd in the hook payload.
     where = event.get("cwd")
     if not where or not pathlib.Path(where).is_dir():
         where = None

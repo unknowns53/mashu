@@ -111,6 +111,41 @@ function who(actor) {
   return actor || "-";
 }
 
+/**
+ * A text input for a folder, beside a button that fills it from the system's folder picker.
+ * The input stays editable, since a path written from ~ is also accepted. A picked folder is
+ * announced with input and change events, so whatever listens to typing hears it too.
+ */
+function folderInput(input, onPick) {
+  const pick = async () => {
+    const path = await pickFolder(input.value);
+    if (!path) return;
+    input.value = path;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    if (onPick) onPick(path);
+  };
+  return h("div", { class: "folder-input" }, input, button(t("common.choose_folder"), pick));
+}
+
+/** A folder from the system's picker, or null when it is closed without one. */
+async function pickFolder(near = "") {
+  // The picker cannot start from ~, which only the backend expands.
+  const start = /^(\/|[A-Za-z]:[\\/])/.test(near.trim()) ? near.trim() : undefined;
+  try {
+    const path = await window.__TAURI__.dialog.open({ directory: true, defaultPath: start });
+    return typeof path === "string" && path ? path : null;
+  } catch (error) {
+    fail(error);
+    return null;
+  }
+}
+
+/** The last part of a path, which names the folder. */
+function folderName(path) {
+  return String(path || "").replace(/[/\\]+$/, "").split(/[/\\]/).pop() || "";
+}
+
 /** A path from the home directory written from ~, as the store writes them. */
 function tilde(path) {
   return String(path || "").replace(/^(\/Users\/[^/]+|\/home\/[^/]+|[A-Za-z]:\\Users\\[^\\]+)(?=$|[/\\])/, "~");
@@ -309,7 +344,7 @@ async function installSection() {
   };
   input.addEventListener("change", () => render().catch(fail));
   await render();
-  return section(t("setup.install_title"), null, h("label", { class: "field" }, h("span", { class: "label", text: t("setup.folder") }), input), body);
+  return section(t("setup.install_title"), null, h("label", { class: "field" }, h("span", { class: "label", text: t("setup.folder") }), folderInput(input)), body);
 }
 
 function usePlaceSection(place) {
@@ -330,7 +365,7 @@ function usePlaceSection(place) {
     h(
       "form",
       { class: "row interval-row", on: { submit: save } },
-      input,
+      folderInput(input),
       h("button", { type: "submit", class: "btn", text: t("setup.save") })
     ),
     h("p", { class: "sub", text: t("setup.hint") })
@@ -810,10 +845,11 @@ function reference(id, text, length = 40) {
 
 /**
  * A form in place of what a pane showed. Each field is {name, label, kind, value, options,
- * hint, max, maxItems, rows, show, big}: kind is text, area, lines (one item per line),
- * select, radio, checks (any number of options, valued as a list), or number; show(values)
- * hides the field while it returns false; options are [value, label, description]. Returns
- * the form node.
+ * hint, max, maxItems, rows, show, big, onPick}: kind is text, area, lines (one item per line),
+ * select, radio, checks (any number of options, valued as a list), number, or folder (text
+ * with a button that opens the system's folder picker); show(values) hides the field while it
+ * returns false; options are [value, label, description]; onPick(path, inputOf) runs after a
+ * folder is picked, with inputOf(name) giving another field's input. Returns the form node.
  */
 function form({ title, fields, submit, onSubmit, onCancel, kind = "primary" }) {
   const node = h("form", { class: "form" });
@@ -852,12 +888,16 @@ function form({ title, fields, submit, onSubmit, onCancel, kind = "primary" }) {
       if (field.step) input.step = field.step;
       input.value = field.value ?? "";
     }
+    const control =
+      field.kind === "folder"
+        ? folderInput(input, (path) => field.onPick && field.onPick(path, (name) => inputs.find((entry) => entry.field.name === name)?.input))
+        : input;
     // A label around a list of options would toggle the first option on a click of its title.
     const label = h(
       field.kind === "checks" ? "div" : "label",
       { class: "field" },
       h("span", { class: "label" }, h("span", { text: field.label }), field.max || field.maxItems ? counter : null),
-      input,
+      control,
       field.hint ? h("div", { class: "hint", text: field.hint }) : null
     );
     inputs.push({ field, input, label, counter });
@@ -959,7 +999,7 @@ function reasonPanel({ label, confirm, danger, onConfirm, onCancel }) {
 // ---------------------------------------------------------------- delivery fields
 
 function deliveryOptions() {
-  return ["always", "scope", "topic"].map((value) => [value, t(`delivery.${value}`), t(`delivery.${value}_long`).replace(/^[^（—]*[（—]\s*/, "").replace(/）$/, "")]);
+  return ["always", "project", "topic"].map((value) => [value, t(`delivery.${value}`), t(`delivery.${value}_long`).replace(/^[^（—]*[（—]\s*/, "").replace(/）$/, "")]);
 }
 
 /** Options for a topic picker: none, each open topic, and a new one described in place. */
@@ -978,7 +1018,7 @@ function topicArgs(values) {
       new_topic: {
         name: values.new_topic_name,
         trigger: values.new_topic_trigger,
-        scope: values.new_topic_scope || null,
+        project: values.new_topic_project || null,
       },
     };
   }
@@ -993,28 +1033,28 @@ function topicFields(choices, current, isTopic) {
     { name: "new_topic_name", label: t("delivery.topic_new_name"), show: isNew, max: 40 },
     { name: "new_topic_trigger", label: t("delivery.topic_new_trigger"), hint: t("delivery.topic_new_trigger_hint"), show: isNew, max: 160 },
     {
-      name: "new_topic_scope",
+      name: "new_topic_project",
       label: t("delivery.topic_new_area"),
       kind: "select",
-      options: [["", t("topic.area_all")], ...choices.scopes.map((name) => [name, name])],
+      options: [["", t("topic.area_all")], ...choices.projects.map((name) => [name, name])],
       show: isNew,
     },
   ];
 }
 
-function areaOptions(choices, none) {
-  return [["", none], ...choices.scopes.map((name) => [name, name])];
+function projectOptions(choices, none) {
+  return [["", none], ...choices.projects.map((name) => [name, name])];
 }
 
-/** Every area as an option of a checks field. */
-function areaChecks(choices) {
-  return choices.scopes.map((name) => [name, name]);
+/** Every project as an option of a checks field. */
+function projectChecks(choices) {
+  return choices.projects.map((name) => [name, name]);
 }
 
 function deliveryText(row) {
   if (row.delivery === "topic") return `${t("delivery.topic")}: ${row.topic_name}`;
-  if (row.delivery === "scope") return `${t("delivery.scope")}: ${row.scope_name || "-"}`;
-  return t("delivery.always") + (row.scope_name ? ` (${row.scope_name})` : "");
+  if (row.delivery === "project") return `${t("delivery.project")}: ${row.project_name || "-"}`;
+  return t("delivery.always") + (row.project_name ? ` (${row.project_name})` : "");
 }
 
 // ---------------------------------------------------------------- keyboard

@@ -440,6 +440,9 @@ dialog .form-actions { justify-content: flex-end; }
 .preview-row { margin-top: 16px; }
 .preview-total { margin-top: 10px; }
 .preview-row input { flex: 1; }
+.folder-input { display: flex; gap: 8px; align-items: center; }
+.folder-input input { flex: 1; min-width: 0; }
+.row > .folder-input { flex: 1; }
 .interval-row { margin-top: 16px; }
 .limit-list { display: grid; gap: 14px; }
 .limit-row { display: grid; grid-template-columns: 1fr 170px 96px; gap: 14px; align-items: start; }
@@ -453,3 +456,5 @@ dialog .form-actions { justify-content: flex-end; }
 .table td.name { white-space: pre; font-weight: 500; }
 .table td.zero { color: var(--text-3); }
 body[data-busy] .detail-pane { opacity: 0.6; pointer-events: none; transition: opacity 0.2s 0.15s; }
+.folder-list { list-style: none; margin: 0; padding: 0; }
+.folder-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; }

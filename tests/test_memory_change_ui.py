@@ -90,7 +90,7 @@ def test_replace_detail_shows_the_successor_snapshot_and_delivery(cur):
     assert "verify the signed archive envelope before extraction" in detail
     assert "replacement delivery: topic:deploy" in detail
     assert f"candidate version: {successor['version']}" in detail
-    assert "candidate scope: -" in detail
+    assert "candidate project: -" in detail
     assert "candidate kind: user_explicit" in detail
 
     revised = "verify the archive envelope and checksum before extraction"
@@ -100,7 +100,7 @@ def test_replace_detail_shows_the_successor_snapshot_and_delivery(cur):
     assert revised in stale
 
 
-def test_redeliver_detail_shows_where_the_rule_moves(cur, scope_id):
+def test_redeliver_detail_shows_where_the_rule_moves(cur, project_id):
     memory = remember(cur, "keep ship stats fixed when tuning")
     proposal = propose_change(
         cur,
@@ -108,7 +108,7 @@ def test_redeliver_detail_shows_where_the_rule_moves(cur, scope_id):
         "redeliver",
         successor_settings={
             "delivery": "topic",
-            "scope_id": scope_id,
+            "project_id": project_id,
             "topic": "calibration",
             "topic_trigger": "Before calibrating difficulty",
         },
@@ -118,9 +118,11 @@ def test_redeliver_detail_shows_where_the_rule_moves(cur, scope_id):
     assert "delivery: always -> topic:calibration" in shown
 
 
-def test_relocated_proposal_shows_its_own_destination(cur, scope_id):
+def test_relocated_proposal_shows_its_own_destination(cur, project_id):
     target = remember(cur, RULE)
-    context = put_temporary(cur, content="archive check", actor="user", days=2, scope_id=scope_id)
+    context = put_temporary(
+        cur, content="archive check", actor="user", days=2, project_id=project_id
+    )
     proposal = propose_change(
         cur,
         target,
@@ -133,7 +135,7 @@ def test_relocated_proposal_shows_its_own_destination(cur, scope_id):
     shown = memory_change_ui._detail(proposal, 1, 1)
     assert str(context["context_id"]) in shown
     assert context["content"] in shown
-    assert "destination scope: test scope" in shown
+    assert "destination project: test project" in shown
     assert str(context["expires_at"]) in shown
 
 
@@ -167,7 +169,7 @@ def test_restore_acknowledges_conflict_only_after_its_reason_is_shown(dsn, monke
     with db.transaction(dsn) as cur:
         target = remember(cur, body)
         conflict = remember(cur, body)
-        retire(cur, target, "scope ended", kind="withdrawn")
+        retire(cur, target, "project ended", kind="withdrawn")
         retire(cur, conflict, "unsafe now")
         proposal = propose_change(cur, target, "restore", restore_reason="needed again")
     monkeypatch.setenv("LINES", "12")

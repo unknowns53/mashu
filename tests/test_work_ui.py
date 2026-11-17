@@ -10,7 +10,7 @@ from conftest import (
     task_row,
     update_task,
 )
-from mashu import db, projects, routing, scopes, task_history, tasks, work_ui
+from mashu import db, projects, routing, task_history, tasks, work_ui
 
 STATE = {
     "goal": "launch without the old rail",
@@ -164,11 +164,11 @@ def test_task_creation_asks_for_a_project_only_when_more_than_one_is_available(d
     assert len(made) == 1 and made[0]["task"]["project_name"] == "drydock"
 
 
-def test_task_creation_prefers_the_only_project_in_the_routed_scope(dsn, monkeypatch, tmp_path):
+def test_task_creation_prefers_the_project_this_directory_belongs_to(dsn, monkeypatch, tmp_path):
     with db.transaction(dsn) as cur:
-        scope_id = scopes.create_scope(cur, name="shipyard", actor="user")["scope_id"]
-        new_project(cur, "hull work", scope_id=scope_id)
-        routing.add_route(cur, path_prefix=str(tmp_path), scope_id=scope_id, actor="user")
+        projects.create_project(cur, name="shipyard", actor="user")
+        project_id = new_project(cur, "hull work")["project_id"]
+        routing.add_route(cur, path_prefix=str(tmp_path), project_id=project_id, actor="user")
     monkeypatch.chdir(tmp_path)
     keys(monkeypatch, "n", "inspect the keel", "", "", "q")
 
@@ -216,14 +216,14 @@ def test_a_dormant_task_can_be_touched_closed_and_reopened_from_the_closed_view(
 def test_project_view_counts_edits_creates_and_notes_a_refusal(dsn, monkeypatch, capsys):
     make_task(dsn, "one active task")
     with db.transaction(dsn) as cur:
-        scopes.create_scope(cur, name="repository", actor="user")
-    edit, refused = ("e", "enrai renamed", "repository"), ("n", "SECRETMARKER7 project", "")
-    keys(monkeypatch, *edit, *refused, "n", "shipyard", "repository", "q")
+        projects.create_project(cur, name="repository", actor="user")
+    edit, refused = ("e", "enrai renamed"), ("n", "SECRETMARKER7 project", "")
+    keys(monkeypatch, *edit, *refused, "n", "shipyard", "", "q")
 
     assert work_ui.run(dsn, initial_view="projects") == 0
     out = capsys.readouterr().out
     assert "1a  0d  0c" in out
     assert "matches banned pattern" in out
     with db.transaction(dsn) as cur:
-        made = {row["name"]: row["scope_name"] for row in projects.list_projects(cur)}
-    assert made == {"enrai renamed": "repository", "shipyard": "repository"}
+        made = {row["name"] for row in projects.list_projects(cur)}
+    assert made == {"enrai renamed", "repository", "shipyard"}

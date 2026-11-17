@@ -5,7 +5,7 @@ import io
 import pytest
 
 from conftest import candidate, expire, new_project, new_task, remember, retire
-from mashu import cli, db, home_ui, nominations, routing, scopes, screen, tasks, temporary
+from mashu import cli, db, home_ui, nominations, projects, routing, screen, tasks, temporary
 
 
 class TtyBuffer(io.StringIO):
@@ -50,8 +50,10 @@ def test_no_command_opens_the_home_screen(monkeypatch):
 
 def test_dashboard_collects_review_task_memory_and_project_counts(dsn):
     with db.transaction(dsn) as cur:
-        scope = scopes.create_scope(cur, name="home scope", actor="user")
-        routing.add_route(cur, path_prefix="/tmp/home", scope_id=scope["scope_id"], actor="user")
+        project = projects.create_project(cur, name="home project", actor="user")
+        routing.add_route(
+            cur, path_prefix="/tmp/home", project_id=project["project_id"], actor="user"
+        )
         new_project(cur, "home dashboard")
         remember(cur, "keep the dashboard count distinct")
         retire(cur, remember(cur, "retire this dashboard-only rule"), "a retired count")
@@ -76,11 +78,10 @@ def test_dashboard_collects_review_task_memory_and_project_counts(dsn):
         tasks_dormant=1,
         task_proposals=1,
         active_memories=1,
-        projects=1,
         tasks_closed=1,
         retired_memories=1,
         temporary_contexts=1,
-        scopes=1,
+        projects=2,
         routes=1,
         schema_pending=0,
     )

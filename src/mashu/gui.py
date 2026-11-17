@@ -22,7 +22,6 @@ from mashu import (
     memories,
     memory_changes,
     nominations,
-    projects,
     task_history,
     tasks,
 )
@@ -269,7 +268,7 @@ def _overview(cur: psycopg.Cursor, query: dict[str, str]) -> str:
         ),
         ("Ledger (30 days)", _e(status.ledger_30d)),
         ("Delivery failures (30 days)", _e(f"{status.delivery_failures_30d}  ({failures})")),
-        ("Scopes", _e(", ".join(row["name"] for row in status.scope_rows) or "none")),
+        ("Projects", _e(", ".join(row["name"] for row in status.project_rows) or "none")),
         (
             "Topics",
             _e(
@@ -294,16 +293,16 @@ def _memory_list(cur: psycopg.Cursor, query: dict[str, str]) -> str:
     status = _choice(query, "status", ("active", "retired"))
     delivery = _choice(query, "delivery", ("", *memories.DELIVERIES))
     every = application.memory_view(cur, status)
-    scope_names = sorted({name for row in every for name in row["scope_names"]})
+    project_names = sorted({name for row in every for name in row["project_names"]})
     topic_names = sorted({row["topic_name"] for row in every if row["topic_name"]})
-    scope = _choice(query, "scope", ("", *scope_names))
+    project = _choice(query, "project", ("", *project_names))
     topic = _choice(query, "topic", ("", *topic_names))
     needle = query.get("q", "")
     shown = [
         row
         for row in every
         if (not delivery or row["delivery"] == delivery)
-        and (not scope or scope in row["scope_names"])
+        and (not project or project in row["project_names"])
         and (not topic or row["topic_name"] == topic)
         and (not needle or _matches(needle, row["content"], row["memory_id"]))
     ]
@@ -311,13 +310,13 @@ def _memory_list(cur: psycopg.Cursor, query: dict[str, str]) -> str:
         '<form method="get" action="/memories">'
         + _select("status", status, (("active", "active"), ("retired", "retired")))
         + _select("delivery", delivery, (("", "all"), *((d, d) for d in memories.DELIVERIES)))
-        + _select("scope", scope, (("", "all"), *((name, name) for name in scope_names)))
+        + _select("project", project, (("", "all"), *((name, name) for name in project_names)))
         + _select("topic", topic, (("", "all"), *((name, name) for name in topic_names)))
         + _search(needle)
         + "</form>"
     )
     retired = status == "retired"
-    headings = ["id", "delivery", "scope", "topic", "content", "created", "updated"]
+    headings = ["id", "delivery", "project", "topic", "content", "created", "updated"]
     if retired:
         headings[5:5] = ["retired as", "reason"]
     rows = []
@@ -325,7 +324,7 @@ def _memory_list(cur: psycopg.Cursor, query: dict[str, str]) -> str:
         cells = [
             _td(_memory_link(row["memory_id"]), "nowrap"),
             _td(_e(row["delivery"]), "nowrap"),
-            _td(_e(row["scope_name"])),
+            _td(_e(row["project_name"])),
             _td(_e(row["topic_name"])),
             _td(_e(row["content"]), "text"),
             _td(_e(row["created_at"]), "nowrap"),
@@ -352,7 +351,7 @@ def _memory_detail(cur: psycopg.Cursor, memory_id: UUID) -> tuple[str, str]:
         ("id", f'<span class="mono">{_e(row["memory_id"])}</span>'),
         ("status", _e(row["status"])),
         ("delivery", _e(row["delivery"])),
-        ("scope", _e(row["scope_name"])),
+        ("project", _e(row["project_name"])),
         ("topic", topic),
         ("created", f"{_e(row['created_at'])}  {_e(row['created_by'])}"),
         ("updated", _e(row["updated_at"])),
@@ -429,11 +428,11 @@ def _memory_detail(cur: psycopg.Cursor, memory_id: UUID) -> tuple[str, str]:
 def _temporary(cur: psycopg.Cursor, query: dict[str, str]) -> str:
     rows = application.memory_view(cur, "temporary")
     return _table(
-        ("id", "scope", "content", "by", "created", "expires"),
+        ("id", "project", "content", "by", "created", "expires"),
         (
             [
                 _td(_short(row["context_id"]), "mono"),
-                _td(_e(row["scope_name"] or "every session")),
+                _td(_e(row["project_name"] or "every session")),
                 _td(_e(row["content"]), "text"),
                 _td(_e(row["created_by"]), "nowrap"),
                 _td(_e(row["created_at"]), "nowrap"),
@@ -454,7 +453,8 @@ def _proposal_text(proposal: dict[str, Any] | None) -> str:
 
 def _task_list(cur: psycopg.Cursor, query: dict[str, str]) -> str:
     activity = _choice(query, "activity", TASK_ACTIVITIES)
-    names = [row["name"] for row in projects.list_projects(cur, include_archived=True)]
+    cur.execute("SELECT name FROM project ORDER BY name")
+    names = [row["name"] for row in cur.fetchall()]
     project = _choice(query, "project", ("", *names))
     needle = query.get("q", "")
     every = tasks.task_list(cur, project=project or None, activity=activity)
@@ -691,7 +691,7 @@ def _review(cur: psycopg.Cursor, query: dict[str, str]) -> str:
             [
                 _td(_short(row["nomination_id"]), "mono"),
                 _td(f"{_e(row['kind'])} v{_e(row['version'])}", "nowrap"),
-                _td(_e(row["scope_name"])),
+                _td(_e(row["project_name"])),
                 _td(content, "text"),
                 _td(f'<ul class="items">{evidence}</ul>' if evidence else "-", "text"),
                 _td(_conflicts(row["conflict_rows"]), "text"),
@@ -699,7 +699,7 @@ def _review(cur: psycopg.Cursor, query: dict[str, str]) -> str:
             ]
         )
     candidates = _table(
-        ("id", "kind", "scope", "content", "evidence", "retired conflicts", "proposed"),
+        ("id", "kind", "project", "content", "evidence", "retired conflicts", "proposed"),
         candidate_rows,
         empty="no candidates waiting",
     )
