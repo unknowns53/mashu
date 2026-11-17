@@ -475,7 +475,7 @@ function projectDetail(row) {
     meta(idTag(row.project_id), t("work.project_created", { when: day(row.created_at) })),
     h("h1", { class: "title", text: row.name }),
     row.summary ? h("p", { class: "sub", text: row.summary }) : null,
-    h("p", { class: "sub", text: [projectTasks(row), t("work.project_rules", { n: row.n_rules })].join("・") }),
+    h("p", { class: "sub", text: [projectTasks(row), t("work.project_rules", { n: row.n_rules }), t("work.project_tokens", { n: row.push_tokens })].join("・") }),
     section(
       t("work.project_folders"),
       row.folders.length,
@@ -532,10 +532,14 @@ function projectForm(target, row) {
       },
       onSubmit: (values) =>
         act(async () => {
-          if (row) await call("project.save", { project_id: row.project_id, name: values.name, summary: values.summary });
-          else await call("project.save", { name: values.name, path: values.path.trim() || null });
+          const saved = row
+            ? await call("project.save", { project_id: row.project_id, name: values.name, summary: values.summary })
+            : await call("project.save", { name: values.name, path: values.path.trim() || null });
           work.creating = null;
           work.panel = null;
+          if (saved.unchecked) return t("project.unchecked");
+          if (saved.malformed && saved.malformed.length) return t("project.malformed");
+          return "";
         }, row ? t("work.saved") : t("work.created")),
     })
   );

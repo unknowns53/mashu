@@ -2,7 +2,7 @@
 // the schema, versions and updates, starting at login, and the window's language.
 "use strict";
 
-const SECTIONS = ["health", "missed", "bootstrap", "projects", "topics", "routes", "limits", "schema", "version", "startup", "display"];
+const SECTIONS = ["health", "missed", "bootstrap", "topics", "routes", "limits", "schema", "version", "startup", "display"];
 
 const settings = { section: "health", editing: null, bootstrapCwd: "", bootstrap: null };
 
@@ -209,48 +209,6 @@ function bootstrapView(answer) {
   ];
 }
 
-async function projectsSection() {
-  const { projects } = await call("project.list");
-  const edit = (row) =>
-    editInSection({
-      title: row ? row.name : t("project.new"),
-      fields: [
-        { name: "name", label: t("project.name"), value: row ? row.name : "" },
-        { name: "summary", label: t("project.summary"), kind: "area", rows: 2, value: row ? row.summary : "" },
-      ],
-      submit: row ? t("common.save") : t("common.create"),
-      done: t("project.saved"),
-      onSubmit: async (values) => {
-        const saved = await call("project.save", { project_id: row ? row.project_id : null, ...values });
-        if (saved.unchecked) return t("project.unchecked");
-        if (saved.malformed && saved.malformed.length) return t("project.malformed");
-        return "";
-      },
-    });
-  const remove = async (row) => {
-    const yes = await confirmDialog({ title: t("project.remove_confirm"), lines: [row.name, t("project.remove_note")], confirm: t("common.remove"), danger: true });
-    if (!yes) return;
-    act(async () => {
-      const removed = await call("project.remove", { project_id: row.project_id });
-      return removed.removed === "archived" ? t("project.archived") : "";
-    }, t("project.removed"));
-  };
-  return [
-    sectionHead(t("settings.projects"), button(t("project.new"), () => edit(null))),
-    table(
-      [t("project.name"), t("project.rules"), t("project.tokens"), t("project.summary")],
-      projects,
-      (row) => [
-        [row.name, "name"],
-        [String(row.n_rules), row.n_rules ? "num" : "num zero"],
-        [`${row.push_tokens} token`, row.push_tokens ? "num" : "num zero"],
-        [row.summary || "", "muted"],
-      ],
-      (row) => [button(t("common.edit"), () => edit(row), { kind: "quiet small" }), button(t("common.remove"), () => remove(row), { kind: "quiet small danger" })]
-    ),
-  ];
-}
-
 async function topicsSection() {
   const [{ topics, capacity }, choices] = await Promise.all([call("topic.list"), loadChoices()]);
   const edit = (row) =>
@@ -295,30 +253,29 @@ async function topicsSection() {
   ];
 }
 
+/** Folders recorded as outside every project; a project's own folders are kept on its page under Work. */
 async function routesSection() {
-  const [{ routes }, choices] = await Promise.all([call("route.list"), loadChoices()]);
+  const { routes } = await call("route.list");
   const edit = (row) =>
     editInSection({
       title: row ? tilde(row.path_prefix) : t("route.new"),
-      fields: [
-        { name: "path", label: t("route.path"), kind: "folder", value: row ? row.path_prefix : "" },
-        { name: "project", label: t("route.area"), kind: "select", options: projectOptions(choices, t("route.ignored")), value: row ? row.project_name || "" : "" },
-      ],
+      fields: [{ name: "path", label: t("route.path"), kind: "folder", value: row ? row.path_prefix : "" }],
       submit: row ? t("common.save") : t("common.add"),
       done: t("route.saved"),
-      onSubmit: (values) => call("route.save", { route_id: row ? row.route_id : null, path: values.path, project: values.project || null }).then(() => ""),
+      onSubmit: (values) => call("route.save", { route_id: row ? row.route_id : null, path: values.path, project: null }).then(() => ""),
     });
   const remove = async (row) => {
     const yes = await confirmDialog({ title: t("route.remove_confirm"), lines: [tilde(row.path_prefix)], confirm: t("common.remove"), danger: true });
     if (yes) act(() => call("route.remove", { path: row.path_prefix }), t("route.removed"));
   };
-  const sorted = [...routes].sort((a, b) => a.path_prefix.localeCompare(b.path_prefix));
+  const ignored = routes.filter((row) => !row.project_name).sort((a, b) => a.path_prefix.localeCompare(b.path_prefix));
   return [
     sectionHead(t("settings.routes"), button(t("route.new"), () => edit(null))),
+    h("p", { class: "sub", text: t("route.projects_note") }),
     table(
-      [t("route.path"), t("route.area")],
-      sorted,
-      (row) => [[tilde(row.path_prefix), "mono"], row.project_name ? [row.project_name, "name"] : [t("route.ignored"), "muted"]],
+      [t("route.path")],
+      ignored,
+      (row) => [[tilde(row.path_prefix), "mono"]],
       (row) => [button(t("common.edit"), () => edit(row), { kind: "quiet small" }), button(t("common.remove"), () => remove(row), { kind: "quiet small danger" })]
     ),
   ];
@@ -545,7 +502,6 @@ const SECTION_VIEWS = {
   health: healthSection,
   missed: missedSection,
   bootstrap: async () => bootstrapSection(),
-  projects: projectsSection,
   topics: topicsSection,
   routes: routesSection,
   limits: limitsSection,

@@ -188,7 +188,7 @@ remote-shell command \b(cluster-wrapper|scheduler-cmd)\b
 | 判断待ち（Inbox） | candidate、Memory change proposal、close の提案を一覧に並べる。candidate の採用、却下、保留と文面の編集、proposal の適用、却下、取り下げ、close の提案の受け入れ。topic へ採用するときは、その場で新しい topic を作成できる |
 | メモリ（Memory） | active と retired の Memory、Temporary Context の一覧と検索。根拠と revision を表示する。直接の登録、本文と理由の編集、配信先の変更、retire と復元、Temporary Context との相互変換 |
 | 作業（Work） | active、dormant、closed の Task と Project。Task の作成、編集、lease（活動期限）の延長、close、reopen と、Project の作成、編集、削除、フォルダの追加と削除。Project は作成のときにフォルダも登録できる |
-| 設定（Settings） | 容量と最近の記録、Bootstrap preview、Project と Topic とフォルダの編集、配信量の上限、migration の適用、表示の言語、バージョンと更新 |
+| 設定（Settings） | 容量と最近の記録、Bootstrap preview、Topic と、どの Project にも属さない「無視するフォルダ」の編集、配信量の上限、migration の適用、表示の言語、バージョンと更新 |
 
 編集は、詳細の表示をその場で入力欄に変えて行う。⌘/Ctrl + Enter で保存し、Esc で取り消す。一覧は ↑↓ か j/k で移動し、/ で検索欄へ移る。retire した規則を書き戻す操作、似た Task がある中での Task の作成、削除、migration の適用は、理由や候補を見せて確認してから実行する。Bootstrap preview は入力したディレクトリで開くセッションに配信される内容を示し、TUI と同様に記録される。設定の「知識があったのに起きた失敗」は、メモリ、タスク、指示ファイルに知識があったのに起きた失敗を新しい順に並べ、知識があった場所と、同じ場所が名指された件数を示す。メモリとタスクはそこから開ける。ウィンドウを閉じてもトレイに残り、トレイのアイコンか、macOS では Dock のアイコンを押すと再び開く。終了するときはトレイのメニューの Quit を使う。設定の「起動」で「ログイン時に起動」にチェックを入れると、ログインのたびにアプリが起動する。表示の言語は日本語と英語を切り替えられる。CLI と TUI の文言は英語だけである。
 
