@@ -290,42 +290,6 @@ def _check_ruling_cap(cur: psycopg.Cursor, task_id: UUID, *, adding: int, withdr
     )
 
 
-def _last_own_write(cur: psycopg.Cursor, task_id: UUID, session: UUID | None, minutes: int) -> Any:
-    """When this session last wrote this task's state inside the checkpoint interval."""
-    if session is None or minutes <= 0:
-        return None
-    cur.execute(
-        """
-        SELECT max(created_at) AS written_at FROM event_log
-        WHERE event_type = 'task_state_replaced'
-          AND detail->>'task_id' = %s AND detail->>'session' = %s
-          AND created_at > clock_timestamp() - make_interval(mins => %s)
-        """,
-        (str(task_id), str(session), minutes),
-    )
-    return cur.fetchone()["written_at"]
-
-
-def _interval_warning(cur: psycopg.Cursor, task_id: UUID, session: UUID | None) -> str | None:
-    """The warning for one session's second write to a task inside the interval.
-
-    Agents measuring or iterating change status and next steps every few minutes and read
-    each change as a reason to write, so the write is answered with a warning. It still goes
-    through whatever it carries: a refusal dropped what the user ruled after the first write,
-    and an exemption for some content would be met by making that content up.
-    """
-    minutes = settings.checkpoint_interval_minutes(cur)
-    written_at = _last_own_write(cur, task_id, session, minutes)
-    if written_at is None:
-        return None
-    return (
-        f"this session also wrote this task's state at {written_at:%H:%M}, inside the "
-        f"{minutes}-minute interval. This write was kept. A checkpoint carries only the "
-        "user's rulings, sources, and the state before you stop; progress, findings, and "
-        "measurements go in a commit or the project's documents, not into another write"
-    )
-
-
 def checkpoint(
     cur: psycopg.Cursor,
     task_id: UUID,
@@ -373,7 +337,6 @@ def checkpoint(
     )
     artifact_items, artifact_problems = _items("artifacts", artifacts, set_limits=set_limits)
     current = tasks.task_get(cur, task_id)["state"]
-    warning = _interval_warning(cur, task_id, session)
     problems = [
         *_what_changed_problems(what_changed),
         *tasks.limit_problems(tasks.replaced_state(current, **given), current),
@@ -438,8 +401,6 @@ def checkpoint(
         result["unchecked"] = bool(result.get("unchecked")) or report["unchecked"]
         if report.get("malformed"):
             result["malformed"] = max(result.get("malformed", 0), report["malformed"])
-    if warning:
-        result["warning"] = warning
     return result
 
 

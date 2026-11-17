@@ -473,7 +473,7 @@ def test_mcp_refuses_a_task_write_carrying_tool_call_markup(mcp, dsn, monkeypatc
         assert tasks.task_get(cur, task_id)["state"]["approach"] is None
 
 
-def test_a_session_writing_state_again_soon_is_warned_over_mcp(mcp, dsn):
+def test_a_session_writing_state_again_soon_is_kept_under_one_session_id_over_mcp(mcp, dsn):
     with db.transaction(dsn) as cur:
         new_project(cur, "mashu")
     made = mcp("task_create", project="mashu", name=SCHEMA, goal=GOAL)
@@ -486,10 +486,9 @@ def test_a_session_writing_state_again_soon_is_warned_over_mcp(mcp, dsn):
         expect_updated_at=first["state"]["updated_at"],
         status_text="written",
         what_changed="wrote it",
-        rulings=[{"ruling": "kept with a warning", "user_instruction": "警告つきで残して"}],
+        rulings=[{"ruling": "kept on the second write", "user_instruction": "二回目も残して"}],
     )
-    assert "warning" not in first
-    assert again["ok"] is True and "inside the 30-minute interval" in again["warning"]
+    assert again["ok"] is True and "warning" not in again
     with db.transaction(dsn) as cur:
         assert tasks.task_get(cur, task_id)["state"]["status_text"] == "written"
         cur.execute(

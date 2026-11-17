@@ -644,18 +644,6 @@ def version(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     return {"version": __version__, "checkout": _checkout()}
 
 
-def interval_get(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    return {
-        "minutes": settings.checkpoint_interval_minutes(cur),
-        "max": settings.MAX_CHECKPOINT_INTERVAL_MINUTES,
-    }
-
-
-def interval_set(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    minutes = _int(args, "minutes")
-    return {"minutes": settings.set_checkpoint_interval_minutes(cur, minutes, actor=ACTOR)}
-
-
 def schema_status(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     return {"pending": migrate.pending(cur)}
 
@@ -715,8 +703,6 @@ OPERATIONS: dict[str, Operation] = {
     "route.list": route_list,
     "route.save": route_save,
     "route.remove": route_remove,
-    "interval.get": interval_get,
-    "interval.set": interval_set,
     "limits.get": limits_get,
     "version": version,
     "limits.set": limits_set,
@@ -746,7 +732,6 @@ READS = frozenset(
         "scope.list",
         "topic.list",
         "route.list",
-        "interval.get",
         "limits.get",
         "version",
         "schema.status",

@@ -52,10 +52,6 @@ DEFAULT_TOPIC_CAPACITY = 800
 #: How long a task's lease runs from its last sign of activity (project-state 7).
 DEFAULT_TASK_LEASE_DAYS = 14
 
-#: How long one session waits between two writes of a task's state until the user sets
-#: another value on the Settings screen (settings.py).
-DEFAULT_CHECKPOINT_INTERVAL_MINUTES = 30
-
 #: Similarity at which two pains count as the same hole (4.1).
 DEFAULT_MATCH_THRESHOLD = 0.45
 

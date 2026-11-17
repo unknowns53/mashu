@@ -21,7 +21,6 @@ from mashu import (
     approvals,
     bootstrap,
     capacity,
-    config,
     db,
     events,
     memories,
@@ -1022,10 +1021,7 @@ def build_server() -> Any:
             "changed goal, approach, or blockers, and where things stand before you stop. "
             "Progress, findings, measurements, rejected options, and each next step belong in "
             "commits and the project's documents, linked as `artifacts`, so a new next step is "
-            "no reason to write. A session's second "
-            "write to a task inside the interval the user sets "
-            f"({config.DEFAULT_CHECKPOINT_INTERVAL_MINUTES} minutes unless changed) is kept "
-            "and answered with `warning`. One write, before you stop, is usually all a session "
+            "no reason to write. One write, before you stop, is usually all a session "
             "needs. Wanting to write again soon means what you have is progress or a "
             "measurement: put it in a commit or a document, not in a later checkpoint. "
             'Omitted fields keep their value; "" or [] clears one. Pass the '

@@ -1,8 +1,8 @@
 // Settings: store health, mistakes made despite existing knowledge, what a session receives, scopes, topics, routes, delivery limits,
-// the checkpoint interval, the schema, versions and updates, starting at login, and the window's language.
+// the schema, versions and updates, starting at login, and the window's language.
 "use strict";
 
-const SECTIONS = ["health", "missed", "bootstrap", "scopes", "topics", "routes", "limits", "interval", "schema", "version", "startup", "display"];
+const SECTIONS = ["health", "missed", "bootstrap", "scopes", "topics", "routes", "limits", "schema", "version", "startup", "display"];
 
 const settings = { section: "health", editing: null, bootstrapCwd: "", bootstrap: null };
 
@@ -386,33 +386,6 @@ async function limitsSection() {
   ];
 }
 
-async function intervalSection() {
-  const { minutes, max } = await call("interval.get");
-  const input = h("input", { type: "number", value: String(minutes) });
-  input.min = "0";
-  input.max = String(max);
-  const submit = (event) => {
-    event.preventDefault();
-    const wanted = Number(input.value);
-    if (!Number.isInteger(wanted)) {
-      toast(t("interval.not_whole"), "warn");
-      return;
-    }
-    act(() => call("interval.set", { minutes: wanted }), t("interval.saved", { n: wanted }));
-  };
-  return [
-    h("h1", { class: "title", text: t("settings.interval") }),
-    h("p", { class: "sub", text: minutes === 0 ? t("interval.none") : t("interval.every", { n: minutes }) }),
-    h(
-      "form",
-      { class: "row interval-row", on: { submit } },
-      input,
-      h("span", { class: "sub", text: t("interval.minutes") }),
-      h("button", { type: "submit", class: "btn primary", text: t("common.save") })
-    ),
-  ];
-}
-
 async function schemaSection() {
   const { pending } = await call("schema.status");
   const nodes = [h("h1", { class: "title", text: t("settings.schema") })];
@@ -578,7 +551,6 @@ const SECTION_VIEWS = {
   limits: limitsSection,
   version: versionSection,
   startup: startupSection,
-  interval: intervalSection,
   schema: schemaSection,
   display: async () => displaySection(),
 };
