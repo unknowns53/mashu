@@ -184,7 +184,8 @@ pub(crate) fn run(program: &Path, args: &[&str], root: &Path) -> Result<String, 
     }
 }
 
-/// (major, minor, patch, is_release) of "4.1.0" or "4.1.0b1"; a prerelease sorts below its release.
+/// (major, minor, patch, is_release) of "4.1.0", "4.1.0-beta.1", or a checkout from before
+/// prereleases took SemVer's -, "4.1.0b1"; a prerelease sorts below its release.
 fn version_key(text: &str) -> Option<(u64, u64, u64, bool)> {
     let text = text.trim().trim_start_matches('v');
     let end = text
@@ -195,7 +196,9 @@ fn version_key(text: &str) -> Option<(u64, u64, u64, bool)> {
     Some((major, minor, patch, end == text.len()))
 }
 
-/// The newest release tag a remote has; prereleases are never offered.
+/// The newest release tag a remote has. Prereleases are never offered, whatever the app's
+/// version: only tools/update.sh --pre installs one, and an app on a prerelease moves to the
+/// first release newer than it.
 pub(crate) fn latest_release(
     git: &Path,
     dir: &Path,
