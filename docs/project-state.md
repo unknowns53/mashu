@@ -96,7 +96,7 @@ evidence: git commit 9d12f5a
 
 Task の所属単位であり、そのフォルダで開いたセッションに届く規則と Task card の境界でもある。通常は repository または研究単位に対応する。Task は `task.project_id` で Project を指す。
 
-active Task card はその Task の Project のセッションにだけ配信し、unrouted session には配信しない。全セッションに届く Task は持たない。`task_create` は `project` を省くと、セッションの cwd が属する Project に Task を置く。デスクトップアプリの作成フォームと `mashu project --add <name> --folder <path>` は、Project と、そのフォルダから Project への route を同じ transaction で登録する。そのフォルダが別の Project に属していれば上書きせずに拒否する。Current State 全文は Project にかかわらず、Task IDを指定した `task_get` にだけ返す。
+active Task card はその Task の Project のセッションにだけ配信し、unrouted session には配信しない。全セッションに届く Task は持たない。`task_create` は `project` を省くと、セッションの cwd が属する Project に Task を置く。デスクトップアプリの作成フォームと `mashu project --add <name> --folder <path>` は、Project と、そのフォルダから Project への route を同じ transaction で登録する。フォルダの追加と「無視するフォルダ」への登録も含めて、そのフォルダが別の Project か無視の側に属していれば上書きせずに拒否する。保管された Project の Task は reopen を拒否する。open に戻しても書き込めないからである。Current State 全文は Project にかかわらず、Task IDを指定した `task_get` にだけ返す。
 
 ### 5.2 Task
 

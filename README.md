@@ -379,7 +379,7 @@ mashu task create "Add CLI help" --project mashu --goal "Every command explains 
 mashu task touch 1a2b3c4d
 ~~~
 
-新しいリポジトリを Mashu につなぐには、デスクトップアプリの作業画面で Project を作る。作成フォームでフォルダを選ぶと名前がフォルダ名で埋まり、作成すると、Project と、そのフォルダからその Project への対応が同じ transaction で登録される。そのフォルダがすでに別の Project に属していれば、上書きせずに拒否する。フォルダは Project の画面で後から追加し、外せる。フォルダの欄は、どの画面でもシステムのフォルダ選択ダイアログで選べ、`~` から始まるパスを直接入力することもできる。
+新しいリポジトリを Mashu につなぐには、デスクトップアプリの作業画面で Project を作る。作成フォームでフォルダを選ぶと名前がフォルダ名で埋まり、作成すると、Project と、そのフォルダからその Project への対応が同じ transaction で登録される。フォルダは Project の画面で後から追加し、外せる。作成でも追加でも、そのフォルダがすでに別の Project か「無視するフォルダ」に属していれば、上書きせずに拒否するので、移すときは元の側から外してから加える。削除して保管された Project の Task は reopen できない。フォルダの欄は、どの画面でもシステムのフォルダ選択ダイアログで選べ、`~` から始まるパスを直接入力することもできる。
 
 `mashu task create` と MCP の `task_create` は、`--project`（`project`）を省くと、今のディレクトリが属する Project に Task を置く。
 

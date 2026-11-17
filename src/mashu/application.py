@@ -418,14 +418,14 @@ def save_topic(
 def set_route(
     cur: psycopg.Cursor, *, path_prefix: str, project_name: str, actor: str
 ) -> dict[str, Any]:
-    """Map a directory tree to a named project."""
-    project_id = projects.require_project(cur, project_name)["project_id"]
-    return routing.add_route(cur, path_prefix=path_prefix, project_id=project_id, actor=actor)
+    """Map a directory tree to a named project, refusing one held elsewhere."""
+    project = projects.require_project(cur, project_name)
+    return projects.add_folder(cur, project, path_prefix, actor=actor)
 
 
 def ignore_route(cur: psycopg.Cursor, *, path_prefix: str, actor: str) -> dict[str, Any]:
-    """Mark a directory tree as intentionally outside every project."""
-    return routing.add_route(cur, path_prefix=path_prefix, project_id=None, actor=actor)
+    """Mark a directory tree as intentionally outside every project, unless one holds it."""
+    return projects.add_folder(cur, None, path_prefix, actor=actor)
 
 
 def update_route(

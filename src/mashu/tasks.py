@@ -1105,6 +1105,8 @@ def reopen(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, Any]:
         raise MashuError(f"no task {task_id}")
     if task["status"] != "closed":
         raise MashuError(f"task '{task['name']}' is already open")
+    # An open task in a removed project could be read but never written again.
+    projects.require_project(cur, task["project_id"])
     cur.execute(
         """
         UPDATE task

@@ -47,20 +47,27 @@ def create_project(
 
 
 def add_folder(
-    cur: psycopg.Cursor, project: dict[str, Any], path: str, *, actor: str
+    cur: psycopg.Cursor, project: dict[str, Any] | None, path: str, *, actor: str
 ) -> dict[str, Any]:
-    """Route a folder to this project, refusing one another project or the ignore list holds."""
+    """Route a folder to this project, or to none to ignore it.
+
+    A folder another project or the ignore list holds is refused rather than taken over, since
+    the screen adding it may not show who holds it.
+    """
+    if not str(path or "").strip():
+        raise MashuError("a route needs the directory it maps")
     prefix = routing.normalise(path)
+    project_id = project["project_id"] if project else None
     cur.execute(
         "SELECT s.name FROM route r LEFT JOIN project s ON s.project_id = r.project_id "
         "WHERE r.path_prefix = %s AND r.project_id IS DISTINCT FROM %s",
-        (prefix, project["project_id"]),
+        (prefix, project_id),
     )
     taken = cur.fetchone()
     if taken is not None:
         owner = f"project '{taken['name']}'" if taken["name"] else "the ignored folders"
         raise MashuError(f"{prefix} already belongs to {owner}; remove it there first")
-    return routing.add_route(cur, path_prefix=prefix, project_id=project["project_id"], actor=actor)
+    return routing.add_route(cur, path_prefix=prefix, project_id=project_id, actor=actor)
 
 
 def update_project(
@@ -127,7 +134,9 @@ def require_project(
     if row is not None and not row.get("archived_at"):
         return row
     if row is not None:
-        raise MashuError(f"project '{name}' is archived; past records name it, so it stays unused")
+        raise MashuError(
+            f"project '{row['name']}' is archived; past records name it, so it stays unused"
+        )
     # SELECT * rather than naming archived_at, so a store without that column still answers.
     cur.execute("SELECT * FROM project ORDER BY name")
     known = [*also, *(r["name"] for r in cur.fetchall() if not r.get("archived_at"))]
