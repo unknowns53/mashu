@@ -271,7 +271,6 @@ async function routesSection() {
   const ignored = routes.filter((row) => !row.project_name).sort((a, b) => a.path_prefix.localeCompare(b.path_prefix));
   return [
     sectionHead(t("settings.routes"), button(t("route.new"), () => edit(null))),
-    h("p", { class: "sub", text: t("route.projects_note") }),
     table(
       [t("route.path")],
       ignored,
