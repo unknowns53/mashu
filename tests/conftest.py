@@ -12,7 +12,7 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
-from mashu import db, memories, memory_changes, nominations, projects, screen, server, tasks
+from mashu import db, memories, memory_changes, nominations, scopes, screen, server, tasks
 from mashu.migrate import migrate, migration_files
 
 TEST_DB = os.environ.get("MASHU_TEST_DB", "mashu_test")
@@ -236,7 +236,9 @@ def apply_change(cur, change, instruction="Apply it", *, version=None, request_i
 
 
 def new_project(cur: psycopg.Cursor, name: str = "enrai", **kwargs):
-    return projects.create_project(cur, name=name, actor="user", **kwargs)
+    """A scope to file tasks under, which is all a project now is; tasks name it project_id."""
+    row = scopes.create_scope(cur, name=name, actor="user", **kwargs)
+    return {**row, "project_id": row["scope_id"]}
 
 
 def new_task(cur: psycopg.Cursor, name: str, project: str = "enrai", **kwargs):

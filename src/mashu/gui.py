@@ -22,7 +22,6 @@ from mashu import (
     memories,
     memory_changes,
     nominations,
-    projects,
     task_history,
     tasks,
 )
@@ -454,7 +453,8 @@ def _proposal_text(proposal: dict[str, Any] | None) -> str:
 
 def _task_list(cur: psycopg.Cursor, query: dict[str, str]) -> str:
     activity = _choice(query, "activity", TASK_ACTIVITIES)
-    names = [row["name"] for row in projects.list_projects(cur, include_archived=True)]
+    cur.execute("SELECT name FROM scope ORDER BY name")
+    names = [row["name"] for row in cur.fetchall()]
     project = _choice(query, "project", ("", *names))
     needle = query.get("q", "")
     every = tasks.task_list(cur, project=project or None, activity=activity)

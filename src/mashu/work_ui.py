@@ -7,7 +7,7 @@ import os
 from typing import Any
 from uuid import UUID
 
-from mashu import application, close_ui, db, projects, screen, task_actions, tasks
+from mashu import application, close_ui, db, scopes, screen, task_actions, tasks
 from mashu.errors import DuplicateTaskError, MashuError
 from mashu.memory_ui import Order, _next_order, _order_text, _ordered
 
@@ -31,7 +31,7 @@ _HELP = """
   Home/End       go to the first or last row
   PgUp/PgDn      move one screenful
   /              search tasks by id, name, project, state, proposal, or history,
-                 and projects by id, name, or scope
+                 and projects by id, name, or folder
   ⏎              read the selected task or project in full
   space          while reading, show the next screenful
   n              create a task; in the projects view, create a project
@@ -64,7 +64,7 @@ def _task_id(row: dict[str, Any]) -> UUID:
 
 
 def _row_id(view: str, row: dict[str, Any]) -> UUID:
-    return row["project_id"] if view == "projects" else _task_id(row)
+    return row["scope_id"] if view == "projects" else _task_id(row)
 
 
 def _find(rows: list[dict[str, Any]], wanted: UUID | None, view: str) -> int | None:
@@ -81,7 +81,7 @@ def _load_tasks(dsn: str | None, activity: str) -> list[dict[str, Any]]:
 
 def _load_projects(dsn: str | None) -> list[dict[str, Any]]:
     with db.transaction(dsn) as cur:
-        return projects.list_projects(cur)
+        return scopes.list_scopes(cur)
 
 
 def _load(dsn: str | None, view: str) -> list[dict[str, Any]]:
@@ -127,7 +127,7 @@ def _matches_task(row: dict[str, Any], query: str) -> bool:
 
 def _matches_project(row: dict[str, Any], query: str) -> bool:
     needle = query.casefold()
-    values = (row.get("project_id"), row.get("name"), row.get("scope_name"))
+    values = (row.get("scope_id"), row.get("name"), *row.get("folders", ()))
     return any(needle in str(value).casefold() for value in values if value is not None)
 
 
@@ -185,8 +185,8 @@ def _task_line(row: dict[str, Any], width: int) -> str:
 
 
 def _project_line(row: dict[str, Any], width: int) -> str:
-    counts = f"{row['n_active']:>2}a {row['n_dormant']:>2}d {row['n_closed']:>2}c"
-    fixed = f"   {_short(row['project_id'])}  {counts}  "
+    counts = f"{row['n_tasks_active']:>2}a {row['n_tasks_dormant']:>2}d {row['n_tasks_closed']:>2}c"
+    fixed = f"   {_short(row['scope_id'])}  {counts}  "
     return fixed + screen.clip(row["name"], max(1, width - screen.cells(fixed)))
 
 
@@ -323,10 +323,10 @@ def _task_detail(row: dict[str, Any]) -> str:
 
 def _project_detail(row: dict[str, Any]) -> str:
     lines = [
-        screen.bold(f"  {_short(row['project_id'])}  {row['name']}"),
-        f"  scope  {row.get('scope_name') or '-'}",
-        f"  tasks  {row['n_active']} active  ·  {row['n_dormant']} dormant  "
-        f"·  {row['n_closed']} closed",
+        screen.bold(f"  {_short(row['scope_id'])}  {row['name']}"),
+        f"  tasks  {row['n_tasks_active']} active  ·  {row['n_tasks_dormant']} dormant  "
+        f"·  {row['n_tasks_closed']} closed",
+        *(f"  folder  {folder}" for folder in row.get("folders", ())),
         f"  created  {_date(row.get('created_at'))}",
     ]
     return "\n".join(lines)
@@ -449,15 +449,13 @@ def _create_project(dsn: str | None) -> tuple[str, UUID | None]:
     name = _readline("  project name [empty cancels]: ")
     if not name:
         return screen.warning("  ! project creation cancelled"), None
-    scope_name = _readline("  scope [empty pushes its cards into every scope]: ")
-    if scope_name is None:
+    folder = _readline("  folder whose sessions it serves [optional]: ")
+    if folder is None:
         return screen.warning("  ! project creation cancelled"), None
     with db.transaction(dsn) as cur:
-        created = task_actions.save_project(
-            cur, None, name=name, scope_name=scope_name, actor=ACTOR
-        )
-    note = screen.success(f"  ✓ created project  {_short(created['project_id'])}")
-    return note, created["project_id"]
+        created = scopes.create_scope(cur, name=name, path=folder or None, actor=ACTOR)
+    note = screen.success(f"  ✓ created project  {_short(created['scope_id'])}")
+    return note, created["scope_id"]
 
 
 def _replacement(
@@ -537,14 +535,11 @@ def _edit_project(dsn: str | None, row: dict[str, Any]) -> str:
     name = _replacement("project name", row["name"], clearable=False)
     if isinstance(name, screen.Cancelled):
         return screen.warning("  ! project edit cancelled")
-    scope_name = _replacement("scope", row.get("scope_name"))
-    if isinstance(scope_name, screen.Cancelled):
-        return screen.warning("  ! project edit cancelled")
     with db.transaction(dsn) as cur:
-        task_actions.save_project(
-            cur, row["project_id"], name=name or row["name"], scope_name=scope_name, actor=ACTOR
+        scopes.update_scope(
+            cur, row["scope_id"], name=name or row["name"], summary=row.get("summary"), actor=ACTOR
         )
-    return screen.success(f"  ✓ edited project  {_short(row['project_id'])}")
+    return screen.success(f"  ✓ edited project  {_short(row['scope_id'])}")
 
 
 def _touch(dsn: str | None, row: dict[str, Any]) -> str:

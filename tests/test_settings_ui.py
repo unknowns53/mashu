@@ -62,7 +62,7 @@ def test_health_collects_capacity_queues_evidence_and_task_activity(dsn):
     assert value.temporary_count == 1 and value.temporary_tokens > 0
     assert (value.pending_ready, value.pending_deferred) == (1, 1)
     assert value.ledger_30d >= 4
-    assert value.delivery_failures_30d == 1 and value.scope_count == 1
+    assert value.delivery_failures_30d == 1 and value.scope_count == 2
     assert (value.tasks_active, value.tasks_dormant, value.tasks_closed) == (1, 1, 1)
 
 
@@ -73,8 +73,7 @@ def test_bootstrap_preview_resolves_cwd_and_shows_every_payload_share(dsn, monke
         routing.add_route(cur, path_prefix=here, scope_id=scope_id, actor="user")
         remember(cur, "always in preview")
         remember(cur, "scoped into preview", scope_id=scope_id, delivery="scope")
-        new_project(cur, "preview project", scope_id=scope_id)
-        new_task(cur, "preview active state", "preview project", goal="show the current state")
+        new_task(cur, "preview active state", "preview", goal="show the current state")
         temporary.put_temporary(
             cur, content="preview temporary context", scope_id=scope_id, actor="user", days=1
         )

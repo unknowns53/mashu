@@ -26,7 +26,6 @@ from mashu import (
     memories,
     memory_changes,
     nominations,
-    projects,
     references,
     routing,
     scopes,
@@ -890,10 +889,21 @@ def build_server() -> Any:
 
     @server.tool()
     def project_list(include_archived: bool = False) -> dict[str, Any]:
-        """List projects and the task counts they currently carry."""
+        """List projects, the folders their sessions open in, and the tasks they carry."""
         try:
             with db.transaction() as cur:
-                found = projects.list_projects(cur, include_archived=include_archived)
+                found = [
+                    {
+                        "project_id": row["scope_id"],
+                        "name": row["name"],
+                        "folders": row["folders"],
+                        "archived_at": row.get("archived_at"),
+                        "n_active": row["n_tasks_active"],
+                        "n_dormant": row["n_tasks_dormant"],
+                        "n_closed": row["n_tasks_closed"],
+                    }
+                    for row in scopes.list_scopes(cur, include_archived=include_archived)
+                ]
                 return _plain({"ok": True, "projects": found})
         except MashuError as error:
             return _failure(error)
@@ -906,9 +916,9 @@ def build_server() -> Any:
             "Open one only for work expected to span sessions, not for a single request or a "
             "step of a larger task, and search with task_search first. Bootstrap delivers a "
             "scope's cards newest activity first up to its card budget and only names the "
-            "older ones, so a needless task pushes real ones out of view. Projects are the "
-            "user's; when "
-            "none fits, ask the user to run `mashu project create`. `goal` names the outcome "
+            "older ones, so a needless task pushes real ones out of view. Without `project`, "
+            "the task is filed under the project this session's folder belongs to. Projects "
+            "are the user's; when none fits, ask the user to create one. `goal` names the outcome "
             "and `status_text` says where the task stands; both ride "
             "on every bootstrap card, so details go in approach or next_actions. "
             f"{state_contract} {_REFUSALS} Success and duplicate candidates return the card "
@@ -917,8 +927,8 @@ def build_server() -> Any:
         )
     )
     def task_create(
-        project: UUID | str,
         name: str,
+        project: UUID | str | None = None,
         goal: str | None = None,
         approach: str | None = None,
         status_text: str | None = None,
@@ -929,6 +939,14 @@ def build_server() -> Any:
     ) -> dict[str, Any]:
         try:
             with db.transaction() as cur:
+                if project is None:
+                    project, _, _ = _scope(cur, None)
+                    if project is None:
+                        raise MashuError(
+                            "this session's folder belongs to no project; pass `project` "
+                            "(project_list names them), or ask the user to add this folder "
+                            "to one"
+                        )
                 answer = tasks.task_create(
                     cur,
                     project=project,

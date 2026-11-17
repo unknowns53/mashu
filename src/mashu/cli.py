@@ -25,7 +25,6 @@ from mashu import (
     memory_actions,
     memory_changes,
     nominations,
-    projects,
     references,
     routing,
     scopes,
@@ -117,13 +116,13 @@ def _task_ref(cur: Any, ref: str) -> UUID:
 
 
 def _project_ref(cur: Any, ref: str) -> UUID:
-    """A project by the name it was opened under, or by the front of its id."""
-    row = projects.get_project(cur, ref)
+    """The scope a task is filed under, by its name or by the front of its id."""
+    row = scopes.get_scope(cur, ref)
     if row is not None:
-        return row["project_id"]
+        return row["scope_id"]
     if references.is_uuid_ref(ref):
-        return _resolve(cur, ref, table="project", id_col="project_id", label="project")
-    return projects.require_project(cur, ref)["project_id"]
+        return _resolve(cur, ref, table="scope", id_col="scope_id", label="scope")
+    return scopes.require_scope(cur, ref)["scope_id"]
 
 
 def _scope(cur: Any, name: str | None) -> UUID | None:
@@ -1235,16 +1234,20 @@ def cmd_scope(args: argparse.Namespace) -> int:
             print(f"{removed['removed']}  {target['name']}")
             return 0
         if args.add is not None:
-            row = scopes.create_scope(cur, name=args.add, summary=args.about, actor=ACTOR)
+            row = scopes.create_scope(
+                cur, name=args.add, summary=args.about, path=args.folder, actor=ACTOR
+            )
         else:
             rows = scopes.list_scopes(cur)
     if args.add is not None:
         _gate_warnings(row)
-        print(f"created  {row['name']}")
+        folder = f"  folder {row['path_prefix']}" if row.get("path_prefix") else ""
+        print(f"created  {row['name']}{folder}")
         return 0
-    print("name                         active  push_tokens")
+    print("name                         rules  push_tokens  tasks a/d/c")
     for row in rows:
-        print(f"{row['name'][:28]:28}  {row['n_active']:6}  {row['push_tokens']:11}")
+        counts = f"{row['n_tasks_active']}/{row['n_tasks_dormant']}/{row['n_tasks_closed']}"
+        print(f"{row['name'][:28]:28}  {row['n_active']:5}  {row['push_tokens']:11}  {counts}")
     return 0
 
 
@@ -1399,86 +1402,6 @@ def _print_task_rows(rows: list[dict[str, Any]], *, project: bool = True) -> Non
             if proposal["stale"]:
                 said += ", state written since"
             print(_flow(f"{said}: {proposal['reason']}", indent="          "))
-
-
-def cmd_project_list(args: argparse.Namespace) -> int:
-    with db.transaction(args.dsn) as cur:
-        rows = projects.list_projects(cur)
-    width = max([_cells("name"), *(_cells(row["name"]) for row in rows)])
-    print(f"{_pad('name', width)}  scope                 active  dormant  closed")
-    for row in rows:
-        print(
-            f"{_pad(row['name'], width)}  {(row['scope_name'] or '-')[:20]:20}  "
-            f"{row['n_active']:6}  {row['n_dormant']:7}  {row['n_closed']:6}"
-        )
-    return 0
-
-
-def _project_scope(cur: Any, given: str) -> UUID | None:
-    """A project's scope by name, with '-' for the cards pushed into every scope."""
-    return None if given == "-" else _scope(cur, given)
-
-
-def _scope_label(cur: Any, project_id: UUID) -> str:
-    return projects.show_project(cur, project_id)["scope_name"] or "- (every scope)"
-
-
-def cmd_project_create(args: argparse.Namespace) -> int:
-    with db.transaction(args.dsn) as cur:
-        if args.scope is not None:
-            scope_id = _project_scope(cur, args.scope)
-        else:
-            # An unscoped project spends a seat in every scope's card share, so it is
-            # never the default; the directory's route stands in for a missing --scope.
-            scope_id, _, _ = _routed_scope(cur)
-            if scope_id is None:
-                raise MashuError(
-                    "no --scope given and this directory is not routed to a scope. Pass "
-                    "--scope <name>, or --scope - to push this project's task cards into "
-                    "every scope."
-                )
-        row = projects.create_project(cur, name=args.name, actor=ACTOR, scope_id=scope_id)
-        label = _scope_label(cur, row["project_id"])
-    print(f"created  {_short(row['project_id'])}  {row['name']}  scope {label}")
-    return 0
-
-
-def cmd_project_edit(args: argparse.Namespace) -> int:
-    if args.name is None and args.scope is None:
-        raise MashuError("pass --name, --scope, or both to say what changes")
-    with db.transaction(args.dsn) as cur:
-        current = projects.require_project(cur, _project_ref(cur, args.ref))
-        row = projects.update_project(
-            cur,
-            current["project_id"],
-            name=current["name"] if args.name is None else args.name,
-            scope_id=(
-                current["scope_id"] if args.scope is None else _project_scope(cur, args.scope)
-            ),
-            actor=ACTOR,
-        )
-        label = _scope_label(cur, row["project_id"])
-    print(f"edited  {_short(row['project_id'])}  {row['name']}  scope {label}")
-    return 0
-
-
-def cmd_project_show(args: argparse.Namespace) -> int:
-    with db.transaction(args.dsn) as cur:
-        row = projects.show_project(cur, _project_ref(cur, args.ref))
-        open_tasks = tasks.task_list(cur, project=row["project_id"], activity="open")
-        _field("project", row["project_id"])
-        _field("name", row["name"])
-        _field("scope", row["scope_name"] or "-")
-        _field("created", _date(row["created_at"]))
-        if row["archived_at"] is not None:
-            _field("archived", _date(row["archived_at"]))
-        _field(
-            "tasks",
-            f"active={row['n_active']}  dormant={row['n_dormant']}  closed={row['n_closed']}",
-        )
-        print("open tasks")
-        _print_task_rows(open_tasks, project=False)
-    return 0
 
 
 def cmd_task_list(args: argparse.Namespace) -> int:
@@ -1727,11 +1650,11 @@ Managing durable rules:
   topic                     Group rules read only when one kind of work begins.
 
 Work state and routing:
-  project / task            Read and manage current project work.
-  scope / route             Map working directories to knowledge scopes.
+  task                      Read and manage current work.
+  scope / route             Map working directories to scopes, which hold tasks.
 
 Run `mashu COMMAND --help` for arguments and examples. Nested commands use
-`mashu project COMMAND --help` or `mashu task COMMAND --help`.
+`mashu task COMMAND --help`.
 
 IDs shown by list commands are shortened to eight characters. Any unique prefix
 of four or more characters is accepted wherever help says REF or ID.
@@ -1741,7 +1664,7 @@ Environment:
   MASHU_AGENT                Agent label used by `mashu serve` when --agent is absent.
 
 This is the human-facing CLI. Agents should normally use the Mashu MCP tools;
-project creation, direct remembering, review decisions, task closure, and task
+scope creation, direct remembering, review decisions, task closure, and task
 reopening remain User decisions even when the command is technically callable.
 """
 
@@ -2171,7 +2094,9 @@ def build_parser() -> argparse.ArgumentParser:
         "the scope register",
         description=(
             "List scopes, create one with --add and an optional --about, or remove one with "
-            "--remove. Removing needs a scope with no active memories, routes, open projects or "
+            "--remove. --folder with --add routes that folder to the new scope, so its sessions "
+            "can file tasks at once. Tasks are filed under a scope. "
+            "Removing needs a scope with no active memories, routes, open tasks or "
             "topics, standing temporary context, or pending candidates and changes: one never "
             "used is deleted, one that past records name is archived. Both are User-only."
         ),
@@ -2179,12 +2104,14 @@ def build_parser() -> argparse.ArgumentParser:
             "mashu scope",
             "mashu scope --add deployment",
             'mashu scope --add deployment --about "Production releases"',
+            "mashu scope --add website --folder ~/work/website",
             "mashu scope --remove deployment",
         ),
     )
     scope.add_argument("--add", metavar="NAME", help="create a scope with this name")
     scope.add_argument("--remove", metavar="NAME", help="delete or archive this scope")
     scope.add_argument("--about", metavar="LINE", help="what the scope covers")
+    scope.add_argument("--folder", metavar="PATH", help="with --add, the folder routed to it")
     scope.set_defaults(func=cmd_scope)
 
     topic = _command(
@@ -2273,81 +2200,6 @@ def build_parser() -> argparse.ArgumentParser:
     route_group.add_argument("--remove", metavar="PATH", help="drop the route for this path prefix")
     route.add_argument("--scope", help="the scope to route to; required with --add")
     route.set_defaults(func=cmd_route)
-
-    project = _command(
-        sub,
-        "project",
-        "the projects work state is filed under",
-        description=(
-            "List, create, edit, or inspect projects. Projects group tasks; scopes control "
-            "knowledge delivery, so the two are related but not interchangeable. A project's "
-            "scope decides which sessions receive its task cards."
-        ),
-        examples=(
-            "mashu project list",
-            "mashu project create website --scope frontend",
-            "mashu project edit website --scope backend",
-            "mashu project show website",
-        ),
-    )
-    project_sub = project.add_subparsers(dest="project_command", required=True, metavar="COMMAND")
-    _command(
-        project_sub,
-        "list",
-        "every project, and how many tasks it is carrying",
-        examples=("mashu project list",),
-    ).set_defaults(func=cmd_project_list)
-    project_create = _command(
-        project_sub,
-        "create",
-        "open a project (User only)",
-        description=(
-            "Open a project. Its task cards are pushed only to sessions in its scope. Without "
-            "--scope, the scope this directory is routed to is used, and a directory with no "
-            "routed scope is refused; '--scope -' pushes the cards into every scope."
-        ),
-        examples=(
-            "mashu project create website --scope frontend",
-            "mashu project create website",
-            "mashu project create notes --scope -",
-        ),
-    )
-    project_create.add_argument("name", help="what its tasks are filed under")
-    project_create.add_argument(
-        "--scope",
-        help="the scope its task cards are pushed to; '-' means every scope; "
-        "defaults to this directory's routed scope",
-    )
-    project_create.set_defaults(func=cmd_project_create)
-    project_edit = _command(
-        project_sub,
-        "edit",
-        "rename a project or change its scope (User only)",
-        description=(
-            "Rename a project or change the scope its task cards are pushed to, keeping its "
-            "tasks. A change that would push the busiest scope further over its card share "
-            "is refused."
-        ),
-        examples=(
-            "mashu project edit website --scope frontend",
-            "mashu project edit website --scope -",
-            "mashu project edit 1a2b3c4d --name storefront",
-        ),
-    )
-    project_edit.add_argument("ref", help=f"the project's name, or {_REF_HELP}")
-    project_edit.add_argument("--name", help="its new name")
-    project_edit.add_argument(
-        "--scope", help="the scope its task cards are pushed to; '-' means every scope"
-    )
-    project_edit.set_defaults(func=cmd_project_edit)
-    project_show = _command(
-        project_sub,
-        "show",
-        "one project and the tasks still open in it",
-        examples=("mashu project show website", "mashu project show 1a2b3c4d"),
-    )
-    project_show.add_argument("ref", help=f"the project's name, or {_REF_HELP}")
-    project_show.set_defaults(func=cmd_project_show)
 
     task = _command(
         sub,

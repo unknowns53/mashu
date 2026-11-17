@@ -70,7 +70,6 @@ class Dashboard:
     tasks_dormant: int
     task_proposals: int
     active_memories: int
-    projects: int
     tasks_closed: int = 0
     retired_memories: int = 0
     temporary_contexts: int = 0
@@ -118,7 +117,7 @@ def _screen_text(state: Dashboard, at: int) -> str:
     )
     work_detail = (
         f"{state.tasks_active} active  ·  {state.tasks_dormant} dormant  ·  "
-        f"{state.tasks_closed} closed  ·  {state.projects} projects"
+        f"{state.tasks_closed} closed  ·  {state.scopes} scopes"
     )
     health = (
         screen.warning(f"{state.schema_pending} migration(s) pending")

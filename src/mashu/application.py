@@ -356,8 +356,6 @@ def dashboard_counts(cur: psycopg.Cursor) -> dict[str, int]:
     memory = cur.fetchone()
     cur.execute("SELECT count(*) AS n FROM temporary_context WHERE expires_at > now()")
     temporary_contexts = cur.fetchone()["n"]
-    cur.execute("SELECT count(*) AS n FROM project WHERE archived_at IS NULL")
-    project_count = cur.fetchone()["n"]
     # Read whole rows so a store without archived_at (before 0021) still counts.
     cur.execute("SELECT * FROM scope")
     scope_count = sum(1 for row in cur.fetchall() if not row.get("archived_at"))
@@ -372,7 +370,6 @@ def dashboard_counts(cur: psycopg.Cursor) -> dict[str, int]:
         "tasks_dormant": task["dormant"],
         "task_proposals": task["proposals"],
         "active_memories": memory["active"],
-        "projects": project_count,
         "tasks_closed": task["closed"],
         "retired_memories": memory["retired"],
         "temporary_contexts": temporary_contexts,

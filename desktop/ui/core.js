@@ -118,20 +118,27 @@ function who(actor) {
  */
 function folderInput(input, onPick) {
   const pick = async () => {
-    // The picker cannot start from ~, which only the backend expands.
-    const start = /^(\/|[A-Za-z]:[\\/])/.test(input.value.trim()) ? input.value.trim() : undefined;
-    try {
-      const path = await window.__TAURI__.dialog.open({ directory: true, defaultPath: start });
-      if (typeof path !== "string" || !path) return;
-      input.value = path;
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-      if (onPick) onPick(path);
-    } catch (error) {
-      fail(error);
-    }
+    const path = await pickFolder(input.value);
+    if (!path) return;
+    input.value = path;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    if (onPick) onPick(path);
   };
   return h("div", { class: "folder-input" }, input, button(t("common.choose_folder"), pick));
+}
+
+/** A folder from the system's picker, or null when it is closed without one. */
+async function pickFolder(near = "") {
+  // The picker cannot start from ~, which only the backend expands.
+  const start = /^(\/|[A-Za-z]:[\\/])/.test(near.trim()) ? near.trim() : undefined;
+  try {
+    const path = await window.__TAURI__.dialog.open({ directory: true, defaultPath: start });
+    return typeof path === "string" && path ? path : null;
+  } catch (error) {
+    fail(error);
+    return null;
+  }
 }
 
 /** The last part of a path, which names the folder. */

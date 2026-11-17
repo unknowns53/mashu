@@ -70,7 +70,7 @@ const workDetail = detailPane();
 const workOrder = heldOrder();
 
 function workId(row) {
-  return work.view === "projects" ? row.project_id : row.task.task_id;
+  return work.view === "projects" ? row.scope_id : row.task.task_id;
 }
 
 function workRow() {
@@ -81,7 +81,7 @@ function shownWork() {
   workSort.setKeys(workSortKeys());
   const found =
     work.view === "projects"
-      ? work.rows.filter((row) => matches(work.query, row.project_id, row.name, row.scope_name))
+      ? work.rows.filter((row) => matches(work.query, row.scope_id, row.name, row.summary, ...row.folders.map(tilde)))
       : work.rows.filter((row) =>
           matches(work.query, row.task.task_id, row.task.name, row.task.project_name, row.state, row.rulings, row.withdrawn_rulings, row.decisions, row.attempts, row.artifacts)
         );
@@ -118,9 +118,9 @@ function renderWork() {
         rows: shownWork().map((row) =>
           projects
             ? {
-                id: row.project_id,
+                id: row.scope_id,
                 primary: row.name,
-                secondary: [row.scope_name, t("work.project_tasks", { a: row.n_active, d: row.n_dormant, c: row.n_closed })],
+                secondary: [row.folders.length ? tilde(row.folders[0]) : t("work.project_no_folder"), projectTasks(row)],
               }
             : {
                 id: row.task.task_id,
@@ -448,76 +448,97 @@ function newTaskForm(target) {
 
 // ---------------------------------------------------------------- one project
 
-function projectDetail(row) {
-  return [
-    meta(idTag(row.project_id), row.scope_name || t("work.project_scope_none"), t("work.project_created", { when: day(row.created_at) })),
-    h("h1", { class: "title", text: row.name }),
-    h("p", { class: "sub", text: t("work.project_tasks", { a: row.n_active, d: row.n_dormant, c: row.n_closed }) }),
-    h("div", { class: "actions" }, button(t("common.edit"), () => workTogglePanel("edit"))),
-  ];
+function projectTasks(row) {
+  return t("work.project_tasks", { a: row.n_tasks_active, d: row.n_tasks_dormant, c: row.n_tasks_closed });
 }
 
-/** The scope choice for the scope of the project's own name, opened when there is none; a stored name cannot hold a NUL. */
-const NAMED_SCOPE = "\u0000named";
+/** A project with the folders its sessions open in, which are added and removed here. */
+function projectDetail(row) {
+  const addFolder = async () => {
+    const path = await pickFolder();
+    if (path) act(() => call("route.save", { path, scope: row.name }), t("work.folder_added"));
+  };
+  const removeFolder = async (path) => {
+    const yes = await confirmDialog({ title: t("work.folder_remove_confirm"), lines: [tilde(path)], confirm: t("common.remove"), danger: true });
+    if (yes) act(() => call("route.remove", { path }), t("work.folder_removed"));
+  };
+  const remove = async () => {
+    const yes = await confirmDialog({ title: t("work.project_remove_confirm"), lines: [row.name, t("scope.remove_note")], confirm: t("common.remove"), danger: true });
+    if (!yes) return;
+    act(async () => {
+      const removed = await call("scope.remove", { scope_id: row.scope_id });
+      work.selected = null;
+      return removed.removed === "archived" ? t("scope.archived") : "";
+    }, t("scope.removed"));
+  };
+  return [
+    meta(idTag(row.scope_id), t("work.project_created", { when: day(row.created_at) })),
+    h("h1", { class: "title", text: row.name }),
+    row.summary ? h("p", { class: "sub", text: row.summary }) : null,
+    h("p", { class: "sub", text: [projectTasks(row), t("work.project_rules", { n: row.n_active })].join("・") }),
+    section(
+      t("work.project_folders"),
+      row.folders.length,
+      row.folders.length
+        ? h(
+            "ul",
+            { class: "folder-list" },
+            row.folders.map((path) =>
+              h("li", null, h("span", { class: "mono", text: tilde(path) }), button(t("common.remove"), () => removeFolder(path), { kind: "quiet small danger" }))
+            )
+          )
+        : h("p", { class: "sub", text: t("work.project_no_folder_note") }),
+      h("div", { class: "actions" }, button(t("work.folder_add"), addFolder))
+    ),
+    h(
+      "div",
+      { class: "actions" },
+      button(t("common.edit"), () => workTogglePanel("edit")),
+      button(t("common.remove"), remove, { kind: "danger" })
+    ),
+  ].filter(Boolean);
+}
 
 function projectForm(target, row) {
-  target.replaceChildren();
-  loadChoices()
-    .then((choices) => {
-      target.replaceChildren(
-        form({
-          title: row ? null : t("work.project_new"),
-          // A new project links its repository in one go, the scope of its name and the folder
-          // routed to it, so its sessions can file tasks without a visit to Settings.
-          fields: row
-            ? [
-                { name: "name", label: t("work.project_name"), value: row.name },
-                { name: "scope", label: t("work.project_scope"), kind: "select", options: areaOptions(choices, t("work.project_scope_none")), value: row.scope_name || "" },
-              ]
-            : [
-                {
-                  name: "path",
-                  label: t("work.project_folder"),
-                  kind: "folder",
-                  value: "",
-                  hint: t("work.project_folder_hint"),
-                  onPick: (path, inputOf) => {
-                    const name = inputOf("name");
-                    if (name && !name.value.trim()) name.value = folderName(path);
-                  },
-                },
-                { name: "name", label: t("work.project_name"), value: "" },
-                {
-                  name: "scope",
-                  label: t("work.project_scope"),
-                  kind: "select",
-                  options: [[NAMED_SCOPE, t("work.project_scope_named")], ...areaOptions(choices, t("work.project_scope_none"))],
-                  value: NAMED_SCOPE,
-                },
-              ],
-          submit: row ? t("common.save") : t("common.create"),
-          onCancel: () => {
-            work.creating = null;
-            work.panel = null;
-            renderWorkDetail();
-          },
-          onSubmit: (values) =>
-            act(async () => {
-              const named = !row && values.scope === NAMED_SCOPE;
-              await call("project.save", {
-                project_id: row ? row.project_id : null,
-                name: values.name,
-                scope: named ? null : values.scope || null,
-                named_scope: named,
-                path: row ? null : values.path.trim() || null,
-              });
-              work.creating = null;
-              work.panel = null;
-            }, row ? t("work.saved") : t("work.created")),
-        })
-      );
+  target.replaceChildren(
+    form({
+      title: row ? null : t("work.project_new"),
+      // A new project is linked to its repository as it is made, so its sessions can file
+      // tasks at once.
+      fields: row
+        ? [
+            { name: "name", label: t("work.project_name"), value: row.name },
+            { name: "summary", label: t("scope.summary"), kind: "area", rows: 2, value: row.summary || "" },
+          ]
+        : [
+            {
+              name: "path",
+              label: t("work.project_folder"),
+              kind: "folder",
+              value: "",
+              hint: t("work.project_folder_hint"),
+              onPick: (path, inputOf) => {
+                const name = inputOf("name");
+                if (name && !name.value.trim()) name.value = folderName(path);
+              },
+            },
+            { name: "name", label: t("work.project_name"), value: "" },
+          ],
+      submit: row ? t("common.save") : t("common.create"),
+      onCancel: () => {
+        work.creating = null;
+        work.panel = null;
+        renderWorkDetail();
+      },
+      onSubmit: (values) =>
+        act(async () => {
+          if (row) await call("scope.save", { scope_id: row.scope_id, name: values.name, summary: values.summary });
+          else await call("project.save", { name: values.name, path: values.path.trim() || null });
+          work.creating = null;
+          work.panel = null;
+        }, row ? t("work.saved") : t("work.created")),
     })
-    .catch(fail);
+  );
 }
 
 page("work", {

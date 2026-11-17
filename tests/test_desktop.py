@@ -378,9 +378,12 @@ def test_a_task_edit_against_an_old_state_is_refused_and_a_closed_task_reopens(d
 
 def test_projects_scopes_topics_and_routes_are_kept_from_the_settings_pages(dsn):
     assert ask(dsn, "scope.save", name="lab", summary="the lab machines")["ok"]
-    assert ask(dsn, "project.save", name="tray", scope="lab")["ok"]
-    project = ask(dsn, "work.projects")["result"]["projects"][0]
-    assert ask(dsn, "project.save", project_id=project["project_id"], name="tray app")["ok"]
+    assert ask(dsn, "project.save", name="tray", path="/work/tray")["ok"]
+    project = next(
+        row for row in ask(dsn, "work.projects")["result"]["projects"] if row["name"] == "tray"
+    )
+    assert project["folders"] == ["/work/tray"]
+    assert ask(dsn, "scope.save", scope_id=project["scope_id"], name="tray app")["ok"]
 
     topic = ask(dsn, "topic.save", name="deploy", trigger="Before deploying", scope="lab")
     assert topic["ok"]
@@ -402,10 +405,11 @@ def test_projects_scopes_topics_and_routes_are_kept_from_the_settings_pages(dsn)
     routes = {
         row["path_prefix"]: row["scope_name"] for row in ask(dsn, "route.list")["result"]["routes"]
     }
-    assert routes == {"/work/lab": "lab", "/work/scratch": None}
+    assert routes == {"/work/lab": "lab", "/work/scratch": None, "/work/tray": "tray app"}
     assert ask(dsn, "route.remove", path="/work/scratch")["result"]["removed"]
 
-    assert [row["name"] for row in ask(dsn, "work.projects")["result"]["projects"]] == ["tray app"]
+    names = [row["name"] for row in ask(dsn, "work.projects")["result"]["projects"]]
+    assert names == ["lab", "tray app"]
 
 
 def test_health_reads_without_writing(dsn):

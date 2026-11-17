@@ -76,11 +76,10 @@ def test_dashboard_collects_review_task_memory_and_project_counts(dsn):
         tasks_dormant=1,
         task_proposals=1,
         active_memories=1,
-        projects=1,
         tasks_closed=1,
         retired_memories=1,
         temporary_contexts=1,
-        scopes=1,
+        scopes=2,
         routes=1,
         schema_pending=0,
     )

@@ -32,7 +32,6 @@ from mashu import (
     memory_changes,
     migrate,
     nominations,
-    projects,
     review_actions,
     routing,
     scopes,
@@ -171,7 +170,8 @@ def choices(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     """The names and fixed choices the forms offer."""
     return {
         "scopes": [row["name"] for row in scopes.list_scopes(cur)],
-        "projects": [row["name"] for row in projects.list_projects(cur)],
+        # A task is filed under a scope; the pages still ask for it by this name.
+        "projects": [row["name"] for row in scopes.list_scopes(cur)],
         "topics": [
             {"topic_id": row["topic_id"], "name": row["name"], "trigger": row["trigger"]}
             for row in topics.list_topics(cur)
@@ -420,7 +420,7 @@ def work_tasks(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 
 def work_projects(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    return {"projects": projects.list_projects(cur)}
+    return {"projects": scopes.list_scopes(cur)}
 
 
 def task_create(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
@@ -495,14 +495,9 @@ def task_reopen(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 
 def project_save(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    return task_actions.save_project(
-        cur,
-        _uuid_or_none(args, "project_id"),
-        name=_text(args, "name"),
-        scope_name=_optional(args, "scope"),
-        actor=ACTOR,
-        named_scope=args.get("named_scope") is True,
-        path=_optional(args, "path"),
+    """Create a scope with the folder its sessions open in; scope.save edits one."""
+    return scopes.create_scope(
+        cur, name=_text(args, "name"), path=_optional(args, "path"), actor=ACTOR
     )
 
 

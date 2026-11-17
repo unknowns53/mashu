@@ -94,13 +94,9 @@ evidence: git commit 9d12f5a
 
 ### 5.1 Project
 
-Task の所属単位。通常は repository または研究単位に対応する。
+Task の所属単位で、Scope そのものである。通常は repository または研究単位に対応する。Project のための表は持たず、`task.project_id` が Scope を指す。
 
-```text
-id / name / scope_id / created_at / archived_at
-```
-
-Project と Scope は同じ概念ではない。Scope は delivery / routing の境界、Project は work state の所属である。一つの Project は一つの主要 Scope を持ち、多対多への一般化は必要が実測されるまでしない。Scope を持つ Project の active Task card はその Scope だけに配信する。Scope を持たない Project の card は全 Scope 共通であり、unrouted session にはこの共通分だけを配信する。Scope を持たない Project の card は全 Scope の予算をそれぞれ使うので、作成の既定にはしない。`mashu project create` は `--scope` を省くと cwd の route が指す Scope を使い、route の無いディレクトリでは拒否する。全 Scope 共通にするには `--scope -` を明示する。デスクトップアプリの作成フォームは、Project と同じ名前の Scope（無ければ作る）と、選んだフォルダからその Scope への route を、Project と同じ transaction で登録する。そのフォルダに別の Scope の route があれば上書きせずに拒否する。Current State 全文は Scope にかかわらず、Task IDを指定した `task_get` にだけ返す。
+Scope は、そのフォルダで開いたセッションに届く規則と Task card の境界であり、Task の所属先でもある。二つを別の概念に分けると、同じ repository に二つの名前が付き、Project を作り忘れた Scope のセッションは Task を作れなかった。active Task card はその Task の Scope のセッションにだけ配信し、unrouted session には配信しない。全セッションに届く Task は持たない。`task_create` は `project` を省くと、セッションの cwd の route が指す Scope に Task を置く。デスクトップアプリの作成フォームと `mashu scope --add <name> --folder <path>` は、Scope と、そのフォルダから Scope への route を同じ transaction で登録する。そのフォルダに別の Scope の route があれば上書きせずに拒否する。Current State 全文は Scope にかかわらず、Task IDを指定した `task_get` にだけ返す。
 
 ### 5.2 Task
 
@@ -147,7 +143,7 @@ MCP で全文の state を返すのは `task_get` だけである。検索結果
 
 **並行する置換は楽観チェックで受ける。**複数セッションが同じ Task を同時に更新しうる。`task_checkpoint` と User の state 編集は読み取り時の `updated_at` を添えて置換し、不一致なら拒否して現在の state を返す。この照合をせずに last-writer-wins で上書きすると、並行セッションの一方の作業が、何の記録も残さずに消える。
 
-**予算境界の挙動も store が持つ。**Task card の予算は Scope ごとに独立し、書き込みではなく配信で効かせる（8 節）。書き込みで拒否すると、Agent が Task を作るたびに予算が埋まり、拒否は「Task を close してほしい」という依頼として User に回るだけだからである。書き込みは拒否せず、bootstrap が最後の活動の新しい順に card を予算まで載せ、残りの Task は短い id・名前・最後の活動日だけを別の小さな予算の中で並べる。書き込みの応答は `card_share` を返し、その `unseated` が card を失った Task を名指す。Scope を持たない Project の card は全 Scope 共通分として各 Scope の配信で競い、書き込みの応答は最も重い Scope で数える。別 Scope の固有 card は競合しない。full detail の本文はこの配信予算を消費せず、1 Task 800-token の上限で別に bound する。1 枚の card の 200-token の上限は、書き込みで拒否する。予算を超えたぶんを、書き手に知らせないまま切り詰めることはしない。
+**予算境界の挙動も store が持つ。**Task card の予算は Scope ごとに独立し、書き込みではなく配信で効かせる（8 節）。書き込みで拒否すると、Agent が Task を作るたびに予算が埋まり、拒否は「Task を close してほしい」という依頼として User に回るだけだからである。書き込みは拒否せず、bootstrap が最後の活動の新しい順に card を予算まで載せ、残りの Task は短い id・名前・最後の活動日だけを別の小さな予算の中で並べる。書き込みの応答は `card_share` を返し、その `unseated` が card を失った Task を名指す。別 Scope の card は競合しない。full detail の本文はこの配信予算を消費せず、1 Task 800-token の上限で別に bound する。1 枚の card の 200-token の上限は、書き込みで拒否する。予算を超えたぶんを、書き手に知らせないまま切り詰めることはしない。
 
 ただし**その Task 自身の card を小さくする書き込みは、予算を超えている状態からでも通す**。予算は設定値であり、card の重さは配信の形から計算されるので、どちらも誰も行を書き換えていないのに変わりうる。つまり書き込みを経ずに予算を超えた状態が成立する。そこで一律に拒否すると、他の active Task だけで予算を超えている場合、対象を空にしても総量が予算を下回らないため拒否される。「他を縮めろ」と言いながらその縮約自体を拒むので、抜け出す手段が無くなる。入口拒否の思想は保ったまま、card を縮めて予算に近づける書き込みだけを通す。
 
@@ -352,7 +348,6 @@ Memory 関連 Tool は `docs/memory.md` 7.1 節に記す。`session_bootstrap` �
 mashu                           人向け dashboard。Attention / Memories / Work / Settings を開く
 mashu gui                       Task を含む一覧の読み取り専用ブラウザ表示（docs/memory.md 7.2 節）
 mashu desktop-backend           デスクトップアプリの子プロセス。Task と Project の操作を Work と close の画面と同じ関数で行う（docs/memory.md 7.2 節）
-mashu project list / create / edit <id> / show <id>
 mashu task list [--dormant] [--closed]
 mashu task show <id>            state・履歴・artifacts を全文
 mashu task create / touch <id>
@@ -362,7 +357,7 @@ mashu task close <id>... [--outcome ...] / reopen <id>
 mashu pain --prevention-kind {rule,work} [--task <id>]   9 節の二つの形
 ```
 
-dashboard は Attention / Memories / Work / Settings & health の四領域を持ち、各画面から戻るたびに件数を再集計する。Attention は review、close proposal、dormant Task を扱う。Work は active / dormant / closed Task と Project を閲覧・検索し、Current State、proposal、全履歴、artifact を表示する。User は Task の create / touch / close / reopen に加え、open Task の名前・所属 Project・Current State と Project の名前・Scope を編集できる。編集入力は現在値を入力バッファへ入れて開き、全文の再入力ではなく既存値の部分修正として扱う。現在値を人が訂正する経路であり、ruling・checkpoint・artifact と過去の記録は編集しない。Settings & health は status、現在の cwd に対する bootstrap preview、Scope と route の作成・編集・削除、配信量の上限、migration を扱う。
+dashboard は Attention / Memories / Work / Settings & health の四領域を持ち、各画面から戻るたびに件数を再集計する。Attention は review、close proposal、dormant Task を扱う。Work は active / dormant / closed Task と Project を閲覧・検索し、Current State、proposal、全履歴、artifact を表示する。User は Task の create / touch / close / reopen に加え、open Task の名前・所属 Project・Current State と Project の名前を編集できる。編集入力は現在値を入力バッファへ入れて開き、全文の再入力ではなく既存値の部分修正として扱う。現在値を人が訂正する経路であり、ruling・checkpoint・artifact と過去の記録は編集しない。Settings & health は status、現在の cwd に対する bootstrap preview、Scope と route の作成・編集・削除、配信量の上限、migration を扱う。
 
 Work の `c` は選択中の Task だけを同じ close decision screen で開く。専用一覧、Work、CLI の `task close <id> --outcome ...` は、明示 outcome と proposal acceptance を別操作にする。proposal acceptance は画面に出した proposal と state を transaction 内で再照合する。stale 確認は proposal を受理するときだけで、reason の入力中に Ctrl+C を受けたら変更しない。
 

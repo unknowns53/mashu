@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from conftest import new_project, remember, retire
+from conftest import new_task, remember, retire
 from mashu import routing, scopes
 from mashu.errors import MashuError
 
@@ -73,7 +73,7 @@ def test_a_windows_route_covers_the_tree_below_it(cur, scope_id):
         ("active memory", "refused"),
         ("other scope of an active memory", "refused"),
         ("retired memory", "archived"),
-        ("project", "refused"),
+        ("open task", "refused"),
     ],
 )
 def test_a_scope_is_removed_only_once_nothing_delivers_through_it(cur, scope_id, use, outcome):
@@ -93,8 +93,8 @@ def test_a_scope_is_removed_only_once_nothing_delivers_through_it(cur, scope_id,
     elif use == "retired memory":
         rule = remember(cur, "a rule once kept here", scope_id=target, delivery="scope")
         retire(cur, rule)
-    elif use == "project":
-        new_project(cur, "a project filed here", scope_id=target)
+    elif use == "open task":
+        new_task(cur, "a task filed here", target)
 
     if outcome == "refused":
         with pytest.raises(MashuError, match="still has"):

@@ -187,7 +187,7 @@ remote-shell command \b(cluster-wrapper|scheduler-cmd)\b
 |---|---|
 | 判断待ち（Inbox） | candidate、Memory change proposal、close の提案を一覧に並べる。candidate の採用、却下、保留と文面の編集、proposal の適用、却下、取り下げ、close の提案の受け入れ。topic へ採用するときは、その場で新しい topic を作成できる |
 | メモリ（Memory） | active と retired の Memory、Temporary Context の一覧と検索。根拠と revision を表示する。直接の登録、本文と理由の編集、配信先の変更、retire と復元、Temporary Context との相互変換 |
-| 作業（Work） | active、dormant、closed の Task と Project。Task の作成、編集、lease（活動期限）の延長、close、reopen と、Project の作成と編集。Project の作成では、フォルダと、同じ名前の Scope を一度に登録できる |
+| 作業（Work） | active、dormant、closed の Task と Project。Task の作成、編集、lease（活動期限）の延長、close、reopen と、Project の作成、編集、削除、フォルダの追加と削除。Project は Scope そのもので、作成のときにフォルダも登録できる |
 | 設定（Settings） | 容量と最近の記録、Bootstrap preview、Scope と Topic と Route の編集、配信量の上限、migration の適用、表示の言語、バージョンと更新 |
 
 編集は、詳細の表示をその場で入力欄に変えて行う。⌘/Ctrl + Enter で保存し、Esc で取り消す。一覧は ↑↓ か j/k で移動し、/ で検索欄へ移る。retire した規則を書き戻す操作、似た Task がある中での Task の作成、削除、migration の適用は、理由や候補を見せて確認してから実行する。Bootstrap preview は入力したディレクトリで開くセッションに配信される内容を示し、TUI と同様に記録される。設定の「知識があったのに起きた失敗」は、メモリ、タスク、指示ファイルに知識があったのに起きた失敗を新しい順に並べ、知識があった場所と、同じ場所が名指された件数を示す。メモリとタスクはそこから開ける。ウィンドウを閉じてもトレイに残り、トレイのアイコンか、macOS では Dock のアイコンを押すと再び開く。終了するときはトレイのメニューの Quit を使う。設定の「起動」で「ログイン時に起動」にチェックを入れると、ログインのたびにアプリが起動する。表示の言語は日本語と英語を切り替えられる。CLI と TUI の文言は英語だけである。
@@ -334,9 +334,9 @@ scope の Memory は、複数の Scope に届けられる。いくつかのリ�
 mashu deliver 1a2b3c4d scope --scope enrai --scope marimo
 ~~~
 
-Scope は `mashu scope --remove <name>`、TUI の `x`、デスクトップアプリの削除で消せる。active な Memory、route、未完了の Project や topic、有効な Temporary Context、review を待つ candidate や変更の提案が残っている Scope は、残っているものを示して拒否する。一度も使われていない Scope は削除し、過去の記録が参照している Scope は一覧から外して保管する。保管した Scope の名前は再利用できない。
+Scope は `mashu scope --remove <name>`、TUI の `x`、デスクトップアプリの削除で消せる。active な Memory、route、open な Task、未完了の topic、有効な Temporary Context、review を待つ candidate や変更の提案が残っている Scope は、残っているものを示して拒否する。一度も使われていない Scope は削除し、過去の記録が参照している Scope は一覧から外して保管する。保管した Scope の名前は再利用できない。
 
-Project は Task の所属先で、Scope とは別の概念である。Project が Scope を持つと、その Task の card はその Scope のセッションにだけ配信される。
+Task は Scope に属し、その card はその Scope のセッションにだけ配信される。
 
 ## Topic
 
@@ -368,13 +368,10 @@ vault の場所は環境変数 `MASHU_VAULT_ROOT` だけが持ち、DB には保
 
 Project State は、セッションを開き直すたびに現在地を拾い直す手間を無くすためにある。どこまで進んだか、何を試して駄目だったか、なぜ今の方針なのかは、放っておくと git の履歴、リポジトリの文書、Obsidian、過去の会話に散らばり、agent が一か所から復元できなくなる。かといって作業の現況を Memory に入れると、古くならないことを前提にした Memory の容量を、やがて古くなる事実が占拠してしまう。
 
-Project は Task をまとめる単位である。Task は複数のセッションにまたがる作業だけに作り、一つの依頼や、大きな作業の一工程のためには作成しない。
+Project は Task をまとめる単位で、Scope そのものである。Task は複数のセッションにまたがる作業だけに作り、一つの依頼や、大きな作業の一工程のためには作成しない。
 
 ~~~bash
-mashu project list
-mashu project create website --scope frontend
-mashu project edit website --scope backend
-mashu project show website
+mashu scope --add website --folder ~/work/website
 
 mashu task list                   # --dormant、--closed で状態を変える
 mashu task show 1a2b3c4d
@@ -382,9 +379,9 @@ mashu task create "Add CLI help" --project mashu --goal "Every command explains 
 mashu task touch 1a2b3c4d
 ~~~
 
-新しいリポジトリを Mashu につなぐには、デスクトップアプリの作業画面で Project を作るのが早い。作成フォームでフォルダを選ぶと Project の名前がフォルダ名で埋まり、作成すると、同じ名前の Scope があればそれに、無ければ新しく作った Scope に Project が属し、そのフォルダからその Scope への route も同じ transaction で登録される。別の名前の Scope を選ぶこともできる。そのフォルダに別の Scope の route がすでにあれば、上書きせずに拒否する。フォルダの欄は、どの画面でもシステムのフォルダ選択ダイアログで選べ、`~` から始まるパスを直接入力することもできる。
+新しいリポジトリを Mashu につなぐには、デスクトップアプリの作業画面で Project を作る。作成フォームでフォルダを選ぶと名前がフォルダ名で埋まり、作成すると、Scope と、そのフォルダからその Scope への route が同じ transaction で登録される。そのフォルダに別の Scope の route がすでにあれば、上書きせずに拒否する。フォルダは Project の画面で後から追加し、外せる。フォルダの欄は、どの画面でもシステムのフォルダ選択ダイアログで選べ、`~` から始まるパスを直接入力することもできる。
 
-`mashu project create` で `--scope` を省くと、今のディレクトリの route が指す Scope を使う。route の無いディレクトリでは拒否するので、すべての Scope に card を配る Project は `--scope -` で作る。`mashu task create` で `--project` を省くと、route から一つに決まる Project か、open な Project が一つだけならそれを使う。
+`mashu task create` と MCP の `task_create` は、`--project`（`project`）を省くと、今のディレクトリの route が指す Scope に Task を置く。
 
 Task の Current State は goal、approach、status、open questions、blockers、next actions からなる。Task が次のセッションへ渡すのは、この Current State と、User の裁定（ruling）と、artifact（外部成果物の場所）だけである。ruling は User がその作業について決めたことで、agent は User の言葉の原文を添えないと書けない。取り下げにも、その ruling についての User の言葉が要る。試したことや見つけたこと、測定、退けた案はプロジェクトの文書に書き、artifact で指す。agent が書いた過去の attempt と decision は消さずに残り、`mashu task show` や GUI で読めるが、agent には返らない。close のときの checkpoint は履歴として別に残る。
 
@@ -411,7 +408,7 @@ MCP tool は 18 個存在する。引数と制限は各 tool の説明として�
 | Memory | `memory_change_instructed` | User が指示した retire、置き換え、復帰を、提案から適用まで一回で実行する |
 | Memory | `memory_redeliver` | User が指示した配信先の変更を、提案から適用まで一回で実行する |
 | Memory | `memory_change_withdraw` | 不要となった proposal を取り下げる |
-| Project State | `project_list` | Project と Task の件数を確認する |
+| Project State | `project_list` | Project、そのフォルダ、Task の件数を確認する |
 | Project State | `task_create` | 類似した open な Task が無いか確かめてから Task を作成する |
 | Project State | `task_get` | Current State の全文と、User の裁定を User の言葉つきですべて読む。Task を続ける前に必ず呼ぶ |
 | Project State | `task_search` | Task の名前、Current State、User の裁定を検索する |
@@ -456,7 +453,7 @@ User が配信先の変更を指示した      → memory_redeliver
 | `mashu retire REF --reason REASON` | Memory を retire する。似た規則が出現すると、この理由を表示して確認を求める |
 | `mashu restore REF --reason REASON` | retire した Memory を戻す |
 | `mashu scope`、`mashu route`、`mashu topic` | Scope、route、topic を一覧し、編集し、削除する |
-| `mashu project`、`mashu task` | Project と Task を一覧し、編集する |
+| `mashu task` | Task を一覧し、編集する |
 | `mashu guard ACTION` | ACTION に結びついた topic の規則を表示する。PreToolUse hook が呼ぶ |
 | `mashu serve` | MCP server を起動する |
 | `mashu desktop-backend` | デスクトップアプリが子プロセスとして起動する |

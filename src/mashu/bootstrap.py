@@ -11,7 +11,6 @@ from mashu import (
     events,
     memories,
     migrate,
-    projects,
     settings,
     tasks,
     temporary,
@@ -67,13 +66,10 @@ def active_states(cur: psycopg.Cursor, scope_id: UUID | None = None) -> list[dic
         include_proposals=available["proposals"],
         include_rulings=available["rulings"],
     )
-    homes = {
-        row["project_id"]: row["scope_id"]
-        for row in projects.list_projects(cur, include_archived=True)
-    }
-    # Unscoped projects apply everywhere. Scoped projects stay in their delivery boundary;
-    # an unrouted session therefore receives only the unscoped rows.
-    return [row for row in rows if homes.get(row["task"]["project_id"]) in (None, scope_id)]
+    # A task reaches only the sessions of its own scope; an unrouted session receives none.
+    if scope_id is None:
+        return []
+    return [row for row in rows if row["task"]["project_id"] == scope_id]
 
 
 def session_bootstrap(

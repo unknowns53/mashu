@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import expire, new_project, new_task
-from mashu import bootstrap, ledger, memories, projects, scopes, server, tasks, temporary, topics
+from conftest import expire, new_task
+from mashu import bootstrap, ledger, memories, scopes, server, tasks, temporary, topics
 from mashu.tokens import pushed_cost
 
 DISCIPLINE = "never report a run as finished without the output that proves it"
@@ -16,13 +16,12 @@ OTHER_WORK = "read up on PNtBAm cononsolvency"
 
 
 @pytest.fixture
-def task(cur):
-    """One project, one task, one state — the smallest thing that is delivered."""
-    new_project(cur, "mashu")
+def task(cur, scope_id):
+    """One task, one state, in the test scope — the smallest thing that is delivered."""
     return new_task(
         cur,
         SCHEMA,
-        project="mashu",
+        project=scope_id,
         goal="hand the active states over with their dates",
         next_actions=["count the three shares apart"],
     )
@@ -102,8 +101,10 @@ def test_an_opening_over_the_total_is_recorded_rather_than_quietly_served(
     assert detail["tokens"] == got["tokens"] and detail["capacity"] == 10
 
 
-def test_the_state_of_current_work_arrives_under_its_date_with_a_call_to_fetch_it(cur, task):
-    got = bootstrap.session_bootstrap(cur, actor="agent")
+def test_the_state_of_current_work_arrives_under_its_date_with_a_call_to_fetch_it(
+    cur, scope_id, task
+):
+    got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
     assert "call task_get" in got["task_instruction"]
     assert "full task_id" in got["task_instruction"]
     row = got["states"][0]
@@ -120,15 +121,17 @@ def test_the_state_of_current_work_arrives_under_its_date_with_a_call_to_fetch_i
     [expire, lambda cur, task_id: tasks.close(cur, task_id, outcome="completed", actor="user")],
     ids=["lease", "closed"],
 )
-def test_a_task_whose_lease_ran_out_or_that_was_closed_is_not_in_the_opening(cur, task, end):
+def test_a_task_whose_lease_ran_out_or_that_was_closed_is_not_in_the_opening(
+    cur, scope_id, task, end
+):
     end(cur, task["task"]["task_id"])
-    got = bootstrap.session_bootstrap(cur, actor="agent")
+    got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
     assert got["states"] == []
     assert got["project_tokens"] == 0
 
 
-def test_the_states_arrive_in_a_fixed_order(cur, task):
-    second = tasks.task_create(cur, project="mashu", name=OTHER_WORK, actor="agent")
+def test_the_states_arrive_in_a_fixed_order(cur, scope_id, task):
+    second = tasks.task_create(cur, project=scope_id, name=OTHER_WORK, actor="agent")
     cur.execute(
         "UPDATE task SET last_activity_at = now() - interval '2 days' WHERE task_id = %s",
         (task["task"]["task_id"],),
@@ -136,28 +139,28 @@ def test_the_states_arrive_in_a_fixed_order(cur, task):
 
     order = [str(second["task"]["task_id"])[:8], str(task["task"]["task_id"])[:8]]
     for _ in range(2):
-        got = bootstrap.session_bootstrap(cur, actor="agent")["states"]
+        got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)["states"]
         assert [row["task"] for row in got] == order
 
 
 def test_work_belonging_to_another_scope_stays_there(cur, scope_id, task):
-    elsewhere = scopes.create_scope(cur, name="somewhere else", actor="user")["scope_id"]
-    projects.create_project(cur, name="the other repository", actor="user", scope_id=elsewhere)
+    home = scope_id
+    elsewhere = scopes.create_scope(cur, name="the other repository", actor="user")["scope_id"]
     away = tasks.task_create(
         cur, project="the other repository", name="rewrite the exporter", actor="agent"
     )
     here = str(task["task"]["task_id"])[:8]
     there = str(away["task"]["task_id"])[:8]
 
-    at_home = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
+    at_home = bootstrap.session_bootstrap(cur, actor="agent", scope_id=home)
     assert [row["task"] for row in at_home["states"]] == [here]
 
     over_there = bootstrap.session_bootstrap(cur, actor="agent", scope_id=elsewhere)
-    assert {row["task"] for row in over_there["states"]} == {here, there}
+    assert [row["task"] for row in over_there["states"]] == [there]
 
-    # An unrouted session has no scoped delivery boundary, so it sees only global state.
+    # An unrouted session belongs to no scope, so no task's card reaches it.
     unrouted = bootstrap.session_bootstrap(cur, actor="agent")
-    assert [row["task"] for row in unrouted["states"]] == [here]
+    assert unrouted["states"] == []
 
 
 def test_what_was_handed_over_is_logged(cur, scope_id):
