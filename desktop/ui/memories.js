@@ -53,9 +53,9 @@ function memorySortValue(row, key) {
   if (key === "created") return row.created_at;
   if (key === "until") return row.expires_at;
   if (key === "kind") {
-    if (mem.view === "temporary") return row.scope_name || "";
+    if (mem.view === "temporary") return row.project_name || "";
     if (mem.view === "retired") return named("retire.kind", row.retirement_kind || "legacy");
-    return `${["always", "scope", "topic"].indexOf(row.delivery)} ${row.topic_name || row.scope_name || ""}`;
+    return `${["always", "project", "topic"].indexOf(row.delivery)} ${row.topic_name || row.project_name || ""}`;
   }
   return row.updated_at || row.created_at;
 }
@@ -88,7 +88,7 @@ function memoryRow() {
 function shownMemories() {
   memSort.setKeys(memorySortKeys());
   const found = mem.rows.filter((row) =>
-    matches(mem.query, memoryId(row), row.content, row.scope_name, row.delivery, row.topic_name, row.retire_reason)
+    matches(mem.query, memoryId(row), row.content, row.project_name, row.delivery, row.topic_name, row.retire_reason)
   );
   const key = [mem.view, memSort.state.key, memSort.state.dir, mem.query].join("\n");
   return memOrder.place(sortRows(found, memSort.state, memorySortValue), memoryId, key);
@@ -137,7 +137,7 @@ async function nameRetirement(detail) {
 
 function deliveryShort(row) {
   if (row.delivery === "topic") return `${t("delivery.topic")}: ${row.topic_name}`;
-  if (row.delivery === "scope") return row.scope_name || t("delivery.scope");
+  if (row.delivery === "project") return row.project_name || t("delivery.project");
   return t("delivery.always");
 }
 
@@ -160,10 +160,10 @@ function renderMemoryList() {
           primary: row.content,
           secondary:
             mem.view === "temporary"
-              ? [row.scope_name || t("common.every_area"), t("temporary.until", { when: day(row.expires_at) })]
+              ? [row.project_name || t("common.every_area"), t("temporary.until", { when: day(row.expires_at) })]
               : mem.view === "retired"
                 ? [named("retire.kind", row.retirement_kind || "legacy"), day(row.retired_at)]
-                : [deliveryShort(row), row.delivery !== "scope" ? row.scope_name : null, sortedDay(row)],
+                : [deliveryShort(row), row.delivery !== "project" ? row.project_name : null, sortedDay(row)],
         })),
       },
     ],
@@ -289,13 +289,13 @@ function deliveryPanel(detail) {
   loadChoices()
     .then((choices) => {
       const isTopic = (values) => values.delivery === "topic";
-      const isScope = (values) => values.delivery === "scope";
-      const reached = detail.scope_names || [];
+      const isProject = (values) => values.delivery === "project";
+      const reached = detail.project_names || [];
       panel.append(
         form({
           fields: [
             { name: "delivery", label: t("delivery.title"), kind: "radio", options: deliveryOptions(), value: detail.delivery },
-            { name: "scopes", label: t("delivery.areas"), kind: "checks", options: areaChecks(choices), value: reached, show: isScope },
+            { name: "projects", label: t("delivery.areas"), kind: "checks", options: projectChecks(choices), value: reached, show: isProject },
             ...topicFields(choices, detail.topic_id, isTopic),
           ],
           onCancel: () => memTogglePanel("delivery"),
@@ -304,7 +304,7 @@ function deliveryPanel(detail) {
               await call("memory.delivery", {
                 memory_id: detail.memory_id,
                 delivery: values.delivery,
-                ...(isScope(values) ? { scopes: values.scopes } : {}),
+                ...(isProject(values) ? { projects: values.projects } : {}),
                 ...topicArgs(isTopic(values) ? values : {}),
               });
               mem.panel = null;
@@ -421,7 +421,7 @@ function retirePanel(detail) {
 // ---------------------------------------------------------------- one temporary note
 
 function temporaryDetail(row) {
-  const nodes = [meta(idTag(row.context_id), row.scope_name || t("common.every_area"), t("temporary.until", { when: day(row.expires_at) }))];
+  const nodes = [meta(idTag(row.context_id), row.project_name || t("common.every_area"), t("temporary.until", { when: day(row.expires_at) }))];
   if (mem.panel === "edit") {
     nodes.push(h("div", null));
     loadChoices()
@@ -430,12 +430,12 @@ function temporaryDetail(row) {
           form({
             fields: [
               { name: "content", label: t("temporary.text"), kind: "area", rows: 3, value: row.content, big: true },
-              { name: "scope", label: t("temporary.area"), kind: "select", options: areaOptions(choices, t("common.every_area")), value: row.scope_name || "" },
+              { name: "project", label: t("temporary.area"), kind: "select", options: projectOptions(choices, t("common.every_area")), value: row.project_name || "" },
             ],
             onCancel: () => memTogglePanel("edit"),
             onSubmit: (values) =>
               act(async () => {
-                await call("temporary.revise", { context_id: row.context_id, content: values.content, scope: values.scope || null });
+                await call("temporary.revise", { context_id: row.context_id, content: values.content, project: values.project || null });
                 mem.panel = null;
               }, t("temporary.revised")),
           })
@@ -487,7 +487,7 @@ function newMemoryForm(target) {
             { name: "content", label: t("memory.rule"), kind: "area", rows: 3, max: mem.contentLimit, hint: t("memory.rule_hint"), big: true },
             { name: "why", label: t("memory.why"), kind: "area", rows: 3, hint: t("memory.why_hint") },
             { name: "delivery", label: t("delivery.title"), kind: "radio", options: deliveryOptions(), value: "always" },
-            { name: "scopes", label: t("delivery.areas"), kind: "checks", options: areaChecks(choices), value: [], show: (values) => values.delivery === "scope" },
+            { name: "projects", label: t("delivery.areas"), kind: "checks", options: projectChecks(choices), value: [], show: (values) => values.delivery === "project" },
             ...topicFields(choices, "", isTopic),
           ],
           submit: t("common.add"),
@@ -502,7 +502,7 @@ function newMemoryForm(target) {
                   content: values.content,
                   why: values.why,
                   delivery: values.delivery,
-                  scopes: values.delivery === "scope" ? values.scopes : [],
+                  projects: values.delivery === "project" ? values.projects : [],
                   ...topicArgs(isTopic(values) ? values : {}),
                   acknowledged,
                 }).then((result) => {

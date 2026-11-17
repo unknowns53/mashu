@@ -67,7 +67,7 @@ function renderInbox() {
         rows: inbox.candidates.map((row) => ({
           id: `c:${row.nomination_id}`,
           primary: row.content,
-          secondary: [named("candidate.kind", row.kind), row.scope_name, when(row.created_at)],
+          secondary: [named("candidate.kind", row.kind), row.project_name, when(row.created_at)],
           dim: !!row.deferred_at,
         })),
       },
@@ -131,8 +131,8 @@ function candidateDetail(row) {
   const nodes = [
     meta(
       idTag(row.nomination_id),
-      row.scope_name
-        ? t("candidate.meta_area", { kind: named("candidate.kind", row.kind), area: row.scope_name, when: when(row.created_at) })
+      row.project_name
+        ? t("candidate.meta_area", { kind: named("candidate.kind", row.kind), area: row.project_name, when: when(row.created_at) })
         : t("candidate.meta", { kind: named("candidate.kind", row.kind), when: when(row.created_at) })
     ),
   ];
@@ -209,7 +209,7 @@ function admitPanel(row) {
       panel.append(
         form({
           fields: [
-            { name: "delivery", label: t("delivery.title"), kind: "radio", options: deliveryOptions(), value: row.scope_id ? "scope" : "always" },
+            { name: "delivery", label: t("delivery.title"), kind: "radio", options: deliveryOptions(), value: row.project_id ? "project" : "always" },
             ...topicFields(choices, "", isTopic),
           ],
           submit: t("candidate.admit"),
@@ -334,7 +334,7 @@ function changeDetail(row) {
           [t("retire.kind"), named("retire.kind", row.retirement_kind)],
           [t("retire.reason"), row.retire_reason],
           [t("change.moved_to"), row.relocated_to_id ? reference(row.relocated_to_id, destination.content || t("temporary.title"), 80) : null],
-          [t("temporary.area"), row.relocated_to_id ? destination.scope_name || t("common.every_area") : null],
+          [t("temporary.area"), row.relocated_to_id ? destination.project_name || t("common.every_area") : null],
           [t("change.until"), destination.expires_at ? day(destination.expires_at) : null],
         ])
       )

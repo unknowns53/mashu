@@ -6,8 +6,8 @@ from conftest import candidate, expire, getkeys, new_project, new_task, remember
 from mashu import (
     db,
     nominations,
+    projects,
     routing,
-    scopes,
     settings_ui,
     tasks,
     temporary,
@@ -32,9 +32,9 @@ def answers(monkeypatch, *typed: str) -> list[str]:
 
 def test_health_collects_capacity_queues_evidence_and_task_activity(dsn):
     with db.transaction(dsn) as cur:
-        scope = scopes.create_scope(cur, name="health", summary="health checks", actor="user")
+        project = projects.create_project(cur, name="health", summary="health checks", actor="user")
         remember(cur, "global health memory")
-        remember(cur, "scoped health memory", scope_id=scope["scope_id"], delivery="scope")
+        remember(cur, "project health memory", project_id=project["project_id"], delivery="project")
         candidate(cur, "show the health queue", kind="incident")
         deferred = candidate(cur, "show the deferred health queue")
         nominations.defer(cur, deferred["nomination_id"], actor="user", reason="the count")
@@ -56,35 +56,35 @@ def test_health_collects_capacity_queues_evidence_and_task_activity(dsn):
     value = settings_ui._health(dsn)
 
     assert value.schema_pending == ()
-    assert value.memory_counts == {"always": 1, "scope": 1}
+    assert value.memory_counts == {"always": 1, "project": 1}
     assert value.memory_always_tokens > 0 and value.memory_worst_tokens > 0
     assert value.active_states == 1 and value.state_worst_tokens > 0
     assert value.temporary_count == 1 and value.temporary_tokens > 0
     assert (value.pending_ready, value.pending_deferred) == (1, 1)
     assert value.ledger_30d >= 4
-    assert value.delivery_failures_30d == 1 and value.scope_count == 2
+    assert value.delivery_failures_30d == 1 and value.project_count == 2
     assert (value.tasks_active, value.tasks_dormant, value.tasks_closed) == (1, 1, 1)
 
 
 def test_bootstrap_preview_resolves_cwd_and_shows_every_payload_share(dsn, monkeypatch):
     here = "/tmp/mashu-settings-project"
     with db.transaction(dsn) as cur:
-        scope_id = scopes.create_scope(cur, name="preview", actor="user")["scope_id"]
-        routing.add_route(cur, path_prefix=here, scope_id=scope_id, actor="user")
+        project_id = projects.create_project(cur, name="preview", actor="user")["project_id"]
+        routing.add_route(cur, path_prefix=here, project_id=project_id, actor="user")
         remember(cur, "always in preview")
-        remember(cur, "scoped into preview", scope_id=scope_id, delivery="scope")
+        remember(cur, "project into preview", project_id=project_id, delivery="project")
         new_task(cur, "preview active state", "preview", goal="show the current state")
         temporary.put_temporary(
-            cur, content="preview temporary context", scope_id=scope_id, actor="user", days=1
+            cur, content="preview temporary context", project_id=project_id, actor="user", days=1
         )
     monkeypatch.setattr(settings_ui.os, "getcwd", lambda: f"{here}/nested")
 
     answer = settings_ui._bootstrap_preview(dsn)
     rendered = settings_ui._bootstrap_text(answer)
 
-    assert answer["scope"] == "preview" and answer["routed"] is True
+    assert answer["project"] == "preview" and answer["routed"] is True
     assert answer["always"][0]["content"] == "always in preview"
-    assert answer["scoped"][0]["content"] == "scoped into preview"
+    assert answer["project_rules"][0]["content"] == "project into preview"
     assert answer["states"][0]["content"].startswith("preview active state")
     assert "call task_get" in answer["task_instruction"]
     assert answer["temporary"][0]["content"] == "preview temporary context"
@@ -94,68 +94,74 @@ def test_bootstrap_preview_resolves_cwd_and_shows_every_payload_share(dsn, monke
 
 
 @pytest.mark.parametrize("summary", ["Release and rollback knowledge", ""])
-def test_scope_page_summary_is_optional_and_a_duplicate_refused(dsn, monkeypatch, capsys, summary):
+def test_project_page_summary_is_optional_and_a_duplicate_refused(
+    dsn, monkeypatch, capsys, summary
+):
     getkeys(monkeypatch, "n", "n", "left")
     answers(monkeypatch, "deployment", summary, "deployment", "another summary")
 
-    settings_ui._scopes_page(dsn)
+    settings_ui._projects_page(dsn)
 
     assert "already exists" in capsys.readouterr().out
     with db.transaction(dsn) as cur:
-        row = scopes.require_scope(cur, "deployment")
+        row = projects.require_project(cur, "deployment")
     assert row["summary"] == (summary or None)
 
 
-def test_ctrl_c_at_an_optional_scope_summary_cancels_creation(dsn, monkeypatch):
+def test_ctrl_c_at_an_optional_project_summary_cancels_creation(dsn, monkeypatch):
     getkeys(monkeypatch, "n", "left")
 
     def answer(prompt: str) -> str:
-        if prompt == "  scope name: ":
+        if prompt == "  project name: ":
             return "deployment"
         raise KeyboardInterrupt
 
     monkeypatch.setattr("builtins.input", answer)
-    settings_ui._scopes_page(dsn)
+    settings_ui._projects_page(dsn)
 
     with db.transaction(dsn) as cur:
-        assert scopes.get_scope(cur, "deployment") is None
+        assert projects.get_project(cur, "deployment") is None
 
 
-def test_scope_name_and_summary_can_be_edited(dsn, monkeypatch):
+def test_project_name_and_summary_can_be_edited(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
-        scope = scopes.create_scope(cur, name="old scope", summary="old summary", actor="user")
+        project = projects.create_project(
+            cur, name="old project", summary="old summary", actor="user"
+        )
     getkeys(monkeypatch, "e", "left")
-    answers(monkeypatch, "new scope", "new summary")
+    answers(monkeypatch, "new project", "new summary")
 
-    settings_ui._scopes_page(dsn)
+    settings_ui._projects_page(dsn)
 
     with db.transaction(dsn) as cur:
-        row = scopes.require_scope(cur, "new scope")
-    assert row["scope_id"] == scope["scope_id"]
+        row = projects.require_project(cur, "new project")
+    assert row["project_id"] == project["project_id"]
     assert row["summary"] == "new summary"
 
 
-def test_scope_refuses_banned_text(cur):
+def test_project_refuses_banned_text(cur):
     for field in ("name", "summary"):
         with pytest.raises(RefusedError):
-            scopes.create_scope(
+            projects.create_project(
                 cur, actor="user", **{"name": "clean", "summary": "clean", field: "SECRETMARKER9"}
             )
 
 
 def test_routes_can_be_edited_added_ignored_and_removed(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
-        scope = scopes.create_scope(cur, name="route scope", actor="user")
+        project = projects.create_project(cur, name="route project", actor="user")
         route = routing.add_route(
-            cur, path_prefix="/tmp/old", scope_id=scope["scope_id"], actor="user"
+            cur, path_prefix="/tmp/old", project_id=project["project_id"], actor="user"
         )
     getkeys(monkeypatch, "e", "n", "i", "x", "left")
-    answers(monkeypatch, "/tmp/new", "-", "/tmp/scoped/a/long/path", "route scope", "/tmp/i", "y")
+    answers(
+        monkeypatch, "/tmp/new", "-", "/tmp/project/a/long/path", "route project", "/tmp/i", "y"
+    )
 
     settings_ui._routes_page(dsn)
 
     rows = settings_ui._route_rows(dsn)
-    kept = [(row["path_prefix"], row["scope_id"]) for row in rows]
+    kept = [(row["path_prefix"], row["project_id"]) for row in rows]
     assert kept == [("/tmp/new", None), ("/tmp/i", None)]
     assert rows[0]["route_id"] == route["route_id"]
 
@@ -177,7 +183,7 @@ def test_schema_apply_is_confirmed_and_reports_a_noop(dsn, monkeypatch, capsys):
 
 def test_topic_page_creates_edits_and_removes_a_topic(dsn, monkeypatch):
     with db.transaction(dsn) as cur:
-        scopes.create_scope(cur, name="game", actor="user")
+        projects.create_project(cur, name="game", actor="user")
     getkeys(monkeypatch, "n", "e", "x", "left")
     answers(
         monkeypatch,
@@ -205,5 +211,5 @@ def test_topic_page_creates_edits_and_removes_a_topic(dsn, monkeypatch):
     assert [row["event_type"] for row in events][:2] == ["topic_created", "topic_updated"]
     edited = events[1]["detail"]["to"]
     assert edited["trigger"] == "Before changing win rates or placement"
-    assert (edited["scope_id"], edited["action"]) == (None, "delegate")
+    assert (edited["project_id"], edited["action"]) == (None, "delegate")
     assert edited["source"] == "Projects/Game/Balance.md#Win rates"

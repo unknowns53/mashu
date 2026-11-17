@@ -1,8 +1,8 @@
-// Settings: store health, mistakes made despite existing knowledge, what a session receives, scopes, topics, routes, delivery limits,
+// Settings: store health, mistakes made despite existing knowledge, what a session receives, projects, topics, routes, delivery limits,
 // the schema, versions and updates, starting at login, and the window's language.
 "use strict";
 
-const SECTIONS = ["health", "missed", "bootstrap", "scopes", "topics", "routes", "limits", "schema", "version", "startup", "display"];
+const SECTIONS = ["health", "missed", "bootstrap", "projects", "topics", "routes", "limits", "schema", "version", "startup", "display"];
 
 const settings = { section: "health", editing: null, bootstrapCwd: "", bootstrap: null };
 
@@ -113,10 +113,10 @@ async function healthSection() {
       null,
       fieldList([
         [t("settings.schema"), health.schema_pending.length ? t("schema.pending", { n: health.schema_pending.length }) : t("health.schema_ok")],
-        [t("health.rules"), t("health.rules_value", { always: counts.always || 0, scope: counts.scope || 0, topic: counts.topic || 0 })],
+        [t("health.rules"), t("health.rules_value", { always: counts.always || 0, project: counts.project || 0, topic: counts.topic || 0 })],
         [t("health.queue"), t("health.queue_value", { ready: health.pending_ready, deferred: health.pending_deferred })],
         [t("health.tasks"), t("health.tasks_value", { a: health.tasks_active, d: health.tasks_dormant, c: health.tasks_closed })],
-        [t("settings.scopes"), String(health.scope_count)],
+        [t("settings.projects"), String(health.project_count)],
         [t("settings.topics"), String(health.topic_count)],
       ])
     ),
@@ -195,54 +195,54 @@ function bootstrapSection() {
 function bootstrapView(answer) {
   const rules = (rows) => entries(rows, (row) => [null, row.content]);
   return [
-    h("p", { class: "sub", text: `${t("bootstrap.area")}: ${answer.scope || t("bootstrap.unrouted")}` }),
+    h("p", { class: "sub", text: `${t("bootstrap.area")}: ${answer.project || t("bootstrap.unrouted")}` }),
     h(
       "div",
       { class: "meters preview-total" },
       meterRow(`${t("bootstrap.total")}${answer.over_budget ? `（${t("bootstrap.over")}）` : ""}`, answer.tokens, answer.capacity)
     ),
     section(t("bootstrap.always"), answer.always.length, rules(answer.always)),
-    section(t("bootstrap.scoped"), answer.scoped.length, rules(answer.scoped)),
+    section(t("bootstrap.project_rules"), answer.project_rules.length, rules(answer.project_rules)),
     section(t("bootstrap.topics"), answer.topics.length, entries(answer.topics, (row) => [null, row.line])),
     section(t("bootstrap.cards"), answer.states.length, entries(answer.states, (row) => [row.heading, row.content])),
     section(t("bootstrap.temporary"), answer.temporary.length, entries(answer.temporary, (row) => [t("temporary.until", { when: day(row.expires_at) }), row.content])),
   ];
 }
 
-async function scopesSection() {
-  const { scopes } = await call("scope.list");
+async function projectsSection() {
+  const { projects } = await call("project.list");
   const edit = (row) =>
     editInSection({
-      title: row ? row.name : t("scope.new"),
+      title: row ? row.name : t("project.new"),
       fields: [
-        { name: "name", label: t("scope.name"), value: row ? row.name : "" },
-        { name: "summary", label: t("scope.summary"), kind: "area", rows: 2, value: row ? row.summary : "" },
+        { name: "name", label: t("project.name"), value: row ? row.name : "" },
+        { name: "summary", label: t("project.summary"), kind: "area", rows: 2, value: row ? row.summary : "" },
       ],
       submit: row ? t("common.save") : t("common.create"),
-      done: t("scope.saved"),
+      done: t("project.saved"),
       onSubmit: async (values) => {
-        const saved = await call("scope.save", { scope_id: row ? row.scope_id : null, ...values });
-        if (saved.unchecked) return t("scope.unchecked");
-        if (saved.malformed && saved.malformed.length) return t("scope.malformed");
+        const saved = await call("project.save", { project_id: row ? row.project_id : null, ...values });
+        if (saved.unchecked) return t("project.unchecked");
+        if (saved.malformed && saved.malformed.length) return t("project.malformed");
         return "";
       },
     });
   const remove = async (row) => {
-    const yes = await confirmDialog({ title: t("scope.remove_confirm"), lines: [row.name, t("scope.remove_note")], confirm: t("common.remove"), danger: true });
+    const yes = await confirmDialog({ title: t("project.remove_confirm"), lines: [row.name, t("project.remove_note")], confirm: t("common.remove"), danger: true });
     if (!yes) return;
     act(async () => {
-      const removed = await call("scope.remove", { scope_id: row.scope_id });
-      return removed.removed === "archived" ? t("scope.archived") : "";
-    }, t("scope.removed"));
+      const removed = await call("project.remove", { project_id: row.project_id });
+      return removed.removed === "archived" ? t("project.archived") : "";
+    }, t("project.removed"));
   };
   return [
-    sectionHead(t("settings.scopes"), button(t("scope.new"), () => edit(null))),
+    sectionHead(t("settings.projects"), button(t("project.new"), () => edit(null))),
     table(
-      [t("scope.name"), t("scope.rules"), t("scope.tokens"), t("scope.summary")],
-      scopes,
+      [t("project.name"), t("project.rules"), t("project.tokens"), t("project.summary")],
+      projects,
       (row) => [
         [row.name, "name"],
-        [String(row.n_active), row.n_active ? "num" : "num zero"],
+        [String(row.n_rules), row.n_rules ? "num" : "num zero"],
         [`${row.push_tokens} token`, row.push_tokens ? "num" : "num zero"],
         [row.summary || "", "muted"],
       ],
@@ -259,7 +259,7 @@ async function topicsSection() {
       fields: [
         { name: "name", label: t("topic.name"), value: row ? row.name : "", max: 40 },
         { name: "trigger", label: t("topic.trigger"), value: row ? row.trigger : "", hint: t("topic.trigger_hint"), max: 160 },
-        { name: "scope", label: t("topic.area"), kind: "select", options: areaOptions(choices, t("topic.area_all")), value: row ? row.scope_name || "" : "" },
+        { name: "project", label: t("topic.area"), kind: "select", options: projectOptions(choices, t("topic.area_all")), value: row ? row.project_name || "" : "" },
         ...(row
           ? [
               { name: "action", label: t("topic.action"), value: row.action || "", hint: t("topic.action_hint") },
@@ -269,7 +269,7 @@ async function topicsSection() {
       ],
       submit: row ? t("common.save") : t("common.create"),
       done: t("topic.saved"),
-      onSubmit: (values) => call("topic.save", { topic_id: row ? row.topic_id : null, ...values, scope: values.scope || null }).then(() => ""),
+      onSubmit: (values) => call("topic.save", { topic_id: row ? row.topic_id : null, ...values, project: values.project || null }).then(() => ""),
     });
   const remove = async (row) => {
     const yes = await confirmDialog({ title: t("topic.remove_confirm"), lines: [row.name, t("topic.remove_note")], confirm: t("common.remove"), danger: true });
@@ -285,7 +285,7 @@ async function topicsSection() {
       [t("topic.name"), t("topic.trigger"), t("topic.rules"), t("topic.tokens")],
       topics,
       (row) => [
-        [row.name + (row.scope_name ? `\n${row.scope_name}` : ""), "name"],
+        [row.name + (row.project_name ? `\n${row.project_name}` : ""), "name"],
         [row.trigger, "muted"],
         [String(row.rules), "num"],
         [`${row.body_tokens} / ${capacity}`, "num"],
@@ -302,11 +302,11 @@ async function routesSection() {
       title: row ? tilde(row.path_prefix) : t("route.new"),
       fields: [
         { name: "path", label: t("route.path"), kind: "folder", value: row ? row.path_prefix : "" },
-        { name: "scope", label: t("route.area"), kind: "select", options: areaOptions(choices, t("route.ignored")), value: row ? row.scope_name || "" : "" },
+        { name: "project", label: t("route.area"), kind: "select", options: projectOptions(choices, t("route.ignored")), value: row ? row.project_name || "" : "" },
       ],
       submit: row ? t("common.save") : t("common.add"),
       done: t("route.saved"),
-      onSubmit: (values) => call("route.save", { route_id: row ? row.route_id : null, path: values.path, scope: values.scope || null }).then(() => ""),
+      onSubmit: (values) => call("route.save", { route_id: row ? row.route_id : null, path: values.path, project: values.project || null }).then(() => ""),
     });
   const remove = async (row) => {
     const yes = await confirmDialog({ title: t("route.remove_confirm"), lines: [tilde(row.path_prefix)], confirm: t("common.remove"), danger: true });
@@ -318,7 +318,7 @@ async function routesSection() {
     table(
       [t("route.path"), t("route.area")],
       sorted,
-      (row) => [[tilde(row.path_prefix), "mono"], row.scope_name ? [row.scope_name, "name"] : [t("route.ignored"), "muted"]],
+      (row) => [[tilde(row.path_prefix), "mono"], row.project_name ? [row.project_name, "name"] : [t("route.ignored"), "muted"]],
       (row) => [button(t("common.edit"), () => edit(row), { kind: "quiet small" }), button(t("common.remove"), () => remove(row), { kind: "quiet small danger" })]
     ),
   ];
@@ -545,7 +545,7 @@ const SECTION_VIEWS = {
   health: healthSection,
   missed: missedSection,
   bootstrap: async () => bootstrapSection(),
-  scopes: scopesSection,
+  projects: projectsSection,
   topics: topicsSection,
   routes: routesSection,
   limits: limitsSection,

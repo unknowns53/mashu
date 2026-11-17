@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import expire, new_project, new_task, update_task
-from mashu import db, scopes, tasks
+from mashu import db, projects, tasks
 from mashu.errors import (
     ClosedTaskError,
     DuplicateTaskError,
@@ -165,28 +165,33 @@ def test_a_replacement_written_against_a_replaced_state_is_rejected(cur, task):
 
 
 # the budget (5.3, 8)
-def test_a_full_scope_leaves_another_scopes_share_alone_and_the_busiest_is_the_worst(
-    cur, scope_id, monkeypatch
+def test_a_full_project_leaves_another_projects_share_alone_and_the_busiest_is_the_worst(
+    cur, project_id, monkeypatch
 ):
-    lighter_scope = scopes.create_scope(cur, name="lighter scope", actor="user")["scope_id"]
-    busy = new_task(cur, "busy work", scope_id, status_text="x" * 120)
+    lighter_project = projects.create_project(cur, name="lighter project", actor="user")[
+        "project_id"
+    ]
+    busy = new_task(cur, "busy work", project_id, status_text="x" * 120)
     age(cur, busy["task"]["task_id"], 2)
     busy_cost = tasks.card_cost(busy["task"]["name"], busy["state"])
-    # A scope already full leaves another scope's share untouched.
+    # A project already full leaves another project's share untouched.
     monkeypatch.setenv("MASHU_PROJECT_CAPACITY", str(busy_cost))
-    light = new_task(cur, "light work", lighter_scope)
+    light = new_task(cur, "light work", lighter_project)
     assert light["card_share"]["unseated"] == []
 
-    crowding = new_task(cur, "crowding work", scope_id)
+    crowding = new_task(cur, "crowding work", project_id)
     share = crowding["card_share"]
-    assert share["boundary"] == "this scope"
+    assert share["boundary"] == "this project"
     assert [row["name"] for row in share["unseated"]] == ["busy work"]
 
     monkeypatch.delenv("MASHU_PROJECT_CAPACITY")
     crowding_cost = tasks.card_cost(crowding["task"]["name"], crowding["state"])
     totals = tasks.pushed_totals(cur)
     light_cost = tasks.card_cost(light["task"]["name"], light["state"])
-    assert totals["scopes"] == {scope_id: busy_cost + crowding_cost, lighter_scope: light_cost}
+    assert totals["projects"] == {
+        project_id: busy_cost + crowding_cost,
+        lighter_project: light_cost,
+    }
     assert totals["worst"] == busy_cost + crowding_cost
 
 

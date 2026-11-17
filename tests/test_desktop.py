@@ -13,7 +13,7 @@ from conftest import (
     retire,
     update_task,
 )
-from mashu import application, db, desktop, memories, nominations, scopes, tasks
+from mashu import application, db, desktop, memories, nominations, projects, tasks
 
 RULE = "run the migration before starting the local server, every time"
 
@@ -274,16 +274,18 @@ def test_a_reason_added_later_becomes_evidence_and_leaves_the_rule_as_it_was(dsn
 
 def test_a_rule_is_moved_retired_and_its_temporary_context_ended_from_the_app(dsn):
     with db.transaction(dsn) as cur:
-        scopes.create_scope(cur, name="lab", actor="user")
+        projects.create_project(cur, name="lab", actor="user")
     rule = ask(dsn, "memory.remember", content=RULE, delivery="always")["result"]
 
-    moved = ask(dsn, "memory.delivery", memory_id=rule["memory_id"], delivery="scope", scope="lab")
-    assert moved["ok"] and moved["result"]["delivery"] == "scope"
+    moved = ask(
+        dsn, "memory.delivery", memory_id=rule["memory_id"], delivery="project", project="lab"
+    )
+    assert moved["ok"] and moved["result"]["delivery"] == "project"
 
     note = ask(dsn, "temporary.add", content="the cluster is down until Friday", days=2)["result"]
-    assert ask(dsn, "temporary.revise", context_id=note["context_id"], content="down", scope="lab")[
-        "ok"
-    ]
+    assert ask(
+        dsn, "temporary.revise", context_id=note["context_id"], content="down", project="lab"
+    )["ok"]
     retired = ask(
         dsn,
         "memory.retire",
@@ -376,16 +378,16 @@ def test_a_task_edit_against_an_old_state_is_refused_and_a_closed_task_reopens(d
     assert listed_tasks(dsn, "closed") == []
 
 
-def test_projects_scopes_topics_and_routes_are_kept_from_the_settings_pages(dsn):
-    assert ask(dsn, "scope.save", name="lab", summary="the lab machines")["ok"]
+def test_projects_topics_and_routes_are_kept_from_the_settings_pages(dsn):
+    assert ask(dsn, "project.save", name="lab", summary="the lab machines")["ok"]
     assert ask(dsn, "project.save", name="tray", path="/work/tray")["ok"]
     project = next(
         row for row in ask(dsn, "work.projects")["result"]["projects"] if row["name"] == "tray"
     )
     assert project["folders"] == ["/work/tray"]
-    assert ask(dsn, "scope.save", scope_id=project["scope_id"], name="tray app")["ok"]
+    assert ask(dsn, "project.save", project_id=project["project_id"], name="tray app")["ok"]
 
-    topic = ask(dsn, "topic.save", name="deploy", trigger="Before deploying", scope="lab")
+    topic = ask(dsn, "topic.save", name="deploy", trigger="Before deploying", project="lab")
     assert topic["ok"]
     edited = ask(
         dsn,
@@ -397,13 +399,14 @@ def test_projects_scopes_topics_and_routes_are_kept_from_the_settings_pages(dsn)
     )
     assert edited["ok"]
     listed_topic = ask(dsn, "topic.list")["result"]["topics"][0]
-    assert (listed_topic["scope_name"], listed_topic["action"]) == (None, "deploy")
+    assert (listed_topic["project_name"], listed_topic["action"]) == (None, "deploy")
     assert ask(dsn, "topic.remove", topic_id=listed_topic["topic_id"])["result"]["removed"]
 
-    assert ask(dsn, "route.save", path="/work/lab", scope="lab")["ok"]
+    assert ask(dsn, "route.save", path="/work/lab", project="lab")["ok"]
     assert ask(dsn, "route.save", path="/work/scratch")["ok"]
     routes = {
-        row["path_prefix"]: row["scope_name"] for row in ask(dsn, "route.list")["result"]["routes"]
+        row["path_prefix"]: row["project_name"]
+        for row in ask(dsn, "route.list")["result"]["routes"]
     }
     assert routes == {"/work/lab": "lab", "/work/scratch": None, "/work/tray": "tray app"}
     assert ask(dsn, "route.remove", path="/work/scratch")["result"]["removed"]
@@ -418,4 +421,4 @@ def test_health_reads_without_writing(dsn):
     assert health["missed_30d"] == 0
     assert ask(dsn, "schema.status")["result"]["pending"] == []
     preview = ask(dsn, "settings.bootstrap", cwd="/nowhere/in/particular")
-    assert preview["ok"] and preview["result"]["scope"] is None
+    assert preview["ok"] and preview["result"]["project"] is None

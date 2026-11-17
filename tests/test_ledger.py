@@ -87,7 +87,7 @@ def test_withdrawn_and_relocated_memories_do_not_suppress_new_candidates(cur, re
         converted = memories.convert_to_temporary(cur, kept["memory_id"], days=1, actor="user")
         destination = converted["temporary"]
     else:
-        retire(cur, kept, "the project left the deployment scope", retirement_kind)
+        retire(cur, kept, "the service left the deployment project", retirement_kind)
 
     got = report(cur, "incident", SAME_HOLE)
     assert got["tombstone_suppressed"] is False
@@ -99,12 +99,12 @@ def test_withdrawn_and_relocated_memories_do_not_suppress_new_candidates(cur, re
         assert conflict["relocated_to_id"] == destination["context_id"]
 
 
-def test_the_ledger_lists_the_scope_it_was_filtered_by(cur, scope_id):
-    report(cur, "incident", HOLE, scope_id=scope_id)
+def test_the_ledger_lists_the_project_it_was_filtered_by(cur, project_id):
+    report(cur, "incident", HOLE, project_id=project_id)
     report(cur, "incident", OTHER_HOLE)
     assert len(ledger.ledger_entries(cur)) == 2
-    scoped = ledger.ledger_entries(cur, scope_id=scope_id)
-    assert [row["prevention"] for row in scoped] == [HOLE]
+    filtered = ledger.ledger_entries(cur, project_id=project_id)
+    assert [row["prevention"] for row in filtered] == [HOLE]
 
 
 def test_a_pain_landing_on_a_rule_already_delivered_indicts_the_delivery(cur):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from mashu import scopes, temporary
+from mashu import projects, temporary
 from mashu.errors import RefusedError
 from mashu.tokens import pushed_cost
 
@@ -34,15 +34,17 @@ def test_a_condition_comes_back_and_takes_room_until_it_stops_applying(cur):
     assert totals["always"] == 0 and totals["count"] == 0
 
 
-def test_a_scoped_session_still_sees_the_conditions_that_apply_everywhere(cur, scope_id):
-    here = temporary.put_temporary(cur, content=WINDOW, actor="agent", days=3, scope_id=scope_id)
+def test_a_project_session_still_sees_the_conditions_that_apply_everywhere(cur, project_id):
+    here = temporary.put_temporary(
+        cur, content=WINDOW, actor="agent", days=3, project_id=project_id
+    )
     anywhere = temporary.put_temporary(cur, content=EVERYWHERE, actor="agent", days=3)
-    elsewhere = scopes.create_scope(cur, name="somewhere else", actor="user")["scope_id"]
+    elsewhere = projects.create_project(cur, name="somewhere else", actor="user")["project_id"]
 
-    at_home = {r["context_id"] for r in temporary.active_temporary(cur, scope_id=scope_id)}
+    at_home = {r["context_id"] for r in temporary.active_temporary(cur, project_id=project_id)}
     assert at_home == {here["context_id"], anywhere["context_id"]}
 
-    away = [r["context_id"] for r in temporary.active_temporary(cur, scope_id=elsewhere)]
+    away = [r["context_id"] for r in temporary.active_temporary(cur, project_id=elsewhere)]
     assert away == [anywhere["context_id"]]
 
     unrouted = [r["context_id"] for r in temporary.active_temporary(cur)]
@@ -62,14 +64,14 @@ def test_a_condition_takes_room_in_its_own_share_while_it_lasts(cur, monkeypatch
     assert cur.fetchone()["n"] == 1
 
 
-def test_a_scoped_condition_weighs_on_that_scope_and_one_for_everywhere_on_the_heaviest(
-    cur, scope_id, monkeypatch
+def test_a_project_condition_weighs_on_that_project_and_one_for_everywhere_on_the_heaviest(
+    cur, project_id, monkeypatch
 ):
     monkeypatch.setenv("MASHU_TEMPORARY_CAPACITY", "30")
-    temporary.put_temporary(cur, content=WINDOW, actor="user", days=3, scope_id=scope_id)
+    temporary.put_temporary(cur, content=WINDOW, actor="user", days=3, project_id=project_id)
     totals = temporary.pushed_totals(cur)
     assert totals["always"] == 0
-    assert totals["scopes"] == {scope_id: pushed_cost([WINDOW])}
+    assert totals["projects"] == {project_id: pushed_cost([WINDOW])}
     assert totals["worst"] == pushed_cost([WINDOW])
 
     with pytest.raises(RefusedError, match="the temporary share seats 30 tokens"):

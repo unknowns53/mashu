@@ -9,7 +9,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import references, routing, scopes, task_history, tasks
+from mashu import projects, references, routing, task_history, tasks
 from mashu.errors import MashuError
 
 _PROPOSAL_FIELDS = ("outcome", "reason", "state_at", "proposed_at", "proposed_by")
@@ -18,7 +18,7 @@ _PROPOSAL_FIELDS = ("outcome", "reason", "state_at", "proposed_at", "proposed_by
 @dataclass(frozen=True)
 class ProjectChoices:
     projects: list[dict[str, Any]]
-    scope_name: str | None
+    project_name: str | None
 
 
 def close_task(
@@ -66,22 +66,19 @@ def keep_open(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, An
 
 
 def task_project_choices(cur: psycopg.Cursor, *, cwd: str | None) -> ProjectChoices:
-    """The scope this directory is routed to, or every open scope as a fallback.
-
-    Each choice carries `project_id`, the id a task is filed under, which is the scope's id.
-    """
-    scope_id, _ = routing.resolve(cur, cwd)
+    """The project this directory is routed to, or every open project as a fallback."""
+    project_id, _ = routing.resolve(cur, cwd)
     # SELECT * rather than naming archived_at, so a store without that column still answers.
-    cur.execute("SELECT * FROM scope ORDER BY name")
-    open_scopes = [
-        {"project_id": row["scope_id"], "name": row["name"]}
+    cur.execute("SELECT * FROM project ORDER BY name")
+    open_projects = [
+        {"project_id": row["project_id"], "name": row["name"]}
         for row in cur.fetchall()
         if not row.get("archived_at")
     ]
-    routed = [row for row in open_scopes if row["project_id"] == scope_id]
+    routed = [row for row in open_projects if row["project_id"] == project_id]
     if routed:
         return ProjectChoices(routed, routed[0]["name"])
-    return ProjectChoices(open_scopes, None)
+    return ProjectChoices(open_projects, None)
 
 
 def task_view(cur: psycopg.Cursor, activity: str) -> list[dict[str, Any]]:
@@ -122,22 +119,22 @@ def create_task(
 
 
 def resolve_task_project(cur: psycopg.Cursor, given: str | None, *, cwd: str | None) -> UUID:
-    """The scope a task is filed under: the one named, or the one this directory is routed to."""
+    """The project a task is filed under: the one named, or the one this directory is routed to."""
     if given:
-        row = scopes.get_scope(cur, given)
+        row = projects.get_project(cur, given)
         if row is not None and not row.get("archived_at"):
-            return row["scope_id"]
+            return row["project_id"]
         if references.is_uuid_ref(given):
             return references.resolve_id(
-                cur, given, table="scope", column="scope_id", label="scope"
+                cur, given, table="project", column="project_id", label="project"
             )
-        return scopes.require_scope(cur, given)["scope_id"]
+        return projects.require_project(cur, given)["project_id"]
 
     choices = task_project_choices(cur, cwd=cwd)
-    if choices.scope_name:
+    if choices.project_name:
         return choices.projects[0]["project_id"]
     named = ", ".join(row["name"] for row in choices.projects) or "none yet"
     raise MashuError(
-        f"this folder belongs to no scope; name one with --project <name> ({named}), "
+        f"this folder belongs to no project; name one with --project <name> ({named}), "
         "or add this folder to one"
     )

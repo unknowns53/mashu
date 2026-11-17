@@ -12,7 +12,7 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
-from mashu import db, memories, memory_changes, nominations, scopes, screen, server, tasks
+from mashu import db, memories, memory_changes, nominations, projects, screen, server, tasks
 from mashu.migrate import migrate, migration_files
 
 TEST_DB = os.environ.get("MASHU_TEST_DB", "mashu_test")
@@ -122,11 +122,11 @@ def cur(test_dsn: str) -> Iterator[psycopg.Cursor]:
 
 
 @pytest.fixture
-def scope_id(cur: psycopg.Cursor):
-    """A scope to hang test rows on."""
-    from mashu.scopes import create_scope
+def project_id(cur: psycopg.Cursor):
+    """A project to hang test rows on."""
+    from mashu.projects import create_project
 
-    return create_scope(cur, name="test scope", actor="test")["scope_id"]
+    return create_project(cur, name="test project", actor="test")["project_id"]
 
 
 @pytest.fixture(autouse=True)
@@ -236,9 +236,8 @@ def apply_change(cur, change, instruction="Apply it", *, version=None, request_i
 
 
 def new_project(cur: psycopg.Cursor, name: str = "enrai", **kwargs):
-    """A scope to file tasks under, which is all a project now is; tasks name it project_id."""
-    row = scopes.create_scope(cur, name=name, actor="user", **kwargs)
-    return {**row, "project_id": row["scope_id"]}
+    """A project to file tasks under."""
+    return projects.create_project(cur, name=name, actor="user", **kwargs)
 
 
 def new_task(cur: psycopg.Cursor, name: str, project: str = "enrai", **kwargs):

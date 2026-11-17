@@ -56,10 +56,15 @@ def count(cur, rows):
     return cur.execute(f"SELECT count(*) AS n FROM {rows}").fetchone()["n"]
 
 
-def two_pains(cur, scope_id=None):
+def two_pains(cur, project_id=None):
     """A candidate from one incident, with a second incident landed under it."""
     first = ledger.report_pain(
-        cur, kind="incident", what="looked it up", prevention=HOLE, actor="agent", scope_id=scope_id
+        cur,
+        kind="incident",
+        what="looked it up",
+        prevention=HOLE,
+        actor="agent",
+        project_id=project_id,
     )
     second = ledger.report_pain(
         cur,
@@ -67,7 +72,7 @@ def two_pains(cur, scope_id=None):
         what="looked it up again",
         prevention=SAME_HOLE,
         actor="agent",
-        scope_id=scope_id,
+        project_id=project_id,
     )
     return first, second, second["nomination"]
 
@@ -104,8 +109,8 @@ def test_admitting_carries_the_evidence_across_and_names_where_the_rule_came_fro
     assert str(nomination["nomination_id"]) in revision["note"]
 
 
-def test_an_admission_may_reword_the_rule_and_choose_where_it_lands(cur, scope_id):
-    _, _, nomination = two_pains(cur, scope_id=scope_id)
+def test_an_admission_may_reword_the_rule_and_choose_where_it_lands(cur, project_id):
+    _, _, nomination = two_pains(cur, project_id=project_id)
     memory = admit(
         cur,
         nomination["nomination_id"],
@@ -114,8 +119,8 @@ def test_an_admission_may_reword_the_rule_and_choose_where_it_lands(cur, scope_i
     )
     assert memory["content"] == "run the migration first"
     assert memory["delivery"] == "always"
-    # The candidate's scope is where it came from; an always rule keeps none.
-    assert memory["scope_id"] is None
+    # The candidate's project is where it came from; an always rule keeps none.
+    assert memory["project_id"] is None
 
 
 def test_a_pending_candidate_can_be_reworded_without_being_decided(cur):
@@ -193,7 +198,7 @@ def test_the_queue_hands_over_the_pains_and_not_their_ids(cur):
 
 
 # an instruction an agent says it was given (5.1, path three)
-def test_a_carried_instruction_reaches_the_queue_once_and_stops_there(cur, scope_id):
+def test_a_carried_instruction_reaches_the_queue_once_and_stops_there(cur, project_id):
     with pytest.raises(RefusedError):
         nominations.nominate_user_explicit(
             cur, content="write it under SECRETMARKER3 from now on", actor="agent"
@@ -201,12 +206,12 @@ def test_a_carried_instruction_reaches_the_queue_once_and_stops_there(cur, scope
     assert count(cur, "ledger") == 0
 
     got = nominations.nominate_user_explicit(
-        cur, content=HOLE, actor="the agent", scope_id=scope_id
+        cur, content=HOLE, actor="the agent", project_id=project_id
     )
     nomination = got["nomination"]
     assert nomination["kind"] == "user_explicit"
     assert nomination["status"] == "pending"
-    assert nomination["scope_id"] == scope_id
+    assert nomination["project_id"] == project_id
     assert nomination["evidence"] == [got["ledger_id"]]
 
     cur.execute("SELECT * FROM ledger WHERE ledger_id = %s", (got["ledger_id"],))
@@ -218,7 +223,7 @@ def test_a_carried_instruction_reaches_the_queue_once_and_stops_there(cur, scope
     assert count(cur, "memory") == 0
 
     second = nominations.nominate_user_explicit(
-        cur, content=SAME_HOLE, actor="agent", scope_id=scope_id
+        cur, content=SAME_HOLE, actor="agent", project_id=project_id
     )
     assert second["nomination_existing"] is True
     assert second["nomination"]["nomination_id"] == nomination["nomination_id"]
@@ -331,7 +336,7 @@ def test_evidence_is_added_once_and_never_to_a_candidate_already_decided(cur):
 
 # an explicit remember carried in one call
 def test_one_call_nominates_and_admits_with_the_same_provenance_and_replays_its_answer(
-    cur, scope_id
+    cur, project_id
 ):
     request_id = uuid4()
     got = nominations.remember_explicit(
@@ -340,15 +345,15 @@ def test_one_call_nominates_and_admits_with_the_same_provenance_and_replays_its_
         actor="the agent",
         approval=REMEMBER,
         request_id=request_id,
-        scope_id=scope_id,
+        project_id=project_id,
     )
 
     assert got["admitted"] is True
     memory = got["memory"]
     assert memory["content"] == HOLE
     assert memory["created_by"] == "the agent"
-    assert memory["delivery"] == "scope"
-    assert memory["scope_id"] == str(scope_id)
+    assert memory["delivery"] == "project"
+    assert memory["project_id"] == str(project_id)
     assert memory["evidence"] == [str(got["ledger_id"])]
 
     cur.execute("SELECT * FROM nomination WHERE nomination_id = %s", (got["nomination_id"],))
@@ -368,7 +373,7 @@ def test_one_call_nominates_and_admits_with_the_same_provenance_and_replays_its_
         actor="agent",
         approval=REMEMBER,
         request_id=request_id,
-        scope_id=scope_id,
+        project_id=project_id,
     )
     assert again == got
     assert count(cur, "nomination") == 1

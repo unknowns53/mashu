@@ -25,9 +25,9 @@ from mashu import (
     memory_actions,
     memory_changes,
     nominations,
+    projects,
     references,
     routing,
-    scopes,
     screen,
     settings,
     task_actions,
@@ -116,17 +116,17 @@ def _task_ref(cur: Any, ref: str) -> UUID:
 
 
 def _project_ref(cur: Any, ref: str) -> UUID:
-    """The scope a task is filed under, by its name or by the front of its id."""
-    row = scopes.get_scope(cur, ref)
+    """The project a task is filed under, by its name or by the front of its id."""
+    row = projects.get_project(cur, ref)
     if row is not None:
-        return row["scope_id"]
+        return row["project_id"]
     if references.is_uuid_ref(ref):
-        return _resolve(cur, ref, table="scope", id_col="scope_id", label="scope")
-    return scopes.require_scope(cur, ref)["scope_id"]
+        return _resolve(cur, ref, table="project", id_col="project_id", label="project")
+    return projects.require_project(cur, ref)["project_id"]
 
 
-def _scope(cur: Any, name: str | None) -> UUID | None:
-    return scopes.require_scope(cur, name)["scope_id"] if name is not None else None
+def _project(cur: Any, name: str | None) -> UUID | None:
+    return projects.require_project(cur, name)["project_id"] if name is not None else None
 
 
 def _topic(cur: Any, name: str | None) -> UUID | None:
@@ -140,8 +140,8 @@ def _delivery_label(row: dict[str, Any]) -> str:
     return row["delivery"]
 
 
-def _routed_scope(cur: Any) -> tuple[UUID | None, str | None, bool]:
-    return application.routed_scope(cur, os.getcwd())
+def _routed_project(cur: Any) -> tuple[UUID | None, str | None, bool]:
+    return application.routed_project(cur, os.getcwd())
 
 
 def _short(value: Any) -> str:
@@ -284,10 +284,10 @@ def cmd_status(args: argparse.Namespace) -> int:
             f"guard   {row['name']} ({row['action']})  served_30d={row['served']}  "
             f"followed={followed}  changed={share}"
         )
-    print("scopes")
+    print("projects")
     print("name                         active  push_tokens")
-    for row in status.scope_rows:
-        print(f"{row['name'][:28]:28}  {row['n_active']:6}  {row['push_tokens']:11}")
+    for row in status.project_rows:
+        print(f"{row['name'][:28]:28}  {row['n_rules']:6}  {row['push_tokens']:11}")
     return 0
 
 
@@ -307,9 +307,9 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         print(f"schema    {len(unapplied)} MIGRATION(S) PENDING: {', '.join(unapplied)}")
         print("          writes against the new columns fail until 'mashu admin migrate'")
     routed_text = str(answer.get("routed", False)).lower()
-    print(f"scope     {answer.get('scope') or '-'}  routed={routed_text}")
+    print(f"project   {answer.get('project') or '-'}  routed={routed_text}")
     _print_memory_rows(answer.get("always", []), heading="always")
-    _print_memory_rows(answer.get("scoped", []), heading="scoped")
+    _print_memory_rows(answer.get("project_rules", []), heading="project")
     if answer.get("topics"):
         print("topics")
     for row in answer.get("topics", []):
@@ -340,21 +340,21 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     return 0
 
 
-#: An always rule keeps no scope (memory 4), so a scope named with it would be dropped unseen.
-ALWAYS_TAKES_NO_SCOPE = "an always rule reaches every session, so it takes no --scope"
+#: An always rule keeps no project (memory 4), so a project named with it would be dropped unseen.
+ALWAYS_TAKES_NO_PROJECT = "an always rule reaches every session, so it takes no --project"
 
 
 def cmd_remember(args: argparse.Namespace) -> int:
     if args.until is not None:
         if (
-            args.scope is not None
+            args.project is not None
             or args.delivery is not None
             or args.topic is not None
             or args.why is not None
             or args.force
         ):
             raise MashuError(
-                "--until cannot be combined with --scope, --delivery, --topic, --why, or "
+                "--until cannot be combined with --project, --delivery, --topic, --why, or "
                 "--force; omit those options when recording a temporary condition"
             )
         days = _parse_days(args.until)
@@ -364,14 +364,16 @@ def cmd_remember(args: argparse.Namespace) -> int:
         print(f"temporary  {_short(row['context_id'])}  {row['expires_at']}")
         return 0
 
-    if args.topic is not None and (args.scope is not None or args.delivery not in (None, "topic")):
+    if args.topic is not None and (
+        args.project is not None or args.delivery not in (None, "topic")
+    ):
         raise MashuError(
             "--topic delivers the rule with that topic, which already says where it is read; "
-            "omit --scope and --delivery"
+            "omit --project and --delivery"
         )
-    delivery = args.delivery or ("topic" if args.topic else "scope" if args.scope else "always")
-    if delivery == "always" and args.scope:
-        raise MashuError(ALWAYS_TAKES_NO_SCOPE)
+    delivery = args.delivery or ("topic" if args.topic else "project" if args.project else "always")
+    if delivery == "always" and args.project:
+        raise MashuError(ALWAYS_TAKES_NO_PROJECT)
     # memories.remember holds the same limit; checked here so the refusal names the flag.
     with db.transaction(args.dsn) as cur:
         limit = settings.limit(cur, "content_limit")
@@ -380,17 +382,17 @@ def cmd_remember(args: argparse.Namespace) -> int:
     while True:
         try:
             with db.transaction(args.dsn) as cur:
-                scope_id, others = memory_actions.scope_ids_named(cur, args.scope or [])
+                project_id, others = memory_actions.project_ids_named(cur, args.project or [])
                 row = memories.remember(
                     cur,
                     content=args.body,
                     actor=ACTOR,
-                    scope_id=scope_id,
+                    project_id=project_id,
                     delivery=delivery,
                     topic_id=_topic(cur, args.topic),
                     acknowledged_conflicts=acknowledged,
                     why=args.why,
-                    also_scope_ids=others,
+                    also_project_ids=others,
                 )
             break
         except RetiredConflictError as conflict:
@@ -544,7 +546,7 @@ def cmd_pain(args: argparse.Namespace) -> int:
             what=args.what,
             prevention=args.prevention,
             actor=ACTOR,
-            scope_id=_scope(cur, args.scope),
+            project_id=_project(cur, args.project),
             prevention_kind=args.prevention_kind,
             task_id=_task_ref(cur, args.task) if args.task else None,
             violated_memory_id=_memory_ref(cur, args.violated) if args.violated else None,
@@ -605,7 +607,7 @@ def cmd_ledger(args: argparse.Namespace) -> int:
         rows = ledger_domain.ledger_entries(
             cur,
             limit=args.limit,
-            scope_id=_scope(cur, args.scope),
+            project_id=_project(cur, args.project),
         )
     print("id        kind       date        what")
     for row in rows:
@@ -629,8 +631,8 @@ def _ledger_rows(cur: Any, ids: list[UUID]) -> list[dict[str, Any]]:
         return []
     cur.execute(
         """
-        SELECT l.*, s.name AS scope_name
-        FROM ledger l LEFT JOIN scope s ON s.scope_id = l.scope_id
+        SELECT l.*, s.name AS project_name
+        FROM ledger l LEFT JOIN project s ON s.project_id = l.project_id
         WHERE l.ledger_id = ANY(%s)
         """,
         (list(ids),),
@@ -655,10 +657,10 @@ def _show_memory(cur: Any, memory_id: UUID) -> None:
     cur.execute(
         """
         SELECT m.*, """
-        + memories.SCOPE_NAMES
+        + memories.PROJECT_NAMES
         + """, t.name AS topic_name, t.trigger AS topic_trigger
         FROM memory m
-        LEFT JOIN scope s ON s.scope_id = m.scope_id
+        LEFT JOIN project s ON s.project_id = m.project_id
         LEFT JOIN topic t ON t.topic_id = m.topic_id
         WHERE m.memory_id = %s
         """,
@@ -673,7 +675,7 @@ def _show_memory(cur: Any, memory_id: UUID) -> None:
     _field("delivery", _delivery_label(row))
     if row["delivery"] == "topic":
         _field("trigger", row["topic_trigger"])
-    _field("scope", row["scope_name"] or "-")
+    _field("project", row["project_name"] or "-")
     _field("created", f"{_date(row['created_at'])}  {row['created_by']}")
     _field("tokens", tokens.pushed_cost([row["content"]]))
     print("content")
@@ -742,14 +744,14 @@ def _show_memory_change(cur: Any, change_id: UUID) -> None:
         _field("successor nomination", row["successor_nomination_id"])
         _field("successor version", row["successor_snapshot"]["version"])
         print(f"  proposed  {row['successor_snapshot']['content']}")
-        _field("candidate scope", row["successor_snapshot"]["scope_id"] or "-")
+        _field("candidate project", row["successor_snapshot"]["project_id"] or "-")
         _field("candidate kind", row["successor_snapshot"]["kind"])
         _field("candidate evidence", ", ".join(row["successor_snapshot"]["evidence"]))
         for line in row["delivery_move"]:
             print(f"  {line}")
         if row.get("successor_changed"):
             print(f"  current v{row['successor']['version']}  {row['successor']['content']}")
-            _field("current candidate scope", row["successor"]["scope_id"] or "-")
+            _field("current candidate project", row["successor"]["project_id"] or "-")
             _field("candidate status", "changed since proposal; refresh and reread")
     if row.get("relocated_to_id"):
         _field("destination", f"{row['relocated_to_kind']}  {row['relocated_to_id']}")
@@ -774,8 +776,8 @@ def _show_memory_change(cur: Any, change_id: UUID) -> None:
 def _show_nomination(cur: Any, nomination_id: UUID) -> None:
     cur.execute(
         """
-        SELECT n.*, s.name AS scope_name
-        FROM nomination n LEFT JOIN scope s ON s.scope_id = n.scope_id
+        SELECT n.*, s.name AS project_name
+        FROM nomination n LEFT JOIN project s ON s.project_id = n.project_id
         WHERE n.nomination_id = %s
         """,
         (nomination_id,),
@@ -785,7 +787,7 @@ def _show_nomination(cur: Any, nomination_id: UUID) -> None:
     _field("kind", row["kind"])
     _field("status", row["status"])
     _field("version", row["version"])
-    _field("scope", row["scope_name"] or "-")
+    _field("project", row["project_name"] or "-")
     print("content")
     print(f"  {row['content']}")
     # Show retirement conflicts before the evidence list.
@@ -813,7 +815,7 @@ def _show_ledger(cur: Any, ledger_id: UUID) -> None:
     _field("ledger", row["ledger_id"])
     _field("kind", row["kind"])
     _field("created", f"{_date(row['created_at'])}  {row['created_by']}")
-    _field("scope", row["scope_name"] or "-")
+    _field("project", row["project_name"] or "-")
     _field("what", row["what"])
     _field("prevention", row["prevention"])
     _field("source", row["source"] or "-")
@@ -869,29 +871,29 @@ def cmd_show(args: argparse.Namespace) -> int:
 def cmd_memories(args: argparse.Namespace) -> int:
     status = "retired" if args.retired else "active"
     with db.transaction(args.dsn) as cur:
-        scope_id = _scope(cur, args.scope) if args.scope else None
+        project_id = _project(cur, args.project) if args.project else None
         cur.execute(
             """
             SELECT m.*, """
-            + memories.SCOPE_NAMES
+            + memories.PROJECT_NAMES
             + """, t.name AS topic_name
             FROM memory m
-            LEFT JOIN scope s ON s.scope_id = m.scope_id
+            LEFT JOIN project s ON s.project_id = m.project_id
             LEFT JOIN topic t ON t.topic_id = m.topic_id
             WHERE m.status = %(status)s
-              AND (%(scope)s::uuid IS NULL OR m.scope_id = %(scope)s::uuid
+              AND (%(project)s::uuid IS NULL OR m.project_id = %(project)s::uuid
                    OR m.memory_id IN
-                      (SELECT memory_id FROM memory_scope WHERE scope_id = %(scope)s::uuid))
+                      (SELECT memory_id FROM memory_project WHERE project_id = %(project)s::uuid))
             ORDER BY m.delivery, s.name, t.name, m.created_at
             """,
-            {"status": status, "scope": scope_id},
+            {"status": status, "project": project_id},
         )
         rows = cur.fetchall()
-    print("id        delivery              scope                 tokens  content")
+    print("id        delivery              project               tokens  content")
     for row in rows:
         print(
             f"{_short(row['memory_id']):8}  {_pad(_delivery_label(row)[:20], 20)}  "
-            f"{(row['scope_name'] or '-')[:20]:20}  "
+            f"{(row['project_name'] or '-')[:20]:20}  "
             f"{tokens.pushed_cost([row['content']]):6}  {row['content']}"
         )
         if status == "retired":
@@ -920,7 +922,7 @@ def _print_pending(rows: list[dict[str, Any]]) -> None:
     for row in rows:
         print(
             f"{row['nomination_id']}  v{row['version']}  {row['kind']}  "
-            f"{row.get('scope_name') or '-'}"
+            f"{row.get('project_name') or '-'}"
         )
         print(f"  {row['content']}")
         if row.get("deferred_at"):
@@ -1091,16 +1093,16 @@ def cmd_review(args: argparse.Namespace) -> int:
             )
             cur.execute("SELECT * FROM nomination WHERE nomination_id = %s", (nomination_id,))
             nomination = cur.fetchone()
-            scope_id = _scope(cur, args.scope) if args.scope else None
+            project_id = _project(cur, args.project) if args.project else None
             delivery = args.delivery or (
                 "topic"
                 if args.topic
-                else "scope"
-                if (args.scope or nomination.get("scope_id"))
+                else "project"
+                if (args.project or nomination.get("project_id"))
                 else "always"
             )
-            if delivery == "always" and args.scope:
-                raise MashuError(ALWAYS_TAKES_NO_SCOPE)
+            if delivery == "always" and args.project:
+                raise MashuError(ALWAYS_TAKES_NO_PROJECT)
             request_id = args.request_id or uuid4()
             row = nominations.admit(
                 cur,
@@ -1108,7 +1110,7 @@ def cmd_review(args: argparse.Namespace) -> int:
                 actor=ACTOR,
                 delivery=delivery,
                 expected_version=args.version,
-                scope_id=scope_id,
+                project_id=project_id,
                 topic_id=_topic(cur, args.topic),
                 approval={"kind": "user_direct", "conflict_ids": args.ack_conflict or []},
                 request_id=request_id,
@@ -1136,26 +1138,26 @@ def cmd_review(args: argparse.Namespace) -> int:
 
 
 def cmd_deliver(args: argparse.Namespace) -> int:
-    if args.scope and args.delivery == "always":
-        raise MashuError(ALWAYS_TAKES_NO_SCOPE)
-    if args.scope and len(args.scope) > 1 and args.delivery != "scope":
-        raise MashuError("only scope delivery takes more than one --scope")
+    if args.project and args.delivery == "always":
+        raise MashuError(ALWAYS_TAKES_NO_PROJECT)
+    if args.project and len(args.project) > 1 and args.delivery != "project":
+        raise MashuError("only project delivery takes more than one --project")
     with db.transaction(args.dsn) as cur:
         memory_id = _memory_ref(cur, args.memory_id)
         current = memories.get_memory(cur, memory_id)
-        scope_id, others = memory_actions.scope_ids_named(
-            cur, args.scope or [], home=current["scope_id"] if current else None
+        project_id, others = memory_actions.project_ids_named(
+            cur, args.project or [], home=current["project_id"] if current else None
         )
         row = memories.set_delivery(
             cur,
             memory_id,
             delivery=args.delivery,
             actor=ACTOR,
-            scope_id=scope_id,
+            project_id=project_id,
             topic_id=_topic(cur, args.topic),
-            also_scope_ids=others if args.scope and args.delivery == "scope" else None,
+            also_project_ids=others if args.project and args.delivery == "project" else None,
         )
-        reached = memories.memory_details(cur, memory_id)["scope_name"]
+        reached = memories.memory_details(cur, memory_id)["project_name"]
     print(f"delivery  {row['memory_id']}  {row['delivery']}  {reached or ''}".rstrip())
     return 0
 
@@ -1168,7 +1170,7 @@ def _guard_outcome(args: argparse.Namespace) -> int:
         else:
             # guard_outcomes counts by topic_id, so an outcome reported without its topic is
             # filed under the one this action leads to here.
-            topic, _ = topics.action_rules(cur, args.action, _routed_scope(cur)[0])
+            topic, _ = topics.action_rules(cur, args.action, _routed_project(cur)[0])
         events.record(
             cur,
             "guard_followed",
@@ -1189,8 +1191,8 @@ def cmd_guard(args: argparse.Namespace) -> int:
     if args.outcome:
         return _guard_outcome(args)
     with db.transaction(args.dsn) as cur:
-        scope_id, _, _ = _routed_scope(cur)
-        topic, rules = topics.action_rules(cur, args.action, scope_id)
+        project_id, _, _ = _routed_project(cur)
+        topic, rules = topics.action_rules(cur, args.action, project_id)
         if rules:
             events.record(
                 cur,
@@ -1224,21 +1226,21 @@ def cmd_guard(args: argparse.Namespace) -> int:
     return GUARD_HOLD
 
 
-def cmd_scope(args: argparse.Namespace) -> int:
+def cmd_project(args: argparse.Namespace) -> int:
     if args.add is not None and args.remove is not None:
         raise MashuError("pass --add or --remove, not both")
     with db.transaction(args.dsn) as cur:
         if args.remove is not None:
-            target = scopes.require_scope(cur, args.remove)
-            removed = scopes.remove_scope(cur, target["scope_id"], actor=ACTOR)
+            target = projects.require_project(cur, args.remove)
+            removed = projects.remove_project(cur, target["project_id"], actor=ACTOR)
             print(f"{removed['removed']}  {target['name']}")
             return 0
         if args.add is not None:
-            row = scopes.create_scope(
+            row = projects.create_project(
                 cur, name=args.add, summary=args.about, path=args.folder, actor=ACTOR
             )
         else:
-            rows = scopes.list_scopes(cur)
+            rows = projects.list_projects(cur)
     if args.add is not None:
         _gate_warnings(row)
         folder = f"  folder {row['path_prefix']}" if row.get("path_prefix") else ""
@@ -1247,7 +1249,7 @@ def cmd_scope(args: argparse.Namespace) -> int:
     print("name                         rules  push_tokens  tasks a/d/c")
     for row in rows:
         counts = f"{row['n_tasks_active']}/{row['n_tasks_dormant']}/{row['n_tasks_closed']}"
-        print(f"{row['name'][:28]:28}  {row['n_active']:5}  {row['push_tokens']:11}  {counts}")
+        print(f"{row['name'][:28]:28}  {row['n_rules']:5}  {row['push_tokens']:11}  {counts}")
     return 0
 
 
@@ -1256,18 +1258,18 @@ def _print_topic_rows(rows: list[dict[str, Any]]) -> None:
         print("no topics")
         return
     width = max(_cells("name"), *(_cells(row["name"]) for row in rows))
-    print(f"{_pad('name', width)}  {'scope':<20}  rules  body  trigger")
+    print(f"{_pad('name', width)}  {'project':<20}  rules  body  trigger")
     for row in rows:
         before = f"  (before: {row['action']})" if row.get("action") else ""
         print(
-            f"{_pad(row['name'], width)}  {(row['scope_name'] or 'every session')[:20]:20}  "
+            f"{_pad(row['name'], width)}  {(row['project_name'] or 'every session')[:20]:20}  "
             f"{row['rules']:5}  {row['body_tokens']:4}  {row['trigger']}{before}"
         )
 
 
 def cmd_topic(args: argparse.Namespace) -> int:
     if args.topic_command == "show":
-        options = (args.add, args.edit, args.remove, args.trigger, args.scope, args.rename)
+        options = (args.add, args.edit, args.remove, args.trigger, args.project, args.rename)
         options += (args.source, args.action)
         if args.no_action or any(option is not None for option in options):
             raise MashuError(
@@ -1277,7 +1279,7 @@ def cmd_topic(args: argparse.Namespace) -> int:
             answer = topics.topic_rules(cur, args.name)
         topic = answer["topic"]
         _field("topic", topic["name"])
-        _field("scope", topic["scope"] or "every session")
+        _field("project", topic["project"] or "every session")
         _field("trigger", topic["trigger"])
         if topic["action"]:
             _field("before", topic["action"])
@@ -1290,10 +1292,10 @@ def cmd_topic(args: argparse.Namespace) -> int:
     if (
         args.add is None
         and args.edit is None
-        and (args.trigger or args.scope or args.rename or args.source)
+        and (args.trigger or args.project or args.rename or args.source)
     ):
         raise MashuError(
-            "--trigger, --scope, and --source go with --add or --edit; --rename with --edit"
+            "--trigger, --project, and --source go with --add or --edit; --rename with --edit"
         )
     if args.edit is None and (args.rename is not None or args.action or args.no_action):
         raise MashuError("--rename, --action, and --no-action go with --edit")
@@ -1304,15 +1306,15 @@ def cmd_topic(args: argparse.Namespace) -> int:
                     "--add requires --trigger: one sentence saying when to read the topic. "
                     'Example: mashu topic --add audio-trim --trigger "Before trimming audio"'
                 )
-            if args.scope == "-":
-                raise MashuError("omit --scope to list the topic in every session")
+            if args.project == "-":
+                raise MashuError("omit --project to list the topic in every session")
             if args.source == "-":
                 raise MashuError("omit --source to create the topic without one")
             row = topics.create_topic(
                 cur,
                 name=args.add,
                 trigger=args.trigger,
-                scope_id=_scope(cur, args.scope),
+                project_id=_project(cur, args.project),
                 source=args.source,
                 actor=ACTOR,
             )
@@ -1326,8 +1328,8 @@ def cmd_topic(args: argparse.Namespace) -> int:
                 actor=ACTOR,
                 name=args.rename,
                 trigger=args.trigger,
-                scope_id=_scope(cur, args.scope) if args.scope not in (None, "-") else None,
-                clear_scope=args.scope == "-",
+                project_id=_project(cur, args.project) if args.project not in (None, "-") else None,
+                clear_project=args.project == "-",
                 action=args.action,
                 clear_action=args.no_action,
                 source=args.source if args.source != "-" else None,
@@ -1345,30 +1347,30 @@ def cmd_topic(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_route(args: argparse.Namespace) -> int:
+def cmd_folder(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
         if args.add is not None:
-            if args.scope is None:
+            if args.project is None:
                 raise MashuError(
-                    "--add requires --scope. Example: mashu route --add <path> --scope <name>"
+                    "--add requires --project. Example: mashu folder --add <path> --project <name>"
                 )
             row = application.set_route(
-                cur, path_prefix=args.add, scope_name=args.scope, actor=ACTOR
+                cur, path_prefix=args.add, project_name=args.project, actor=ACTOR
             )
-            print(f"route  {row['path_prefix']}  {args.scope}")
+            print(f"route  {row['path_prefix']}  {args.project}")
             return 0
         if args.ignore is not None:
-            if args.scope is not None:
+            if args.project is not None:
                 raise MashuError(
-                    "--ignore cannot be combined with --scope; ignored paths are unscoped"
+                    "--ignore cannot be combined with --project; ignored paths belong to no project"
                 )
             row = application.ignore_route(cur, path_prefix=args.ignore, actor=ACTOR)
             print(f"ignored  {row['path_prefix']}")
             return 0
         if args.remove is not None:
-            if args.scope is not None:
+            if args.project is not None:
                 raise MashuError(
-                    "--remove cannot be combined with --scope; omit --scope to remove the route"
+                    "--remove cannot be combined with --project; omit --project to remove the route"
                 )
             removed = application.remove_route(cur, path_prefix=args.remove, actor=ACTOR)
             print("removed" if removed else "not found")
@@ -1377,11 +1379,11 @@ def cmd_route(args: argparse.Namespace) -> int:
     # Size this column by display width so full routes remain distinguishable.
     header = "path_prefix"
     width = max([_cells(header), *(_cells(row["path_prefix"]) for row in rows)])
-    print(f"{header}{' ' * (width - _cells(header))}  scope")
+    print(f"{header}{' ' * (width - _cells(header))}  project")
     for row in rows:
         prefix = row["path_prefix"]
         pad = " " * (width - _cells(prefix))
-        print(f"{prefix}{pad}  {row.get('scope_name') or '(ignored)'}")
+        print(f"{prefix}{pad}  {row.get('project_name') or '(ignored)'}")
     return 0
 
 
@@ -1651,7 +1653,7 @@ Managing durable rules:
 
 Work state and routing:
   task                      Read and manage current work.
-  scope / route             Map working directories to scopes, which hold tasks.
+  project / folder          Map working folders to projects, which hold tasks.
 
 Run `mashu COMMAND --help` for arguments and examples. Nested commands use
 `mashu task COMMAND --help`.
@@ -1664,7 +1666,7 @@ Environment:
   MASHU_AGENT                Agent label used by `mashu serve` when --agent is absent.
 
 This is the human-facing CLI. Agents should normally use the Mashu MCP tools;
-scope creation, direct remembering, review decisions, task closure, and task
+project creation, direct remembering, review decisions, task closure, and task
 reopening remain User decisions even when the command is technically callable.
 """
 
@@ -1758,7 +1760,7 @@ def build_parser() -> argparse.ArgumentParser:
         "write a rule straight into the active set (the only immediate path)",
         description=(
             "Write a User-confirmed rule directly into active memory. Use --until instead for "
-            "a temporary condition; it cannot be combined with --scope, --delivery, "
+            "a temporary condition; it cannot be combined with --project, --delivery, "
             "--topic, or --force."
         ),
         examples=(
@@ -1783,15 +1785,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     remember.add_argument(
-        "--scope",
+        "--project",
         action="append",
-        help="deliver it to this scope; repeat to deliver it to several scopes",
+        help="deliver it to this project; repeat to deliver it to several projects",
     )
     remember.add_argument(
         "--delivery",
         choices=memories.DELIVERIES,
         help=(
-            "where it is delivered (default: topic with --topic, scope with --scope, "
+            "where it is delivered (default: topic with --topic, project with --project, "
             "otherwise always)"
         ),
     )
@@ -1874,11 +1876,11 @@ def build_parser() -> argparse.ArgumentParser:
         "list the memories held",
         examples=(
             "mashu memories",
-            "mashu memories --scope deployment",
+            "mashu memories --project deployment",
             "mashu memories --retired",
         ),
     )
-    memories_parser.add_argument("--scope", help="only the memories belonging to this scope")
+    memories_parser.add_argument("--project", help="only the memories belonging to this project")
     memories_parser.add_argument(
         "--retired", action="store_true", help="list the withdrawn ones, with their reasons"
     )
@@ -1937,7 +1939,7 @@ def build_parser() -> argparse.ArgumentParser:
     pain.add_argument(
         "--prevention", required=True, help="what would have had to be known; the matching key"
     )
-    pain.add_argument("--scope", help="the scope it happened in")
+    pain.add_argument("--project", help="the project it happened in")
     pain.add_argument(
         "--prevention-kind",
         choices=ledger_domain.PREVENTION_KINDS,
@@ -1954,12 +1956,12 @@ def build_parser() -> argparse.ArgumentParser:
         sub,
         "ledger",
         "read the pain ledger, newest first",
-        examples=("mashu ledger", "mashu ledger --scope deployment --limit 50"),
+        examples=("mashu ledger", "mashu ledger --project deployment --limit 50"),
     )
     ledger.add_argument(
         "--limit", type=_bounded_int(0), default=20, help="how many rows to show (default 20)"
     )
-    ledger.add_argument("--scope", help="only the pains recorded in this scope")
+    ledger.add_argument("--project", help="only the pains recorded in this project")
     ledger.set_defaults(func=cmd_ledger)
 
     review = _command(
@@ -1973,7 +1975,7 @@ def build_parser() -> argparse.ArgumentParser:
         examples=(
             "mashu review",
             "mashu review --list --all",
-            "mashu review --admit 1a2b3c4d --version 3 --delivery scope --scope deployment",
+            "mashu review --admit 1a2b3c4d --version 3 --delivery project --project deployment",
             "mashu review --changes",
             "mashu review --changes --list",
             'mashu review --decline 1a2b3c4d --reason "Too specific to one run"',
@@ -2012,7 +2014,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=memories.DELIVERIES,
         help="where the admitted memory is delivered",
     )
-    review.add_argument("--scope", help="the scope the admitted memory belongs to")
+    review.add_argument("--project", help="the project the admitted memory belongs to")
     review.add_argument("--topic", help="the topic it is read with, for topic")
     review.add_argument(
         "--ack-conflict",
@@ -2029,16 +2031,16 @@ def build_parser() -> argparse.ArgumentParser:
     deliver = _command(
         sub,
         "deliver",
-        "move a memory between the opening, a scope, and a topic",
+        "move a memory between the opening, a project, and a topic",
         description=(
-            "Change where an active memory is delivered. Scope delivery takes one --scope "
-            "per scope it reaches, and the scopes left out stop receiving it; topic delivery "
+            "Change where an active memory is delivered. Project delivery takes one --project "
+            "per project it reaches, and the projects left out stop receiving it; topic delivery "
             "requires --topic."
         ),
         examples=(
             "mashu deliver 1a2b3c4d always",
-            "mashu deliver 1a2b3c4d scope --scope deployment",
-            "mashu deliver 1a2b3c4d scope --scope enrai --scope marimo",
+            "mashu deliver 1a2b3c4d project --project deployment",
+            "mashu deliver 1a2b3c4d project --project enrai --project marimo",
             "mashu deliver 1a2b3c4d topic --topic difficulty",
         ),
     )
@@ -2048,9 +2050,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     deliver.add_argument("--topic", help="the topic it is read with, for topic")
     deliver.add_argument(
-        "--scope",
+        "--project",
         action="append",
-        help="a scope it reaches, for scope; repeat for several, and scopes left out stop "
+        help="a project it reaches, for project; repeat for several, and projects left out stop "
         "receiving it",
     )
     deliver.set_defaults(func=cmd_deliver)
@@ -2088,31 +2090,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     guard.set_defaults(func=cmd_guard)
 
-    scope = _command(
+    project = _command(
         sub,
-        "scope",
-        "the scope register",
+        "project",
+        "the project register",
         description=(
-            "List scopes, create one with --add and an optional --about, or remove one with "
-            "--remove. --folder with --add routes that folder to the new scope, so its sessions "
-            "can file tasks at once. Tasks are filed under a scope. "
-            "Removing needs a scope with no active memories, routes, open tasks or "
+            "List projects, create one with --add and an optional --about, or remove one with "
+            "--remove. --folder with --add routes that folder to the new project, so its sessions "
+            "can file tasks at once. "
+            "Removing needs a project with no active memories, routes, open tasks or "
             "topics, standing temporary context, or pending candidates and changes: one never "
             "used is deleted, one that past records name is archived. Both are User-only."
         ),
         examples=(
-            "mashu scope",
-            "mashu scope --add deployment",
-            'mashu scope --add deployment --about "Production releases"',
-            "mashu scope --add website --folder ~/work/website",
-            "mashu scope --remove deployment",
+            "mashu project",
+            "mashu project --add deployment",
+            'mashu project --add deployment --about "Production releases"',
+            "mashu project --add website --folder ~/work/website",
+            "mashu project --remove deployment",
         ),
     )
-    scope.add_argument("--add", metavar="NAME", help="create a scope with this name")
-    scope.add_argument("--remove", metavar="NAME", help="delete or archive this scope")
-    scope.add_argument("--about", metavar="LINE", help="what the scope covers")
-    scope.add_argument("--folder", metavar="PATH", help="with --add, the folder routed to it")
-    scope.set_defaults(func=cmd_scope)
+    project.add_argument("--add", metavar="NAME", help="create a project with this name")
+    project.add_argument("--remove", metavar="NAME", help="delete or archive this project")
+    project.add_argument("--about", metavar="LINE", help="what the project covers")
+    project.add_argument("--folder", metavar="PATH", help="with --add, the folder routed to it")
+    project.set_defaults(func=cmd_project)
 
     topic = _command(
         sub,
@@ -2121,7 +2123,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "List topics, or create, edit, or remove one. A topic's trigger line is pushed at "
             "session start and its rules are read when that work begins. --add requires "
-            "--trigger; --scope limits the listing to one Scope, and '-' with --edit lists it "
+            "--trigger; --project limits the listing to one Project, and '-' with --edit lists it "
             "in every session. Removing needs a topic with no active rules: one never used is "
             "deleted, one whose past rules name it is archived. --action with --edit links the "
             "topic to an action such as delegate (an Agent or Task tool call), so the "
@@ -2133,9 +2135,9 @@ def build_parser() -> argparse.ArgumentParser:
         examples=(
             "mashu topic",
             'mashu topic --add difficulty --trigger "Before changing difficulty levers" '
-            "--scope game",
+            "--project game",
             'mashu topic --edit difficulty --trigger "Before changing win rates"',
-            "mashu topic --edit difficulty --scope -",
+            "mashu topic --edit difficulty --project -",
             "mashu topic --edit delegation --action delegate",
             'mashu topic --edit difficulty --source "Projects/Game/Difficulty.md#Levers"',
             "mashu topic --remove difficulty",
@@ -2150,7 +2152,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     topic.add_argument("--trigger", metavar="TEXT", help="one sentence saying when to read it")
     topic.add_argument(
-        "--scope", help="the Scope whose sessions list it; '-' with --edit means every session"
+        "--project", help="the Project whose sessions list it; '-' with --edit means every session"
     )
     topic.add_argument("--rename", metavar="NEW", help="the new name, with --edit")
     topic.add_argument(
@@ -2177,29 +2179,30 @@ def build_parser() -> argparse.ArgumentParser:
     topic_show.add_argument("name", help="the topic's name")
     topic_show.set_defaults(func=cmd_topic)
 
-    route = _command(
+    folder = _command(
         sub,
-        "route",
-        "which working directory means which scope",
+        "folder",
+        "which working folder belongs to which project",
         description=(
-            "List directory-prefix routes, add or remove one, or explicitly mark a prefix as "
-            "unscoped. --add requires --scope."
+            "List the folders routed to projects, add or remove one, or explicitly mark a folder "
+            "as outside every project. A folder covers everything under it, and the longest "
+            "match wins. --add requires --project."
         ),
         examples=(
-            "mashu route",
-            "mashu route --add /work/service --scope deployment",
-            "mashu route --ignore /work/scratch",
-            "mashu route --remove /work/service",
+            "mashu folder",
+            "mashu folder --add /work/service --project deployment",
+            "mashu folder --ignore /work/scratch",
+            "mashu folder --remove /work/service",
         ),
     )
-    route_group = route.add_mutually_exclusive_group()
-    route_group.add_argument("--add", metavar="PATH", help="route this path prefix to --scope")
-    route_group.add_argument(
-        "--ignore", metavar="PATH", help="record that this path prefix has no scope"
+    folder_group = folder.add_mutually_exclusive_group()
+    folder_group.add_argument("--add", metavar="PATH", help="route this folder to --project")
+    folder_group.add_argument(
+        "--ignore", metavar="PATH", help="record that this folder belongs to no project"
     )
-    route_group.add_argument("--remove", metavar="PATH", help="drop the route for this path prefix")
-    route.add_argument("--scope", help="the scope to route to; required with --add")
-    route.set_defaults(func=cmd_route)
+    folder_group.add_argument("--remove", metavar="PATH", help="drop the route for this folder")
+    folder.add_argument("--project", help="the project the folder belongs to; required with --add")
+    folder.set_defaults(func=cmd_folder)
 
     task = _command(
         sub,

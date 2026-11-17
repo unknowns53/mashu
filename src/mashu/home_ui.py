@@ -73,7 +73,7 @@ class Dashboard:
     tasks_closed: int = 0
     retired_memories: int = 0
     temporary_contexts: int = 0
-    scopes: int = 0
+    projects: int = 0
     routes: int = 0
     schema_pending: int = 0
     memory_changes: int = 0
@@ -117,14 +117,14 @@ def _screen_text(state: Dashboard, at: int) -> str:
     )
     work_detail = (
         f"{state.tasks_active} active  ·  {state.tasks_dormant} dormant  ·  "
-        f"{state.tasks_closed} closed  ·  {state.scopes} scopes"
+        f"{state.tasks_closed} closed  ·  {state.projects} projects"
     )
     health = (
         screen.warning(f"{state.schema_pending} migration(s) pending")
         if state.schema_pending
         else screen.success("schema current")
     )
-    settings_detail = f"{state.scopes} scopes  ·  {state.routes} routes  ·  {health}"
+    settings_detail = f"{state.projects} projects  ·  {state.routes} routes  ·  {health}"
 
     rows = [
         _choice("Attention", attention_detail, at == 0),

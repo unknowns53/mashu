@@ -70,7 +70,7 @@ const workDetail = detailPane();
 const workOrder = heldOrder();
 
 function workId(row) {
-  return work.view === "projects" ? row.scope_id : row.task.task_id;
+  return work.view === "projects" ? row.project_id : row.task.task_id;
 }
 
 function workRow() {
@@ -81,7 +81,7 @@ function shownWork() {
   workSort.setKeys(workSortKeys());
   const found =
     work.view === "projects"
-      ? work.rows.filter((row) => matches(work.query, row.scope_id, row.name, row.summary, ...row.folders.map(tilde)))
+      ? work.rows.filter((row) => matches(work.query, row.project_id, row.name, row.summary, ...row.folders.map(tilde)))
       : work.rows.filter((row) =>
           matches(work.query, row.task.task_id, row.task.name, row.task.project_name, row.state, row.rulings, row.withdrawn_rulings, row.decisions, row.attempts, row.artifacts)
         );
@@ -118,7 +118,7 @@ function renderWork() {
         rows: shownWork().map((row) =>
           projects
             ? {
-                id: row.scope_id,
+                id: row.project_id,
                 primary: row.name,
                 secondary: [row.folders.length ? tilde(row.folders[0]) : t("work.project_no_folder"), projectTasks(row)],
               }
@@ -456,26 +456,26 @@ function projectTasks(row) {
 function projectDetail(row) {
   const addFolder = async () => {
     const path = await pickFolder();
-    if (path) act(() => call("route.save", { path, scope: row.name }), t("work.folder_added"));
+    if (path) act(() => call("route.save", { path, project: row.name }), t("work.folder_added"));
   };
   const removeFolder = async (path) => {
     const yes = await confirmDialog({ title: t("work.folder_remove_confirm"), lines: [tilde(path)], confirm: t("common.remove"), danger: true });
     if (yes) act(() => call("route.remove", { path }), t("work.folder_removed"));
   };
   const remove = async () => {
-    const yes = await confirmDialog({ title: t("work.project_remove_confirm"), lines: [row.name, t("scope.remove_note")], confirm: t("common.remove"), danger: true });
+    const yes = await confirmDialog({ title: t("work.project_remove_confirm"), lines: [row.name, t("project.remove_note")], confirm: t("common.remove"), danger: true });
     if (!yes) return;
     act(async () => {
-      const removed = await call("scope.remove", { scope_id: row.scope_id });
+      const removed = await call("project.remove", { project_id: row.project_id });
       work.selected = null;
-      return removed.removed === "archived" ? t("scope.archived") : "";
-    }, t("scope.removed"));
+      return removed.removed === "archived" ? t("project.archived") : "";
+    }, t("project.removed"));
   };
   return [
-    meta(idTag(row.scope_id), t("work.project_created", { when: day(row.created_at) })),
+    meta(idTag(row.project_id), t("work.project_created", { when: day(row.created_at) })),
     h("h1", { class: "title", text: row.name }),
     row.summary ? h("p", { class: "sub", text: row.summary }) : null,
-    h("p", { class: "sub", text: [projectTasks(row), t("work.project_rules", { n: row.n_active })].join("・") }),
+    h("p", { class: "sub", text: [projectTasks(row), t("work.project_rules", { n: row.n_rules })].join("・") }),
     section(
       t("work.project_folders"),
       row.folders.length,
@@ -508,7 +508,7 @@ function projectForm(target, row) {
       fields: row
         ? [
             { name: "name", label: t("work.project_name"), value: row.name },
-            { name: "summary", label: t("scope.summary"), kind: "area", rows: 2, value: row.summary || "" },
+            { name: "summary", label: t("project.summary"), kind: "area", rows: 2, value: row.summary || "" },
           ]
         : [
             {
@@ -532,7 +532,7 @@ function projectForm(target, row) {
       },
       onSubmit: (values) =>
         act(async () => {
-          if (row) await call("scope.save", { scope_id: row.scope_id, name: values.name, summary: values.summary });
+          if (row) await call("project.save", { project_id: row.project_id, name: values.name, summary: values.summary });
           else await call("project.save", { name: values.name, path: values.path.trim() || null });
           work.creating = null;
           work.panel = null;

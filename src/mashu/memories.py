@@ -1,4 +1,4 @@
-"""Manage active memories, retirement reasons, and delivery scopes."""
+"""Manage active memories, retirement reasons, and delivery projects."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from mashu.errors import (
     RetiredConflictError,
 )
 
-DELIVERIES = ("always", "scope", "topic")
+DELIVERIES = ("always", "project", "topic")
 
 _EXPLICIT_WHAT = "recorded by the user's own hand"
 
@@ -74,14 +74,14 @@ def body_problems(
 
 def check_delivery(
     delivery: str,
-    scope_id: UUID | None,
+    project_id: UUID | None,
     topic_id: UUID | None = None,
 ) -> None:
     """Refuse a delivery that lacks the one detail its route needs, or carries another's."""
     if delivery not in DELIVERIES:
         raise MashuError(f"unknown delivery '{delivery}' (expected one of {', '.join(DELIVERIES)})")
-    if delivery == "scope" and scope_id is None:
-        raise MashuError("delivery 'scope' needs a scope to be delivered to")
+    if delivery == "project" and project_id is None:
+        raise MashuError("delivery 'project' needs a project to be delivered to")
     if delivery == "topic" and topic_id is None:
         raise MashuError("delivery 'topic' needs the topic it is read with")
     if delivery != "topic" and topic_id is not None:
@@ -89,26 +89,26 @@ def check_delivery(
 
 
 def topic_home(cur: psycopg.Cursor, delivery: str, topic_id: UUID | None) -> UUID | None:
-    """The scope a topic Memory takes from its topic, which must still be open."""
+    """The project a topic Memory takes from its topic, which must still be open."""
     if delivery != "topic" or topic_id is None:
         return None
-    return topics.lock_open_topic(cur, topic_id)["scope_id"]
+    return topics.lock_open_topic(cur, topic_id)["project_id"]
 
 
-def delivered_scope(
-    cur: psycopg.Cursor, delivery: str, scope_id: UUID | None, topic_id: UUID | None
+def delivered_project(
+    cur: psycopg.Cursor, delivery: str, project_id: UUID | None, topic_id: UUID | None
 ) -> UUID | None:
-    """The scope_id a Memory row keeps for its delivery.
+    """The project_id a Memory row keeps for its delivery.
 
-    An always rule reaches every session, so a scope named with it (a candidate's place of
-    origin, a scope picked before the delivery changed) is dropped rather than kept as a home
-    that would hold the scope against removal.
+    An always rule reaches every session, so a project named with it (a candidate's place of
+    origin, a project picked before the delivery changed) is dropped rather than kept as a home
+    that would hold the project against removal.
     """
     if delivery == "always":
         return None
     if delivery == "topic":
         return topic_home(cur, delivery, topic_id)
-    return scope_id
+    return project_id
 
 
 def _retired_conflicts(
@@ -141,56 +141,57 @@ def _retired_conflicts(
     return retirement_matches, overruled
 
 
-#: The scopes a Memory reaches, its home scope first, for a query naming memory m and its home
-#: scope s. scope_name joins them for listings; scope_names keeps them apart for forms.
-SCOPE_NAMES = """
+#: The projects a Memory reaches, its home project first, for a query naming memory m and its home
+#: project s. project_name joins them for listings; project_names keeps them apart for forms.
+PROJECT_NAMES = """
     array_remove(ARRAY[s.name] || ARRAY(
-        SELECT x.name FROM memory_scope ms JOIN scope x ON x.scope_id = ms.scope_id
+        SELECT x.name FROM memory_project ms JOIN project x ON x.project_id = ms.project_id
         WHERE ms.memory_id = m.memory_id ORDER BY x.name
-    ), NULL) AS scope_names,
+    ), NULL) AS project_names,
     array_to_string(array_remove(ARRAY[s.name] || ARRAY(
-        SELECT x.name FROM memory_scope ms JOIN scope x ON x.scope_id = ms.scope_id
+        SELECT x.name FROM memory_project ms JOIN project x ON x.project_id = ms.project_id
         WHERE ms.memory_id = m.memory_id ORDER BY x.name
-    ), NULL), ', ') AS scope_name
+    ), NULL), ', ') AS project_name
 """
 
 
-def _has_other_scopes(cur: psycopg.Cursor) -> bool:
+def _has_other_projects(cur: psycopg.Cursor) -> bool:
     # Bootstrap runs from the SessionStart hook, so a store without the table must still answer.
-    cur.execute("SELECT to_regclass('memory_scope') IS NOT NULL AS present")
+    cur.execute("SELECT to_regclass('memory_project') IS NOT NULL AS present")
     return cur.fetchone()["present"]
 
 
-def other_scopes(cur: psycopg.Cursor, memory_id: UUID) -> list[UUID]:
-    """The scopes a scope Memory reaches besides its home scope."""
-    if not _has_other_scopes(cur):
+def other_projects(cur: psycopg.Cursor, memory_id: UUID) -> list[UUID]:
+    """The projects a project Memory reaches besides its home project."""
+    if not _has_other_projects(cur):
         return []
     cur.execute(
-        "SELECT scope_id FROM memory_scope WHERE memory_id = %s ORDER BY scope_id", (memory_id,)
+        "SELECT project_id FROM memory_project WHERE memory_id = %s ORDER BY project_id",
+        (memory_id,),
     )
-    return [row["scope_id"] for row in cur.fetchall()]
+    return [row["project_id"] for row in cur.fetchall()]
 
 
-def _check_other_scopes(delivery: str, home: UUID | None, others: Sequence[UUID]) -> list[UUID]:
-    """The other scopes once checked against the delivery and the home scope."""
+def _check_other_projects(delivery: str, home: UUID | None, others: Sequence[UUID]) -> list[UUID]:
+    """The other projects once checked against the delivery and the home project."""
     others = list(dict.fromkeys(others))
-    if others and delivery != "scope":
-        raise MashuError(f"only a scope memory reaches several scopes, not a {delivery} one")
-    return [scope_id for scope_id in others if scope_id != home]
+    if others and delivery != "project":
+        raise MashuError(f"only a project memory reaches several projects, not a {delivery} one")
+    return [project_id for project_id in others if project_id != home]
 
 
-def _write_other_scopes(
+def _write_other_projects(
     cur: psycopg.Cursor, memory_id: UUID, others: Sequence[UUID], *, actor: str
 ) -> None:
     cur.execute(
-        "DELETE FROM memory_scope WHERE memory_id = %s AND NOT (scope_id = ANY(%s))",
+        "DELETE FROM memory_project WHERE memory_id = %s AND NOT (project_id = ANY(%s))",
         (memory_id, list(others)),
     )
-    for scope_id in others:
+    for project_id in others:
         cur.execute(
-            "INSERT INTO memory_scope (memory_id, scope_id, created_by) VALUES (%s, %s, %s) "
+            "INSERT INTO memory_project (memory_id, project_id, created_by) VALUES (%s, %s, %s) "
             "ON CONFLICT DO NOTHING",
-            (memory_id, scope_id, actor),
+            (memory_id, project_id, actor),
         )
 
 
@@ -199,23 +200,23 @@ def remember(
     *,
     content: str,
     actor: str,
-    scope_id: UUID | None = None,
+    project_id: UUID | None = None,
     delivery: str = "always",
     topic_id: UUID | None = None,
     acknowledged_conflicts: list[UUID] | None = None,
     why: str | None = None,
-    also_scope_ids: Sequence[UUID] = (),
+    also_project_ids: Sequence[UUID] = (),
 ) -> dict[str, Any]:
     """Write a rule straight into the active set, with the writing as its evidence.
 
     `why` becomes the evidence row's account, where the reason is kept without being pushed.
-    A scope rule also reaches `also_scope_ids` besides `scope_id`.
+    A project rule also reaches `also_project_ids` besides `project_id`.
     """
     why = (why or "").strip() or None
     check_body(content, limit=settings.limit(cur, "content_limit"), why=why)
-    check_delivery(delivery, scope_id, topic_id)
-    others = _check_other_scopes(delivery, scope_id, also_scope_ids)
-    scope_id = delivered_scope(cur, delivery, scope_id, topic_id)
+    check_delivery(delivery, project_id, topic_id)
+    others = _check_other_projects(delivery, project_id, also_project_ids)
+    project_id = delivered_project(cur, delivery, project_id, topic_id)
 
     verdict = redact.gate({"content": content, "why": why})
 
@@ -232,20 +233,20 @@ def remember(
         cur,
         content=content,
         delivery=delivery,
-        scope_id=scope_id,
+        project_id=project_id,
         topic_id=topic_id,
-        also_scope_ids=others,
+        also_project_ids=others,
     )
     if not admission["ok"]:
         raise RefusedError(admission["refusal"])
 
     cur.execute(
         """
-        INSERT INTO ledger (kind, what, prevention, scope_id, created_by)
+        INSERT INTO ledger (kind, what, prevention, project_id, created_by)
         VALUES ('explicit', %s, %s, %s, %s)
         RETURNING ledger_id
         """,
-        (why or _EXPLICIT_WHAT, content, scope_id, actor),
+        (why or _EXPLICIT_WHAT, content, project_id, actor),
     )
     ledger_id = cur.fetchone()["ledger_id"]
     events.record(cur, "pain_recorded", actor, ledger_id=ledger_id, detail={"kind": "explicit"})
@@ -254,22 +255,22 @@ def remember(
     cur.execute(
         """
         INSERT INTO memory
-            (content, scope_id, delivery, topic_id, evidence, created_by)
+            (content, project_id, delivery, topic_id, evidence, created_by)
         VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING *
         """,
-        (content, scope_id, delivery, topic_id, [ledger_id], actor),
+        (content, project_id, delivery, topic_id, [ledger_id], actor),
     )
     memory = cur.fetchone()
     if others:
-        _write_other_scopes(cur, memory["memory_id"], others, actor=actor)
+        _write_other_projects(cur, memory["memory_id"], others, actor=actor)
     cur.execute(
         "INSERT INTO memory_revision (memory_id, content, actor, note) VALUES (%s, %s, %s, %s)",
         (memory["memory_id"], content, actor, _EXPLICIT_WHAT),
     )
     detail: dict[str, Any] = {"delivery": delivery, "approval_source": approval_source}
     if others:
-        detail["also_scope_ids"] = [str(scope_id) for scope_id in others]
+        detail["also_project_ids"] = [str(project_id) for project_id in others]
     if topic_id is not None:
         detail["topic_id"] = str(topic_id)
     if overruled:
@@ -319,13 +320,13 @@ def memory_details(cur: psycopg.Cursor, memory_id: UUID) -> dict[str, Any] | Non
     cur.execute(
         """
         SELECT m.*, """
-        + SCOPE_NAMES
+        + PROJECT_NAMES
         + """,
                t.name AS topic_name, t.trigger AS topic_trigger,
                r.revision_id AS current_revision_id,
                r.created_at AS revision_created_at
         FROM memory m
-        LEFT JOIN scope s ON s.scope_id = m.scope_id
+        LEFT JOIN project s ON s.project_id = m.project_id
         LEFT JOIN topic t ON t.topic_id = m.topic_id
         LEFT JOIN LATERAL (
             SELECT revision_id, created_at FROM memory_revision
@@ -484,18 +485,18 @@ def convert_to_temporary(
         raise MashuError(
             "a topic memory cannot become temporary because its topic's trigger would be lost"
         )
-    if other_scopes(cur, memory_id):
+    if other_projects(cur, memory_id):
         raise MashuError(
-            "this memory reaches several scopes and a temporary context has one; "
-            "deliver it to one scope first"
+            "this memory reaches several projects and a temporary context has one; "
+            "deliver it to one project first"
         )
-    scope_id = current["scope_id"] if current["delivery"] == "scope" else None
+    project_id = current["project_id"] if current["delivery"] == "project" else None
     context = temporary.put_temporary(
         cur,
         content=current["content"],
         actor=actor,
         days=days,
-        scope_id=scope_id,
+        project_id=project_id,
     )
     until = context["expires_at"].date().isoformat()
     retired = retire(
@@ -549,7 +550,7 @@ def revise(
         cur,
         content=content,
         delivery=current["delivery"],
-        scope_id=current["scope_id"],
+        project_id=current["project_id"],
         exclude_memory_id=memory_id,
         topic_id=current["topic_id"],
     )
@@ -590,11 +591,11 @@ def add_reason(cur: psycopg.Cursor, memory_id: UUID, *, why: str, actor: str) ->
     verdict = redact.gate({"why": why})
     cur.execute(
         """
-        INSERT INTO ledger (kind, what, prevention, scope_id, created_by)
+        INSERT INTO ledger (kind, what, prevention, project_id, created_by)
         VALUES ('explicit', %s, %s, %s, %s)
         RETURNING *
         """,
-        (why, memory["content"], memory["scope_id"], actor),
+        (why, memory["content"], memory["project_id"], actor),
     )
     row = cur.fetchone()
     cur.execute(
@@ -652,14 +653,14 @@ def restore(
     ]
     if active:
         raise MashuError("a similar active Memory already exists; resolve that Memory first")
-    home = delivered_scope(cur, current["delivery"], current["scope_id"], current["topic_id"])
+    home = delivered_project(cur, current["delivery"], current["project_id"], current["topic_id"])
     admission = capacity.check_admission(
         cur,
         content=current["content"],
         delivery=current["delivery"],
-        scope_id=home,
+        project_id=home,
         topic_id=current["topic_id"],
-        also_scope_ids=other_scopes(cur, memory_id) if current["delivery"] == "scope" else (),
+        also_project_ids=other_projects(cur, memory_id) if current["delivery"] == "project" else (),
     )
     if not admission["ok"]:
         raise RefusedError(admission["refusal"])
@@ -668,7 +669,7 @@ def restore(
         UPDATE memory
         SET status = 'active', retire_reason = NULL, retired_at = NULL, updated_at = now(),
             retirement_kind = NULL, superseded_by = NULL,
-            relocated_to_kind = NULL, relocated_to_id = NULL, scope_id = %s
+            relocated_to_kind = NULL, relocated_to_id = NULL, project_id = %s
         WHERE memory_id = %s AND status = 'retired'
         RETURNING *
         """,
@@ -703,39 +704,39 @@ def set_delivery(
     *,
     delivery: str,
     actor: str,
-    scope_id: UUID | None = None,
-    clear_scope: bool = False,
+    project_id: UUID | None = None,
+    clear_project: bool = False,
     topic_id: UUID | None = None,
     approval_source: dict[str, Any] | None = None,
-    also_scope_ids: Sequence[UUID] | None = None,
+    also_project_ids: Sequence[UUID] | None = None,
 ) -> dict[str, Any]:
-    """Move a rule between the opening, the openings of some scopes, and a topic.
+    """Move a rule between the opening, the openings of some projects, and a topic.
 
-    `also_scope_ids` names every scope a scope rule reaches besides its home scope. Left out,
-    a rule that stays in the same home scope keeps the others it had, and a moved rule drops
-    them, as the store does for any move.
+    `also_project_ids` names every project a project rule reaches besides its home project. Left
+    out, a rule that stays in the same home project keeps the others it had, and a moved rule
+    drops them, as the store does for any move.
     """
     current = _require_active(cur, memory_id)
-    if clear_scope and scope_id is not None:
-        raise MashuError("pass a scope or clear it, not both")
-    home = None if clear_scope else (current["scope_id"] if scope_id is None else scope_id)
+    if clear_project and project_id is not None:
+        raise MashuError("pass a project or clear it, not both")
+    home = None if clear_project else (current["project_id"] if project_id is None else project_id)
     check_delivery(delivery, home, topic_id)
-    home = delivered_scope(cur, delivery, home, topic_id)
-    before = other_scopes(cur, memory_id)
-    if also_scope_ids is None:
-        kept = delivery == "scope" and current["delivery"] == "scope"
-        others = before if kept and home == current["scope_id"] else []
+    home = delivered_project(cur, delivery, home, topic_id)
+    before = other_projects(cur, memory_id)
+    if also_project_ids is None:
+        kept = delivery == "project" and current["delivery"] == "project"
+        others = before if kept and home == current["project_id"] else []
     else:
-        others = _check_other_scopes(delivery, home, also_scope_ids)
+        others = _check_other_projects(delivery, home, also_project_ids)
 
     admission = capacity.check_admission(
         cur,
         content=current["content"],
         delivery=delivery,
-        scope_id=home,
+        project_id=home,
         exclude_memory_id=memory_id,
         topic_id=topic_id,
-        also_scope_ids=others,
+        also_project_ids=others,
     )
     if not admission["ok"]:
         raise RefusedError(admission["refusal"])
@@ -743,7 +744,7 @@ def set_delivery(
     cur.execute(
         """
         UPDATE memory
-        SET delivery = %s, scope_id = %s, topic_id = %s, updated_at = now()
+        SET delivery = %s, project_id = %s, topic_id = %s, updated_at = now()
         WHERE memory_id = %s
         RETURNING *
         """,
@@ -751,11 +752,11 @@ def set_delivery(
     )
     row = cur.fetchone()
     if before or others:
-        _write_other_scopes(cur, memory_id, others, actor=actor)
+        _write_other_projects(cur, memory_id, others, actor=actor)
     detail: dict[str, Any] = {"from": current["delivery"], "to": delivery}
     if before or others:
-        detail["from_also_scope_ids"] = sorted(str(scope_id) for scope_id in before)
-        detail["to_also_scope_ids"] = sorted(str(scope_id) for scope_id in others)
+        detail["from_also_project_ids"] = sorted(str(project_id) for project_id in before)
+        detail["to_also_project_ids"] = sorted(str(project_id) for project_id in others)
     if current["topic_id"] is not None or topic_id is not None:
         detail["from_topic_id"] = str(current["topic_id"]) if current["topic_id"] else None
         detail["to_topic_id"] = str(topic_id) if topic_id else None
@@ -775,37 +776,37 @@ def always_memories(cur: psycopg.Cursor) -> list[dict[str, Any]]:
     return cur.fetchall()
 
 
-def _in_scope(cur: psycopg.Cursor) -> str:
-    """The condition that a memory row reaches the scope %(scope)s, as home or as another."""
-    if not _has_other_scopes(cur):
-        return "scope_id = %(scope)s"
+def _in_project(cur: psycopg.Cursor) -> str:
+    """The condition that a memory row reaches the project %(project)s, as home or as another."""
+    if not _has_other_projects(cur):
+        return "project_id = %(project)s"
     return (
-        "(scope_id = %(scope)s OR memory_id IN "
-        "(SELECT memory_id FROM memory_scope WHERE scope_id = %(scope)s))"
+        "(project_id = %(project)s OR memory_id IN "
+        "(SELECT memory_id FROM memory_project WHERE project_id = %(project)s))"
     )
 
 
-def scope_push_memories(cur: psycopg.Cursor, scope_id: UUID) -> list[dict[str, Any]]:
-    """The scope rules a session in this scope receives, whether it is their home or not."""
+def project_push_memories(cur: psycopg.Cursor, project_id: UUID) -> list[dict[str, Any]]:
+    """The project rules a session in this project receives, whether it is their home or not."""
     cur.execute(
         f"""
         SELECT * FROM memory
-        WHERE status = 'active' AND delivery = 'scope' AND {_in_scope(cur)}
+        WHERE status = 'active' AND delivery = 'project' AND {_in_project(cur)}
         ORDER BY created_at, memory_id
         """,
-        {"scope": scope_id},
+        {"project": project_id},
     )
     return cur.fetchall()
 
 
-def active_memories(cur: psycopg.Cursor, *, scope_id: UUID) -> list[dict[str, Any]]:
-    """Everything alive in one scope, whatever route it takes to a session."""
+def active_memories(cur: psycopg.Cursor, *, project_id: UUID) -> list[dict[str, Any]]:
+    """Everything alive in one project, whatever route it takes to a session."""
     cur.execute(
         f"""
         SELECT * FROM memory
-        WHERE status = 'active' AND {_in_scope(cur)}
+        WHERE status = 'active' AND {_in_project(cur)}
         ORDER BY delivery, created_at, memory_id
         """,
-        {"scope": scope_id},
+        {"project": project_id},
     )
     return cur.fetchall()

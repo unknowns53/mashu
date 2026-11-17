@@ -999,7 +999,7 @@ function reasonPanel({ label, confirm, danger, onConfirm, onCancel }) {
 // ---------------------------------------------------------------- delivery fields
 
 function deliveryOptions() {
-  return ["always", "scope", "topic"].map((value) => [value, t(`delivery.${value}`), t(`delivery.${value}_long`).replace(/^[^（—]*[（—]\s*/, "").replace(/）$/, "")]);
+  return ["always", "project", "topic"].map((value) => [value, t(`delivery.${value}`), t(`delivery.${value}_long`).replace(/^[^（—]*[（—]\s*/, "").replace(/）$/, "")]);
 }
 
 /** Options for a topic picker: none, each open topic, and a new one described in place. */
@@ -1018,7 +1018,7 @@ function topicArgs(values) {
       new_topic: {
         name: values.new_topic_name,
         trigger: values.new_topic_trigger,
-        scope: values.new_topic_scope || null,
+        project: values.new_topic_project || null,
       },
     };
   }
@@ -1033,28 +1033,28 @@ function topicFields(choices, current, isTopic) {
     { name: "new_topic_name", label: t("delivery.topic_new_name"), show: isNew, max: 40 },
     { name: "new_topic_trigger", label: t("delivery.topic_new_trigger"), hint: t("delivery.topic_new_trigger_hint"), show: isNew, max: 160 },
     {
-      name: "new_topic_scope",
+      name: "new_topic_project",
       label: t("delivery.topic_new_area"),
       kind: "select",
-      options: [["", t("topic.area_all")], ...choices.scopes.map((name) => [name, name])],
+      options: [["", t("topic.area_all")], ...choices.projects.map((name) => [name, name])],
       show: isNew,
     },
   ];
 }
 
-function areaOptions(choices, none) {
-  return [["", none], ...choices.scopes.map((name) => [name, name])];
+function projectOptions(choices, none) {
+  return [["", none], ...choices.projects.map((name) => [name, name])];
 }
 
-/** Every area as an option of a checks field. */
-function areaChecks(choices) {
-  return choices.scopes.map((name) => [name, name]);
+/** Every project as an option of a checks field. */
+function projectChecks(choices) {
+  return choices.projects.map((name) => [name, name]);
 }
 
 function deliveryText(row) {
   if (row.delivery === "topic") return `${t("delivery.topic")}: ${row.topic_name}`;
-  if (row.delivery === "scope") return `${t("delivery.scope")}: ${row.scope_name || "-"}`;
-  return t("delivery.always") + (row.scope_name ? ` (${row.scope_name})` : "");
+  if (row.delivery === "project") return `${t("delivery.project")}: ${row.project_name || "-"}`;
+  return t("delivery.always") + (row.project_name ? ` (${row.project_name})` : "");
 }
 
 // ---------------------------------------------------------------- keyboard

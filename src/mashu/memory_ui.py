@@ -33,7 +33,7 @@ _HELP = """
   ↑↓ or j/k    move one row
   Home/End     go to the first or last row
   PgUp/PgDn    move one screenful
-  /            search by id, content, scope, delivery, topic, reason, or expiry
+  /            search by id, content, project, delivery, topic, reason, or expiry
   ⏎ or →       read the selected row in full, with its evidence and revisions
   space        while reading, show the next screenful
   b            while reading, show the previous screenful
@@ -45,7 +45,7 @@ _HELP = """
   d            change where the selected active memory is delivered
   o            restore the selected retired memory, after reading why it was retired
   s            sort by the next key: updated, created, delivery or kind, then back to
-               the listed order (created, expires, scope for temporary context)
+               the listed order (created, expires, project for temporary context)
   v            reverse the order
   ← or Esc     clear the search; without a search, go back
   ?            show this help
@@ -56,7 +56,7 @@ _HELP_KEYS = "  space read on   q quit   any other key goes back"
 #: Each delivery in one plain line, shown wherever a person chooses one.
 DELIVERY_CHOICES = (
     ("always", "every session, at start"),
-    ("scope", "sessions in the chosen Scopes, at start"),
+    ("project", "sessions in the chosen Projects, at start"),
     ("topic", "its trigger is listed at start; read when that work begins"),
 )
 
@@ -97,24 +97,24 @@ def _delivery(row: dict[str, Any]) -> str:
 
 
 def _columns(rows: list[dict[str, Any]], width: int) -> tuple[int, int]:
-    """Delivery and scope widths that fit the longest value listed.
+    """Delivery and project widths that fit the longest value listed.
 
-    Capped so one long topic or scope name cannot take the content's room.
+    Capped so one long topic or project name cannot take the content's room.
     """
     delivery = max((screen.cells(_delivery(row)) for row in rows if "delivery" in row), default=1)
-    scope = max((screen.cells(row.get("scope_name") or "-") for row in rows), default=1)
-    return min(delivery, max(6, width // 6)), min(scope, max(6, width // 7))
+    project = max((screen.cells(row.get("project_name") or "-") for row in rows), default=1)
+    return min(delivery, max(6, width // 6)), min(project, max(6, width // 7))
 
 
 def _line(row: dict[str, Any], view: str, width: int, columns: tuple[int, int]) -> str:
-    delivery, scope = columns
-    scope_name = screen.pad(row.get("scope_name") or "-", scope)
+    delivery, project = columns
+    project_name = screen.pad(row.get("project_name") or "-", project)
     if view == "temporary":
-        fixed = f"   {_short(row['context_id'])}  {scope_name}  "
+        fixed = f"   {_short(row['context_id'])}  {project_name}  "
         expiry = _date(row["expires_at"])
         return screen.clip(f"{fixed}{expiry}  {row['content']}", width)
     route = screen.pad(_delivery(row), delivery)
-    fixed = f"   {_short(row['memory_id'])}  {route}  {scope_name}  "
+    fixed = f"   {_short(row['memory_id'])}  {route}  {project_name}  "
     return screen.clip(f"{fixed}{row['content']}", width)
 
 
@@ -129,7 +129,7 @@ def _detail(row: dict[str, Any], view: str) -> str:
     if view == "temporary":
         lines = [
             screen.bold(f"  ── temporary {_short(row['context_id'])}"),
-            _field("scope", row.get("scope_name") or "-"),
+            _field("project", row.get("project_name") or "-"),
             _field("expires", _date(row.get("expires_at"))),
             screen.bold("  content"),
             screen.wrap(row.get("content") or "", indent="    "),
@@ -138,7 +138,7 @@ def _detail(row: dict[str, Any], view: str) -> str:
         lines = [
             screen.bold(f"  ── {view} memory {_short(row['memory_id'])}"),
             _field("delivery", _delivery(row)),
-            _field("scope", row.get("scope_name") or "-"),
+            _field("project", row.get("project_name") or "-"),
         ]
         if row.get("delivery") == "topic":
             lines.append(_field("trigger", row.get("topic_trigger") or "-"))
@@ -173,7 +173,7 @@ def _full_detail(row: dict[str, Any]) -> str:
         screen.dim(f"  {_date(row.get('created_at'))}  by {row.get('created_by') or '-'}"),
         "",
         _field("delivery", _delivery(row)),
-        _field("scope", row.get("scope_name") or "-"),
+        _field("project", row.get("project_name") or "-"),
     ]
     if row.get("delivery") == "topic":
         lines.extend(
@@ -227,7 +227,7 @@ def _full_temporary(row: dict[str, Any]) -> str:
             screen.bold(f"  temporary {_short(row['context_id'])}"),
             screen.dim(f"  expires {_date(row.get('expires_at'))}"),
             "",
-            _field("scope", row.get("scope_name") or "-"),
+            _field("project", row.get("project_name") or "-"),
             screen.bold("  content"),
             screen.wrap(row.get("content") or "", indent="    "),
         ]
@@ -312,7 +312,7 @@ def _matches(row: dict[str, Any], view: str, query: str) -> bool:
     values = [
         _row_id(row, view),
         row.get("content"),
-        row.get("scope_name"),
+        row.get("project_name"),
         row.get("delivery"),
         row.get("topic_name"),
         row.get("retire_reason"),
@@ -362,10 +362,10 @@ def _optional(prompt: str) -> str | None:
 
 
 def _topic_line(number: int, row: dict[str, Any]) -> str:
-    scope = row.get("scope_name") or "every session"
+    project = row.get("project_name") or "every session"
     rules = f"{row['rules']} rule" + ("" if row["rules"] == 1 else "s")
     return screen.clip(
-        f"    {number:>2}  {screen.pad(row['name'], 20)} {screen.pad(scope, 14)} "
+        f"    {number:>2}  {screen.pad(row['name'], 20)} {screen.pad(project, 14)} "
         f"{rules:>8}  {row['trigger']}",
         screen.terminal_width() - 1,
     )
@@ -402,8 +402,8 @@ def _new_topic() -> dict[str, Any] | None:
     name = _required(f"  new topic name [at most {topics.NAME_LIMIT} characters]: ")
     if name is None:
         return None
-    scope = screen.editline("  scope [empty means every session]: ", "")
-    if isinstance(scope, screen.Cancelled):
+    project = screen.editline("  project [empty means every session]: ", "")
+    if isinstance(project, screen.Cancelled):
         return None
     print(
         screen.dim(
@@ -414,7 +414,12 @@ def _new_topic() -> dict[str, Any] | None:
     trigger = _required(f"  trigger [one sentence, at most {topics.TRIGGER_LIMIT} characters]: ")
     if trigger is None:
         return None
-    return {"topic_id": None, "name": name, "scope_name": scope.text or None, "trigger": trigger}
+    return {
+        "topic_id": None,
+        "name": name,
+        "project_name": project.text or None,
+        "trigger": trigger,
+    }
 
 
 def _chosen_delivery(text: str) -> str:
@@ -423,42 +428,42 @@ def _chosen_delivery(text: str) -> str:
     for name, _meaning in DELIVERY_CHOICES:
         if chosen in (name, name[0]):
             return name
-    raise MashuError("delivery must be always, scope, or topic")
+    raise MashuError("delivery must be always, project, or topic")
 
 
 def _delivery_answers(
     default: str = "always",
     *,
-    scope_default: str | None = None,
+    project_default: str | None = None,
     topic_default: Any = None,
     dsn: str | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None] | None:
     """Ask for a route and its route-specific fields before opening a transaction."""
     print(screen.bold("  where should this rule be delivered?"))
     print(delivery_legend())
-    chosen_answer = screen.editline("  delivery [always/scope/topic; edit existing]: ", default)
+    chosen_answer = screen.editline("  delivery [always/project/topic; edit existing]: ", default)
     if isinstance(chosen_answer, screen.Cancelled):
         return None
     chosen = _chosen_delivery(chosen_answer.text or default)
-    scope_name: str | None = None
+    project_name: str | None = None
     topic: dict[str, Any] | None = None
     if chosen == "topic":
         topic = pick_topic(dsn, topic_default)
         if topic is None:
             return None
-    elif chosen == "scope":
+    elif chosen == "project":
         prompt = (
-            f"  scope names, comma-separated [enter={scope_default}]: "
-            if scope_default
-            else "  scope names, comma-separated [required]: "
+            f"  project names, comma-separated [enter={project_default}]: "
+            if project_default
+            else "  project names, comma-separated [required]: "
         )
-        entered_scope = screen.editline(prompt, scope_default or "")
-        if isinstance(entered_scope, screen.Cancelled):
+        entered_project = screen.editline(prompt, project_default or "")
+        if isinstance(entered_project, screen.Cancelled):
             return None
-        scope_name = entered_scope.text or scope_default
-        if scope_name is None:
+        project_name = entered_project.text or project_default
+        if project_name is None:
             return None
-    return chosen, scope_name, topic
+    return chosen, project_name, topic
 
 
 def _revise(dsn: str | None, row: dict[str, Any]) -> str:
@@ -484,21 +489,21 @@ def _revise(dsn: str | None, row: dict[str, Any]) -> str:
 
 def _revise_temporary(dsn: str | None, row: dict[str, Any]) -> str:
     content = screen.edit_long_text("Edit temporary context", row["content"])
-    current_scope = row.get("scope_name")
-    scope_prompt = (
-        f"  scope name [enter={current_scope}; '-' means every scope]: "
-        if current_scope
-        else "  scope name [empty means every scope]: "
+    current_project = row.get("project_name")
+    project_prompt = (
+        f"  project name [enter={current_project}; '-' means every project]: "
+        if current_project
+        else "  project name [empty means every project]: "
     )
-    entered_scope = screen.editline(scope_prompt, current_scope or "")
-    if isinstance(entered_scope, screen.Cancelled):
+    entered_project = screen.editline(project_prompt, current_project or "")
+    if isinstance(entered_project, screen.Cancelled):
         return screen.warning("  ! temporary context unchanged")
-    scope_name = current_scope if not entered_scope.text else entered_scope.text
-    if scope_name == "-":
-        scope_name = None
+    project_name = current_project if not entered_project.text else entered_project.text
+    if project_name == "-":
+        project_name = None
     with db.transaction(dsn) as cur:
         memory_actions.revise_temporary(
-            cur, row["context_id"], content=content, scope_name=scope_name, actor=ACTOR
+            cur, row["context_id"], content=content, project_name=project_name, actor=ACTOR
         )
     return screen.success(f"  ✓ revised temporary {_short(row['context_id'])}")
 
@@ -540,29 +545,29 @@ def _restore(dsn: str | None, row: dict[str, Any]) -> tuple[str, bool]:
 
 
 def _names(entered: str | None) -> list[str]:
-    """The scope names typed into one comma-separated answer."""
+    """The project names typed into one comma-separated answer."""
     return [name.strip() for name in (entered or "").split(",") if name.strip()]
 
 
 def _set_delivery(dsn: str | None, row: dict[str, Any]) -> str:
     answers = _delivery_answers(
         row["delivery"],
-        scope_default=row.get("scope_name"),
+        project_default=row.get("project_name"),
         topic_default=row.get("topic_id"),
         dsn=dsn,
     )
     if answers is None:
         return screen.warning("  ! delivery unchanged")
-    delivery, scope_name, topic = answers
+    delivery, project_name, topic = answers
     with db.transaction(dsn) as cur:
         changed = memory_actions.set_delivery(
             cur,
             row["memory_id"],
             delivery=delivery,
-            scope_name=scope_name,
+            project_name=project_name,
             topic=topic,
             actor=ACTOR,
-            scope_names=_names(scope_name) if delivery == "scope" else None,
+            project_names=_names(project_name) if delivery == "project" else None,
         )
     label = f"topic:{topic['name']}" if topic else changed["delivery"]
     return screen.success(f"  ✓ delivery {_short(row['memory_id'])}  {label}")
@@ -590,7 +595,7 @@ def _remember(dsn: str | None) -> tuple[str, UUID | None]:
     answers = _delivery_answers(dsn=dsn)
     if answers is None:
         return screen.warning("  ! nothing remembered"), None
-    delivery, scope_name, topic = answers
+    delivery, project_name, topic = answers
     acknowledged: list[UUID] | None = None
     while True:
         try:
@@ -600,11 +605,11 @@ def _remember(dsn: str | None) -> tuple[str, UUID | None]:
                     content=content,
                     why=why,
                     delivery=delivery,
-                    scope_name=scope_name,
+                    project_name=project_name,
                     topic=topic,
                     acknowledged=acknowledged,
                     actor=ACTOR,
-                    scope_names=_names(scope_name) if delivery == "scope" else (),
+                    project_names=_names(project_name) if delivery == "project" else (),
                 )
             message = screen.success(f"  ✓ remembered {_short(row['memory_id'])}")
             for warning in row.get("retirement_warnings", []):

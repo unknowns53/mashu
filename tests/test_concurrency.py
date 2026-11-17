@@ -9,7 +9,7 @@ import pytest
 from psycopg.rows import dict_row
 
 from conftest import propose_change, remember, retire
-from mashu import ledger, memory_changes, nominations, scopes
+from mashu import ledger, memory_changes, nominations, projects
 from mashu.errors import MashuError, RetiredConflictError
 
 RULE = "always run the migration before starting the local server"
@@ -86,9 +86,9 @@ def test_two_pains_cannot_be_matched_against_each_other_at_once(two):
 
 def test_a_nomination_being_decided_is_held_against_the_other_decision(committing_dsn, two):
     with psycopg.connect(committing_dsn, row_factory=dict_row) as setup, setup.cursor() as cur:
-        scope = scopes.create_scope(cur, name="a scope for the race", actor="user")
+        project = projects.create_project(cur, name="a project for the race", actor="user")
         nomination = nominations.nominate_user_explicit(
-            cur, content=RULE, actor="agent", scope_id=scope["scope_id"]
+            cur, content=RULE, actor="agent", project_id=project["project_id"]
         )["nomination"]
 
     first, second = two

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import expire, new_task
-from mashu import bootstrap, ledger, memories, scopes, server, tasks, temporary, topics
+from mashu import bootstrap, ledger, memories, projects, server, tasks, temporary, topics
 from mashu.tokens import pushed_cost
 
 DISCIPLINE = "never report a run as finished without the output that proves it"
@@ -16,42 +16,44 @@ OTHER_WORK = "read up on PNtBAm cononsolvency"
 
 
 @pytest.fixture
-def task(cur, scope_id):
-    """One task, one state, in the test scope — the smallest thing that is delivered."""
+def task(cur, project_id):
+    """One task, one state, in the test project — the smallest thing that is delivered."""
     return new_task(
         cur,
         SCHEMA,
-        project=scope_id,
+        project=project_id,
         goal="hand the active states over with their dates",
         next_actions=["count the three shares apart"],
     )
 
 
-def test_a_rule_for_every_session_reaches_every_session(cur, scope_id):
+def test_a_rule_for_every_session_reaches_every_session(cur, project_id):
     memories.remember(cur, content=DISCIPLINE, actor="user")
     blind = bootstrap.session_bootstrap(cur, actor="agent")
-    scoped = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
+    opened = bootstrap.session_bootstrap(cur, actor="agent", project_id=project_id)
 
     assert [row["content"] for row in blind["always"]] == [DISCIPLINE]
-    assert [row["content"] for row in scoped["always"]] == [DISCIPLINE]
+    assert [row["content"] for row in opened["always"]] == [DISCIPLINE]
     # A pushed row carries an id and a body and nothing else.
     assert set(blind["always"][0]) == {"memory_id", "content"}
 
 
-def test_a_scope_rule_waits_for_a_session_in_that_scope(cur, scope_id):
-    memories.remember(cur, content=LOCAL, actor="user", scope_id=scope_id, delivery="scope")
-    elsewhere = scopes.create_scope(cur, name="somewhere else", actor="user")["scope_id"]
+def test_a_project_rule_waits_for_a_session_in_that_project(cur, project_id):
+    memories.remember(cur, content=LOCAL, actor="user", project_id=project_id, delivery="project")
+    elsewhere = projects.create_project(cur, name="somewhere else", actor="user")["project_id"]
 
-    assert bootstrap.session_bootstrap(cur, actor="agent")["scoped"] == []
-    assert bootstrap.session_bootstrap(cur, actor="agent", scope_id=elsewhere)["scoped"] == []
+    assert bootstrap.session_bootstrap(cur, actor="agent")["project_rules"] == []
+    assert (
+        bootstrap.session_bootstrap(cur, actor="agent", project_id=elsewhere)["project_rules"] == []
+    )
 
-    here = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
-    assert [row["content"] for row in here["scoped"]] == [LOCAL]
+    here = bootstrap.session_bootstrap(cur, actor="agent", project_id=project_id)
+    assert [row["content"] for row in here["project_rules"]] == [LOCAL]
 
 
-def test_the_conditions_of_the_week_come_with_the_opening(cur, scope_id):
+def test_the_conditions_of_the_week_come_with_the_opening(cur, project_id):
     temporary.put_temporary(cur, content="the licence server is offline", actor="user", days=3)
-    got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
+    got = bootstrap.session_bootstrap(cur, actor="agent", project_id=project_id)
     assert [row["content"] for row in got["temporary"]] == ["the licence server is offline"]
     assert set(got["temporary"][0]) == {"content", "expires_at"}
 
@@ -65,13 +67,13 @@ def test_a_candidate_waiting_is_worth_one_number(cur):
     assert bootstrap.session_bootstrap(cur, actor="agent")["pending"] == 1
 
 
-def test_the_opening_reports_each_share_and_the_total(cur, scope_id, task):
+def test_the_opening_reports_each_share_and_the_total(cur, project_id, task):
     memories.remember(cur, content=DISCIPLINE, actor="user")
-    memories.remember(cur, content=LOCAL, actor="user", scope_id=scope_id, delivery="scope")
+    memories.remember(cur, content=LOCAL, actor="user", project_id=project_id, delivery="project")
     temporary.put_temporary(cur, content=THIS_WEEK, actor="user", days=3)
 
     state = task["state"]
-    got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
+    got = bootstrap.session_bootstrap(cur, actor="agent", project_id=project_id)
     assert got["memory_tokens"] == pushed_cost([DISCIPLINE, LOCAL])
     assert got["project_tokens"] == tasks.card_cost(SCHEMA, state)
     assert got["card_tokens"] == got["project_tokens"]
@@ -81,16 +83,16 @@ def test_the_opening_reports_each_share_and_the_total(cur, scope_id, task):
 
 
 def test_an_opening_over_the_total_is_recorded_rather_than_quietly_served(
-    cur, scope_id, task, monkeypatch
+    cur, project_id, task, monkeypatch
 ):
     memories.remember(cur, content=DISCIPLINE, actor="user")
-    bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
+    bootstrap.session_bootstrap(cur, actor="agent", project_id=project_id)
     cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'bootstrap_over_capacity'")
     assert cur.fetchone()["n"] == 0
 
     monkeypatch.setenv("MASHU_TOTAL_CAPACITY", "10")
 
-    got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
+    got = bootstrap.session_bootstrap(cur, actor="agent", project_id=project_id)
     assert got["capacity"] == 10
     assert got["over_budget"] is True
     # The opening is never trimmed when it exceeds its configured ceiling.
@@ -102,9 +104,9 @@ def test_an_opening_over_the_total_is_recorded_rather_than_quietly_served(
 
 
 def test_the_state_of_current_work_arrives_under_its_date_with_a_call_to_fetch_it(
-    cur, scope_id, task
+    cur, project_id, task
 ):
-    got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
+    got = bootstrap.session_bootstrap(cur, actor="agent", project_id=project_id)
     assert "call task_get" in got["task_instruction"]
     assert "full task_id" in got["task_instruction"]
     row = got["states"][0]
@@ -122,16 +124,16 @@ def test_the_state_of_current_work_arrives_under_its_date_with_a_call_to_fetch_i
     ids=["lease", "closed"],
 )
 def test_a_task_whose_lease_ran_out_or_that_was_closed_is_not_in_the_opening(
-    cur, scope_id, task, end
+    cur, project_id, task, end
 ):
     end(cur, task["task"]["task_id"])
-    got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
+    got = bootstrap.session_bootstrap(cur, actor="agent", project_id=project_id)
     assert got["states"] == []
     assert got["project_tokens"] == 0
 
 
-def test_the_states_arrive_in_a_fixed_order(cur, scope_id, task):
-    second = tasks.task_create(cur, project=scope_id, name=OTHER_WORK, actor="agent")
+def test_the_states_arrive_in_a_fixed_order(cur, project_id, task):
+    second = tasks.task_create(cur, project=project_id, name=OTHER_WORK, actor="agent")
     cur.execute(
         "UPDATE task SET last_activity_at = now() - interval '2 days' WHERE task_id = %s",
         (task["task"]["task_id"],),
@@ -139,42 +141,44 @@ def test_the_states_arrive_in_a_fixed_order(cur, scope_id, task):
 
     order = [str(second["task"]["task_id"])[:8], str(task["task"]["task_id"])[:8]]
     for _ in range(2):
-        got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)["states"]
+        got = bootstrap.session_bootstrap(cur, actor="agent", project_id=project_id)["states"]
         assert [row["task"] for row in got] == order
 
 
-def test_work_belonging_to_another_scope_stays_there(cur, scope_id, task):
-    home = scope_id
-    elsewhere = scopes.create_scope(cur, name="the other repository", actor="user")["scope_id"]
+def test_work_belonging_to_another_project_stays_there(cur, project_id, task):
+    home = project_id
+    elsewhere = projects.create_project(cur, name="the other repository", actor="user")[
+        "project_id"
+    ]
     away = tasks.task_create(
         cur, project="the other repository", name="rewrite the exporter", actor="agent"
     )
     here = str(task["task"]["task_id"])[:8]
     there = str(away["task"]["task_id"])[:8]
 
-    at_home = bootstrap.session_bootstrap(cur, actor="agent", scope_id=home)
+    at_home = bootstrap.session_bootstrap(cur, actor="agent", project_id=home)
     assert [row["task"] for row in at_home["states"]] == [here]
 
-    over_there = bootstrap.session_bootstrap(cur, actor="agent", scope_id=elsewhere)
+    over_there = bootstrap.session_bootstrap(cur, actor="agent", project_id=elsewhere)
     assert [row["task"] for row in over_there["states"]] == [there]
 
-    # An unrouted session belongs to no scope, so no task's card reaches it.
+    # An unrouted session belongs to no project, so no task's card reaches it.
     unrouted = bootstrap.session_bootstrap(cur, actor="agent")
     assert unrouted["states"] == []
 
 
-def test_what_was_handed_over_is_logged(cur, scope_id):
+def test_what_was_handed_over_is_logged(cur, project_id):
     memories.remember(cur, content=DISCIPLINE, actor="user")
     got = bootstrap.session_bootstrap(
-        cur, actor="agent", scope_id=scope_id, scope_name="test scope", routed=True
+        cur, actor="agent", project_id=project_id, project_name="test project", routed=True
     )
-    assert got["scope"] == "test scope"
+    assert got["project"] == "test project"
     assert got["routed"] is True
 
     cur.execute("SELECT detail FROM event_log WHERE event_type = 'bootstrap_served'")
     detail = cur.fetchone()["detail"]
     assert detail["tokens"] == got["tokens"]
-    assert detail["scope"] == "test scope"
+    assert detail["project_name"] == "test project"
 
 
 def test_an_opening_against_a_schema_the_code_has_outgrown_says_so(cur):
@@ -193,15 +197,15 @@ def test_the_calling_guidance_fits_before_the_client_truncates_it():
     assert len(server.INSTRUCTIONS.encode()) <= server.INSTRUCTIONS_BYTE_LIMIT
 
 
-def test_an_opening_and_the_hook_reader_survive_pending_topic_migrations(cur, scope_id):
+def test_an_opening_and_the_hook_reader_survive_pending_topic_migrations(cur, project_id):
     memories.remember(cur, content="Always rule", actor="user")
-    memories.remember(cur, content=LOCAL, actor="user", scope_id=scope_id, delivery="scope")
-    cur.execute("DROP TRIGGER memory_scope_cleared ON memory")
-    cur.execute("DROP TABLE memory_scope")
-    cur.execute("ALTER TABLE scope DROP COLUMN archived_at")
+    memories.remember(cur, content=LOCAL, actor="user", project_id=project_id, delivery="project")
+    cur.execute("DROP TRIGGER memory_project_cleared ON memory")
+    cur.execute("DROP TABLE memory_project")
+    cur.execute("ALTER TABLE project DROP COLUMN archived_at")
     cur.execute("DELETE FROM schema_migration WHERE filename = %s", ("0021_memory_scope.sql",))
-    single = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
-    assert [row["content"] for row in single["scoped"]] == [LOCAL]
+    single = bootstrap.session_bootstrap(cur, actor="agent", project_id=project_id)
+    assert [row["content"] for row in single["project_rules"]] == [LOCAL]
     subject = topics.create_topic(cur, name="delegation", trigger="Before delegating", actor="user")
     memories.remember(
         cur, content=PINNED, actor="user", delivery="topic", topic_id=subject["topic_id"]
@@ -212,7 +216,9 @@ def test_an_opening_and_the_hook_reader_survive_pending_topic_migrations(cur, sc
 
     cur.execute("ALTER TABLE topic DROP COLUMN action")
     cur.execute("DELETE FROM schema_migration WHERE filename = %s", ("0011_guard_into_topics.sql",))
-    assert bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)["topics"] == linked
+    assert (
+        bootstrap.session_bootstrap(cur, actor="agent", project_id=project_id)["topics"] == linked
+    )
     assert topics.action_rules(cur, "delegate", None) == (None, [])
 
     cur.execute("ALTER TABLE memory DROP COLUMN topic_id")
@@ -223,7 +229,7 @@ def test_an_opening_and_the_hook_reader_survive_pending_topic_migrations(cur, sc
     cur.execute("DROP TABLE topic")
     cur.execute("DELETE FROM schema_migration WHERE filename = %s", ("0010_topics.sql",))
 
-    got = bootstrap.session_bootstrap(cur, actor="agent", scope_id=scope_id)
+    got = bootstrap.session_bootstrap(cur, actor="agent", project_id=project_id)
 
     assert [row["content"] for row in got["always"]] == ["Always rule"]
     assert got["topics"] == []

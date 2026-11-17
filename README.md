@@ -187,14 +187,14 @@ remote-shell command \b(cluster-wrapper|scheduler-cmd)\b
 |---|---|
 | 判断待ち（Inbox） | candidate、Memory change proposal、close の提案を一覧に並べる。candidate の採用、却下、保留と文面の編集、proposal の適用、却下、取り下げ、close の提案の受け入れ。topic へ採用するときは、その場で新しい topic を作成できる |
 | メモリ（Memory） | active と retired の Memory、Temporary Context の一覧と検索。根拠と revision を表示する。直接の登録、本文と理由の編集、配信先の変更、retire と復元、Temporary Context との相互変換 |
-| 作業（Work） | active、dormant、closed の Task と Project。Task の作成、編集、lease（活動期限）の延長、close、reopen と、Project の作成、編集、削除、フォルダの追加と削除。Project は Scope そのもので、作成のときにフォルダも登録できる |
-| 設定（Settings） | 容量と最近の記録、Bootstrap preview、Scope と Topic と Route の編集、配信量の上限、migration の適用、表示の言語、バージョンと更新 |
+| 作業（Work） | active、dormant、closed の Task と Project。Task の作成、編集、lease（活動期限）の延長、close、reopen と、Project の作成、編集、削除、フォルダの追加と削除。Project は作成のときにフォルダも登録できる |
+| 設定（Settings） | 容量と最近の記録、Bootstrap preview、Project と Topic とフォルダの編集、配信量の上限、migration の適用、表示の言語、バージョンと更新 |
 
 編集は、詳細の表示をその場で入力欄に変えて行う。⌘/Ctrl + Enter で保存し、Esc で取り消す。一覧は ↑↓ か j/k で移動し、/ で検索欄へ移る。retire した規則を書き戻す操作、似た Task がある中での Task の作成、削除、migration の適用は、理由や候補を見せて確認してから実行する。Bootstrap preview は入力したディレクトリで開くセッションに配信される内容を示し、TUI と同様に記録される。設定の「知識があったのに起きた失敗」は、メモリ、タスク、指示ファイルに知識があったのに起きた失敗を新しい順に並べ、知識があった場所と、同じ場所が名指された件数を示す。メモリとタスクはそこから開ける。ウィンドウを閉じてもトレイに残り、トレイのアイコンか、macOS では Dock のアイコンを押すと再び開く。終了するときはトレイのメニューの Quit を使う。設定の「起動」で「ログイン時に起動」にチェックを入れると、ログインのたびにアプリが起動する。表示の言語は日本語と英語を切り替えられる。CLI と TUI の文言は英語だけである。
 
 TUI は四つの領域（Attention、Memories、Work、Settings & health）を持ち、デスクトップアプリとほぼ同じことができる。矢印か j/k で移動し、Enter で開き、Esc か ← で一段戻る。q はどの画面からでも Mashu を終了し、? はその画面のキーの説明を出す。`e` で編集欄が開くので、その場で直して Enter で保存する。`VISUAL` か `EDITOR` を設定していれば、そのエディタで開く。
 
-ブラウザの一覧は 127.0.0.1 で開き、端末の幅に収まらない一覧を、本文を省略せずに一画面に並べる。Memory は status、配信先、Scope、topic、本文の部分一致で、Task は状態と Project で絞り込める。採用や編集はできない。GET と HEAD 以外の要求は 405 で拒否し、ページを作る DB の transaction も READ ONLY にしている。
+ブラウザの一覧は 127.0.0.1 で開き、端末の幅に収まらない一覧を、本文を省略せずに一画面に並べる。Memory は status、配信先、Project、topic、本文の部分一致で、Task は状態と Project で絞り込める。採用や編集はできない。GET と HEAD 以外の要求は 405 で拒否し、ページを作る DB の transaction も READ ONLY にしている。
 
 ~~~bash
 mashu gui
@@ -210,13 +210,13 @@ Ledger、Memory の revision、Task の ruling と checkpoint と artifact、過
 ~~~bash
 mashu remember "Run migrations before restarting the service"
 mashu remember "Run migrations before restarting" --why "a restart against an old schema broke the API"
-mashu remember "Use the deployment scope" --scope deployment
+mashu remember "Deploy from the release branch" --project deployment
 mashu remember "Keep the win rate between 40 and 60 percent" --topic difficulty
 ~~~
 
-配信先は、何も指定しなければ always、`--scope` を指定すれば scope、`--topic` を指定すれば topic になる。`--scope` を繰り返すと、その規則は指定したすべての Scope に届く。配信先の違いは[配信の仕組み](#配信の仕組み)で説明する。
+配信先は、何も指定しなければ always、`--project` を指定すれば project、`--topic` を指定すれば topic になる。`--project` を繰り返すと、その規則は指定したすべての Project に届く。配信先の違いは[配信の仕組み](#配信の仕組み)で説明する。
 
-期限付きの条件は `--until` で Temporary Context として登録する。review は不要で、期限が来ると無効になる。期限は最長 14 日で、`--until` は `--scope`、`--delivery`、`--topic`、`--force` と一緒には使えない。TUI の Memories で `c` を押すと、always か scope の Memory と Temporary Context を相互に変換できる。topic の Memory は発動条件を、複数の Scope に届く Memory はほかの Scope を失うので、変換できない。
+期限付きの条件は `--until` で Temporary Context として登録する。review は不要で、期限が来ると無効になる。期限は最長 14 日で、`--until` は `--project`、`--delivery`、`--topic`、`--force` と一緒には使えない。TUI の Memories で `c` を押すと、always か project の Memory と Temporary Context を相互に変換できる。topic の Memory は発動条件を、複数の Project に届く Memory はほかの Project を失うので、変換できない。
 
 ~~~bash
 mashu remember "The staging host is down" --until 2d
@@ -250,7 +250,7 @@ mashu pain --what "Bad export" --prevention "Validate the manifest" --prevention
 ~~~bash
 mashu review                      # TUI で candidate を一件ずつ判断する
 mashu review --list               # 一覧だけ表示する（--all で保留中のものも出す）
-mashu review --admit 1a2b3c4d --version 3 --delivery scope --scope deployment
+mashu review --admit 1a2b3c4d --version 3 --delivery project --project deployment
 mashu review --decline 1a2b3c4d --reason "Too specific to one run"
 mashu review --changes            # Memory change proposal を TUI で判断する
 mashu review --apply-change 1a2b3c4d --version 2
@@ -280,15 +280,15 @@ agent は自分が何を知らないかを知らないので、検索に任せ�
 | 配信先 | 届くセッション | 届く時点 | 向いている規則 |
 |---|---|---|---|
 | always | すべて | 開始時 | どの作業でも守る規則 |
-| scope | 選んだ Scope のどれかに route が一致するディレクトリで開いたセッション | 開始時 | 特定のプロジェクトか、いくつかのプロジェクトだけで必要な規則 |
-| topic | topic の Scope が一致するセッション。Scope が無ければすべて | 開始時には見出しの一行だけを配信。本文は agent がその作業を開始するときに読む | 特定作業の間だけ必要な規則 |
+| project | 選んだ Project のどれかのフォルダで開いたセッション | 開始時 | 特定のプロジェクトか、いくつかのプロジェクトだけで必要な規則 |
+| topic | topic の Project が一致するセッション。Project が無ければすべて | 開始時には見出しの一行だけを配信。本文は agent がその作業を開始するときに読む | 特定作業の間だけ必要な規則 |
 
-scope は「どこで」を絞り、topic は「何の作業のあいだか」を絞る。topic は本文を push しないが、見出しと発動条件は毎回届くので、agent は何があっていつ読むべきかを把握した状態で本文を読むことができる。
+project は「どこで」を絞り、topic は「何の作業のあいだか」を絞る。topic は本文を push しないが、見出しと発動条件は毎回届くので、agent は何があっていつ読むべきかを把握した状態で本文を読むことができる。
 
 `session_bootstrap` は次の順に返す。
 
 1. always の Memory
-2. 現在の Scope の Memory
+2. 現在の Project の Memory
 3. topic の見出し（名前、規則の数、発動条件）
 4. active な Task の card（完全な Task ID、名前、goal、status、詳細の件数、最終確認日時）
 5. 有効な Temporary Context
@@ -302,7 +302,7 @@ topic の本文と source、Task の approach、open questions、blockers、next
 
 ~~~text
 全体                 4000 token
-Memory               2000 token（always は 800 まで。各 Scope は always と合わせて 2000 まで）
+Memory               2000 token（always は 800 まで。各 Project は always と合わせて 2000 まで）
 Task cards            800 token / session（1 Task 200。入りきらない Task は名前だけを 200 まで）
 Task detail           800 token / Task（常時は配信しない）
 Decisions in force    800 token / Task（task_get が全文に足して返す。常時は配信しない）
@@ -310,41 +310,41 @@ Topic body            800 token / topic（常時は配信しない）
 Temporary Context     400 token
 ~~~
 
-topic の見出しの行も Memory の容量に数える。Scope を持たない topic の行は always に、Scope を持つ topic の行はその Scope に入る。Task の card の予算は配信のときに効き、書き込みは拒否しない。最後の活動が新しい Task から順に card を載せ、入りきらない Task は短い ID、名前、最後の活動日だけを並べる。
+topic の見出しの行も Memory の容量に数える。Project を持たない topic の行は always に、Project を持つ topic の行はその Project に入る。Task の card の予算は配信のときに効き、書き込みは拒否しない。最後の活動が新しい Task から順に card を載せ、入りきらない Task は短い ID、名前、最後の活動日だけを並べる。
 
 上限と Memory 本文の字数（既定 120 字）は、デスクトップアプリの設定の「配信量の上限」か、TUI の Settings の Delivery limits で変更できる。値は DB の `setting` テーブルにある。書き込みの判定と `session_bootstrap` は呼ばれるたびにこの値を読むので、変更は保存した直後から有効となる。MCP server が agent に示す上限の数字だけは起動時に読むので、次に開くセッションから変更が反映される。上限を現在の使用量より下げても記録は消えないが、超えている間は量を増やす書き込みが拒否される。Task の card は古いものから配信されなくなる。タスクごとのユーザーの決定（ruling）の件数（既定 10）、決定 1 件の本文（既定 120 字）、決定 1 件の原文（既定 300 字）も同じ画面で変えられる。件数を下げても今ある決定は消えず、増やす書き込みだけが拒否される。
 
-## Scope と route
+## Project とフォルダ
 
-Scope は Memory を配る範囲で、route は作業ディレクトリの path prefix を Scope に対応づける。`mashu bootstrap` と `session_bootstrap` は、今のディレクトリから route をたどって Scope を決める。無関係なディレクトリは `--ignore` で、どの Scope にも属さないと明示できる。
-
-~~~bash
-mashu scope
-mashu scope --add deployment --about "Production releases"
-
-mashu route
-mashu route --add /work/service --scope deployment
-mashu route --ignore /work/scratch
-mashu route --remove /work/service
-~~~
-
-scope の Memory は、複数の Scope に届けられる。いくつかのリポジトリで同じ規則を使うときは、Memory を一件だけ置き、配信先でそれぞれのリポジトリの Scope を選ぶ。デスクトップアプリでは配信先の画面で Scope をチェックし、TUI ではカンマ区切りで名前を入れる。容量は、届く Scope のそれぞれで判定する。
+Project は一つのリポジトリで開いたセッションに届く規則と Task card の範囲で、Task の所属先でもある。フォルダ（route）は作業ディレクトリの path prefix を Project に対応づける。`mashu bootstrap` と `session_bootstrap` は、今のディレクトリからフォルダの対応をたどって Project を決める。無関係なディレクトリは `--ignore` で、どの Project にも属さないと明示できる。
 
 ~~~bash
-mashu deliver 1a2b3c4d scope --scope enrai --scope marimo
+mashu project
+mashu project --add deployment --about "Production releases"
+
+mashu folder
+mashu folder --add /work/service --project deployment
+mashu folder --ignore /work/scratch
+mashu folder --remove /work/service
 ~~~
 
-Scope は `mashu scope --remove <name>`、TUI の `x`、デスクトップアプリの削除で消せる。active な Memory、route、open な Task、未完了の topic、有効な Temporary Context、review を待つ candidate や変更の提案が残っている Scope は、残っているものを示して拒否する。一度も使われていない Scope は削除し、過去の記録が参照している Scope は一覧から外して保管する。保管した Scope の名前は再利用できない。
+project の Memory は、複数の Project に届けられる。いくつかのリポジトリで同じ規則を使うときは、Memory を一件だけ置き、配信先でそれぞれのリポジトリの Project を選ぶ。デスクトップアプリでは配信先の画面で Project をチェックし、TUI ではカンマ区切りで名前を入れる。容量は、届く Project のそれぞれで判定する。
 
-Task は Scope に属し、その card はその Scope のセッションにだけ配信される。
+~~~bash
+mashu deliver 1a2b3c4d project --project enrai --project marimo
+~~~
+
+Project は `mashu project --remove <name>`、TUI の `x`、デスクトップアプリの削除で消せる。active な Memory、フォルダ、open な Task、未完了の topic、有効な Temporary Context、review を待つ candidate や変更の提案が残っている Project は、残っているものを示して拒否する。一度も使われていない Project は削除し、過去の記録が参照している Project は一覧から外して保管する。保管した Project の名前は再利用できない。
+
+Task の card は、その Task の Project のセッションにだけ配信される。
 
 ## Topic
 
-topic は、特定の作業をしているあいだだけ必要な規則のまとまりである。名前、発動条件の一文、Scope を持ち、任意で action と原典（source）を持つ。セッションの開始時には `難易度較正 (9 rules): Before changing difficulty levers or win rates` のような見出しの一行だけが届き、agent はその作業に入るときに `memory_list(topic=...)` で本文を読む。
+topic は、特定の作業をしているあいだだけ必要な規則のまとまりである。名前、発動条件の一文、Project を持ち、任意で action と原典（source）を持つ。セッションの開始時には `難易度較正 (9 rules): Before changing difficulty levers or win rates` のような見出しの一行だけが届き、agent はその作業に入るときに `memory_list(topic=...)` で本文を読む。
 
 ~~~bash
 mashu topic
-mashu topic --add 難易度較正 --scope enrai --trigger "Before changing difficulty levers or win rates"
+mashu topic --add 難易度較正 --project enrai --trigger "Before changing difficulty levers or win rates"
 mashu topic --edit 難易度較正 --source "Projects/Enrai/難易度.md#レバー"
 mashu topic --edit 委譲 --action delegate
 mashu topic show 難易度較正
@@ -354,7 +354,7 @@ mashu remember "Do not change ship stats to set difficulty" --topic 難易度較
 mashu deliver 1a2b3c4d topic --topic 難易度較正
 ~~~
 
-プロジェクトのどの作業でも遵守する規則なら scope を選択し、そのプロジェクトの一部の作業でのみ必要なら topic を選ぶ。特定の操作の直前に必ず目に入れたいなら、その topic に action を結びつけ、[PreToolUse hook](#pretooluse-hook-で特定操作の前に規則を示す) を利用する。一つの action に結びつく topic は一つだけで、action は topic の編集でだけ設定できる。
+プロジェクトのどの作業でも遵守する規則なら project を選択し、そのプロジェクトの一部の作業でのみ必要なら topic を選ぶ。特定の操作の直前に必ず目に入れたいなら、その topic に action を結びつけ、[PreToolUse hook](#pretooluse-hook-で特定操作の前に規則を示す) を利用する。一つの action に結びつく topic は一つだけで、action は topic の編集でだけ設定できる。
 
 `--remove` で消せるのは active な規則を持たない topic だけである。一度も使われていない topic は削除され、retire した規則や提案が名前を参照している topic は、履歴を保つために archive されて一覧から消える。topic を作るのは User で、agent が作成できるのは、User の明示的な指示で規則を追加するか移すときのみである。
 
@@ -368,10 +368,10 @@ vault の場所は環境変数 `MASHU_VAULT_ROOT` だけが持ち、DB には保
 
 Project State は、セッションを開き直すたびに現在地を拾い直す手間を無くすためにある。どこまで進んだか、何を試して駄目だったか、なぜ今の方針なのかは、放っておくと git の履歴、リポジトリの文書、Obsidian、過去の会話に散らばり、agent が一か所から復元できなくなる。かといって作業の現況を Memory に入れると、古くならないことを前提にした Memory の容量を、やがて古くなる事実が占拠してしまう。
 
-Project は Task をまとめる単位で、Scope そのものである。Task は複数のセッションにまたがる作業だけに作り、一つの依頼や、大きな作業の一工程のためには作成しない。
+Task は Project に属する。Task は複数のセッションにまたがる作業だけに作り、一つの依頼や、大きな作業の一工程のためには作成しない。
 
 ~~~bash
-mashu scope --add website --folder ~/work/website
+mashu project --add website --folder ~/work/website
 
 mashu task list                   # --dormant、--closed で状態を変える
 mashu task show 1a2b3c4d
@@ -379,9 +379,9 @@ mashu task create "Add CLI help" --project mashu --goal "Every command explains 
 mashu task touch 1a2b3c4d
 ~~~
 
-新しいリポジトリを Mashu につなぐには、デスクトップアプリの作業画面で Project を作る。作成フォームでフォルダを選ぶと名前がフォルダ名で埋まり、作成すると、Scope と、そのフォルダからその Scope への route が同じ transaction で登録される。そのフォルダに別の Scope の route がすでにあれば、上書きせずに拒否する。フォルダは Project の画面で後から追加し、外せる。フォルダの欄は、どの画面でもシステムのフォルダ選択ダイアログで選べ、`~` から始まるパスを直接入力することもできる。
+新しいリポジトリを Mashu につなぐには、デスクトップアプリの作業画面で Project を作る。作成フォームでフォルダを選ぶと名前がフォルダ名で埋まり、作成すると、Project と、そのフォルダからその Project への対応が同じ transaction で登録される。そのフォルダがすでに別の Project に属していれば、上書きせずに拒否する。フォルダは Project の画面で後から追加し、外せる。フォルダの欄は、どの画面でもシステムのフォルダ選択ダイアログで選べ、`~` から始まるパスを直接入力することもできる。
 
-`mashu task create` と MCP の `task_create` は、`--project`（`project`）を省くと、今のディレクトリの route が指す Scope に Task を置く。
+`mashu task create` と MCP の `task_create` は、`--project`（`project`）を省くと、今のディレクトリが属する Project に Task を置く。
 
 Task の Current State は goal、approach、status、open questions、blockers、next actions からなる。Task が次のセッションへ渡すのは、この Current State と、User の裁定（ruling）と、artifact（外部成果物の場所）だけである。ruling は User がその作業について決めたことで、agent は User の言葉の原文を添えないと書けない。取り下げにも、その ruling についての User の言葉が要る。試したことや見つけたこと、測定、退けた案はプロジェクトの文書に書き、artifact で指す。agent が書いた過去の attempt と decision は消さずに残り、`mashu task show` や GUI で読めるが、agent には返らない。close のときの checkpoint は履歴として別に残る。
 
@@ -399,7 +399,7 @@ MCP tool は 18 個存在する。引数と制限は各 tool の説明として�
 |---|---|---|
 | Memory | `session_bootstrap` | 開始時に一度呼び、Memory、Task の card、Temporary Context を受け取る |
 | Memory | `pain_report` | 事故を Ledger に記録し、必要なら candidate を作成する |
-| Memory | `memory_list` | Scope の Memory を一覧する。`topic` を渡すと、その topic の本文と source を読む |
+| Memory | `memory_list` | Project の Memory を一覧する。`topic` を渡すと、その topic の本文と source を読む |
 | Memory | `memory_get` | Memory の本文、revision、根拠、retire の理由を読む |
 | Memory | `memory_admit` | User が残すよう求めた規則を採用する。本文を渡せば候補の作成と採用を一回で行う |
 | Memory | `memory_nominate` | agent 自身の置き換え案の後継を candidate として作成する |
@@ -449,10 +449,10 @@ User が配信先の変更を指示した      → memory_redeliver
 | `mashu memories` | active な Memory を表示する。`--retired` で retire したものと理由を表示する |
 | `mashu ledger` | Ledger を新しい順に表示する |
 | `mashu revise REF` | Memory を改訂する。前の本文は revision として残る |
-| `mashu deliver REF always\|scope\|topic` | Memory の配信先を変更する |
+| `mashu deliver REF always\|project\|topic` | Memory の配信先を変更する |
 | `mashu retire REF --reason REASON` | Memory を retire する。似た規則が出現すると、この理由を表示して確認を求める |
 | `mashu restore REF --reason REASON` | retire した Memory を戻す |
-| `mashu scope`、`mashu route`、`mashu topic` | Scope、route、topic を一覧し、編集し、削除する |
+| `mashu project`、`mashu folder`、`mashu topic` | Project、フォルダ、topic を一覧し、編集し、削除する |
 | `mashu task` | Task を一覧し、編集する |
 | `mashu guard ACTION` | ACTION に結びついた topic の規則を表示する。PreToolUse hook が呼ぶ |
 | `mashu serve` | MCP server を起動する |

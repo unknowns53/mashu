@@ -46,7 +46,7 @@ def create_nomination(
     kind: str,
     evidence: list[UUID],
     actor: str,
-    scope_id: UUID | None = None,
+    project_id: UUID | None = None,
     conflicts: list[UUID] | None = None,
 ) -> dict[str, Any]:
     """File a candidate. The evidence array is why it is allowed to be one."""
@@ -55,11 +55,11 @@ def create_nomination(
     validate_evidence(cur, list(evidence))
     cur.execute(
         """
-        INSERT INTO nomination (content, scope_id, kind, evidence, conflicts, created_by)
+        INSERT INTO nomination (content, project_id, kind, evidence, conflicts, created_by)
         VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING *
         """,
-        (content, scope_id, kind, list(evidence), list(conflicts or []) or None, actor),
+        (content, project_id, kind, list(evidence), list(conflicts or []) or None, actor),
     )
     row = cur.fetchone()
     snapshot = _conflict_snapshot(cur, list(conflicts or []))
@@ -176,7 +176,7 @@ def nominate_user_explicit(
     *,
     content: str,
     actor: str,
-    scope_id: UUID | None = None,
+    project_id: UUID | None = None,
     why: str | None = None,
     join_pending: bool = True,
 ) -> dict[str, Any]:
@@ -190,7 +190,7 @@ def nominate_user_explicit(
         cur,
         content=content,
         actor=actor,
-        scope_id=scope_id,
+        project_id=project_id,
         why=why,
         join_pending=join_pending,
         stated=("claimed", "user_explicit", CLAIMED_WHAT),
@@ -202,7 +202,7 @@ def nominate_proposed(
     *,
     content: str,
     actor: str,
-    scope_id: UUID | None = None,
+    project_id: UUID | None = None,
     why: str | None = None,
 ) -> dict[str, Any]:
     """Hold the successor an agent drafts for its own replace proposal.
@@ -213,7 +213,7 @@ def nominate_proposed(
         cur,
         content=content,
         actor=actor,
-        scope_id=scope_id,
+        project_id=project_id,
         why=why,
         join_pending=False,
         stated=("proposed", "proposed", PROPOSED_WHAT),
@@ -225,7 +225,7 @@ def _nominate(
     *,
     content: str,
     actor: str,
-    scope_id: UUID | None,
+    project_id: UUID | None,
     why: str | None,
     join_pending: bool,
     stated: tuple[str, str, str],
@@ -248,11 +248,11 @@ def _nominate(
     # Insert the ledger row first so nominations can cite it.
     cur.execute(
         """
-        INSERT INTO ledger (kind, what, prevention, scope_id, created_by)
+        INSERT INTO ledger (kind, what, prevention, project_id, created_by)
         VALUES (%s, %s, %s, %s, %s)
         RETURNING ledger_id
         """,
-        (ledger_kind, why or default_what, content, scope_id, actor),
+        (ledger_kind, why or default_what, content, project_id, actor),
     )
     ledger_id = cur.fetchone()["ledger_id"]
     events.record(cur, "pain_recorded", actor, ledger_id=ledger_id, detail={"kind": ledger_kind})
@@ -295,7 +295,7 @@ def _nominate(
         kind=nomination_kind,
         evidence=[ledger_id],
         actor=actor,
-        scope_id=scope_id,
+        project_id=project_id,
         conflicts=conflicts,
     )
     return result
@@ -307,8 +307,8 @@ def pending_nominations(
     """The queue, oldest first, each candidate carrying the pains it rests on."""
     cur.execute(
         f"""
-        SELECT n.*, s.name AS scope_name
-        FROM nomination n LEFT JOIN scope s ON s.scope_id = n.scope_id
+        SELECT n.*, s.name AS project_name
+        FROM nomination n LEFT JOIN project s ON s.project_id = n.project_id
         WHERE n.status = 'pending'
         {"" if include_deferred else "AND n.deferred_at IS NULL"}
         ORDER BY n.created_at, n.nomination_id
@@ -458,8 +458,8 @@ def admit(
     actor: str,
     delivery: str,
     expected_version: int,
-    scope_id: UUID | None = None,
-    scope_override: bool = False,
+    project_id: UUID | None = None,
+    project_override: bool = False,
     topic_id: UUID | None = None,
     content: str | None = None,
     approval: dict[str, Any],
@@ -475,8 +475,8 @@ def admit(
             "nomination_id": str(nomination_id),
             "expected_version": expected_version,
             "delivery": delivery,
-            "scope_id": str(scope_id) if scope_id else None,
-            "scope_override": scope_override,
+            "project_id": str(project_id) if project_id else None,
+            "project_override": project_override,
             "content": content,
             "exclude_memory_id": str(exclude_memory_id) if exclude_memory_id else None,
             "approval": approval,
@@ -500,7 +500,13 @@ def admit(
     final = nomination["content"] if content is None else content
     if final != nomination["content"]:
         memories.check_body(final, limit=settings.limit(cur, "content_limit"), rest=None)
-    home = scope_id if scope_override else nomination["scope_id"] if scope_id is None else scope_id
+    home = (
+        project_id
+        if project_override
+        else nomination["project_id"]
+        if project_id is None
+        else project_id
+    )
 
     cur.execute(
         "SELECT pg_advisory_xact_lock(%s, %s)",
@@ -528,7 +534,7 @@ def admit(
     )
 
     memories.check_delivery(delivery, home, topic_id)
-    home = memories.delivered_scope(cur, delivery, home, topic_id)
+    home = memories.delivered_project(cur, delivery, home, topic_id)
 
     verdict = redact.gate({"content": final})
     if verdict.unchecked:
@@ -549,7 +555,7 @@ def admit(
         cur,
         content=final,
         delivery=delivery,
-        scope_id=home,
+        project_id=home,
         exclude_memory_id=exclude_memory_id,
         topic_id=topic_id,
     )
@@ -559,24 +565,24 @@ def admit(
     cur.execute(
         """
         INSERT INTO memory
-            (content, scope_id, delivery, topic_id, evidence, created_by)
+            (content, project_id, delivery, topic_id, evidence, created_by)
         VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING *
         """,
         (final, home, delivery, topic_id, list(nomination["evidence"]), actor),
     )
     memory = cur.fetchone()
-    if exclude_memory_id is not None and delivery == "scope":
-        # A successor in its predecessor's home scope keeps reaching the scopes it reached;
+    if exclude_memory_id is not None and delivery == "project":
+        # A successor in its predecessor's home project keeps reaching the projects it reached;
         # capacity.check_admission above weighed it there.
-        cur.execute("SELECT to_regclass('memory_scope') IS NOT NULL AS present")
+        cur.execute("SELECT to_regclass('memory_project') IS NOT NULL AS present")
         if cur.fetchone()["present"]:
             cur.execute(
                 """
-                INSERT INTO memory_scope (memory_id, scope_id, created_by)
-                SELECT %s, ms.scope_id, %s
-                FROM memory_scope ms JOIN memory m ON m.memory_id = ms.memory_id
-                WHERE ms.memory_id = %s AND m.delivery = 'scope' AND m.scope_id = %s
+                INSERT INTO memory_project (memory_id, project_id, created_by)
+                SELECT %s, ms.project_id, %s
+                FROM memory_project ms JOIN memory m ON m.memory_id = ms.memory_id
+                WHERE ms.memory_id = %s AND m.delivery = 'project' AND m.project_id = %s
                 """,
                 (memory["memory_id"], actor, exclude_memory_id, home),
             )
@@ -649,7 +655,7 @@ def remember_explicit(
     actor: str,
     approval: dict[str, Any],
     request_id: UUID,
-    scope_id: UUID | None = None,
+    project_id: UUID | None = None,
     delivery: str | None = None,
     topic_id: UUID | None = None,
     new_topic: dict[str, Any] | None = None,
@@ -659,16 +665,16 @@ def remember_explicit(
 
     A stop keeps the ledger row and nomination, as memory_nominate would, so the agent can
     continue with an admission by id. Any other refusal propagates and writes nothing.
-    `new_topic` (name, trigger, scope_id) is opened only on the way to admitting, so a stop
+    `new_topic` (name, trigger, project_id) is opened only on the way to admitting, so a stop
     or a refusal leaves no empty topic behind.
     """
     filed = topic_id or new_topic
-    chosen_delivery = delivery or ("topic" if filed else "scope" if scope_id else "always")
+    chosen_delivery = delivery or ("topic" if filed else "project" if project_id else "always")
     settings = {
         "actor": actor,
         "delivery": chosen_delivery,
-        "scope_id": scope_id,
-        "scope_override": True,
+        "project_id": project_id,
+        "project_override": True,
         "topic_id": topic_id,
         "approval": approval,
         "request_id": request_id,
@@ -695,7 +701,7 @@ def remember_explicit(
         return _remembered(memory, replay, replay["evidence"][0], gate)
 
     nominated = nominate_user_explicit(
-        cur, content=content, actor=actor, scope_id=scope_id, why=why
+        cur, content=content, actor=actor, project_id=project_id, why=why
     )
     nomination = nominated["nomination"]
     if nominated["nomination_existing"]:

@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 
-from mashu import approvals, events, redact, scopes, settings, tasks
+from mashu import approvals, events, projects, redact, settings, tasks
 from mashu.errors import (
     MalformedRequestError,
     MashuError,
@@ -394,7 +394,7 @@ def checkpoint(
     if ruling_items or withdrawal_items:
         # task_update read the task before these rows existed; the card now names them.
         fresh = tasks.task_get(cur, task_id)
-        home = scopes.require_scope(cur, fresh["task"]["project_id"])
+        home = projects.require_project(cur, fresh["task"]["project_id"])
         result.update({**fresh, "card_share": tasks.card_share(cur, home)})
     for verdict in verdicts:
         report = _gate_report(verdict)

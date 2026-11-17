@@ -13,7 +13,7 @@ from mashu import (
     memories,
     memory_changes,
     nominations,
-    scopes,
+    projects,
     server,
     topics,
 )
@@ -60,8 +60,8 @@ def _redeliver(cur, memory, settings, **kwargs):
     return propose_change(cur, memory, "redeliver", successor_settings=settings, **kwargs)
 
 
-def _topic_settings(name, trigger=None, scope_id=None):
-    settings = {"delivery": "topic", "scope_id": scope_id, "topic": name}
+def _topic_settings(name, trigger=None, project_id=None):
+    settings = {"delivery": "topic", "project_id": project_id, "topic": name}
     if trigger is not None:
         settings["topic_trigger"] = trigger
     return settings
@@ -240,10 +240,10 @@ def test_replace_seats_against_the_final_active_set_and_refusal_rolls_back(cur, 
 
 
 def test_replace_proposal_version_follows_its_successor_and_its_delivery(cur):
-    old_scope = scopes.create_scope(cur, name=f"old delivery scope {uuid4()}", actor="user")
-    new_scope = scopes.create_scope(cur, name=f"new delivery scope {uuid4()}", actor="user")
+    old_project = projects.create_project(cur, name=f"old delivery project {uuid4()}", actor="user")
+    new_project = projects.create_project(cur, name=f"new delivery project {uuid4()}", actor="user")
     old = remember(
-        cur, f"old adapter rule {uuid4()}", delivery="scope", scope_id=old_scope["scope_id"]
+        cur, f"old adapter rule {uuid4()}", delivery="project", project_id=old_project["project_id"]
     )
     revised_content = f"verify the transport envelope before sending {uuid4()}"
     successor = _successor(cur, f"verify the export digest before sending {uuid4()}")
@@ -264,7 +264,7 @@ def test_replace_proposal_version_follows_its_successor_and_its_delivery(cur):
     assert refreshed["version"] == proposal["version"] + 1
     assert refreshed["successor_snapshot"]["content"] == revised_content
 
-    moved = {"delivery": "scope", "scope_id": new_scope["scope_id"]}
+    moved = {"delivery": "project", "project_id": new_project["project_id"]}
     changed = _replace(
         cur,
         old,
@@ -275,31 +275,31 @@ def test_replace_proposal_version_follows_its_successor_and_its_delivery(cur):
     )
     assert changed["version"] == refreshed["version"] + 1
     with pytest.raises(MashuError, match="version changed"):
-        apply_change(cur, refreshed, "Replace it and move delivery to the new scope")
-    applied = apply_change(cur, changed, "Replace it and move delivery to the new scope")
+        apply_change(cur, refreshed, "Replace it and move delivery to the new project")
+    applied = apply_change(cur, changed, "Replace it and move delivery to the new project")
     assert applied["memory"]["content"] == revised_content
-    assert applied["memory"]["delivery"] == "scope"
-    assert applied["memory"]["scope_id"] == str(new_scope["scope_id"])
+    assert applied["memory"]["delivery"] == "project"
+    assert applied["memory"]["project_id"] == str(new_project["project_id"])
 
 
-def test_replace_inherits_topic_settings_clears_nomination_scope_and_refuses_guard(cur):
-    scope = scopes.create_scope(cur, name=f"candidate-only scope {uuid4()}", actor="user")
+def test_replace_inherits_topic_settings_clears_nomination_project_and_refuses_guard(cur):
+    project = projects.create_project(cur, name=f"candidate-only project {uuid4()}", actor="user")
     home = topics.create_topic(cur, name="deploy", trigger="Before deploying", actor="user")
     old = remember(
         cur, f"run the deployment checksum {uuid4()}", delivery="topic", topic_id=home["topic_id"]
     )
     successor = _successor(
-        cur, f"verify the release signature {uuid4()}", "incident", scope_id=scope["scope_id"]
+        cur, f"verify the release signature {uuid4()}", "incident", project_id=project["project_id"]
     )
-    with pytest.raises(MashuError, match="must be one of always, scope, topic"):
-        _replace(cur, old, successor, successor_settings={"delivery": "guard", "scope_id": None})
+    with pytest.raises(MashuError, match="must be one of always, project, topic"):
+        _replace(cur, old, successor, successor_settings={"delivery": "guard", "project_id": None})
     proposal = _replace(cur, old, successor)
     assert proposal["successor_delivery"] == "topic"
-    assert proposal["successor_scope_id"] is None
+    assert proposal["successor_project_id"] is None
 
     applied = apply_change(cur, proposal, "Replace it with the release signature check")
     assert applied["memory"]["delivery"] == "topic"
-    assert applied["memory"]["scope_id"] is None
+    assert applied["memory"]["project_id"] is None
     cur.execute(
         "SELECT detail FROM event_log WHERE event_type = 'memory_change_applied' "
         "AND memory_id = %s ORDER BY event_id DESC LIMIT 1",
@@ -307,7 +307,7 @@ def test_replace_inherits_topic_settings_clears_nomination_scope_and_refuses_gua
     )
     assert cur.fetchone()["detail"]["successor_settings"] == {
         "delivery": "topic",
-        "scope_id": None,
+        "project_id": None,
         "topic_id": str(home["topic_id"]),
         "topic_name": "deploy",
     }
@@ -316,7 +316,7 @@ def test_replace_inherits_topic_settings_clears_nomination_scope_and_refuses_gua
 def test_redeliver_moves_a_rule_into_an_existing_topic_without_touching_its_body(cur):
     memory = remember(cur, RULE)
     with pytest.raises(MashuError, match="as they are"):
-        _redeliver(cur, memory, {"delivery": "always", "scope_id": None})
+        _redeliver(cur, memory, {"delivery": "always", "project_id": None})
     topics.create_topic(cur, name="calibration", trigger="Before calibrating", actor="user")
     with pytest.raises(MashuError, match="already exists"):
         _redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))
@@ -343,13 +343,13 @@ def test_redeliver_moves_a_rule_into_an_existing_topic_without_touching_its_body
     assert cur.fetchone()["detail"]["approval_source"]["kind"] == "user_instruction"
 
 
-def test_redeliver_opens_a_described_topic_only_when_it_fits(cur, scope_id, monkeypatch):
+def test_redeliver_opens_a_described_topic_only_when_it_fits(cur, project_id, monkeypatch):
     memory = remember(cur, RULE)
     proposal = _redeliver(
-        cur, memory, _topic_settings("calibration", "Before calibrating", scope_id)
+        cur, memory, _topic_settings("calibration", "Before calibrating", project_id)
     )
     assert proposal["delivery_move"][1] == (
-        "opens topic calibration for test scope: Before calibrating"
+        "opens topic calibration for test project: Before calibrating"
     )
 
     monkeypatch.setenv("MASHU_TOPIC_CAPACITY", "1")
@@ -364,13 +364,13 @@ def test_redeliver_opens_a_described_topic_only_when_it_fits(cur, scope_id, monk
 
     topic = topics.get_topic(cur, "calibration")
     moved = memories.get_memory(cur, memory["memory_id"])
-    assert topic["scope_id"] == scope_id
+    assert topic["project_id"] == project_id
     assert topic["created_by"] == "agent"
     assert moved["topic_id"] == topic["topic_id"]
-    assert moved["scope_id"] == scope_id
+    assert moved["project_id"] == project_id
 
 
-def test_redeliver_refuses_a_topic_opened_differently_or_a_target_changed_after_it(cur, scope_id):
+def test_redeliver_refuses_a_topic_opened_differently_or_a_target_changed_after_it(cur, project_id):
     memory = remember(cur, RULE)
     proposal = _redeliver(cur, memory, _topic_settings("calibration", "Before calibrating"))
     topics.create_topic(cur, name="calibration", trigger="Before tuning", actor="user")
@@ -378,11 +378,11 @@ def test_redeliver_refuses_a_topic_opened_differently_or_a_target_changed_after_
         apply_change(cur, proposal, "Put it in a new calibration topic")
     assert memories.get_memory(cur, memory["memory_id"])["delivery"] == "always"
 
-    scoped = {"delivery": "scope", "scope_id": scope_id}
-    proposal = _redeliver(cur, memory, scoped)
+    to_project = {"delivery": "project", "project_id": project_id}
+    proposal = _redeliver(cur, memory, to_project)
     memories.revise(cur, memory["memory_id"], content=UPDATED, actor="user")
     with pytest.raises(MashuError, match="changed after this proposal was read"):
-        apply_change(cur, proposal, "Scope it")
+        apply_change(cur, proposal, "Project it")
 
 
 def test_mcp_records_a_user_instruction_without_being_told_its_kind(mcp, dsn):

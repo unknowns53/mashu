@@ -13,8 +13,8 @@ from mashu import (
     capacity,
     memories,
     migrate,
+    projects,
     routing,
-    scopes,
     settings,
     tasks,
     temporary,
@@ -27,9 +27,10 @@ DELIVERY_FAILURE_ROUTES = ("pushed", "topic_unread", "topic_read", "guard", "unk
 # How the rule behind a delivery_failure_suspected event reached the session. A topic rule that
 # failed unread points at its trigger; one that failed after being read points at its wording,
 # so the two are counted apart (memory 10). An unread topic linked to an action is the one the
-# PreToolUse hook stands behind, so it counts as guard.
+# PreToolUse hook stands behind, so it counts as guard. event_log is never rewritten, and its
+# older rows name project delivery by its former value 'scope'.
 FAILURE_ROUTE_SQL = """CASE
-    WHEN detail->>'delivery' IN ('always', 'scope') THEN 'pushed'
+    WHEN detail->>'delivery' IN ('always', 'project', 'scope') THEN 'pushed'
     WHEN detail->>'delivery' = 'guard' THEN 'guard'
     WHEN detail->>'topic_read' = 'true' THEN 'topic_read'
     WHEN detail->>'topic_action' IS NOT NULL THEN 'guard'
@@ -54,8 +55,8 @@ class StatusSnapshot:
     delivery_failures_30d: int
     delivery_failures_by_route: dict[str, int]
     knowledge_unused_30d: int
-    scope_count: int
-    scope_rows: list[dict[str, Any]]
+    project_count: int
+    project_rows: list[dict[str, Any]]
     topic_count: int
     topic_heaviest_name: str | None
     topic_heaviest_tokens: int
@@ -66,12 +67,12 @@ class StatusSnapshot:
 
 
 def memory_view(cur: psycopg.Cursor, view: str) -> list[dict[str, Any]]:
-    """Read one complete view, including the scope names people recognize."""
+    """Read one complete view, including the project names people recognize."""
     if view == "temporary":
         cur.execute(
             """
-            SELECT t.*, s.name AS scope_name
-            FROM temporary_context t LEFT JOIN scope s ON s.scope_id = t.scope_id
+            SELECT t.*, s.name AS project_name
+            FROM temporary_context t LEFT JOIN project s ON s.project_id = t.project_id
             WHERE t.expires_at > now()
             ORDER BY t.expires_at, t.context_id
             """
@@ -80,11 +81,11 @@ def memory_view(cur: psycopg.Cursor, view: str) -> list[dict[str, Any]]:
         cur.execute(
             """
             SELECT m.*, """
-            + memories.SCOPE_NAMES
+            + memories.PROJECT_NAMES
             + """,
                    t.name AS topic_name, t.trigger AS topic_trigger
             FROM memory m
-            LEFT JOIN scope s ON s.scope_id = m.scope_id
+            LEFT JOIN project s ON s.project_id = m.project_id
             LEFT JOIN topic t ON t.topic_id = m.topic_id
             WHERE m.status = %s
             ORDER BY m.delivery, s.name NULLS FIRST, t.name, m.created_at, m.memory_id
@@ -99,13 +100,13 @@ def memory_view(cur: psycopg.Cursor, view: str) -> list[dict[str, Any]]:
 MEMORY_SORTS = {
     "active": ("updated", "created", "delivery"),
     "retired": ("updated", "created", "kind"),
-    "temporary": ("created", "expires", "scope"),
+    "temporary": ("created", "expires", "project"),
 }
 TASK_SORTS = ("updated", "created", "project")
 PROJECT_SORTS = ("created", "name")
 #: Keys that hold a time; they start newest first, and the rest start A to Z.
 DATE_SORTS = frozenset({"updated", "created", "expires"})
-_DELIVERY_ORDER = ("always", "scope", "topic")
+_DELIVERY_ORDER = ("always", "project", "topic")
 
 
 def sort_value(row: dict[str, Any], key: str) -> Any:
@@ -122,12 +123,12 @@ def sort_value(row: dict[str, Any], key: str) -> Any:
     if key == "expires":
         return row.get("expires_at")
     if key == "delivery":
-        place = row.get("topic_name") or row.get("scope_name") or ""
+        place = row.get("topic_name") or row.get("project_name") or ""
         return (_DELIVERY_ORDER.index(row["delivery"]), place)
     if key == "kind":
         return row.get("retirement_kind") or "legacy"
-    if key == "scope":
-        return row.get("scope_name") or ""
+    if key == "project":
+        return row.get("project_name") or ""
     return row.get(key if key == "name" else "created_at")
 
 
@@ -146,24 +147,24 @@ def sort_rows(rows: list[dict[str, Any]], key: str, *, descending: bool) -> list
     return [row for _, row in present] + blank
 
 
-def routed_scope(cur: psycopg.Cursor, cwd: str | None) -> tuple[UUID | None, str | None, bool]:
-    """Resolve a directory route to the scope identity and name shown to a person."""
-    scope_id, routed = routing.resolve(cur, cwd)
-    if scope_id is None:
+def routed_project(cur: psycopg.Cursor, cwd: str | None) -> tuple[UUID | None, str | None, bool]:
+    """Resolve a directory route to the project identity and name shown to a person."""
+    project_id, routed = routing.resolve(cur, cwd)
+    if project_id is None:
         return None, None, routed
-    cur.execute("SELECT name FROM scope WHERE scope_id = %s", (scope_id,))
+    cur.execute("SELECT name FROM project WHERE project_id = %s", (project_id,))
     row = cur.fetchone()
-    return scope_id, row["name"] if row else None, routed
+    return project_id, row["name"] if row else None, routed
 
 
 def bootstrap_preview(cur: psycopg.Cursor, *, cwd: str, actor: str) -> dict[str, Any]:
     """Build the session payload for a directory without duplicating route resolution."""
-    scope_id, scope_name, routed = routed_scope(cur, cwd)
+    project_id, project_name, routed = routed_project(cur, cwd)
     return bootstrap.session_bootstrap(
         cur,
         actor=actor,
-        scope_id=scope_id,
-        scope_name=scope_name,
+        project_id=project_id,
+        project_name=project_name,
         routed=routed,
     )
 
@@ -283,7 +284,7 @@ def status_snapshot(cur: psycopg.Cursor) -> StatusSnapshot:
         "AND created_at >= now() - interval '30 days'"
     )
     knowledge_unused = cur.fetchone()["n"]
-    scope_rows = scopes.list_scopes(cur)
+    project_rows = projects.list_projects(cur)
     topic_rows = topics.list_topics(cur)
     heaviest = max(topic_rows, key=lambda row: row["body_tokens"], default=None)
     cur.execute(
@@ -307,8 +308,8 @@ def status_snapshot(cur: psycopg.Cursor) -> StatusSnapshot:
         delivery_failures_30d=delivery_failures,
         delivery_failures_by_route=by_route,
         knowledge_unused_30d=knowledge_unused,
-        scope_count=len(scope_rows),
-        scope_rows=scope_rows,
+        project_count=len(project_rows),
+        project_rows=project_rows,
         topic_count=len(topic_rows),
         topic_heaviest_name=heaviest["name"] if heaviest else None,
         topic_heaviest_tokens=heaviest["body_tokens"] if heaviest else 0,
@@ -357,8 +358,8 @@ def dashboard_counts(cur: psycopg.Cursor) -> dict[str, int]:
     cur.execute("SELECT count(*) AS n FROM temporary_context WHERE expires_at > now()")
     temporary_contexts = cur.fetchone()["n"]
     # Read whole rows so a store without archived_at (before 0021) still counts.
-    cur.execute("SELECT * FROM scope")
-    scope_count = sum(1 for row in cur.fetchall() if not row.get("archived_at"))
+    cur.execute("SELECT * FROM project")
+    project_count = sum(1 for row in cur.fetchall() if not row.get("archived_at"))
     cur.execute("SELECT count(*) AS n FROM route")
     route_count = cur.fetchone()["n"]
 
@@ -373,7 +374,7 @@ def dashboard_counts(cur: psycopg.Cursor) -> dict[str, int]:
         "tasks_closed": task["closed"],
         "retired_memories": memory["retired"],
         "temporary_contexts": temporary_contexts,
-        "scopes": scope_count,
+        "projects": project_count,
         "routes": route_count,
         "schema_pending": len(migrate.pending(cur)),
     }
@@ -385,26 +386,28 @@ def save_topic(
     *,
     name: str,
     trigger: str,
-    scope_name: str | None,
+    project_name: str | None,
     actor: str,
     action: str | None = None,
     source: str | None = None,
 ) -> dict[str, Any]:
-    """Create a topic, or set every field of one; no scope means every session.
+    """Create a topic, or set every field of one; no project means every session.
 
     Editing sets action and source too, so None removes them. A new topic takes neither.
     """
-    scope_id = scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
+    project_id = projects.require_project(cur, project_name)["project_id"] if project_name else None
     if topic_id is None:
-        return topics.create_topic(cur, name=name, trigger=trigger, scope_id=scope_id, actor=actor)
+        return topics.create_topic(
+            cur, name=name, trigger=trigger, project_id=project_id, actor=actor
+        )
     return topics.update_topic(
         cur,
         topic_id,
         actor=actor,
         name=name,
         trigger=trigger,
-        scope_id=scope_id,
-        clear_scope=scope_id is None,
+        project_id=project_id,
+        clear_project=project_id is None,
         action=action,
         clear_action=action is None,
         source=source,
@@ -413,16 +416,16 @@ def save_topic(
 
 
 def set_route(
-    cur: psycopg.Cursor, *, path_prefix: str, scope_name: str, actor: str
+    cur: psycopg.Cursor, *, path_prefix: str, project_name: str, actor: str
 ) -> dict[str, Any]:
-    """Map a directory tree to a named scope."""
-    scope_id = scopes.require_scope(cur, scope_name)["scope_id"]
-    return routing.add_route(cur, path_prefix=path_prefix, scope_id=scope_id, actor=actor)
+    """Map a directory tree to a named project."""
+    project_id = projects.require_project(cur, project_name)["project_id"]
+    return routing.add_route(cur, path_prefix=path_prefix, project_id=project_id, actor=actor)
 
 
 def ignore_route(cur: psycopg.Cursor, *, path_prefix: str, actor: str) -> dict[str, Any]:
-    """Mark a directory tree as intentionally outside every scope."""
-    return routing.add_route(cur, path_prefix=path_prefix, scope_id=None, actor=actor)
+    """Mark a directory tree as intentionally outside every project."""
+    return routing.add_route(cur, path_prefix=path_prefix, project_id=None, actor=actor)
 
 
 def update_route(
@@ -430,16 +433,16 @@ def update_route(
     route_id: UUID,
     *,
     path_prefix: str,
-    scope_name: str | None,
+    project_name: str | None,
     actor: str,
 ) -> dict[str, Any]:
     """Edit both parts of a route as one application operation."""
-    scope_id = scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
+    project_id = projects.require_project(cur, project_name)["project_id"] if project_name else None
     return routing.update_route(
         cur,
         route_id,
         path_prefix=path_prefix,
-        scope_id=scope_id,
+        project_id=project_id,
         actor=actor,
     )
 

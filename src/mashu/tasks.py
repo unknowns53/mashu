@@ -8,7 +8,7 @@ from uuid import UUID
 
 import psycopg
 
-from mashu import capacity, config, events, redact, scopes, settings
+from mashu import capacity, config, events, projects, redact, settings
 from mashu.errors import (
     ClosedTaskError,
     DuplicateTaskError,
@@ -34,7 +34,7 @@ OUTCOME_MEANINGS = {
 LOCK_PROJECT_STATE = 3
 
 #: The ceilings 5.3 puts on one current state. goal and status ride on every bootstrap
-#: card of the scope, so they are held to a line each. The CHECK constraints keep the
+#: card of the project, so they are held to a line each. The CHECK constraints keep the
 #: wider ceilings of 0004, because states written under them are carried forward.
 TEXT_LIMITS = {"goal": 80, "approach": 500, "status_text": 120}
 
@@ -130,7 +130,7 @@ SELECT t.*, p.name AS project_name, {_ACTIVITY} AS activity,
        {rulings_count} AS rulings_count,
 {proposal_columns}
 FROM task t
-JOIN scope p ON p.scope_id = t.project_id
+JOIN project p ON p.project_id = t.project_id
 JOIN task_state ts ON ts.task_id = t.task_id
 {proposal_join}
 """
@@ -425,7 +425,7 @@ def task_list(
     """
     if activity not in ("active", "dormant", "open", "closed", "all"):
         raise MashuError(f"unknown activity '{activity}'")
-    project_id = scopes.require_scope(cur, project)["scope_id"] if project else None
+    project_id = projects.require_project(cur, project)["project_id"] if project else None
     where = {
         "active": "t.status = 'open' AND now() <= t.active_until",
         "dormant": "t.status = 'open' AND now() > t.active_until",
@@ -460,7 +460,7 @@ SELECT * FROM (
                     ELSE similarity(ts.goal, %(goal)s) END
            ) AS score
     FROM task t
-    JOIN scope p ON p.scope_id = t.project_id
+    JOIN project p ON p.project_id = t.project_id
     JOIN task_state ts ON ts.task_id = t.task_id
     WHERE t.project_id = %(project)s AND t.status = 'open'
 ) c
@@ -502,7 +502,7 @@ def task_create(
     force: bool = False,
 ) -> dict[str, Any]:
     """Open a task, unless one that reads like it is already open here."""
-    home = scopes.require_scope(cur, project)
+    home = projects.require_project(cur, project)
     name = (name or "").strip()
     if not name:
         raise MashuError("a task needs a name: it is what the duplicate match reads")
@@ -520,7 +520,9 @@ def task_create(
     # Held from before the match until the insert commits.
     _lock(cur)
 
-    candidates = similar_open_tasks(cur, project_id=home["scope_id"], name=name, goal=state["goal"])
+    candidates = similar_open_tasks(
+        cur, project_id=home["project_id"], name=name, goal=state["goal"]
+    )
     threshold = config.match_threshold()
     hits = [c for c in candidates if c["score"] >= threshold]
     if hits and not force:
@@ -538,7 +540,7 @@ def task_create(
         VALUES (%s, %s, %s, now(), now() + make_interval(days => %s::int))
         RETURNING task_id
         """,
-        (home["scope_id"], name, actor, lease),
+        (home["project_id"], name, actor, lease),
     )
     task_id = cur.fetchone()["task_id"]
     cur.execute(
@@ -607,7 +609,7 @@ SELECT * FROM (
                     THEN 1 ELSE 0 END
            ) AS score
     FROM task t
-    JOIN scope p ON p.scope_id = t.project_id
+    JOIN project p ON p.project_id = t.project_id
     JOIN task_state ts ON ts.task_id = t.task_id
     WHERE (%(project)s::uuid IS NULL OR t.project_id = %(project)s::uuid)
       AND (%(closed)s OR t.status = 'open')
@@ -627,7 +629,7 @@ def task_search(
     limit: int = 10,
 ) -> list[dict[str, Any]]:
     """Tasks whose name, goal or status reads like this."""
-    project_id = scopes.require_scope(cur, project)["scope_id"] if project else None
+    project_id = projects.require_project(cur, project)["project_id"] if project else None
     cur.execute(
         _SEARCH,
         {
@@ -655,7 +657,7 @@ SELECT r.ruling_id, r.ruling, r.user_instruction AS user_said, r.created_at, t.t
        ) AS withdrawn
 FROM ruling r
 JOIN task t ON t.task_id = r.task_id
-JOIN scope p ON p.scope_id = t.project_id
+JOIN project p ON p.project_id = t.project_id
 WHERE (%(project)s::uuid IS NULL OR t.project_id = %(project)s::uuid)
   AND (%(closed)s OR t.status = 'open')
   AND cardinality(%(terms)s::text[]) > 0
@@ -675,7 +677,7 @@ def ruling_search(
 ) -> list[dict[str, Any]]:
     """Rulings of any task whose text or the user's words hold every term, those in force
     first."""
-    project_id = scopes.require_scope(cur, project)["scope_id"] if project else None
+    project_id = projects.require_project(cur, project)["project_id"] if project else None
     cur.execute(
         _RULING_SEARCH,
         {
@@ -691,10 +693,10 @@ def ruling_search(
 # the budget (5.3, 8)
 
 _ACTIVE_STATES = f"""
-SELECT t.task_id, t.name, t.last_activity_at, p.scope_id, ts.goal, ts.approach, ts.status_text,
+SELECT t.task_id, t.name, t.last_activity_at, p.project_id, ts.goal, ts.approach, ts.status_text,
        ts.open_questions, ts.blockers, ts.next_actions, {_RULINGS_COUNT} AS rulings_count
 FROM task t
-JOIN scope p ON p.scope_id = t.project_id
+JOIN project p ON p.project_id = t.project_id
 JOIN task_state ts ON ts.task_id = t.task_id
 WHERE t.status = 'open' AND now() <= t.active_until
 """
@@ -707,7 +709,7 @@ def active_state_costs(cur: psycopg.Cursor) -> list[dict[str, Any]]:
         {
             "task_id": row["task_id"],
             "name": row["name"],
-            "scope_id": row["scope_id"],
+            "project_id": row["project_id"],
             "last_activity_at": row["last_activity_at"],
             "tokens": card_cost(row["name"], row),
         }
@@ -717,14 +719,14 @@ def active_state_costs(cur: psycopg.Cursor) -> list[dict[str, Any]]:
 
 
 def pushed_totals(cur: psycopg.Cursor) -> dict[str, Any]:
-    """What active state costs per scope, and at its worst."""
+    """What active state costs per project, and at its worst."""
     rows = active_state_costs(cur)
-    scoped: dict[UUID, int] = {}
+    by_project: dict[UUID, int] = {}
     for row in rows:
-        scoped[row["scope_id"]] = scoped.get(row["scope_id"], 0) + row["tokens"]
+        by_project[row["project_id"]] = by_project.get(row["project_id"], 0) + row["tokens"]
     return {
-        "scopes": scoped,
-        "worst": max(scoped.values(), default=0),
+        "projects": by_project,
+        "worst": max(by_project.values(), default=0),
         "count": len(rows),
     }
 
@@ -749,14 +751,14 @@ def seat_cards(rows: list[dict[str, Any]], capacity: int) -> tuple[list, list]:
 def card_share(cur: psycopg.Cursor, project: dict[str, Any]) -> dict[str, Any]:
     """Which active tasks beside this project's lose their card, after a write (project-state 8).
 
-    A write is never refused for the scope's share; the oldest cards fall out of delivery
+    A write is never refused for the project's share; the oldest cards fall out of delivery
     instead, and the writer is told which, so a needless task shows what it hid.
     """
-    rows = [row for row in active_state_costs(cur) if row["scope_id"] == project["scope_id"]]
+    rows = [row for row in active_state_costs(cur) if row["project_id"] == project["project_id"]]
     capacity = settings.limit(cur, "project_capacity")
     _, unseated = seat_cards(rows, capacity)
     return {
-        "boundary": "this scope",
+        "boundary": "this project",
         "capacity": capacity,
         "tokens": sum(row["tokens"] for row in rows),
         "unseated": [{"task_id": row["task_id"], "name": row["name"]} for row in unseated],
@@ -830,7 +832,7 @@ def task_update(
     new_name = task["name"] if name is None else name.strip()
     if not new_name:
         raise MashuError("a task needs a name: it is what the duplicate match reads")
-    home = scopes.require_scope(cur, task["project_id"] if project is None else project)
+    home = projects.require_project(cur, task["project_id"] if project is None else project)
     state = replaced_state(
         current["state"],
         goal=goal,
@@ -860,11 +862,11 @@ def task_update(
             current,
         )
 
-    identity_changed = new_name != task["name"] or home["scope_id"] != task["project_id"]
+    identity_changed = new_name != task["name"] or home["project_id"] != task["project_id"]
     if identity_changed:
         candidates = similar_open_tasks(
             cur,
-            project_id=home["scope_id"],
+            project_id=home["project_id"],
             name=new_name,
             goal=state["goal"],
         )
@@ -885,7 +887,7 @@ def task_update(
 
     cur.execute(
         "UPDATE task SET name = %s, project_id = %s WHERE task_id = %s",
-        (new_name, home["scope_id"], task_id),
+        (new_name, home["project_id"], task_id),
     )
 
     cur.execute(
@@ -912,10 +914,10 @@ def task_update(
             "from_name": task["name"] if new_name != task["name"] else None,
             "to_name": new_name if new_name != task["name"] else None,
             "from_project_id": (
-                str(task["project_id"]) if home["scope_id"] != task["project_id"] else None
+                str(task["project_id"]) if home["project_id"] != task["project_id"] else None
             ),
             "to_project_id": (
-                str(home["scope_id"]) if home["scope_id"] != task["project_id"] else None
+                str(home["project_id"]) if home["project_id"] != task["project_id"] else None
             ),
             **(history or {}),
         },

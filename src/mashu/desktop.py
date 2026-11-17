@@ -32,9 +32,9 @@ from mashu import (
     memory_changes,
     migrate,
     nominations,
+    projects,
     review_actions,
     routing,
-    scopes,
     settings,
     task_actions,
     tasks,
@@ -130,7 +130,7 @@ def _topic(args: Args) -> dict[str, Any] | None:
             "topic_id": None,
             "name": _text(described, "name"),
             "trigger": _text(described, "trigger"),
-            "scope_name": _optional(described, "scope"),
+            "project_name": _optional(described, "project"),
         }
     return None
 
@@ -169,9 +169,7 @@ def home(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 def choices(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     """The names and fixed choices the forms offer."""
     return {
-        "scopes": [row["name"] for row in scopes.list_scopes(cur)],
-        # A task is filed under a scope; the pages still ask for it by this name.
-        "projects": [row["name"] for row in scopes.list_scopes(cur)],
+        "projects": [row["name"] for row in projects.list_projects(cur)],
         "topics": [
             {"topic_id": row["topic_id"], "name": row["name"], "trigger": row["trigger"]}
             for row in topics.list_topics(cur)
@@ -198,8 +196,8 @@ def review_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 def review_admit(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     delivery = args.get("delivery")
-    if delivery not in ("always", "scope", "topic"):
-        raise MashuError("delivery must be always, scope, or topic")
+    if delivery not in ("always", "project", "topic"):
+        raise MashuError("delivery must be always, project, or topic")
     topic = _topic(args) if delivery == "topic" else None
     if delivery == "topic" and topic is None:
         raise MashuError("topic delivery needs topic_id or new_topic")
@@ -314,11 +312,11 @@ def memory_remember(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
         content=_text(args, "content"),
         why=_optional(args, "why"),
         delivery=_text(args, "delivery"),
-        scope_name=_optional(args, "scope"),
+        project_name=_optional(args, "project"),
         topic=_topic(args),
         acknowledged=_uuids(args, "acknowledged"),
         actor=ACTOR,
-        scope_names=_lines(args, "scopes"),
+        project_names=_lines(args, "projects"),
     )
 
 
@@ -357,10 +355,10 @@ def memory_delivery(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
         cur,
         _uuid(args, "memory_id"),
         delivery=_text(args, "delivery"),
-        scope_name=_optional(args, "scope"),
+        project_name=_optional(args, "project"),
         topic=_topic(args),
         actor=ACTOR,
-        scope_names=_lines(args, "scopes") if args.get("scopes") is not None else None,
+        project_names=_lines(args, "projects") if args.get("projects") is not None else None,
     )
 
 
@@ -381,7 +379,7 @@ def temporary_revise(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
         cur,
         _uuid(args, "context_id"),
         content=_text(args, "content"),
-        scope_name=_optional(args, "scope"),
+        project_name=_optional(args, "project"),
         actor=ACTOR,
     )
 
@@ -420,7 +418,7 @@ def work_tasks(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 
 def work_projects(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    return {"projects": scopes.list_scopes(cur)}
+    return {"projects": projects.list_projects(cur)}
 
 
 def task_create(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
@@ -494,13 +492,6 @@ def task_reopen(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     return tasks.reopen(cur, _uuid(args, "task_id"), actor=ACTOR)
 
 
-def project_save(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    """Create a scope with the folder its sessions open in; scope.save edits one."""
-    return scopes.create_scope(
-        cur, name=_text(args, "name"), path=_optional(args, "path"), actor=ACTOR
-    )
-
-
 # Settings and health
 
 
@@ -537,20 +528,23 @@ def bootstrap_preview(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     return application.bootstrap_preview(cur, cwd=_text(args, "cwd"), actor=ACTOR)
 
 
-def scope_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    return {"scopes": scopes.list_scopes(cur)}
+def project_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    return {"projects": projects.list_projects(cur)}
 
 
-def scope_remove(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    return scopes.remove_scope(cur, _uuid(args, "scope_id"), actor=ACTOR)
+def project_remove(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    return projects.remove_project(cur, _uuid(args, "project_id"), actor=ACTOR)
 
 
-def scope_save(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    scope_id = _uuid_or_none(args, "scope_id")
+def project_save(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    """Create a project, routing `path` to it when given, or rename the one `project_id` names."""
+    project_id = _uuid_or_none(args, "project_id")
     name, summary = _text(args, "name"), _optional(args, "summary")
-    if scope_id is None:
-        return scopes.create_scope(cur, name=name, summary=summary, actor=ACTOR)
-    return scopes.update_scope(cur, scope_id, name=name, summary=summary, actor=ACTOR)
+    if project_id is None:
+        return projects.create_project(
+            cur, name=name, summary=summary, path=_optional(args, "path"), actor=ACTOR
+        )
+    return projects.update_project(cur, project_id, name=name, summary=summary, actor=ACTOR)
 
 
 def topic_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
@@ -566,7 +560,7 @@ def topic_save(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
         _uuid_or_none(args, "topic_id"),
         name=_text(args, "name"),
         trigger=_text(args, "trigger"),
-        scope_name=_optional(args, "scope"),
+        project_name=_optional(args, "project"),
         action=_optional(args, "action"),
         source=_optional(args, "source"),
         actor=ACTOR,
@@ -582,16 +576,16 @@ def route_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 
 def route_save(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    """Add or edit a route; no scope means the directory is ignored on purpose."""
+    """Add or edit a route; no project means the directory is ignored on purpose."""
     route_id, path = _uuid_or_none(args, "route_id"), _text(args, "path")
-    scope_name = _optional(args, "scope")
+    project_name = _optional(args, "project")
     if route_id is not None:
         return application.update_route(
-            cur, route_id, path_prefix=path, scope_name=scope_name, actor=ACTOR
+            cur, route_id, path_prefix=path, project_name=project_name, actor=ACTOR
         )
-    if scope_name is None:
+    if project_name is None:
         return application.ignore_route(cur, path_prefix=path, actor=ACTOR)
-    return application.set_route(cur, path_prefix=path, scope_name=scope_name, actor=ACTOR)
+    return application.set_route(cur, path_prefix=path, project_name=project_name, actor=ACTOR)
 
 
 def route_remove(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
@@ -687,13 +681,12 @@ OPERATIONS: dict[str, Operation] = {
     "task.keep": task_keep,
     "task.renew": task_renew,
     "task.reopen": task_reopen,
-    "project.save": project_save,
     "settings.health": health,
     "settings.missed": missed,
     "settings.bootstrap": bootstrap_preview,
-    "scope.list": scope_list,
-    "scope.save": scope_save,
-    "scope.remove": scope_remove,
+    "project.list": project_list,
+    "project.save": project_save,
+    "project.remove": project_remove,
     "topic.list": topic_list,
     "topic.save": topic_save,
     "topic.remove": topic_remove,
@@ -726,7 +719,7 @@ READS = frozenset(
         "work.projects",
         "settings.health",
         "settings.missed",
-        "scope.list",
+        "project.list",
         "topic.list",
         "route.list",
         "limits.get",
