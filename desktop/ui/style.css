@@ -457,4 +457,5 @@ dialog .form-actions { justify-content: flex-end; }
 .table td.zero { color: var(--text-3); }
 body[data-busy] .detail-pane { opacity: 0.6; pointer-events: none; transition: opacity 0.2s 0.15s; }
 .folder-list { list-style: none; margin: 0; padding: 0; }
-.folder-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; }
+/* Rows spaced and ruled like a table's, since the other lists of a detail page are tables. */
+.folder-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 0; border-top: 1px solid var(--line); }

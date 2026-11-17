@@ -459,7 +459,7 @@ function projectDetail(row) {
     if (path) act(() => call("route.save", { path, project: row.name }), t("work.folder_added"));
   };
   const removeFolder = async (path) => {
-    const yes = await confirmDialog({ title: t("work.folder_remove_confirm"), lines: [tilde(path)], confirm: t("common.remove"), danger: true });
+    const yes = await confirmDialog({ title: t("work.folder_remove_confirm"), lines: [tilde(path), t("work.folder_remove_note")], confirm: t("common.remove"), danger: true });
     if (yes) act(() => call("route.remove", { path }), t("work.folder_removed"));
   };
   const remove = async () => {
