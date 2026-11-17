@@ -2089,6 +2089,7 @@ dependencies = [
 name = "mashu-desktop"
 version = "4.0.0"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
  "tauri",

@@ -5,6 +5,8 @@
 //! release tag, syncs its environment and schema, and only then replaces the app, so the
 //! window never runs against an older backend than itself.
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -20,6 +22,11 @@ use crate::{drop_process, Backend};
 pub(crate) struct Config {
     pub(crate) checkout: Option<PathBuf>,
 }
+
+const LOG_FILE: &str = "update.log";
+/// The line written just before the updater replaces the app. The next start looks for it and
+/// records the version that came up, since the Windows installer runs after the app has exited.
+const INSTALLING: &str = "installing the app";
 
 fn config_file(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
@@ -44,6 +51,56 @@ pub(crate) fn write_config(app: &AppHandle, config: &Config) -> Result<(), Strin
     }
     let text = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
     std::fs::write(path, text).map_err(|error| error.to_string())
+}
+
+fn log_file(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(config_file(app)?.with_file_name(LOG_FILE))
+}
+
+/// Appends one line to update.log. A failed write is passed over, since update_install has
+/// checked that the file can be written before it starts.
+fn log(app: &AppHandle, message: &str) {
+    let Ok(path) = log_file(app) else { return };
+    let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let _ = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| writeln!(file, "[{time}] {message}"));
+}
+
+/// Stops an update before it starts when update.log cannot be written, since the outcome of
+/// the Windows installer is kept nowhere else.
+fn open_log(app: &AppHandle) -> Result<(), String> {
+    let path = log_file(app)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map(drop)
+        .map_err(|error| format!("cannot write to {}: {error}", path.display()))
+}
+
+/// After an update that replaced the app, records the version this start came up with.
+pub(crate) fn log_started(app: &AppHandle) {
+    let Ok(text) = log_file(app)
+        .and_then(|path| std::fs::read_to_string(path).map_err(|error| error.to_string()))
+    else {
+        return;
+    };
+    let last = text.lines().rev().find(|line| !line.trim().is_empty());
+    let installing = last
+        .and_then(|line| line.split_once("] "))
+        .is_some_and(|(_, message)| message.starts_with(INSTALLING));
+    if installing {
+        log(
+            app,
+            &format!("started the app at {}", app.package_info().version),
+        );
+    }
 }
 
 /// The mashu executable inside a checkout's virtual environment.
@@ -317,6 +374,16 @@ pub async fn update_check(app: AppHandle) -> Result<Value, String> {
 
 fn step(app: &AppHandle, name: &str) {
     let _ = app.emit("update-step", name);
+    let message = match name {
+        "fetch" => "fetching the tags from origin",
+        "checkout" => "moving main to the tag",
+        "sync" => "running uv sync --extra mcp",
+        "migrate" => "running mashu admin migrate",
+        "app" => "looking for the release's app",
+        "done" => "done",
+        other => other,
+    };
+    log(app, message);
 }
 
 /// Stop the backend so the next request starts it from the checkout now configured.
@@ -379,29 +446,55 @@ fn update_checkout(app: &AppHandle, root: &Path, version: &str) -> Result<(), St
         format!("{error}\nOn Windows an agent that starts .venv\\Scripts\\mashu.exe holds it while it runs; close that agent's sessions and update again, and register its MCP server as .venv\\Scripts\\python.exe -m mashu serve so later updates need not close them.")
     })?;
     step(app, "migrate");
-    run(&venv_mashu(root), &["admin", "migrate"], root)?;
+    let migrated = run(&venv_mashu(root), &["admin", "migrate"], root)?;
+    for line in migrated.lines().filter(|line| !line.trim().is_empty()) {
+        log(app, line);
+    }
     Ok(())
 }
 
-/// Update the checkout, then the app, then restart into the new app.
+/// Update the checkout, then the app, then restart into the new app, keeping each step and
+/// any failure in update.log.
 ///
 /// Every step can run again, so after a failure the same update is simply started again.
 #[tauri::command]
 pub async fn update_install(app: AppHandle, version: String) -> Result<Value, String> {
-    let root = update_root(&app).ok_or("set where the Mashu checkout is first")?;
+    open_log(&app)?;
+    let result = install(&app, &version).await;
+    if let Err(error) = &result {
+        log(&app, &format!("error: {error}"));
+    }
+    result
+}
+
+async fn install(app: &AppHandle, version: &str) -> Result<Value, String> {
+    let root = update_root(app).ok_or("set where the Mashu checkout is first")?;
+    log(
+        app,
+        &format!(
+            "updating {} and the app {} to {version}",
+            root.display(),
+            app.package_info().version
+        ),
+    );
     let local = app.clone();
-    let target = version.clone();
+    let target = version.to_owned();
     tauri::async_runtime::spawn_blocking(move || update_checkout(&local, &root, &target))
         .await
         .map_err(|error| error.to_string())??;
     if cfg!(debug_assertions) {
-        step(&app, "done");
+        step(app, "done");
+        log(
+            app,
+            "a development build is not replaced; start it again with cargo run",
+        );
         return Ok(json!({"restart": false, "app": "dev_build"}));
     }
-    step(&app, "app");
+    step(app, "app");
     let updater = app.updater().map_err(|error| error.to_string())?;
     match updater.check().await.map_err(|error| error.to_string())? {
         Some(update) if update.version == version => {
+            log(app, &format!("{INSTALLING} {version} and restarting"));
             update
                 .download_and_install(|_, _| {}, || {})
                 .await
@@ -409,7 +502,11 @@ pub async fn update_install(app: AppHandle, version: String) -> Result<Value, St
             app.restart();
         }
         _ => {
-            step(&app, "done");
+            step(app, "done");
+            log(
+                app,
+                &format!("the release has no app for {version} yet; only the checkout was updated"),
+            );
             Ok(json!({"restart": false, "app": "not_published"}))
         }
     }
