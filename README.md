@@ -503,6 +503,8 @@ User が配信先の変更を指示した      → memory_redeliver
 
 checkout に commit していない変更があるとき、main 以外のブランチにいるとき、main にタグに無いコミットがあるときは、何も変えずに理由を示す。途中で失敗しても、もう一度「更新」を押せば続きから進む。手元でビルドしたアプリは checkout だけを更新するので、アプリは `cargo run` で起動し直す。Windows のアプリは backend を `.venv\Scripts\python.exe -m mashu` で起動する。MCP server を `mashu.exe` で登録した agent のセッションが開いていると `uv sync` が失敗するので、そのセッションを閉じてから更新するか、[MCP server を登録する](#mcp-server-を登録する)の手順で `python.exe` から登録し直す。
 
+アプリからの更新は、各段階、`mashu admin migrate` の出力、失敗の理由を `update.log` に追記する。場所は、Mac では `~/Library/Application Support/dev.mashu.desktop/update.log`、Windows では `%APPDATA%\dev.mashu.desktop\update.log` である。Windows のインストーラはアプリの終了後に動作し、その成否は画面に表示されないので、アプリを入れ替えた次の起動時に、起動したバージョンを記録する。`update.log` に書き込めないときは、更新を開始しない。スクリプトによる更新は、進捗を端末に表示し、`update.log` には記録しない。
+
 同じ更新はスクリプトでも実行できる。checkout で以下を実行すると、上記の 3 段階を同じ順に実行し、最後にアプリを再起動する。アプリは、Mac では `/Applications/Mashu.app` を置き換え、Windows ではインストーラで再インストールする。スクリプトは、ダウンロードした配布物を Release の `SHA256SUMS` と照合してから使用する。
 
 | 入れるもの | macOS | Windows |

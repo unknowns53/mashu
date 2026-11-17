@@ -324,6 +324,7 @@ fn main() {
             setup::setup_database
         ])
         .setup(move |app| {
+            update::log_started(app.handle());
             let open = MenuItem::with_id(app, "open", "Open Mashu", true, None::<&str>)?;
             let check = MenuItem::with_id(app, "check", "Check now", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;

@@ -15,6 +15,8 @@ tauri-plugin-notification = "2"
 tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Local time for update.log; the time crate cannot read the offset in a multithreaded process.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [features]
 # Always serve the pages in ui/ from inside the binary; there is no dev server.
