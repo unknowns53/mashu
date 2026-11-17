@@ -11,7 +11,7 @@ Mashu は、Claude Code や Codex など複数の AI agent が共有する外部
 - 出所と履歴  
 規則の改訂、誰がどの指示で承認したか、遵守しなかった記録を append-only で残し、後から書き換えさせない。
 - 作業状態の引き継ぎ  
-セッションをまたぐ作業の現在地、User がその作業について決めたこと、成果物の場所を Task として次のセッションに渡す。
+セッションをまたぐ作業の現在地、User がその作業について決定したこと、成果物の場所を Task として次のセッションに渡す。
 
 長い本文は持たない。ドメイン知識、要件定義、設計案などは、たとえば Obsidian の vault やリポジトリを原典とし、Mashu はその場所を指すのみとする。
 
@@ -428,7 +428,7 @@ User が配信先の変更を指示した      → memory_redeliver
 作業が終わったと判断した           → task_propose_close
 ~~~
 
-- `task_checkpoint` には、次のセッションが必要なものだけを渡す。User の裁定とその取り下げ、外部成果物の場所、goal と approach と blockers の変更、作業を止める前の状態が該当する。進捗、試したことの結果、測定、退けた案は commit とプロジェクトの文書に書く
+- `task_checkpoint` には、次のセッションが必要なものだけを渡す。User の裁定とその取り下げ、外部成果物の場所、goal と approach と blockers の変更、作業を止める前の状態が該当する。進捗、試行の結果、測定、採用しなかった案は commit とプロジェクトの文書に記載する
 - 同じセッションが同じ Task を書くのは、一定の間隔ごとに一回を目安とする。間隔の中の二回目も記録し、応答に `warning` を付ける。間隔は既定で 30 分で、TUI の Settings & health の Checkpoint interval で 0〜1440 分に設定でき、0 にすると警告しない
 - 作業が終わったと思ったら `task_propose_close` で提案する。status に書くと User が読んで close を打ち直すことになるが、提案なら一回のキー操作で受理される。終わったと見なすのは User がマージや受け入れをしたあとである。提案後に state を書くと提案が古くなるので、checkpoint を先に打ち、提案を最後にする
 - agent 自身が考えた Memory の変更は proposal に留める。Temporary Context の登録、Memory の直接の操作、review は原則として User だけが行う
