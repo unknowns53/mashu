@@ -8,8 +8,8 @@ Usage: tools/release.sh <version>
 
 Writes <version> to src/mashu/__init__.py, commits it to main and pushes. Once main's CI has
 passed, pushes the tag v<version> and waits for the tag's CI to publish the GitHub Release.
-A version of release numbers alone, such as 3.0.1, is a release; one ending in a, b or rc and
-a number, such as 3.1.0b1, is a prerelease.
+A version without a -, such as 3.0.1, is a release; one with -alpha.N, -beta.N or -rc.N, such
+as 3.1.0-beta.2, is a prerelease.
 USAGE
 }
 
@@ -21,9 +21,10 @@ fail() {
 [[ $# -eq 1 ]] || { usage; exit 1; }
 [[ "$1" != "-h" && "$1" != "--help" ]] || { usage; exit 0; }
 version="$1"
-# PEP 440 in its normalized spelling, so the package, the tag and the release all read the same.
-[[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$ ]] ||
-  fail "version $version is not of the form 3.0.1 or 3.1.0b1"
+# SemVer, as the app and the tag read it. The prerelease part is limited to the spellings PEP 440
+# also reads (3.1.0-beta.2 is 3.1.0b2 to Python), so the package builds from the same string.
+[[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$ ]] ||
+  fail "version $version is not of the form 3.0.1 or 3.1.0-beta.2"
 tag="v$version"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

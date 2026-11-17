@@ -125,7 +125,8 @@ jobs:
       - name: Draft the release
         id: draft
         run: |
-          if [[ "${TAG#v}" =~ [a-z] ]]; then
+          # SemVer marks a prerelease with a - after the release numbers.
+          if [[ "$TAG" == *-* ]]; then
             kind=(--prerelease)
           else
             kind=()
@@ -156,11 +157,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # The app reports the release's version; semver writes the PEP 440 prerelease 4.1.0b1 as 4.1.0-b1.
+      # The app reports the release's version, which the updater compares with latest.json.
       - name: Version the app from the tag
         shell: bash
         run: |
-          semver="$(sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)((a|b|rc)[0-9]+)$/\1-\2/' <<< "${TAG#v}")"
+          semver="${TAG#v}"
           node -e 'const fs = require("fs"); const path = "desktop/src-tauri/tauri.conf.json"; const conf = JSON.parse(fs.readFileSync(path, "utf8")); conf.version = process.argv.at(-1); fs.writeFileSync(path, JSON.stringify(conf, null, 2) + "\n");' "$semver"
 
       # The updater checks each download against the public key in tauri.conf.json.
@@ -186,12 +187,42 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.ref_name }}
     steps:
-      # PEP 440 marks a prerelease with a letter (a, b or rc) after the release numbers.
+      # tools/update.sh and update.ps1 check what they download against this list.
+      - name: List the checksums
+        run: |
+          dir="$(mktemp -d)"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$dir" \
+            --pattern 'Mashu_aarch64.app.tar.gz' --pattern 'Mashu_*_x64-setup.exe'
+          (cd "$dir" && sha256sum Mashu_aarch64.app.tar.gz Mashu_*_x64-setup.exe > SHA256SUMS)
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "$dir/SHA256SUMS"
+
+      # A prerelease never becomes Latest, so the app's updater, whose latest.json comes from the
+      # Latest release, and tools/update.sh without --pre pass it by.
       - name: Publish the release
         run: |
-          if [[ "${TAG#v}" =~ [a-z] ]]; then
+          if [[ "$TAG" == *-* ]]; then
             kind=(--prerelease --latest=false)
           else
             kind=(--latest)
           fi
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false "${kind[@]}"
+
+      # Once a release is out, --pre no longer chooses a prerelease of that version or older, so those
+      # are deleted with their tags: v4.2.0 deletes v4.2.0-beta.1 and v4.1.9-rc.1 and keeps
+      # v4.2.1-beta.1. A prerelease spelled the older way, such as 4.1.3b1, is compared without its
+      # letter and number, since sort -V puts 4.1.3b1 after 4.1.3.
+      - name: Delete released prereleases
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          released="${TAG#v}"
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,isPrerelease \
+            --jq '.[] | select(.isPrerelease and (.tagName | startswith("v"))) | .tagName' |
+            while read -r pre; do
+              base="${pre#v}"
+              base="${base%%-*}"
+              base="$(sed -E 's/(a|b|rc)[0-9]+$//' <<< "$base")"
+              if [[ "$(printf '%s\n%s\n' "$base" "$released" | sort -V | tail -n 1)" == "$released" ]]; then
+                echo "deleting the released prerelease $pre"
+                gh release delete "$pre" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+              fi
+            done
