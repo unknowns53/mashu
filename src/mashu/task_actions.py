@@ -129,12 +129,49 @@ def save_project(
     name: str,
     scope_name: str | None,
     actor: str,
+    named_scope: bool = False,
+    path: str | None = None,
 ) -> dict[str, Any]:
-    """Create a project, or rename and rehome one; no scope pushes its cards everywhere."""
-    scope_id = scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
-    if project_id is None:
-        return projects.create_project(cur, name=name, scope_id=scope_id, actor=actor)
-    return projects.update_project(cur, project_id, name=name, scope_id=scope_id, actor=actor)
+    """Create a project, or rename and rehome one; no scope pushes its cards everywhere.
+
+    On creation, `named_scope` files the project under the scope of its own name, opening it
+    when there is none, and `path` routes a folder to the project's scope, so one request links
+    a new repository. A scope and route without
+    a project is the state a person leaves behind most easily, and its sessions cannot file
+    a task.
+    """
+    if project_id is not None:
+        if named_scope or path:
+            raise MashuError("a scope or folder is linked only when a project is created")
+        scope_id = scopes.require_scope(cur, scope_name)["scope_id"] if scope_name else None
+        return projects.update_project(cur, project_id, name=name, scope_id=scope_id, actor=actor)
+
+    if named_scope:
+        scope = scopes.get_scope(cur, name.strip())
+        if scope is None or scope.get("archived_at"):
+            # An archived name is refused here with the reason, since names are not reused.
+            scope = scopes.create_scope(cur, name=name.strip(), actor=actor)
+    else:
+        scope = scopes.require_scope(cur, scope_name) if scope_name else None
+    scope_id = scope["scope_id"] if scope else None
+    created = projects.create_project(cur, name=name, scope_id=scope_id, actor=actor)
+    if path:
+        if scope is None:
+            raise MashuError("a folder is routed to a scope; choose one for the project")
+        prefix = routing.normalise(path)
+        cur.execute(
+            "SELECT s.name FROM route r LEFT JOIN scope s ON s.scope_id = r.scope_id "
+            "WHERE r.path_prefix = %s AND r.scope_id IS DISTINCT FROM %s",
+            (prefix, scope_id),
+        )
+        taken = cur.fetchone()
+        if taken is not None:
+            owner = f"scope '{taken['name']}'" if taken["name"] else "the ignored folders"
+            raise MashuError(f"{prefix} already belongs to {owner}; change it under Folders")
+        routing.add_route(cur, path_prefix=prefix, scope_id=scope_id, actor=actor)
+        created["path_prefix"] = prefix
+    created["scope_name"] = scope["name"] if scope else None
+    return created
 
 
 def resolve_task_project(cur: psycopg.Cursor, given: str | None, *, cwd: str | None) -> UUID:

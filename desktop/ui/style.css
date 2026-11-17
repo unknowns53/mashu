@@ -440,6 +440,9 @@ dialog .form-actions { justify-content: flex-end; }
 .preview-row { margin-top: 16px; }
 .preview-total { margin-top: 10px; }
 .preview-row input { flex: 1; }
+.folder-input { display: flex; gap: 8px; align-items: center; }
+.folder-input input { flex: 1; min-width: 0; }
+.row > .folder-input { flex: 1; }
 .interval-row { margin-top: 16px; }
 .limit-list { display: grid; gap: 14px; }
 .limit-row { display: grid; grid-template-columns: 1fr 170px 96px; gap: 14px; align-items: start; }

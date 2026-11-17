@@ -501,6 +501,8 @@ def project_save(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
         name=_text(args, "name"),
         scope_name=_optional(args, "scope"),
         actor=ACTOR,
+        named_scope=args.get("named_scope") is True,
+        path=_optional(args, "path"),
     )
 
 

@@ -187,7 +187,7 @@ function bootstrapSection() {
   return [
     h("h1", { class: "title", text: t("settings.bootstrap") }),
     h("p", { class: "sub", text: t("bootstrap.note") }),
-    h("form", { class: "row preview-row", on: { submit: run } }, input, h("button", { type: "submit", class: "btn primary", text: t("bootstrap.run") })),
+    h("form", { class: "row preview-row", on: { submit: run } }, folderInput(input), h("button", { type: "submit", class: "btn primary", text: t("bootstrap.run") })),
     result,
   ];
 }
@@ -301,7 +301,7 @@ async function routesSection() {
     editInSection({
       title: row ? tilde(row.path_prefix) : t("route.new"),
       fields: [
-        { name: "path", label: t("route.path"), value: row ? row.path_prefix : "" },
+        { name: "path", label: t("route.path"), kind: "folder", value: row ? row.path_prefix : "" },
         { name: "scope", label: t("route.area"), kind: "select", options: areaOptions(choices, t("route.ignored")), value: row ? row.scope_name || "" : "" },
       ],
       submit: row ? t("common.save") : t("common.add"),

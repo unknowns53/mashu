@@ -100,7 +100,7 @@ Task の所属単位。通常は repository または研究単位に対応する
 id / name / scope_id / created_at / archived_at
 ```
 
-Project と Scope は同じ概念ではない。Scope は delivery / routing の境界、Project は work state の所属である。一つの Project は一つの主要 Scope を持ち、多対多への一般化は必要が実測されるまでしない。Scope を持つ Project の active Task card はその Scope だけに配信する。Scope を持たない Project の card は全 Scope 共通であり、unrouted session にはこの共通分だけを配信する。Scope を持たない Project の card は全 Scope の予算をそれぞれ使うので、作成の既定にはしない。`mashu project create` は `--scope` を省くと cwd の route が指す Scope を使い、route の無いディレクトリでは拒否する。全 Scope 共通にするには `--scope -` を明示する。Current State 全文は Scope にかかわらず、Task IDを指定した `task_get` にだけ返す。
+Project と Scope は同じ概念ではない。Scope は delivery / routing の境界、Project は work state の所属である。一つの Project は一つの主要 Scope を持ち、多対多への一般化は必要が実測されるまでしない。Scope を持つ Project の active Task card はその Scope だけに配信する。Scope を持たない Project の card は全 Scope 共通であり、unrouted session にはこの共通分だけを配信する。Scope を持たない Project の card は全 Scope の予算をそれぞれ使うので、作成の既定にはしない。`mashu project create` は `--scope` を省くと cwd の route が指す Scope を使い、route の無いディレクトリでは拒否する。全 Scope 共通にするには `--scope -` を明示する。デスクトップアプリの作成フォームは、Project と同じ名前の Scope（無ければ作る）と、選んだフォルダからその Scope への route を、Project と同じ transaction で登録する。そのフォルダに別の Scope の route があれば上書きせずに拒否する。Current State 全文は Scope にかかわらず、Task IDを指定した `task_get` にだけ返す。
 
 ### 5.2 Task
 

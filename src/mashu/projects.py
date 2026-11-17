@@ -110,7 +110,8 @@ def require_project(cur: psycopg.Cursor, project: UUID | str) -> dict[str, Any]:
     listed = ", ".join(known) if known else "none yet"
     raise UnknownProjectError(
         f"no project '{project}' (open projects: {listed}); projects are the user's, so if "
-        "none fits, ask the user to run 'mashu project create'"
+        "none fits, ask the user to create one: in the desktop app under Work, Projects, New "
+        "project, which also links its folder, or with 'mashu project create'"
     )
 
 

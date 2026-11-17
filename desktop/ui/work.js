@@ -457,6 +457,9 @@ function projectDetail(row) {
   ];
 }
 
+/** The scope choice for the scope of the project's own name, opened when there is none; a stored name cannot hold a NUL. */
+const NAMED_SCOPE = "\u0000named";
+
 function projectForm(target, row) {
   target.replaceChildren();
   loadChoices()
@@ -464,16 +467,34 @@ function projectForm(target, row) {
       target.replaceChildren(
         form({
           title: row ? null : t("work.project_new"),
-          fields: [
-            { name: "name", label: t("work.project_name"), value: row ? row.name : "" },
-            {
-              name: "scope",
-              label: t("work.project_scope"),
-              kind: "select",
-              options: areaOptions(choices, t("work.project_scope_none")),
-              value: row ? row.scope_name || "" : "",
-            },
-          ],
+          // A new project links its repository in one go, the scope of its name and the folder
+          // routed to it, so its sessions can file tasks without a visit to Settings.
+          fields: row
+            ? [
+                { name: "name", label: t("work.project_name"), value: row.name },
+                { name: "scope", label: t("work.project_scope"), kind: "select", options: areaOptions(choices, t("work.project_scope_none")), value: row.scope_name || "" },
+              ]
+            : [
+                {
+                  name: "path",
+                  label: t("work.project_folder"),
+                  kind: "folder",
+                  value: "",
+                  hint: t("work.project_folder_hint"),
+                  onPick: (path, inputOf) => {
+                    const name = inputOf("name");
+                    if (name && !name.value.trim()) name.value = folderName(path);
+                  },
+                },
+                { name: "name", label: t("work.project_name"), value: "" },
+                {
+                  name: "scope",
+                  label: t("work.project_scope"),
+                  kind: "select",
+                  options: [[NAMED_SCOPE, t("work.project_scope_named")], ...areaOptions(choices, t("work.project_scope_none"))],
+                  value: NAMED_SCOPE,
+                },
+              ],
           submit: row ? t("common.save") : t("common.create"),
           onCancel: () => {
             work.creating = null;
@@ -482,7 +503,14 @@ function projectForm(target, row) {
           },
           onSubmit: (values) =>
             act(async () => {
-              await call("project.save", { project_id: row ? row.project_id : null, name: values.name, scope: values.scope || null });
+              const named = !row && values.scope === NAMED_SCOPE;
+              await call("project.save", {
+                project_id: row ? row.project_id : null,
+                name: values.name,
+                scope: named ? null : values.scope || null,
+                named_scope: named,
+                path: row ? null : values.path.trim() || null,
+              });
               work.creating = null;
               work.panel = null;
             }, row ? t("work.saved") : t("work.created")),
