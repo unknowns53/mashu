@@ -225,6 +225,7 @@ def create_topic(
     trigger: str,
     actor: str,
     project_id: UUID | None = None,
+    action: str | None = None,
     source: str | None = None,
     approval_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -233,18 +234,30 @@ def create_topic(
     An agent opens one only on a user's instruction, whose `approval_source` the event keeps.
     """
     name, trigger = _clean(name, trigger)
+    action = clean_action(action) if action is not None else None
     source = clean_source(source) if source is not None else None
     existing = get_topic(cur, name)
     if existing is not None:
         state = " (archived)" if existing["archived_at"] is not None else ""
         raise MashuError(f"topic '{name}' already exists{state}")
+    if action is not None:
+        cur.execute(
+            "SELECT name FROM topic WHERE action = %s AND archived_at IS NULL",
+            (action,),
+        )
+        holder = cur.fetchone()
+        if holder is not None:
+            raise MashuError(
+                f"topic '{holder['name']}' already applies before {action}; one action "
+                "leads to one topic, so clear that topic's action first"
+            )
     cur.execute(
         """
-        INSERT INTO topic (name, project_id, trigger, source, created_by)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO topic (name, project_id, trigger, action, source, created_by)
+        VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING *
         """,
-        (name, project_id, trigger, source, actor),
+        (name, project_id, trigger, action, source, actor),
     )
     row = cur.fetchone()
     detail = {
@@ -253,6 +266,8 @@ def create_topic(
         "trigger": trigger,
         "project_id": str(project_id) if project_id else None,
     }
+    if action is not None:
+        detail["action"] = action
     if source is not None:
         detail["source"] = source
     if approval_source is not None:

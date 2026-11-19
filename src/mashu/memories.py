@@ -476,27 +476,36 @@ def convert_to_temporary(
     *,
     days: float,
     actor: str,
+    project_id: UUID | None = None,
+    also_project_ids: Sequence[UUID] = (),
+    override_projects: bool = False,
 ) -> dict[str, Any]:
-    """Replace a pushed memory with an expiring condition in one transaction."""
+    """Replace an active memory with an expiring condition in one transaction.
+
+    Without `override_projects`, keeps an always or project memory's own projects and refuses a
+    topic memory (whose trigger cannot carry over). With `override_projects`, writes the condition
+    to the caller's chosen projects (or every session when `project_id` is None).
+    """
     from mashu import temporary
 
     current = _require_active(cur, memory_id)
-    if current["delivery"] == "topic":
-        raise MashuError(
-            "a topic memory cannot become temporary because its topic's trigger would be lost"
-        )
-    if other_projects(cur, memory_id):
-        raise MashuError(
-            "this memory reaches several projects and a temporary context has one; "
-            "deliver it to one project first"
-        )
-    project_id = current["project_id"] if current["delivery"] == "project" else None
+    if override_projects:
+        target_project = project_id
+        target_others: Sequence[UUID] = also_project_ids
+    else:
+        if current["delivery"] == "topic":
+            raise MashuError(
+                "a topic memory cannot become temporary because its topic's trigger would be lost"
+            )
+        target_project = current["project_id"] if current["delivery"] == "project" else None
+        target_others = other_projects(cur, memory_id) if current["delivery"] == "project" else ()
     context = temporary.put_temporary(
         cur,
         content=current["content"],
         actor=actor,
         days=days,
-        project_id=project_id,
+        project_id=target_project,
+        also_project_ids=target_others,
     )
     until = context["expires_at"].date().isoformat()
     retired = retire(
@@ -615,8 +624,17 @@ def restore(
     reason: str,
     actor: str,
     approval_source: dict[str, Any],
+    delivery: str | None = None,
+    project_id: UUID | None = None,
+    clear_project: bool = False,
+    topic_id: UUID | None = None,
+    also_project_ids: Sequence[UUID] | None = None,
 ) -> dict[str, Any]:
-    """Restore a retired body through normal text, capacity, and conflict checks."""
+    """Restore a retired body through normal text, capacity, and conflict checks.
+
+    When `delivery` is given, restores directly into that delivery, project set, or topic
+    instead of keeping the retired row's earlier placement.
+    """
     cur.execute("SELECT * FROM memory WHERE memory_id = %s FOR UPDATE", (memory_id,))
     current = cur.fetchone()
     if current is None or current["status"] != "retired":
@@ -653,14 +671,36 @@ def restore(
     ]
     if active:
         raise MashuError("a similar active Memory already exists; resolve that Memory first")
-    home = delivered_project(cur, current["delivery"], current["project_id"], current["topic_id"])
+
+    before_others = other_projects(cur, memory_id)
+    if delivery is not None:
+        if clear_project and project_id is not None:
+            raise MashuError("pass a project or clear it, not both")
+        target_delivery = delivery
+        target_topic = topic_id
+        raw_home = (
+            None if clear_project else (current["project_id"] if project_id is None else project_id)
+        )
+        check_delivery(target_delivery, raw_home, target_topic)
+        home = delivered_project(cur, target_delivery, raw_home, target_topic)
+        if also_project_ids is None:
+            kept = target_delivery == "project" and current["delivery"] == "project"
+            others = before_others if kept and home == current["project_id"] else []
+        else:
+            others = _check_other_projects(target_delivery, home, also_project_ids)
+    else:
+        target_delivery = current["delivery"]
+        target_topic = current["topic_id"]
+        home = delivered_project(cur, target_delivery, current["project_id"], target_topic)
+        others = before_others if target_delivery == "project" else []
+
     admission = capacity.check_admission(
         cur,
         content=current["content"],
-        delivery=current["delivery"],
+        delivery=target_delivery,
         project_id=home,
-        topic_id=current["topic_id"],
-        also_project_ids=other_projects(cur, memory_id) if current["delivery"] == "project" else (),
+        topic_id=target_topic,
+        also_project_ids=others,
     )
     if not admission["ok"]:
         raise RefusedError(admission["refusal"])
@@ -669,13 +709,16 @@ def restore(
         UPDATE memory
         SET status = 'active', retire_reason = NULL, retired_at = NULL, updated_at = now(),
             retirement_kind = NULL, superseded_by = NULL,
-            relocated_to_kind = NULL, relocated_to_id = NULL, project_id = %s
+            relocated_to_kind = NULL, relocated_to_id = NULL,
+            delivery = %s, project_id = %s, topic_id = %s
         WHERE memory_id = %s AND status = 'retired'
         RETURNING *
         """,
-        (home, memory_id),
+        (target_delivery, home, target_topic, memory_id),
     )
     row = cur.fetchone()
+    if before_others or others:
+        _write_other_projects(cur, memory_id, others, actor=actor)
     events.record(
         cur,
         "memory_restored",
@@ -683,6 +726,7 @@ def restore(
         memory_id=memory_id,
         detail={
             "reason": reason,
+            "delivery": target_delivery,
             "former_retirement_kind": current["retirement_kind"],
             "former_retire_reason": current["retire_reason"],
             "former_superseded_by": str(current["superseded_by"])

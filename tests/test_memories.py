@@ -568,10 +568,11 @@ def test_the_other_projects_of_a_rule_follow_it_until_it_moves(cur, project_id):
         also_project_ids=[other],
     )
 
-    with pytest.raises(MashuError, match="several projects"):
-        memories.convert_to_temporary(cur, old["memory_id"], days=3, actor="user")
+    converted = memories.convert_to_temporary(cur, old["memory_id"], days=3, actor="user")
+    assert converted["temporary"]["project_id"] == project_id
+    assert temporary.other_projects(cur, converted["temporary"]["context_id"]) == [other]
+    temporary.end(cur, converted["temporary"]["context_id"], actor="user")
 
-    retire(cur, old)
     memories.restore(
         cur,
         old["memory_id"],

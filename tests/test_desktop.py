@@ -422,3 +422,219 @@ def test_health_reads_without_writing(dsn):
     assert ask(dsn, "schema.status")["result"]["pending"] == []
     preview = ask(dsn, "settings.bootstrap", cwd="/nowhere/in/particular")
     assert preview["ok"] and preview["result"]["project"] is None
+
+
+def test_temporary_notes_support_multiple_projects_expiry_edits_and_flexible_conversions(dsn):
+    with db.transaction(dsn) as cur:
+        projects.create_project(cur, name="alpha", actor="user")
+        projects.create_project(cur, name="beta", actor="user")
+
+    added = ask(
+        dsn,
+        "temporary.add",
+        content="staging is paused for maintenance",
+        days=2,
+        projects=["alpha", "beta"],
+    )
+    assert added["ok"]
+    listed = ask(dsn, "memory.list", view="temporary")["result"]["rows"]
+    assert listed[0]["project_names"] == ["alpha", "beta"]
+
+    revised = ask(
+        dsn,
+        "temporary.revise",
+        context_id=listed[0]["context_id"],
+        content="staging is paused until next week",
+        projects=["beta"],
+        days=10,
+    )
+    assert revised["ok"]
+    listed = ask(dsn, "memory.list", view="temporary")["result"]["rows"]
+    assert listed[0]["project_names"] == ["beta"]
+
+    converted = ask(
+        dsn,
+        "temporary.to_memory",
+        context_id=listed[0]["context_id"],
+        delivery="topic",
+        new_topic={"name": "ops", "trigger": "Before touching staging"},
+        why="staging maintenance happens often",
+    )
+    assert converted["ok"]
+    mem_id = converted["result"]["memory"]["memory_id"]
+    detail = ask(dsn, "memory.get", memory_id=mem_id)["result"]
+    assert (detail["delivery"], detail["topic_name"]) == ("topic", "ops")
+    assert detail["basis"][0]["what"] == "staging maintenance happens often"
+
+    back = ask(dsn, "memory.to_temporary", memory_id=mem_id, days=4, projects=["alpha", "beta"])
+    assert back["ok"]
+    temp_rows = ask(dsn, "memory.list", view="temporary")["result"]["rows"]
+    assert temp_rows[0]["project_names"] == ["alpha", "beta"]
+
+
+def test_memory_edit_and_restore_can_change_delivery_and_inbox_supports_projects_and_edits(dsn):
+    with db.transaction(dsn) as cur:
+        projects.create_project(cur, name="alpha", actor="user")
+        projects.create_project(cur, name="beta", actor="user")
+
+    rule = ask(dsn, "memory.remember", content=RULE, delivery="always")["result"]
+    edited = ask(
+        dsn,
+        "memory.revise",
+        memory_id=rule["memory_id"],
+        content=f"{RULE} carefully",
+        delivery="project",
+        projects=["alpha", "beta"],
+    )
+    assert edited["ok"]
+    detail = ask(dsn, "memory.get", memory_id=rule["memory_id"])["result"]
+    assert (detail["delivery"], detail["project_names"]) == ("project", ["alpha", "beta"])
+
+    assert ask(dsn, "memory.retire", memory_id=rule["memory_id"], reason="old")["ok"]
+    restored = ask(
+        dsn,
+        "memory.restore",
+        memory_id=rule["memory_id"],
+        reason="needed again everywhere",
+        delivery="always",
+    )
+    assert restored["ok"]
+    detail = ask(dsn, "memory.get", memory_id=rule["memory_id"])["result"]
+    assert (detail["status"], detail["delivery"]) == ("active", "always")
+
+    cand1 = a_candidate(dsn, "check lockfiles before building")
+    admitted = ask(
+        dsn,
+        "review.admit",
+        nomination_id=cand1["nomination_id"],
+        expected_version=cand1["version"],
+        delivery="project",
+        projects=["alpha", "beta"],
+    )
+    assert admitted["ok"] and "admitted" in admitted["result"]
+    admitted_detail = ask(dsn, "memory.get", memory_id=admitted["result"]["admitted"]["memory_id"])[
+        "result"
+    ]
+    assert admitted_detail["project_names"] == ["alpha", "beta"]
+
+    cand2 = a_candidate(dsn, "temporary workaround for CI outage")
+    made_temp = ask(
+        dsn,
+        "review.to_temporary",
+        nomination_id=cand2["nomination_id"],
+        expected_version=cand2["version"],
+        days=3,
+        projects=["alpha"],
+    )
+    assert made_temp["ok"] and "temporary" in made_temp["result"]
+
+    with db.transaction(dsn) as cur:
+        change = propose_change(cur, rule, "retire", retire_reason="initial reason")
+    updated = ask(
+        dsn,
+        "change.edit",
+        change_id=change["change_id"],
+        version=change["version"],
+        target_revision_id=detail["current_revision_id"],
+        reason="refined reason",
+    )
+    assert updated["ok"] and updated["result"]["retire_reason"] == "refined reason"
+
+    with db.transaction(dsn) as cur:
+        redeliver = propose_change(
+            cur,
+            rule,
+            "redeliver",
+            successor_settings={
+                "delivery": "project",
+                "project_id": projects.require_project(cur, "alpha")["project_id"],
+            },
+        )
+    moved_change = ask(
+        dsn,
+        "change.edit",
+        change_id=redeliver["change_id"],
+        version=redeliver["version"],
+        target_revision_id=detail["current_revision_id"],
+        delivery="project",
+        project="beta",
+    )
+    assert moved_change["ok"]
+    pending_changes = ask(dsn, "change.list")["result"]["changes"]
+    found = next(row for row in pending_changes if row["change_id"] == str(redeliver["change_id"]))
+    assert found["successor_project_name"] == "beta"
+
+
+def test_tasks_rulings_artifacts_topics_and_pain_ledger_work_through_desktop(dsn):
+    with db.transaction(dsn) as cur:
+        new_project(cur)
+
+    created = ask(
+        dsn,
+        "task.create",
+        name="polish gui",
+        project="enrai",
+        goal="cover all actions",
+        approach="extend desktop ops",
+        status_text="starting",
+        next_actions=["add ruling panel"],
+    )
+    assert created["ok"]
+    task_id = created["result"]["task"]["task_id"]
+    updated_at = created["result"]["state"]["updated_at"]
+
+    ruled = ask(
+        dsn,
+        "task.ruling_add",
+        task_id=task_id,
+        expect_updated_at=updated_at,
+        ruling="Support multi-project temporary notes",
+    )
+    assert ruled["ok"]
+    ruling_id = ruled["result"]["rulings"][0]["ruling_id"]
+    updated_at = ruled["result"]["state"]["updated_at"]
+
+    art = ask(
+        dsn,
+        "task.artifact_add",
+        task_id=task_id,
+        expect_updated_at=updated_at,
+        kind="file",
+        locator="desktop/ui/memories.js",
+        label="memories page",
+    )
+    assert art["ok"]
+    updated_at = art["result"]["state"]["updated_at"]
+
+    withdrawn = ask(
+        dsn,
+        "task.ruling_withdraw",
+        task_id=task_id,
+        expect_updated_at=updated_at,
+        ruling_id=ruling_id,
+        user_instruction="no longer applies",
+    )
+    assert withdrawn["ok"]
+
+    topic = ask(
+        dsn,
+        "topic.save",
+        name="guarding",
+        trigger="Before calling external tools",
+        action="delegate",
+        source="docs/memory.md",
+    )
+    assert topic["ok"]
+    listed_topic = ask(dsn, "topic.list")["result"]["topics"][0]
+    assert (listed_topic["action"], listed_topic["source"]) == ("delegate", "docs/memory.md")
+
+    pain = ask(
+        dsn,
+        "pain.report",
+        what="forgot to run migrations",
+        prevention="check pending migrations before testing",
+        project="enrai",
+    )
+    assert pain["ok"] and pain["result"]["nomination"] is not None
+    entries = ask(dsn, "ledger.list", project="enrai")["result"]["entries"]
+    assert any(row["what"] == "forgot to run migrations" for row in entries)

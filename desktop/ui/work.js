@@ -240,18 +240,10 @@ function taskDetail(row) {
         { showEmpty: true }
       )
     ),
-    rulingsSection(row.rulings || [], row.withdrawn_rulings || []),
+    rulingsSection(row),
     decisionsSection(row.decisions || []),
     attemptsSection(row.attempts || []),
-    section(
-      t("work.artifacts"),
-      (row.artifacts || []).length,
-      entries(row.artifacts, (item) => [
-        `${item.kind || "other"} · ${day(item.created_at)}`,
-        tilde(item.locator),
-        [null, item.label && tilde(item.label)],
-      ])
-    ),
+    artifactsSection(row),
     (row.checkpoints || []).length
       ? section(
           t("work.checkpoints"),
@@ -263,11 +255,109 @@ function taskDetail(row) {
   return nodes;
 }
 
-function rulingsSection(rulings, withdrawn) {
-  return section(
+function addRulingPanel(row) {
+  const panel = h("div", { class: "inline-panel" });
+  loadChoices()
+    .then((choices) => {
+      panel.append(
+        form({
+          fields: [
+            { name: "ruling", label: t("work.ruling_text"), kind: "area", rows: 2, max: choices.ruling_chars || 200 },
+            { name: "user_instruction", label: t("work.ruling_quote"), kind: "area", rows: 2, max: choices.ruling_words_chars || 240, hint: t("work.ruling_quote_hint") },
+          ],
+          submit: t("common.add"),
+          onCancel: () => workTogglePanel("add_ruling"),
+          onSubmit: (values) =>
+            act(async () => {
+              await call("task.ruling_add", {
+                task_id: row.task.task_id,
+                expect_updated_at: row.state.updated_at,
+                ruling: values.ruling,
+                user_instruction: values.user_instruction,
+              });
+              work.panel = null;
+            }, t("work.ruling_added")),
+        })
+      );
+    })
+    .catch(fail);
+  return panel;
+}
+
+function addArtifactPanel(row) {
+  const panel = h("div", { class: "inline-panel" });
+  loadChoices()
+    .then((choices) => {
+      const kinds = (choices.artifact_kinds || ["file", "document", "url", "other"]).map((kind) => [kind, kind]);
+      panel.append(
+        form({
+          fields: [
+            { name: "kind", label: t("work.artifact_kind"), kind: "select", options: kinds, value: "file" },
+            { name: "locator", label: t("work.artifact_locator"), max: 500 },
+            { name: "label", label: t("work.artifact_label"), max: 300 },
+          ],
+          submit: t("common.add"),
+          onCancel: () => workTogglePanel("add_artifact"),
+          onSubmit: (values) =>
+            act(async () => {
+              await call("task.artifact_add", {
+                task_id: row.task.task_id,
+                expect_updated_at: row.state.updated_at,
+                kind: values.kind,
+                locator: values.locator,
+                label: values.label,
+              });
+              work.panel = null;
+            }, t("work.artifact_added")),
+        })
+      );
+    })
+    .catch(fail);
+  return panel;
+}
+
+function rulingsSection(row) {
+  const rulings = row.rulings || [];
+  const withdrawn = row.withdrawn_rulings || [];
+  const open = row.task.status !== "closed";
+  const addBtn = open ? button(t("work.ruling_add"), () => workTogglePanel("add_ruling"), { kind: "quiet small" }) : null;
+  const withdrawKey = (id) => `withdraw:${id}`;
+  const activeWithdrawal = rulings.find((item) => work.panel === withdrawKey(item.ruling_id));
+  return sectionWithAction(
     t("work.rulings"),
     rulings.length,
-    entries(rulings, (item) => [day(item.on), item.ruling, [t("work.user_said"), item.user_said]]),
+    addBtn,
+    work.panel === "add_ruling" ? addRulingPanel(row) : null,
+    entries(rulings, (item) => [
+      open
+        ? h(
+            "div",
+            { class: "entry-head" },
+            h("span", { class: "when", text: day(item.on) }),
+            button(t("work.ruling_withdraw"), () => workTogglePanel(withdrawKey(item.ruling_id)), { kind: "quiet small danger" })
+          )
+        : day(item.on),
+      item.ruling,
+      [t("work.user_said"), item.user_said],
+    ]),
+    activeWithdrawal
+      ? reasonPanel({
+          label: t("work.ruling_withdraw_reason"),
+          confirm: t("work.ruling_withdraw"),
+          danger: true,
+          onCancel: () => workTogglePanel(withdrawKey(activeWithdrawal.ruling_id)),
+          onConfirm: (reason) =>
+            act(async () => {
+              await call("task.ruling_withdraw", {
+                task_id: row.task.task_id,
+                expect_updated_at: row.state.updated_at,
+                ruling_id: activeWithdrawal.ruling_id,
+                user_instruction: reason,
+              });
+              work.panel = null;
+            }, t("work.ruling_withdrawn")),
+        })
+      : null,
     withdrawn.length
       ? h(
           "details",
@@ -285,6 +375,23 @@ function rulingsSection(rulings, withdrawn) {
           )
         )
       : null
+  );
+}
+
+function artifactsSection(row) {
+  const artifacts = row.artifacts || [];
+  const open = row.task.status !== "closed";
+  const addBtn = open ? button(t("work.artifact_add"), () => workTogglePanel("add_artifact"), { kind: "quiet small" }) : null;
+  return sectionWithAction(
+    t("work.artifacts"),
+    artifacts.length,
+    addBtn,
+    work.panel === "add_artifact" ? addArtifactPanel(row) : null,
+    entries(artifacts, (item) => [
+      `${item.kind || "other"} · ${day(item.created_at)}`,
+      tilde(item.locator),
+      [null, item.label && tilde(item.label)],
+    ])
   );
 }
 
@@ -414,9 +521,14 @@ function newTaskForm(target) {
         form({
           title: t("work.task_new"),
           fields: [
-            { name: "name", label: t("work.name") },
+            { name: "name", label: t("work.name"), big: true },
             { name: "project", label: t("work.project"), kind: "select", options: choices.projects.map((name) => [name, name]) },
-            { name: "goal", label: t("work.goal"), max: 80 },
+            { name: "goal", label: t("work.goal"), kind: "area", rows: 1, max: 80 },
+            { name: "approach", label: t("work.approach"), kind: "area", rows: 3, max: 500 },
+            { name: "status_text", label: t("work.status"), kind: "area", rows: 2, max: 120 },
+            { name: "open_questions", label: t("work.open_questions"), kind: "lines", value: [], maxItems: 5, hint: t("work.one_per_line") },
+            { name: "blockers", label: t("work.blockers"), kind: "lines", value: [], maxItems: 5, hint: t("work.one_per_line") },
+            { name: "next_actions", label: t("work.next_actions"), kind: "lines", value: [], maxItems: 5, hint: t("work.one_per_line") },
           ],
           submit: t("common.create"),
           onCancel: () => {
@@ -452,7 +564,41 @@ function projectTasks(row) {
   return t("work.project_tasks", { a: row.n_tasks_active, d: row.n_tasks_dormant, c: row.n_tasks_closed });
 }
 
-/** A project with the folders its sessions open in, which are added and removed here. */
+function editFolderPanel(row, path) {
+  const panel = h("div", { class: "inline-panel" });
+  Promise.all([call("route.list"), loadChoices()])
+    .then(([{ routes }, choices]) => {
+      const route = routes.find((item) => item.path_prefix === path);
+      panel.append(
+        form({
+          fields: [
+            { name: "path", label: t("route.path"), kind: "folder", value: path },
+            {
+              name: "project",
+              label: t("work.folder_project"),
+              kind: "select",
+              options: [["", t("work.folder_ignored")], ...choices.projects.map((name) => [name, name])],
+              value: row.name,
+            },
+          ],
+          onCancel: () => workTogglePanel(`folder:${path}`),
+          onSubmit: (values) =>
+            act(async () => {
+              await call("route.save", {
+                route_id: route ? route.route_id : null,
+                path: values.path,
+                project: values.project || null,
+              });
+              work.panel = null;
+            }, t("route.saved")),
+        })
+      );
+    })
+    .catch(fail);
+  return panel;
+}
+
+/** A project with the folders its sessions open in, which are added, edited, and removed here. */
 function projectDetail(row) {
   const addFolder = async () => {
     const path = await pickFolder();
@@ -471,6 +617,7 @@ function projectDetail(row) {
       return removed.removed === "archived" ? t("project.archived") : "";
     }, t("project.removed"));
   };
+  const editingFolder = row.folders.find((path) => work.panel === `folder:${path}`);
   return [
     meta(idTag(row.project_id), t("work.project_created", { when: day(row.created_at) })),
     h("h1", { class: "title", text: row.name }),
@@ -484,10 +631,21 @@ function projectDetail(row) {
             "ul",
             { class: "folder-list" },
             row.folders.map((path) =>
-              h("li", null, h("span", { class: "mono", text: tilde(path) }), button(t("common.remove"), () => removeFolder(path), { kind: "quiet small danger" }))
+              h(
+                "li",
+                null,
+                h("span", { class: "mono", text: tilde(path) }),
+                h(
+                  "span",
+                  { class: "folder-ops" },
+                  button(t("common.edit"), () => workTogglePanel(`folder:${path}`), { kind: "quiet small" }),
+                  button(t("common.remove"), () => removeFolder(path), { kind: "quiet small danger" })
+                )
+              )
             )
           )
         : h("p", { class: "sub", text: t("work.project_no_folder_note") }),
+      editingFolder ? editFolderPanel(row, editingFolder) : null,
       h("div", { class: "actions" }, button(t("work.folder_add"), addFolder))
     ),
     h(
@@ -523,6 +681,7 @@ function projectForm(target, row) {
               },
             },
             { name: "name", label: t("work.project_name"), value: "" },
+            { name: "summary", label: t("project.summary"), kind: "area", rows: 2, value: "" },
           ],
       submit: row ? t("common.save") : t("common.create"),
       onCancel: () => {
@@ -534,7 +693,7 @@ function projectForm(target, row) {
         act(async () => {
           const saved = row
             ? await call("project.save", { project_id: row.project_id, name: values.name, summary: values.summary })
-            : await call("project.save", { name: values.name, path: values.path.trim() || null });
+            : await call("project.save", { name: values.name, summary: values.summary, path: values.path.trim() || null });
           work.creating = null;
           work.panel = null;
           if (saved.unchecked) return t("project.unchecked");
