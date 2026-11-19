@@ -701,9 +701,12 @@ def _detail(cur: psycopg.Cursor, row: dict[str, Any]) -> dict[str, Any]:
     row["conflicts"] = nominations.conflict_rows(cur, row["conflict_ids"])
     row["destination"] = None
     if row["relocated_to_id"]:
+        from mashu import temporary
+
         cur.execute(
-            "SELECT t.content, t.expires_at, s.name AS project_name "
-            "FROM temporary_context t LEFT JOIN project s ON s.project_id = t.project_id "
+            "SELECT t.content, t.expires_at, "
+            + temporary.project_names_sql(cur)
+            + " FROM temporary_context t LEFT JOIN project s ON s.project_id = t.project_id "
             "WHERE t.context_id = %s",
             (row["relocated_to_id"],),
         )

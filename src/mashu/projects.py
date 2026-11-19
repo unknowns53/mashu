@@ -192,13 +192,22 @@ def remove_project(cur: psycopg.Cursor, project_id: UUID, *, actor: str) -> dict
 
     A project still in use is refused with what holds it, so nothing is left delivered nowhere.
     """
+    from mashu import temporary
+
     capacity.lock(cur)
     cur.execute("SELECT * FROM project WHERE project_id = %s FOR UPDATE", (project_id,))
     row = cur.fetchone()
     if row is None or row.get("archived_at"):
         raise MashuError(f"no project {project_id}")
+    has_temp_projects = temporary.has_other_projects(cur)
     held = []
     for label, sql in _HOLDS:
+        if label == "temporary contexts" and has_temp_projects:
+            sql = (
+                "SELECT count(*) FROM temporary_context WHERE expires_at > now() AND ("
+                "project_id = %(id)s OR context_id IN ("
+                "SELECT context_id FROM temporary_context_project WHERE project_id = %(id)s))"
+            )
         cur.execute(sql, {"id": project_id})
         n = cur.fetchone()["count"]
         if n:
@@ -208,8 +217,9 @@ def remove_project(cur: psycopg.Cursor, project_id: UUID, *, actor: str) -> dict
             f"project '{row['name']}' still has {', '.join(held)}; "
             "move, retire, or remove them first"
         )
+    named_tables = (*_NAMED_BY, "temporary_context_project") if has_temp_projects else _NAMED_BY
     named = " OR ".join(
-        f"EXISTS (SELECT 1 FROM {table} WHERE project_id = %(id)s)" for table in _NAMED_BY
+        f"EXISTS (SELECT 1 FROM {table} WHERE project_id = %(id)s)" for table in named_tables
     )
     cur.execute(
         "SELECT EXISTS (SELECT 1 FROM memory_change WHERE successor_project_id = %(id)s) OR "

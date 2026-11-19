@@ -71,7 +71,9 @@ def memory_view(cur: psycopg.Cursor, view: str) -> list[dict[str, Any]]:
     if view == "temporary":
         cur.execute(
             """
-            SELECT t.*, s.name AS project_name
+            SELECT t.*, """
+            + temporary.project_names_sql(cur)
+            + """
             FROM temporary_context t LEFT JOIN project s ON s.project_id = t.project_id
             WHERE t.expires_at > now()
             ORDER BY t.expires_at, t.context_id
@@ -393,12 +395,18 @@ def save_topic(
 ) -> dict[str, Any]:
     """Create a topic, or set every field of one; no project means every session.
 
-    Editing sets action and source too, so None removes them. A new topic takes neither.
+    Passing `action` or `source` sets them on create or edit; None clears them on edit.
     """
     project_id = projects.require_project(cur, project_name)["project_id"] if project_name else None
     if topic_id is None:
         return topics.create_topic(
-            cur, name=name, trigger=trigger, project_id=project_id, actor=actor
+            cur,
+            name=name,
+            trigger=trigger,
+            project_id=project_id,
+            action=action,
+            source=source,
+            actor=actor,
         )
     return topics.update_topic(
         cur,

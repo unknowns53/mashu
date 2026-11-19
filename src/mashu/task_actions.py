@@ -106,6 +106,11 @@ def create_task(
     cwd: str | None,
     actor: str,
     force: bool = False,
+    approach: str | None = None,
+    status_text: str | None = None,
+    open_questions: list[str] | None = None,
+    blockers: list[str] | None = None,
+    next_actions: list[str] | None = None,
 ) -> dict[str, Any]:
     """Open a task under the named project, or the only one available from cwd.
 
@@ -114,7 +119,17 @@ def create_task(
     """
     project_id = resolve_task_project(cur, project, cwd=cwd)
     return tasks.task_create(
-        cur, project=project_id, name=name, goal=goal or None, actor=actor, force=force
+        cur,
+        project=project_id,
+        name=name,
+        goal=goal or None,
+        approach=approach or None,
+        status_text=status_text or None,
+        open_questions=open_questions,
+        blockers=blockers,
+        next_actions=next_actions,
+        actor=actor,
+        force=force,
     )
 
 

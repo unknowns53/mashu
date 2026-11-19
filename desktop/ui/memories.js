@@ -5,9 +5,10 @@ const mem = {
   view: "active",
   rows: [],
   query: "",
+  filters: { delivery: "", project: "", topic: "" },
   selected: null,
   detail: null,
-  panel: null, // "edit", "delivery", "temporary", "retire"
+  panel: null, // "edit", "delivery", "temporary", "retire", "restore", "reason", "to_memory"
   creating: null, // "memory" or "temporary" while the new form is shown
   contentLimit: null, // the Settings screen's limit on one memory body
 };
@@ -21,6 +22,7 @@ const memSeg = segmented(
   mem.view,
   (view) => {
     mem.view = view;
+    mem.filters = { delivery: "", project: "", topic: "" };
     mem.selected = null;
     mem.panel = null;
     mem.creating = null;
@@ -36,6 +38,75 @@ memNew.append(icon("plus"));
 const memSort = sortControl("memories", () => {
   renderMemoryList();
 });
+
+const memFilterDelivery = h("select", { "aria-label": t("filter.delivery") });
+const memFilterProject = h("select", { "aria-label": t("filter.project") });
+const memFilterTopic = h("select", { "aria-label": t("filter.topic") });
+const memFilterRow = h("div", { class: "filter-row" }, memFilterDelivery, memFilterProject, memFilterTopic);
+
+function onMemoryFilterChange() {
+  mem.filters.delivery = memFilterDelivery.value;
+  mem.filters.project = memFilterProject.value;
+  mem.filters.topic = memFilterTopic.value;
+  mem.selected = keepSelection(shownMemories().map(memoryId), mem.selected);
+  loadMemoryDetail().catch(fail);
+}
+memFilterDelivery.addEventListener("change", onMemoryFilterChange);
+memFilterProject.addEventListener("change", onMemoryFilterChange);
+memFilterTopic.addEventListener("change", onMemoryFilterChange);
+
+function syncMemoryFilters() {
+  const fillSelect = (select, options, current) => {
+    select.replaceChildren(...options.map(([value, label]) => h("option", { value, text: label })));
+    select.value = options.some(([value]) => value === current) ? current : "";
+    return select.value;
+  };
+  if (mem.view === "temporary") {
+    memFilterDelivery.hidden = true;
+    memFilterTopic.hidden = true;
+    mem.filters.delivery = "";
+    mem.filters.topic = "";
+    const projectNames = [...new Set(mem.rows.flatMap((row) => row.project_names || []))].sort();
+    memFilterProject.hidden = !projectNames.length;
+    mem.filters.project = fillSelect(
+      memFilterProject,
+      [
+        ["", `${t("filter.project")}: ${t("common.all")}`],
+        ["__all", t("common.every_area")],
+        ...projectNames.map((name) => [name, name]),
+      ],
+      mem.filters.project
+    );
+    memFilterRow.hidden = memFilterProject.hidden;
+    return;
+  }
+  const projectNames = [...new Set(mem.rows.flatMap((row) => row.project_names || []))].sort();
+  const topicNames = [...new Set([...mem.rows.map((row) => row.topic_name).filter(Boolean), mem.filters.topic].filter(Boolean))].sort();
+  memFilterDelivery.hidden = false;
+  mem.filters.delivery = fillSelect(
+    memFilterDelivery,
+    [
+      ["", `${t("filter.delivery")}: ${t("common.all")}`],
+      ["always", t("delivery.always")],
+      ["project", t("delivery.project")],
+      ["topic", t("delivery.topic")],
+    ],
+    mem.filters.delivery
+  );
+  memFilterProject.hidden = !projectNames.length;
+  mem.filters.project = fillSelect(
+    memFilterProject,
+    [["", `${t("filter.project")}: ${t("common.all")}`], ...projectNames.map((name) => [name, name])],
+    mem.filters.project
+  );
+  memFilterTopic.hidden = !topicNames.length;
+  mem.filters.topic = fillSelect(
+    memFilterTopic,
+    [["", `${t("filter.topic")}: ${t("common.all")}`], ...topicNames.map((name) => [name, name])],
+    mem.filters.topic
+  );
+  memFilterRow.hidden = false;
+}
 
 /** The keys each view sorts by: dates it has, and the kind that groups its rows. */
 function memorySortKeys() {
@@ -72,6 +143,7 @@ const memList = listPane(
     }),
     memNew
   ),
+  memFilterRow,
   memSort
 );
 const memDetail = detailPane();
@@ -87,21 +159,62 @@ function memoryRow() {
 
 function shownMemories() {
   memSort.setKeys(memorySortKeys());
-  const found = mem.rows.filter((row) =>
-    matches(mem.query, memoryId(row), row.content, row.project_name, row.delivery, row.topic_name, row.retire_reason)
-  );
-  const key = [mem.view, memSort.state.key, memSort.state.dir, mem.query].join("\n");
+  syncMemoryFilters();
+  const { delivery, project, topic } = mem.filters;
+  const found = mem.rows.filter((row) => {
+    if (mem.view === "temporary") {
+      if (project === "__all" && (row.project_names || []).length) return false;
+      if (project && project !== "__all" && !(row.project_names || []).includes(project)) return false;
+    } else {
+      if (delivery && row.delivery !== delivery) return false;
+      if (project && !(row.project_names || []).includes(project)) return false;
+      if (topic && row.topic_name !== topic) return false;
+    }
+    return matches(mem.query, memoryId(row), row.content, row.project_name, row.delivery, row.topic_name, row.retire_reason);
+  });
+  const key = [mem.view, memSort.state.key, memSort.state.dir, mem.query, delivery, project, topic].join("\n");
   return memOrder.place(sortRows(found, memSort.state, memorySortValue), memoryId, key);
 }
 
-/** Open a rule from elsewhere, such as a mistake listed in Settings. */
+/** Open a rule from elsewhere, such as a mistake listed in Settings or a change proposal. */
 async function openMemory(memoryId, status) {
-  const view = status === "retired" ? "retired" : "active";
+  let view = status === "retired" ? "retired" : "active";
+  if (!status) {
+    const got = await call("memory.get", { memory_id: memoryId }).catch(() => null);
+    if (got && got.status === "retired") view = "retired";
+  }
   mem.view = view;
   memSeg.select(view);
   mem.query = "";
+  mem.filters = { delivery: "", project: "", topic: "" };
   memList.pane.querySelector("[data-search]").value = "";
   mem.selected = memoryId;
+  mem.panel = null;
+  mem.creating = null;
+  await show("memories");
+}
+
+/** Open a temporary note from elsewhere, such as a relocated retirement record. */
+async function openTemporary(contextId) {
+  mem.view = "temporary";
+  memSeg.select("temporary");
+  mem.query = "";
+  mem.filters = { delivery: "", project: "", topic: "" };
+  memList.pane.querySelector("[data-search]").value = "";
+  mem.selected = contextId;
+  mem.panel = null;
+  mem.creating = null;
+  await show("memories");
+}
+
+/** Open active memories filtered to one topic, such as from Settings › Topics. */
+async function openTopicMemories(topicName) {
+  mem.view = "active";
+  memSeg.select("active");
+  mem.query = "";
+  mem.filters = { delivery: "topic", project: "", topic: topicName };
+  memList.pane.querySelector("[data-search]").value = "";
+  mem.selected = null;
   mem.panel = null;
   mem.creating = null;
   await show("memories");
@@ -127,11 +240,13 @@ async function nameRetirement(detail) {
   if (detail.superseded_by) {
     const successor = await call("memory.get", { memory_id: detail.superseded_by }).catch(() => null);
     detail.successor_content = reference(detail.superseded_by, successor ? successor.content : "", 400);
+    detail.successor_status = successor ? successor.status : null;
   }
   if (detail.relocated_to_id) {
     const { rows } = await call("memory.list", { view: "temporary" });
     const note = rows.find((item) => item.context_id === detail.relocated_to_id);
     detail.destination_content = reference(detail.relocated_to_id, note ? note.content : t("temporary.title"), 400);
+    detail.destination_standing = !!note;
   }
 }
 
@@ -160,7 +275,7 @@ function renderMemoryList() {
           primary: row.content,
           secondary:
             mem.view === "temporary"
-              ? [row.project_name || t("common.every_area"), t("temporary.until", { when: day(row.expires_at) })]
+              ? [temporaryDeliveryText(row), t("temporary.until", { when: day(row.expires_at) })]
               : mem.view === "retired"
                 ? [named("retire.kind", row.retirement_kind || "legacy"), day(row.retired_at)]
                 : [deliveryShort(row), row.delivery !== "project" ? row.project_name : null, sortedDay(row)],
@@ -192,25 +307,63 @@ function renderMemoryDetail() {
 
 // ---------------------------------------------------------------- one rule
 
+function memoryEditForm(detail) {
+  const box = h("div");
+  loadChoices()
+    .then((choices) => {
+      const isTopic = (values) => values.delivery === "topic";
+      const isProject = (values) => values.delivery === "project";
+      const reached = detail.project_names || [];
+      box.replaceChildren(
+        form({
+          fields: [
+            { name: "content", label: t("memory.rule"), kind: "area", rows: 3, value: detail.content, max: mem.contentLimit, big: true },
+            { name: "delivery", label: t("delivery.title"), kind: "radio", options: deliveryOptions(), value: detail.delivery },
+            { name: "projects", label: t("delivery.areas"), kind: "checks", options: projectChecks(choices), value: reached, show: isProject },
+            ...topicFields(choices, detail.topic_id, isTopic),
+          ],
+          onCancel: () => memTogglePanel("edit"),
+          onSubmit: (values) =>
+            acknowledging(
+              (acknowledged) =>
+                call("memory.revise", {
+                  memory_id: detail.memory_id,
+                  content: values.content,
+                  delivery: values.delivery,
+                  ...(isProject(values) ? { projects: values.projects } : {}),
+                  ...topicArgs(isTopic(values) ? values : {}),
+                  acknowledged,
+                }).then((result) => {
+                  mem.panel = null;
+                  return result;
+                }),
+              t("memory.revised")
+            ),
+        })
+      );
+    })
+    .catch(fail);
+  return box;
+}
+
+function retirementHistoryEntries(history) {
+  return entries(history, (item) => {
+    const d = item.detail || {};
+    const label = named("memory.history", item.event_type) || item.event_type;
+    const body = d.reason || (d.retirement_kind ? named("retire.kind", d.retirement_kind) : label);
+    return [
+      `${day(item.created_at)} · ${who(item.actor)} · ${label}`,
+      body,
+      [t("retire.kind"), d.retirement_kind ? named("retire.kind", d.retirement_kind) : null],
+    ];
+  });
+}
+
 function memoryDetail(detail) {
   const retired = detail.status === "retired";
   const nodes = [meta(idTag(detail.memory_id), deliveryText(detail), t("memory.created", { when: day(detail.created_at), who: who(detail.created_by) }))];
   if (mem.panel === "edit") {
-    nodes.push(
-      form({
-        fields: [{ name: "content", label: t("memory.rule"), kind: "area", rows: 3, value: detail.content, max: mem.contentLimit, big: true }],
-        onCancel: () => memTogglePanel("edit"),
-        onSubmit: (values) =>
-          acknowledging(
-            (acknowledged) =>
-              call("memory.revise", { memory_id: detail.memory_id, content: values.content, acknowledged }).then((result) => {
-                mem.panel = null;
-                return result;
-              }),
-            t("memory.revised")
-          ),
-      })
-    );
+    nodes.push(memoryEditForm(detail));
   } else {
     nodes.push(h("p", { class: "rule-text", text: detail.content }));
     if (detail.delivery === "topic" && detail.topic_trigger) {
@@ -219,6 +372,26 @@ function memoryDetail(detail) {
   }
 
   if (retired) {
+    const successorCell = detail.superseded_by
+      ? h(
+          "span",
+          null,
+          detail.successor_content || short(detail.superseded_by),
+          " ",
+          button(t("memory.open_successor"), () => openMemory(detail.superseded_by, detail.successor_status).catch(fail), { kind: "quiet small" })
+        )
+      : null;
+    const destinationCell = detail.relocated_to_id
+      ? h(
+          "span",
+          null,
+          detail.destination_content || short(detail.relocated_to_id),
+          detail.destination_standing ? " " : null,
+          detail.destination_standing
+            ? button(t("memory.open_destination"), () => openTemporary(detail.relocated_to_id).catch(fail), { kind: "quiet small" })
+            : null
+        )
+      : null;
     nodes.push(
       h(
         "div",
@@ -227,8 +400,8 @@ function memoryDetail(detail) {
           [t("retire.when"), day(detail.retired_at)],
           [t("retire.kind"), named("retire.kind", detail.retirement_kind || "legacy")],
           [t("retire.reason"), detail.retire_reason],
-          [t("retire.successor_label"), detail.successor_content],
-          [t("change.moved_to"), detail.destination_content],
+          [t("retire.successor_label"), successorCell],
+          [t("change.moved_to"), destinationCell],
         ])
       ),
       h(
@@ -247,10 +420,7 @@ function memoryDetail(detail) {
         { class: "actions" },
         button(t("memory.edit"), () => memTogglePanel("edit")),
         button(t("memory.delivery"), () => memTogglePanel("delivery")),
-        button(t("memory.to_temporary"), () => {
-          if (detail.delivery === "topic") toast(t("memory.topic_cannot_be_temporary"), "warn");
-          else memTogglePanel("temporary");
-        }),
+        button(t("memory.to_temporary"), () => memTogglePanel("temporary")),
         button(latestReason(detail) ? t("memory.edit_reason") : t("memory.add_reason"), () => memTogglePanel("reason")),
         h("span", { class: "spacer" }),
         button(t("memory.retire"), () => memTogglePanel("retire"), { kind: "danger quiet" })
@@ -272,14 +442,21 @@ function memoryDetail(detail) {
     (detail.revisions || []).length < 2
       ? null
       : section(
-      t("memory.revisions"),
-      (detail.revisions || []).length,
-      entries(detail.revisions, (item) => [
-        `${day(item.created_at)} · ${who(item.actor)}`,
-        item.content,
-        [null, item.note && item.note !== "recorded by the user's own hand" ? item.note : null],
-      ])
-    )
+          t("memory.revisions"),
+          (detail.revisions || []).length,
+          entries(detail.revisions, (item) => [
+            `${day(item.created_at)} · ${who(item.actor)}`,
+            item.content,
+            [null, item.note && item.note !== "recorded by the user's own hand" ? item.note : null],
+          ])
+        ),
+    (detail.retirement_history || []).length
+      ? section(
+          t("memory.retirement_history"),
+          detail.retirement_history.length,
+          retirementHistoryEntries(detail.retirement_history)
+        )
+      : null
   );
   return nodes;
 }
@@ -316,34 +493,54 @@ function deliveryPanel(detail) {
   return panel;
 }
 
-/** Bring a retired rule back; its retirement stays in the history, the reason is required. */
+/** Bring a retired rule back, with its reason and optional delivery change. */
 function restorePanel(detail) {
-  return h(
-    "div",
-    { class: "inline-panel" },
-    form({
-      fields: [{ name: "reason", label: t("memory.restore_reason"), kind: "area", rows: 2, hint: t("memory.restore_hint") }],
-      submit: t("memory.restore"),
-      onCancel: () => memTogglePanel("restore"),
-      onSubmit: (values) => {
-        if (!values.reason.trim()) {
-          toast(t("common.reason_required"), "warn");
-          return;
-        }
-        acknowledging(
-          (acknowledged) =>
-            call("memory.restore", { memory_id: detail.memory_id, reason: values.reason, acknowledged }).then((result) => {
-              mem.panel = null;
-              mem.view = "active";
-              mem.selected = detail.memory_id;
-              memSeg.select("active");
-              return result;
-            }),
-          t("memory.restored")
-        );
-      },
+  const panel = h("div", { class: "inline-panel" });
+  loadChoices()
+    .then((choices) => {
+      const isTopic = (values) => values.delivery === "topic";
+      const isProject = (values) => values.delivery === "project";
+      const reached = detail.project_names || [];
+      const openTopic = choices.topics.some((item) => item.topic_id === detail.topic_id) ? detail.topic_id : "";
+      panel.append(
+        form({
+          fields: [
+            { name: "reason", label: t("memory.restore_reason"), kind: "area", rows: 2, hint: t("memory.restore_hint") },
+            { name: "delivery", label: t("memory.restore_delivery"), kind: "radio", options: deliveryOptions(), value: detail.delivery || "always" },
+            { name: "projects", label: t("delivery.areas"), kind: "checks", options: projectChecks(choices), value: reached, show: isProject },
+            ...topicFields(choices, openTopic, isTopic),
+          ],
+          submit: t("memory.restore"),
+          onCancel: () => memTogglePanel("restore"),
+          onSubmit: (values) => {
+            if (!values.reason.trim()) {
+              toast(t("common.reason_required"), "warn");
+              return;
+            }
+            acknowledging(
+              (acknowledged) =>
+                call("memory.restore", {
+                  memory_id: detail.memory_id,
+                  reason: values.reason,
+                  delivery: values.delivery,
+                  ...(isProject(values) ? { projects: values.projects } : {}),
+                  ...topicArgs(isTopic(values) ? values : {}),
+                  acknowledged,
+                }).then((result) => {
+                  mem.panel = null;
+                  mem.view = "active";
+                  mem.selected = detail.memory_id;
+                  memSeg.select("active");
+                  return result;
+                }),
+              t("memory.restored")
+            );
+          },
+        })
+      );
     })
-  );
+    .catch(fail);
+  return panel;
 }
 
 /**
@@ -383,20 +580,34 @@ function reasonAddPanel(detail) {
 }
 
 function toTemporaryPanel(detail) {
-  return h(
-    "div",
-    { class: "inline-panel" },
-    form({
-      fields: [{ name: "days", label: t("memory.days"), kind: "number", step: "0.5", value: 7, hint: t("memory.days_hint") }],
-      submit: t("memory.to_temporary"),
-      onCancel: () => memTogglePanel("temporary"),
-      onSubmit: (values) =>
-        act(async () => {
-          await call("memory.to_temporary", { memory_id: detail.memory_id, days: values.days });
-          mem.panel = null;
-        }, t("memory.made_temporary")),
+  const panel = h("div", { class: "inline-panel" });
+  loadChoices()
+    .then((choices) => {
+      const initial = detail.delivery === "project" ? detail.project_names || [] : [];
+      panel.append(
+        form({
+          fields: [
+            { name: "days", label: t("memory.days"), kind: "number", step: "0.5", value: 7, hint: t("memory.days_hint") },
+            ...temporaryDeliveryFields(choices, initial),
+          ],
+          submit: t("memory.to_temporary"),
+          onCancel: () => memTogglePanel("temporary"),
+          onSubmit: (values) => {
+            if (!checkTemporaryDelivery(values)) return;
+            act(async () => {
+              await call("memory.to_temporary", {
+                memory_id: detail.memory_id,
+                days: values.days,
+                projects: temporaryProjectsFrom(values),
+              });
+              mem.panel = null;
+            }, t("memory.made_temporary"));
+          },
+        })
+      );
     })
-  );
+    .catch(fail);
+  return panel;
 }
 
 /** Retire with a reason only; a move to a temporary note is its own button. */
@@ -420,24 +631,119 @@ function retirePanel(detail) {
 
 // ---------------------------------------------------------------- one temporary note
 
+function temporaryDeliveryPanel(row) {
+  const panel = h("div", { class: "inline-panel" });
+  loadChoices()
+    .then((choices) => {
+      panel.append(
+        form({
+          fields: [
+            ...temporaryDeliveryFields(choices, row.project_names || []),
+            {
+              name: "days",
+              label: t("temporary.days_edit"),
+              kind: "number",
+              step: "0.5",
+              value: "",
+              hint: t("temporary.days_edit_hint", { until: day(row.expires_at) }),
+            },
+          ],
+          onCancel: () => memTogglePanel("delivery"),
+          onSubmit: (values) => {
+            if (!checkTemporaryDelivery(values)) return;
+            act(async () => {
+              await call("temporary.revise", {
+                context_id: row.context_id,
+                content: row.content,
+                projects: temporaryProjectsFrom(values),
+                ...(values.days !== null ? { days: values.days } : {}),
+              });
+              mem.panel = null;
+            }, t("temporary.revised"));
+          },
+        })
+      );
+    })
+    .catch(fail);
+  return panel;
+}
+
+function temporaryToMemoryPanel(row) {
+  const panel = h("div", { class: "inline-panel" });
+  loadChoices()
+    .then((choices) => {
+      const reached = row.project_names || [];
+      const isTopic = (values) => values.delivery === "topic";
+      const isProject = (values) => values.delivery === "project";
+      panel.append(
+        form({
+          fields: [
+            { name: "delivery", label: t("delivery.title"), kind: "radio", options: deliveryOptions(), value: reached.length ? "project" : "always" },
+            { name: "projects", label: t("delivery.areas"), kind: "checks", options: projectChecks(choices), value: reached, show: isProject },
+            ...topicFields(choices, "", isTopic),
+            { name: "why", label: t("memory.why"), kind: "area", rows: 2, max: 500, hint: t("memory.why_hint") },
+          ],
+          submit: t("temporary.to_rule"),
+          onCancel: () => memTogglePanel("to_memory"),
+          onSubmit: (values) =>
+            acknowledging(
+              (acknowledged) =>
+                call("temporary.to_memory", {
+                  context_id: row.context_id,
+                  delivery: values.delivery,
+                  ...(isProject(values) ? { projects: values.projects } : {}),
+                  ...topicArgs(isTopic(values) ? values : {}),
+                  why: values.why,
+                  acknowledged,
+                }).then((result) => {
+                  mem.panel = null;
+                  return result;
+                }),
+              t("temporary.converted")
+            ),
+        })
+      );
+    })
+    .catch(fail);
+  return panel;
+}
+
 function temporaryDetail(row) {
-  const nodes = [meta(idTag(row.context_id), row.project_name || t("common.every_area"), t("temporary.until", { when: day(row.expires_at) }))];
+  const nodes = [
+    meta(idTag(row.context_id), temporaryDeliveryText(row), t("temporary.until", { when: day(row.expires_at) })),
+  ];
   if (mem.panel === "edit") {
-    nodes.push(h("div", null));
+    const slot = h("div");
+    nodes.push(slot);
     loadChoices()
       .then((choices) => {
-        nodes[1].replaceWith(
+        slot.replaceChildren(
           form({
             fields: [
               { name: "content", label: t("temporary.text"), kind: "area", rows: 3, value: row.content, big: true },
-              { name: "project", label: t("temporary.area"), kind: "select", options: projectOptions(choices, t("common.every_area")), value: row.project_name || "" },
+              ...temporaryDeliveryFields(choices, row.project_names || []),
+              {
+                name: "days",
+                label: t("temporary.days_edit"),
+                kind: "number",
+                step: "0.5",
+                value: "",
+                hint: t("temporary.days_edit_hint", { until: day(row.expires_at) }),
+              },
             ],
             onCancel: () => memTogglePanel("edit"),
-            onSubmit: (values) =>
+            onSubmit: (values) => {
+              if (!checkTemporaryDelivery(values)) return;
               act(async () => {
-                await call("temporary.revise", { context_id: row.context_id, content: values.content, project: values.project || null });
+                await call("temporary.revise", {
+                  context_id: row.context_id,
+                  content: values.content,
+                  projects: temporaryProjectsFrom(values),
+                  ...(values.days !== null ? { days: values.days } : {}),
+                });
                 mem.panel = null;
-              }, t("temporary.revised")),
+              }, t("temporary.revised"));
+            },
           })
         );
       })
@@ -450,15 +756,8 @@ function temporaryDetail(row) {
       "div",
       { class: "actions" },
       button(t("memory.edit"), () => memTogglePanel("edit")),
-      button(t("temporary.to_rule"), async () => {
-        const yes = await confirmDialog({ title: t("temporary.to_rule_confirm"), lines: [row.content], confirm: t("temporary.to_rule") });
-        if (yes) {
-          acknowledging(
-            (acknowledged) => call("temporary.to_memory", { context_id: row.context_id, acknowledged }),
-            t("temporary.converted")
-          );
-        }
-      }),
+      button(t("temporary.delivery"), () => memTogglePanel("delivery")),
+      button(t("temporary.to_rule"), () => memTogglePanel("to_memory")),
       h("span", { class: "spacer" }),
       button(
         t("temporary.end"),
@@ -470,6 +769,8 @@ function temporaryDetail(row) {
       )
     )
   );
+  if (mem.panel === "delivery") nodes.push(temporaryDeliveryPanel(row));
+  if (mem.panel === "to_memory") nodes.push(temporaryToMemoryPanel(row));
   return nodes;
 }
 
@@ -518,25 +819,37 @@ function newMemoryForm(target) {
 }
 
 function newTemporaryForm(target) {
-  target.replaceChildren(
-    form({
-      title: t("memory.temporary_new"),
-      fields: [
-        { name: "content", label: t("temporary.text"), kind: "area", rows: 3, big: true },
-        { name: "days", label: t("memory.days"), kind: "number", step: "0.5", value: 3, hint: t("memory.days_hint") },
-      ],
-      submit: t("common.add"),
-      onCancel: () => {
-        mem.creating = null;
-        renderMemoryDetail();
-      },
-      onSubmit: (values) =>
-        act(async () => {
-          await call("temporary.add", { content: values.content, days: values.days });
-          mem.creating = null;
-        }, t("temporary.added")),
+  target.replaceChildren();
+  loadChoices()
+    .then((choices) => {
+      target.replaceChildren(
+        form({
+          title: t("memory.temporary_new"),
+          fields: [
+            { name: "content", label: t("temporary.text"), kind: "area", rows: 3, big: true },
+            ...temporaryDeliveryFields(choices, []),
+            { name: "days", label: t("memory.days"), kind: "number", step: "0.5", value: 3, hint: t("memory.days_hint") },
+          ],
+          submit: t("common.add"),
+          onCancel: () => {
+            mem.creating = null;
+            renderMemoryDetail();
+          },
+          onSubmit: (values) => {
+            if (!checkTemporaryDelivery(values)) return;
+            act(async () => {
+              await call("temporary.add", {
+                content: values.content,
+                days: values.days,
+                projects: temporaryProjectsFrom(values),
+              });
+              mem.creating = null;
+            }, t("temporary.added"));
+          },
+        })
+      );
     })
-  );
+    .catch(fail);
 }
 
 page("memories", {

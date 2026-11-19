@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
@@ -460,6 +461,7 @@ def admit(
     expected_version: int,
     project_id: UUID | None = None,
     project_override: bool = False,
+    also_project_ids: Sequence[UUID] = (),
     topic_id: UUID | None = None,
     content: str | None = None,
     approval: dict[str, Any],
@@ -470,6 +472,7 @@ def admit(
     cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (str(request_id),))
     cur.execute("SELECT * FROM nomination WHERE admit_request_id = %s", (request_id,))
     replay = cur.fetchone()
+    extra_projects = list(dict.fromkeys(also_project_ids))
     request = approvals.json_value(
         {
             "nomination_id": str(nomination_id),
@@ -485,6 +488,8 @@ def admit(
     if topic_id is not None:
         # Absent otherwise, so requests stored before topics existed still replay.
         request["topic_id"] = str(topic_id)
+    if extra_projects:
+        request["also_project_ids"] = [str(pid) for pid in extra_projects]
     if replay is not None:
         if replay["nomination_id"] != nomination_id or replay["admit_request"] != request:
             raise MashuError("request_id was already used for a different Memory admission")
@@ -534,6 +539,7 @@ def admit(
     )
 
     memories.check_delivery(delivery, home, topic_id)
+    others = memories._check_other_projects(delivery, home, extra_projects)
     home = memories.delivered_project(cur, delivery, home, topic_id)
 
     verdict = redact.gate({"content": final})
@@ -558,6 +564,7 @@ def admit(
         project_id=home,
         exclude_memory_id=exclude_memory_id,
         topic_id=topic_id,
+        also_project_ids=others if others else None,
     )
     if not admission["ok"]:
         raise RefusedError(admission["refusal"])
@@ -572,7 +579,9 @@ def admit(
         (final, home, delivery, topic_id, list(nomination["evidence"]), actor),
     )
     memory = cur.fetchone()
-    if exclude_memory_id is not None and delivery == "project":
+    if others:
+        memories._write_other_projects(cur, memory["memory_id"], others, actor=actor)
+    elif exclude_memory_id is not None and delivery == "project":
         # A successor in its predecessor's home project keeps reaching the projects it reached;
         # capacity.check_admission above weighed it there.
         cur.execute("SELECT to_regclass('memory_project') IS NOT NULL AS present")
@@ -621,6 +630,7 @@ def admit(
         detail={
             "delivery": delivery,
             "approval_source": approval_source,
+            **({"also_project_ids": [str(pid) for pid in others]} if others else {}),
             **({"topic_id": str(topic_id)} if topic_id is not None else {}),
         },
     )

@@ -134,8 +134,12 @@ def restore(
     reason: str,
     acknowledged: list[UUID] | None,
     actor: str,
+    delivery: str | None = None,
+    project_name: str | None = None,
+    project_names: Sequence[str] | None = None,
+    topic: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Bring a retired rule back on the person's word.
+    """Bring a retired rule back on the person's word, optionally into a new delivery.
 
     The person reverses the retirement directly, so the reason they give is the reversal;
     the former kind and reason stay on the restore event. Retired rules the body repeats are
@@ -144,7 +148,103 @@ def restore(
     approval: dict[str, Any] = {"kind": "user_direct"}
     if acknowledged:
         approval["conflict_ids"] = sorted(str(ident) for ident in acknowledged)
-    return memories.restore(cur, memory_id, reason=reason, actor=actor, approval_source=approval)
+    if delivery is None:
+        return memories.restore(
+            cur, memory_id, reason=reason, actor=actor, approval_source=approval
+        )
+    others: list[UUID] | None = None
+    if project_names is not None and delivery == "project":
+        current = memories.get_memory(cur, memory_id)
+        project_id, others = project_ids_named(
+            cur, project_names, home=current["project_id"] if current else None
+        )
+    else:
+        project_id = project_id_named(cur, project_name)
+    return memories.restore(
+        cur,
+        memory_id,
+        reason=reason,
+        actor=actor,
+        approval_source=approval,
+        delivery=delivery,
+        project_id=project_id,
+        clear_project=project_id is None,
+        topic_id=topic_id_for(cur, topic, actor=actor),
+        also_project_ids=others,
+    )
+
+
+def edit_memory(
+    cur: psycopg.Cursor,
+    memory_id: UUID,
+    *,
+    content: str,
+    acknowledged: list[UUID] | None,
+    actor: str,
+    delivery: str | None = None,
+    project_name: str | None = None,
+    project_names: Sequence[str] | None = None,
+    topic: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Rewrite an active rule's body and optionally its delivery in one transaction.
+
+    Runs whichever of body revision or delivery move frees capacity first when both change.
+    """
+    current = memories.memory_details(cur, memory_id)
+    if current is None:
+        raise MashuError(f"no memory {memory_id}")
+    if current["status"] != "active":
+        raise MashuError(f"memory {memory_id} is {current['status']}, and only active rows change")
+
+    body_changed = content != current["content"]
+    delivery_changed = False
+    if delivery is not None:
+        if delivery != current["delivery"]:
+            delivery_changed = True
+        elif delivery == "project":
+            wanted = (
+                list(dict.fromkeys(project_names))
+                if project_names is not None
+                else ([project_name] if project_name else [])
+            )
+            delivery_changed = set(wanted) != set(current["project_names"] or [])
+        elif delivery == "topic":
+            wanted_topic_id = topic.get("topic_id") if topic else None
+            delivery_changed = topic is None or wanted_topic_id != current["topic_id"]
+
+    if not body_changed and not delivery_changed:
+        return current
+
+    def do_revise() -> dict[str, Any]:
+        return memories.revise(
+            cur,
+            memory_id,
+            content=content,
+            actor=actor,
+            acknowledged_conflicts=acknowledged,
+        )
+
+    def do_deliver() -> dict[str, Any]:
+        assert delivery is not None
+        return set_delivery(
+            cur,
+            memory_id,
+            delivery=delivery,
+            project_name=project_name,
+            topic=topic,
+            actor=actor,
+            project_names=project_names if delivery == "project" else None,
+        )
+
+    if body_changed and delivery_changed:
+        if len(content) <= len(current["content"]):
+            do_revise()
+            return do_deliver()
+        do_deliver()
+        return do_revise()
+    if body_changed:
+        return do_revise()
+    return do_deliver()
 
 
 def retire(cur: psycopg.Cursor, memory_id: UUID, *, reason: str, actor: str) -> dict[str, Any]:
@@ -163,21 +263,112 @@ def retire(cur: psycopg.Cursor, memory_id: UUID, *, reason: str, actor: str) -> 
     )
 
 
-def add_temporary(cur: psycopg.Cursor, *, content: str, days: float, actor: str) -> dict[str, Any]:
-    """Record a temporary context for every project; editing it can give it one."""
-    return temporary.put_temporary(cur, content=content, actor=actor, days=days, project_id=None)
+def add_temporary(
+    cur: psycopg.Cursor,
+    *,
+    content: str,
+    days: float,
+    actor: str,
+    project_name: str | None = None,
+    project_names: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Record a temporary context for every project, or for the projects named."""
+    if project_names:
+        home, others = project_ids_named(cur, project_names)
+    else:
+        home, others = project_id_named(cur, project_name), []
+    return temporary.put_temporary(
+        cur, content=content, actor=actor, days=days, project_id=home, also_project_ids=others
+    )
 
 
 def revise_temporary(
-    cur: psycopg.Cursor, context_id: UUID, *, content: str, project_name: str | None, actor: str
+    cur: psycopg.Cursor,
+    context_id: UUID,
+    *,
+    content: str,
+    project_name: str | None,
+    actor: str,
+    project_names: Sequence[str] | None = None,
+    days: float | None = None,
 ) -> dict[str, Any]:
-    """Rewrite a standing temporary context; no project named means every project."""
+    """Rewrite a standing temporary context's text, projects, and optionally its expiry."""
+    others: list[UUID] | None = None
+    if project_names is not None:
+        cur.execute("SELECT project_id FROM temporary_context WHERE context_id = %s", (context_id,))
+        existing = cur.fetchone()
+        home_before = existing["project_id"] if existing else None
+        project_id, others = project_ids_named(cur, project_names, home=home_before)
+    else:
+        project_id = project_id_named(cur, project_name)
     return temporary.revise(
         cur,
         context_id,
         content=content,
-        project_id=project_id_named(cur, project_name),
+        project_id=project_id,
         actor=actor,
+        also_project_ids=others,
+        days=days,
+    )
+
+
+def convert_to_temporary(
+    cur: psycopg.Cursor,
+    memory_id: UUID,
+    *,
+    days: float,
+    actor: str,
+    project_names: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """Convert an active memory to temporary context, keeping or overriding its projects."""
+    if project_names is None:
+        return memories.convert_to_temporary(cur, memory_id, days=days, actor=actor)
+    home, others = project_ids_named(cur, project_names)
+    return memories.convert_to_temporary(
+        cur,
+        memory_id,
+        days=days,
+        actor=actor,
+        project_id=home,
+        also_project_ids=others,
+        override_projects=True,
+    )
+
+
+def convert_temporary_to_memory(
+    cur: psycopg.Cursor,
+    context_id: UUID,
+    *,
+    actor: str,
+    acknowledged: list[UUID] | None = None,
+    delivery: str | None = None,
+    project_name: str | None = None,
+    project_names: Sequence[str] | None = None,
+    topic: dict[str, Any] | None = None,
+    why: str | None = None,
+) -> dict[str, Any]:
+    """Convert a temporary context to an active memory, keeping or choosing its delivery."""
+    if delivery is None:
+        return temporary.convert_to_memory(
+            cur, context_id, actor=actor, acknowledged_conflicts=acknowledged, why=why
+        )
+    if delivery == "project":
+        if project_names is not None:
+            home, others = project_ids_named(cur, project_names)
+        else:
+            home, others = project_id_named(cur, project_name), []
+    else:
+        home, others = None, []
+    return temporary.convert_to_memory(
+        cur,
+        context_id,
+        actor=actor,
+        acknowledged_conflicts=acknowledged,
+        delivery=delivery,
+        project_id=home,
+        also_project_ids=others,
+        topic_id=topic_id_for(cur, topic, actor=actor),
+        why=why,
     )
 
 
@@ -232,6 +423,7 @@ def _repropose(
     actor: str,
     retire_reason: str | None,
     restore_reason: str | None,
+    successor_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return memory_changes.propose(
         cur,
@@ -245,7 +437,11 @@ def _repropose(
         retire_reason=retire_reason,
         successor_nomination_id=current["successor_nomination_id"],
         successor_nomination_version=successor_version,
-        successor_settings=memory_changes.requested_settings(current),
+        successor_settings=(
+            memory_changes.requested_settings(current)
+            if successor_settings is None
+            else successor_settings
+        ),
         relocated_to_kind=current["relocated_to_kind"],
         relocated_to_id=current["relocated_to_id"],
         restore_reason=restore_reason,
@@ -321,4 +517,97 @@ def edit_change_reason(
         actor=actor,
         retire_reason=shown["retire_reason"] if restoring else reason,
         restore_reason=reason if restoring else shown["restore_reason"],
+    )
+
+
+def _change_settings(
+    cur: psycopg.Cursor,
+    *,
+    delivery: str,
+    project_name: str | None,
+    topic: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build memory_changes.propose's successor_settings from human form fields."""
+    if delivery == "always":
+        return {"delivery": "always", "project_id": None}
+    if delivery == "project":
+        return {"delivery": "project", "project_id": project_id_named(cur, project_name)}
+    if delivery == "topic":
+        if topic is None:
+            raise MashuError("topic delivery needs a topic")
+        if topic.get("topic_id") is not None:
+            row = topics.lock_open_topic(cur, topic["topic_id"])
+            return {"delivery": "topic", "project_id": row["project_id"], "topic": row["name"]}
+        if topic.get("trigger") is not None:
+            return {
+                "delivery": "topic",
+                "project_id": project_id_named(cur, topic.get("project_name")),
+                "topic": topic["name"],
+                "topic_trigger": topic["trigger"],
+            }
+        row = topics.require_topic(cur, topic["name"])
+        return {"delivery": "topic", "project_id": row["project_id"], "topic": row["name"]}
+    raise MashuError(f"unknown delivery '{delivery}'")
+
+
+def edit_change(
+    cur: psycopg.Cursor,
+    change_id: UUID,
+    *,
+    version: int,
+    target_revision_id: UUID | None,
+    actor: str,
+    reason: str | None = None,
+    successor_content: str | None = None,
+    delivery: str | None = None,
+    project_name: str | None = None,
+    topic: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Edit a pending Memory change's reason, replacement wording, or delivery in one step."""
+    shown = pending_change(cur, change_id)
+    if (
+        shown["version"] != version
+        or shown["target"].get("current_revision_id") != target_revision_id
+    ):
+        raise ChangedSinceReadError("the proposal or its target changed; read it again first")
+
+    op = shown["operation"]
+    retire_reason = shown["retire_reason"]
+    restore_reason = shown["restore_reason"]
+    if reason is not None:
+        if op == "redeliver":
+            raise MashuError("a redeliver proposal has no reason to edit; its evidence says why")
+        if not reason.strip():
+            raise MashuError("the reason cannot be empty")
+        if op == "restore":
+            restore_reason = reason
+        else:
+            retire_reason = reason
+
+    successor_version = shown["successor"]["version"] if op == "replace" else None
+    if successor_content is not None:
+        if op != "replace":
+            raise MashuError("only a replace proposal has replacement wording to edit")
+        revised = nominations.revise(
+            cur, shown["successor_nomination_id"], content=successor_content, actor=actor
+        )
+        successor_version = revised["version"]
+
+    settings_arg: dict[str, Any] | None = None
+    if delivery is not None:
+        if op not in ("redeliver", "replace"):
+            raise MashuError(f"a {op} proposal has no delivery to edit")
+        settings_arg = _change_settings(
+            cur, delivery=delivery, project_name=project_name, topic=topic
+        )
+
+    return _repropose(
+        cur,
+        shown,
+        target=shown["target"],
+        successor_version=successor_version,
+        actor=actor,
+        retire_reason=retire_reason,
+        restore_reason=restore_reason,
+        successor_settings=settings_arg,
     )

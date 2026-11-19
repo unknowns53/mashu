@@ -27,6 +27,7 @@ from mashu import (
     application,
     config,
     db,
+    ledger,
     memories,
     memory_actions,
     memory_changes,
@@ -37,6 +38,7 @@ from mashu import (
     routing,
     settings,
     task_actions,
+    task_history,
     tasks,
     temporary,
     topics,
@@ -113,6 +115,13 @@ def _days(args: Args) -> float:
         ) from error
 
 
+def _days_or_none(args: Args) -> float | None:
+    value = args.get("days")
+    if value is None or value == "":
+        return None
+    return _days(args)
+
+
 def _when(value: Any, name: str) -> datetime:
     try:
         return datetime.fromisoformat(str(value))
@@ -168,6 +177,7 @@ def home(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 def choices(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     """The names and fixed choices the forms offer."""
+    limits = settings.limits(cur)
     return {
         "projects": [row["name"] for row in projects.list_projects(cur)],
         "topics": [
@@ -175,7 +185,12 @@ def choices(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
             for row in topics.list_topics(cur)
         ],
         "outcomes": list(tasks.OUTCOMES),
+        "artifact_kinds": list(task_history.ARTIFACT_KINDS),
+        "prevention_kinds": list(ledger.PREVENTION_KINDS),
         "temporary_max_days": config.TEMPORARY_MAX_DAYS,
+        "ruling_chars": limits["ruling_chars"],
+        "ruling_words_chars": limits["ruling_words_chars"],
+        "content_limit": limits["content_limit"],
     }
 
 
@@ -209,10 +224,27 @@ def review_admit(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
         topic=topic,
         conflict_ids=_uuids(args, "conflict_ids") or [],
         actor=ACTOR,
+        project_name=_optional(args, "project"),
+        project_names=_lines(args, "projects") if args.get("projects") is not None else None,
     )
     if isinstance(outcome, review_actions.Changed):
         return {"changed": outcome.what, "current": outcome.current}
     return {"admitted": outcome}
+
+
+def review_to_temporary(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    outcome = review_actions.admit_as_temporary(
+        cur,
+        _uuid(args, "nomination_id"),
+        expected_version=_int(args, "expected_version"),
+        days=_days(args),
+        actor=ACTOR,
+        project_names=_lines(args, "projects") if args.get("projects") is not None else None,
+        content=_optional(args, "content"),
+    )
+    if isinstance(outcome, review_actions.Changed):
+        return {"changed": outcome.what, "current": outcome.current}
+    return outcome
 
 
 def review_revise(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
@@ -238,9 +270,11 @@ def review_defer(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 def change_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     rows = memory_changes.pending(cur)
+    project_by_id = {row["project_id"]: row["name"] for row in projects.list_projects(cur)}
     for row in rows:
         row["blocking_conflict_ids"] = memory_actions.blocking_conflict_ids(row)
-    return {"changes": rows}
+        row["successor_project_name"] = project_by_id.get(row.get("successor_project_id"))
+    return {"changes": rows, "content_limit": settings.limit(cur, "content_limit")}
 
 
 def change_apply(dsn: str | None, args: Args) -> dict[str, Any]:
@@ -274,6 +308,27 @@ def change_reason(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
         target_revision_id=_uuid_or_none(args, "target_revision_id"),
         reason=_text(args, "reason"),
         actor=ACTOR,
+    )
+
+
+def change_edit(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    delivery = _optional(args, "delivery")
+    reason_arg = args.get("reason")
+    if reason_arg is not None and not isinstance(reason_arg, str):
+        raise MashuError("reason must be text")
+    return memory_actions.edit_change(
+        cur,
+        _uuid(args, "change_id"),
+        version=_int(args, "version"),
+        target_revision_id=_uuid_or_none(args, "target_revision_id"),
+        actor=ACTOR,
+        reason=reason_arg,
+        successor_content=_text(args, "successor_content")
+        if args.get("successor_content") is not None
+        else None,
+        delivery=delivery,
+        project_name=_optional(args, "project"),
+        topic=_topic(args) if delivery == "topic" else None,
     )
 
 
@@ -321,6 +376,19 @@ def memory_remember(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 
 def memory_revise(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    delivery = _optional(args, "delivery")
+    if delivery is not None:
+        return memory_actions.edit_memory(
+            cur,
+            _uuid(args, "memory_id"),
+            content=_text(args, "content"),
+            acknowledged=_uuids(args, "acknowledged"),
+            actor=ACTOR,
+            delivery=delivery,
+            project_name=_optional(args, "project"),
+            project_names=_lines(args, "projects") if args.get("projects") is not None else None,
+            topic=_topic(args) if delivery == "topic" else None,
+        )
     return memories.revise(
         cur,
         _uuid(args, "memory_id"),
@@ -335,12 +403,17 @@ def memory_add_reason(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 
 def memory_restore(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    delivery = _optional(args, "delivery")
     return memory_actions.restore(
         cur,
         _uuid(args, "memory_id"),
         reason=_text(args, "reason"),
         acknowledged=_uuids(args, "acknowledged"),
         actor=ACTOR,
+        delivery=delivery,
+        project_name=_optional(args, "project"),
+        project_names=_lines(args, "projects") if args.get("projects") is not None else None,
+        topic=_topic(args) if delivery == "topic" else None,
     )
 
 
@@ -363,14 +436,23 @@ def memory_delivery(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 
 def memory_to_temporary(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    return memories.convert_to_temporary(
-        cur, _uuid(args, "memory_id"), days=_days(args), actor=ACTOR
+    return memory_actions.convert_to_temporary(
+        cur,
+        _uuid(args, "memory_id"),
+        days=_days(args),
+        actor=ACTOR,
+        project_names=_lines(args, "projects") if args.get("projects") is not None else None,
     )
 
 
 def temporary_add(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     return memory_actions.add_temporary(
-        cur, content=_text(args, "content"), days=_days(args), actor=ACTOR
+        cur,
+        content=_text(args, "content"),
+        days=_days(args),
+        actor=ACTOR,
+        project_name=_optional(args, "project"),
+        project_names=_lines(args, "projects") if args.get("projects") is not None else (),
     )
 
 
@@ -381,6 +463,8 @@ def temporary_revise(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
         content=_text(args, "content"),
         project_name=_optional(args, "project"),
         actor=ACTOR,
+        project_names=_lines(args, "projects") if args.get("projects") is not None else None,
+        days=_days_or_none(args),
     )
 
 
@@ -389,11 +473,17 @@ def temporary_end(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 
 def temporary_to_memory(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    return temporary.convert_to_memory(
+    delivery = _optional(args, "delivery")
+    return memory_actions.convert_temporary_to_memory(
         cur,
         _uuid(args, "context_id"),
         actor=ACTOR,
-        acknowledged_conflicts=_uuids(args, "acknowledged"),
+        acknowledged=_uuids(args, "acknowledged"),
+        delivery=delivery,
+        project_name=_optional(args, "project"),
+        project_names=_lines(args, "projects") if args.get("projects") is not None else None,
+        topic=_topic(args) if delivery == "topic" else None,
+        why=_optional(args, "why"),
     )
 
 
@@ -427,6 +517,13 @@ def task_create(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
         name=_text(args, "name"),
         project=_optional(args, "project"),
         goal=_optional(args, "goal"),
+        approach=_optional(args, "approach"),
+        status_text=_optional(args, "status_text"),
+        open_questions=_lines(args, "open_questions")
+        if args.get("open_questions") is not None
+        else None,
+        blockers=_lines(args, "blockers") if args.get("blockers") is not None else None,
+        next_actions=_lines(args, "next_actions") if args.get("next_actions") is not None else None,
         cwd=None,
         actor=ACTOR,
         force=bool(args.get("force")),
@@ -490,6 +587,79 @@ def task_renew(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 def task_reopen(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     return tasks.reopen(cur, _uuid(args, "task_id"), actor=ACTOR)
+
+
+def task_ruling_add(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    ruling = _text(args, "ruling")
+    quote = _optional(args, "user_instruction") or ruling
+    return task_history.checkpoint(
+        cur,
+        _uuid(args, "task_id"),
+        actor=ACTOR,
+        expect_updated_at=_when(args.get("expect_updated_at"), "expect_updated_at"),
+        rulings=[{"ruling": ruling, "user_instruction": quote}],
+    )
+
+
+def task_ruling_withdraw(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    return task_history.checkpoint(
+        cur,
+        _uuid(args, "task_id"),
+        actor=ACTOR,
+        expect_updated_at=_when(args.get("expect_updated_at"), "expect_updated_at"),
+        withdraw_rulings=[
+            {
+                "ruling_id": _uuid(args, "ruling_id"),
+                "user_instruction": _text(args, "user_instruction"),
+            }
+        ],
+    )
+
+
+def task_artifact_add(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "kind": _text(args, "kind"),
+        "locator": _text(args, "locator"),
+    }
+    label = _optional(args, "label")
+    if label is not None:
+        item["label"] = label
+    return task_history.checkpoint(
+        cur,
+        _uuid(args, "task_id"),
+        actor=ACTOR,
+        expect_updated_at=_when(args.get("expect_updated_at"), "expect_updated_at"),
+        artifacts=[item],
+    )
+
+
+def ledger_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    limit = _int(args, "limit") if args.get("limit") is not None else 50
+    if limit < 1 or limit > 500:
+        raise MashuError("limit must be between 1 and 500")
+    project_name = _optional(args, "project")
+    project_id = memory_actions.project_id_named(cur, project_name)
+    return {
+        "entries": ledger.ledger_entries(cur, limit=limit, project_id=project_id),
+        "content_limit": settings.limit(cur, "content_limit"),
+    }
+
+
+def pain_report(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    project_name = _optional(args, "project")
+    return ledger.report_pain(
+        cur,
+        kind="incident",
+        what=_text(args, "what"),
+        prevention=_text(args, "prevention"),
+        actor=ACTOR,
+        project_id=memory_actions.project_id_named(cur, project_name),
+        prevention_kind=_optional(args, "prevention_kind") or "rule",
+        task_id=_uuid_or_none(args, "task_id"),
+        violated_memory_id=_uuid_or_none(args, "violated_memory_id"),
+        ignored_task_id=_uuid_or_none(args, "ignored_task_id"),
+        ignored_source=_optional(args, "ignored_source"),
+    )
 
 
 # Settings and health
@@ -652,11 +822,13 @@ OPERATIONS: dict[str, Operation] = {
     "choices": choices,
     "review.list": review_list,
     "review.admit": review_admit,
+    "review.to_temporary": review_to_temporary,
     "review.revise": review_revise,
     "review.decline": review_decline,
     "review.defer": review_defer,
     "change.list": change_list,
     "change.reason": change_reason,
+    "change.edit": change_edit,
     "change.decline": _change_decision("declined"),
     "change.withdraw": _change_decision("withdrawn"),
     "memory.list": memory_list,
@@ -681,6 +853,11 @@ OPERATIONS: dict[str, Operation] = {
     "task.keep": task_keep,
     "task.renew": task_renew,
     "task.reopen": task_reopen,
+    "task.ruling_add": task_ruling_add,
+    "task.ruling_withdraw": task_ruling_withdraw,
+    "task.artifact_add": task_artifact_add,
+    "ledger.list": ledger_list,
+    "pain.report": pain_report,
     "settings.health": health,
     "settings.missed": missed,
     "settings.bootstrap": bootstrap_preview,
@@ -722,6 +899,7 @@ READS = frozenset(
         "project.list",
         "topic.list",
         "route.list",
+        "ledger.list",
         "limits.get",
         "version",
         "schema.status",

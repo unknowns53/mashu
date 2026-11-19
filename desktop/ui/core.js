@@ -728,6 +728,22 @@ function section(title, count, ...children) {
   );
 }
 
+function sectionWithAction(title, count, action, ...children) {
+  return h(
+    "section",
+    null,
+    h(
+      "h2",
+      null,
+      title,
+      count !== undefined && count !== null ? h("span", { class: "count", text: String(count) }) : null,
+      action ? h("span", { class: "spacer" }) : null,
+      action || null
+    ),
+    children
+  );
+}
+
 /** Label and value pairs. Empty values are left out, unless showEmpty marks them unwritten. */
 function fieldList(pairs, { showEmpty = false } = {}) {
   const node = h("dl", { class: "fields" });
@@ -754,7 +770,7 @@ function entries(rows, render, { empty = t("common.none"), old } = {}) {
       return h(
         "li",
         { class: `entry${old && old(row) ? " old" : ""}` },
-        whenText ? h("div", { class: "when", text: whenText }) : null,
+        whenText ? (whenText instanceof Node ? whenText : h("div", { class: "when", text: whenText })) : null,
         h("div", { class: "text", text }),
         notes
           .filter((note) => note && note[1])
@@ -910,7 +926,7 @@ function form({ title, fields, submit, onSubmit, onCancel, kind = "primary" }) {
       return chosen ? chosen.value : "";
     }
     if (field.kind === "lines") return input.value.split("\n").map((line) => line.trim()).filter(Boolean);
-    if (field.kind === "number") return Number(input.value);
+    if (field.kind === "number") return input.value.trim() === "" ? null : Number(input.value);
     return input.value;
   };
   const values = () => Object.fromEntries(inputs.map((entry) => [entry.field.name, valueOf(entry)]));
@@ -1055,6 +1071,50 @@ function deliveryText(row) {
   if (row.delivery === "topic") return `${t("delivery.topic")}: ${row.topic_name}`;
   if (row.delivery === "project") return `${t("delivery.project")}: ${row.project_name || "-"}`;
   return t("delivery.always") + (row.project_name ? ` (${row.project_name})` : "");
+}
+
+function temporaryDeliveryOptions() {
+  return [
+    ["all", t("temporary.reach_all"), t("temporary.reach_all_desc")],
+    ["project", t("temporary.reach_project"), t("temporary.reach_project_desc")],
+  ];
+}
+
+function temporaryDeliveryFields(choices, projectNames = []) {
+  const reached = (projectNames || []).filter(Boolean);
+  return [
+    {
+      name: "temp_delivery",
+      label: t("temporary.reach"),
+      kind: "radio",
+      options: temporaryDeliveryOptions(),
+      value: reached.length ? "project" : "all",
+    },
+    {
+      name: "temp_projects",
+      label: t("delivery.areas"),
+      kind: "checks",
+      options: projectChecks(choices),
+      value: reached,
+      show: (values) => values.temp_delivery === "project",
+    },
+  ];
+}
+
+function temporaryProjectsFrom(values) {
+  return values.temp_delivery === "project" ? values.temp_projects : [];
+}
+
+function checkTemporaryDelivery(values) {
+  if (values.temp_delivery === "project" && !(values.temp_projects || []).length) {
+    toast(t("temporary.projects_required"), "warn");
+    return false;
+  }
+  return true;
+}
+
+function temporaryDeliveryText(row) {
+  return row.project_name || t("common.every_area");
 }
 
 // ---------------------------------------------------------------- keyboard

@@ -2,9 +2,9 @@
 // the schema, versions and updates, starting at login, and the window's language.
 "use strict";
 
-const SECTIONS = ["health", "missed", "bootstrap", "topics", "routes", "limits", "schema", "version", "startup", "display"];
+const SECTIONS = ["health", "missed", "ledger", "bootstrap", "topics", "routes", "limits", "schema", "version", "startup", "display"];
 
-const settings = { section: "health", editing: null, bootstrapCwd: "", bootstrap: null };
+const settings = { section: "health", editing: null, bootstrapCwd: "", bootstrap: null, ledgerProject: "" };
 
 const settingsList = listPane();
 settingsList.pane.classList.add("narrow");
@@ -124,7 +124,7 @@ async function healthSection() {
       t("health.recent"),
       null,
       fieldList([
-        [t("health.ledger"), t("health.n", { n: health.ledger_30d })],
+        [t("health.ledger"), h("span", null, t("health.n", { n: health.ledger_30d }), " ", button(t("missed.list"), () => pickSection("ledger"), { kind: "quiet small" }))],
         [t("health.missed"), h("span", null, missedText(health), " ", button(t("missed.list"), () => pickSection("missed"), { kind: "quiet small" }))],
       ])
     ),
@@ -166,6 +166,96 @@ async function missedSection() {
     h("h1", { class: "title", text: t("health.missed") }),
     section(t("health.recent"), recent.length, list(recent)),
     earlier.length ? section(t("missed.earlier"), earlier.length, list(earlier)) : null,
+  ];
+}
+
+async function ledgerSection() {
+  const [{ entries: rows, content_limit: contentLimit }, choices] = await Promise.all([
+    call("ledger.list", { limit: 100, ...(settings.ledgerProject ? { project: settings.ledgerProject } : {}) }),
+    loadChoices(),
+  ]);
+  const openReport = async () => {
+    const [activeTasks, dormantTasks, activeMemories] = await Promise.all([
+      call("work.tasks", { activity: "active" }),
+      call("work.tasks", { activity: "dormant" }),
+      call("memory.list", { view: "active" }),
+    ]);
+    const openTasks = [...activeTasks.tasks, ...dormantTasks.tasks];
+    const taskOpts = [["", t("common.none")], ...openTasks.map((row) => [row.task.task_id, `${row.task.name} (${row.task.project_name})`])];
+    const memOpts = [["", t("common.none")], ...activeMemories.rows.map((row) => [row.memory_id, `${short(row.memory_id)} ${excerpt(row.content, 60)}`])];
+    const spec = {
+      title: t("pain.new"),
+      fields: [
+        { name: "what", label: t("pain.what"), kind: "area", rows: 3 },
+        { name: "prevention", label: t("pain.prevention"), kind: "area", rows: 2, max: contentLimit },
+        { name: "project", label: t("pain.project"), kind: "select", options: projectOptions(choices, t("common.none")), value: settings.ledgerProject },
+        {
+          name: "prevention_kind",
+          label: t("pain.prevention_kind"),
+          kind: "radio",
+          options: [
+            ["rule", t("pain.kind.rule")],
+            ["work", t("pain.kind.work")],
+          ],
+          value: "rule",
+        },
+        { name: "task_id", label: t("pain.task"), kind: "select", options: taskOpts, value: "", show: (values) => values.prevention_kind === "work" },
+        { name: "violated_memory_id", label: t("pain.violated"), kind: "select", options: memOpts, value: "" },
+        { name: "ignored_task_id", label: t("pain.ignored_task"), kind: "select", options: taskOpts, value: "" },
+        { name: "ignored_source", label: t("pain.ignored_source"), value: "", hint: t("pain.ignored_source_hint") },
+      ],
+      submit: t("common.add"),
+      done: t("pain.reported"),
+      onSubmit: async (values) => {
+        const result = await call("pain.report", {
+          what: values.what,
+          prevention: values.prevention,
+          project: values.project || null,
+          prevention_kind: values.prevention_kind,
+          task_id: values.prevention_kind === "work" ? values.task_id || null : null,
+          violated_memory_id: values.violated_memory_id || null,
+          ignored_task_id: values.ignored_task_id || null,
+          ignored_source: values.ignored_source || null,
+        });
+        if (result.delivery_suspect) return t("pain.delivery_suspect");
+        if (result.ignored_task_id || result.ignored_source) return t("pain.knowledge_unused");
+        if (result.prevention_kind === "work" && result.filed_task) spec.done = t("pain.work_filed");
+        else if (result.nomination_existing) spec.done = t("pain.candidate_joined");
+        else if (result.nomination) spec.done = t("pain.candidate_created");
+        else spec.done = t("pain.reported");
+        return "";
+      },
+    };
+    editInSection(spec);
+  };
+  const projectFilter = h(
+    "select",
+    {
+      "aria-label": t("filter.project"),
+      on: {
+        change: (event) => {
+          settings.ledgerProject = event.target.value;
+          reload().catch(fail);
+        },
+      },
+    },
+    [["", `${t("filter.project")}: ${t("common.all")}`], ...choices.projects.map((name) => [name, name])].map(([value, label]) =>
+      h("option", { value, text: label })
+    )
+  );
+  projectFilter.value = settings.ledgerProject;
+  return [
+    sectionHead(t("settings.ledger"), button(t("pain.new"), () => openReport().catch(fail), { kind: "primary" })),
+    choices.projects.length ? h("div", { class: "filter-row" }, projectFilter) : null,
+    section(
+      t("settings.ledger"),
+      rows.length,
+      entries(rows, (row) => [
+        [day(row.created_at), short(row.ledger_id), named("evidence.kind", row.kind), row.project_name, row.created_by && who(row.created_by)].filter(Boolean).join(" · "),
+        row.what,
+        [t("evidence.prevention"), row.prevention],
+      ])
+    ),
   ];
 }
 
@@ -218,16 +308,19 @@ async function topicsSection() {
         { name: "name", label: t("topic.name"), value: row ? row.name : "", max: 40 },
         { name: "trigger", label: t("topic.trigger"), value: row ? row.trigger : "", hint: t("topic.trigger_hint"), max: 160 },
         { name: "project", label: t("topic.area"), kind: "select", options: projectOptions(choices, t("topic.area_all")), value: row ? row.project_name || "" : "" },
-        ...(row
-          ? [
-              { name: "action", label: t("topic.action"), value: row.action || "", hint: t("topic.action_hint") },
-              { name: "source", label: t("topic.source"), value: row.source || "", hint: t("topic.source_hint") },
-            ]
-          : []),
+        { name: "action", label: t("topic.action"), value: row ? row.action || "" : "", hint: t("topic.action_hint") },
+        { name: "source", label: t("topic.source"), value: row ? row.source || "" : "", hint: t("topic.source_hint") },
       ],
       submit: row ? t("common.save") : t("common.create"),
       done: t("topic.saved"),
-      onSubmit: (values) => call("topic.save", { topic_id: row ? row.topic_id : null, ...values, project: values.project || null }).then(() => ""),
+      onSubmit: (values) =>
+        call("topic.save", {
+          topic_id: row ? row.topic_id : null,
+          ...values,
+          project: values.project || null,
+          action: values.action || null,
+          source: values.source || null,
+        }).then(() => ""),
     });
   const remove = async (row) => {
     const yes = await confirmDialog({ title: t("topic.remove_confirm"), lines: [row.name, t("topic.remove_note")], confirm: t("common.remove"), danger: true });
@@ -248,33 +341,50 @@ async function topicsSection() {
         [String(row.rules), "num"],
         [`${row.body_tokens} / ${capacity}`, "num"],
       ],
-      (row) => [button(t("common.edit"), () => edit(row), { kind: "quiet small" }), button(t("common.remove"), () => remove(row), { kind: "quiet small danger" })]
+      (row) => [
+        button(t("topic.open_memories"), () => openTopicMemories(row.name).catch(fail), { kind: "quiet small" }),
+        button(t("common.edit"), () => edit(row), { kind: "quiet small" }),
+        button(t("common.remove"), () => remove(row), { kind: "quiet small danger" }),
+      ]
     ),
   ];
 }
 
-/** Folders recorded as outside every project; a project's own folders are kept on its page under Work. */
+/** Folders mapped to projects or recorded as outside every project; both can be changed here. */
 async function routesSection() {
-  const { routes } = await call("route.list");
+  const [{ routes }, choices] = await Promise.all([call("route.list"), loadChoices()]);
   const edit = (row) =>
     editInSection({
       title: row ? tilde(row.path_prefix) : t("route.new"),
-      fields: [{ name: "path", label: t("route.path"), kind: "folder", value: row ? row.path_prefix : "" }],
+      fields: [
+        { name: "path", label: t("route.path"), kind: "folder", value: row ? row.path_prefix : "" },
+        {
+          name: "project",
+          label: t("route.project"),
+          kind: "select",
+          options: [["", t("route.ignored")], ...choices.projects.map((name) => [name, name])],
+          value: row ? row.project_name || "" : "",
+        },
+      ],
       submit: row ? t("common.save") : t("common.add"),
       done: t("route.saved"),
-      onSubmit: (values) => call("route.save", { route_id: row ? row.route_id : null, path: values.path, project: null }).then(() => ""),
+      onSubmit: (values) =>
+        call("route.save", { route_id: row ? row.route_id : null, path: values.path, project: values.project || null }).then(() => ""),
     });
   const remove = async (row) => {
     const yes = await confirmDialog({ title: t("route.remove_confirm"), lines: [tilde(row.path_prefix)], confirm: t("common.remove"), danger: true });
     if (yes) act(() => call("route.remove", { path: row.path_prefix }), t("route.removed"));
   };
-  const ignored = routes.filter((row) => !row.project_name).sort((a, b) => a.path_prefix.localeCompare(b.path_prefix));
+  const sorted = [...routes].sort((a, b) => a.path_prefix.localeCompare(b.path_prefix));
   return [
     sectionHead(t("settings.routes"), button(t("route.new"), () => edit(null))),
     table(
-      [t("route.path")],
-      ignored,
-      (row) => [[tilde(row.path_prefix), "mono"]],
+      [t("route.path"), t("route.project")],
+      sorted,
+      (row) => [
+        [tilde(row.path_prefix), "mono"],
+        [row.project_name || t("work.folder_ignored"), row.project_name ? "" : "muted"],
+      ],
       (row) => [button(t("common.edit"), () => edit(row), { kind: "quiet small" }), button(t("common.remove"), () => remove(row), { kind: "quiet small danger" })]
     ),
   ];
@@ -500,6 +610,7 @@ function displaySection() {
 const SECTION_VIEWS = {
   health: healthSection,
   missed: missedSection,
+  ledger: ledgerSection,
   bootstrap: async () => bootstrapSection(),
   topics: topicsSection,
   routes: routesSection,

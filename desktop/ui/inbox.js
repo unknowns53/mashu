@@ -1,6 +1,6 @@
 // Inbox: everything waiting for the user's decision, in one list. Candidates are admitted,
-// declined, deferred, or reworded; Memory change proposals applied, declined, or withdrawn;
-// close proposals accepted or dropped.
+// made temporary, declined, deferred, or reworded; Memory change proposals edited, applied,
+// declined, or withdrawn; close proposals accepted, adjusted, or dropped.
 "use strict";
 
 const inbox = {
@@ -11,7 +11,7 @@ const inbox = {
   contentLimit: null, // the Settings screen's limit on one memory body
   includeDeferred: false,
   selected: null,
-  panel: null, // the open inline panel: "admit", "edit", "decline", "defer", "reason", "withdraw"
+  panel: null, // "admit", "to_temporary", "edit", "decline", "defer", "change_edit", "withdraw", "edit_close"
 };
 
 const inboxList = listPane(
@@ -164,6 +164,7 @@ function candidateDetail(row) {
         "div",
         { class: "actions" },
         admit,
+        button(t("candidate.to_temporary"), () => togglePanel("to_temporary")),
         button(t("candidate.edit"), () => togglePanel("edit")),
         h("span", { class: "spacer" }),
         button(t("candidate.defer"), () => togglePanel("defer"), { kind: "quiet" }),
@@ -174,6 +175,7 @@ function candidateDetail(row) {
   }
 
   if (inbox.panel === "admit") nodes.push(admitPanel(row));
+  if (inbox.panel === "to_temporary") nodes.push(candidateToTemporaryPanel(row));
   for (const [name, op, label, done, danger] of [
     ["decline", "review.decline", "candidate.decline_label", "candidate.declined", true],
     ["defer", "review.defer", "candidate.defer_label", "candidate.deferred_done", false],
@@ -206,10 +208,13 @@ function admitPanel(row) {
   loadChoices()
     .then((choices) => {
       const isTopic = (values) => values.delivery === "topic";
+      const isProject = (values) => values.delivery === "project";
+      const initialProjects = row.project_name ? [row.project_name] : [];
       panel.append(
         form({
           fields: [
             { name: "delivery", label: t("delivery.title"), kind: "radio", options: deliveryOptions(), value: row.project_id ? "project" : "always" },
+            { name: "projects", label: t("delivery.areas"), kind: "checks", options: projectChecks(choices), value: initialProjects, show: isProject },
             ...topicFields(choices, "", isTopic),
           ],
           submit: t("candidate.admit"),
@@ -220,6 +225,7 @@ function admitPanel(row) {
                 nomination_id: row.nomination_id,
                 expected_version: row.version,
                 delivery: values.delivery,
+                ...(isProject(values) ? { projects: values.projects } : {}),
                 ...topicArgs(isTopic(values) ? values : {}),
                 conflict_ids: row.blocking_conflict_ids,
               });
@@ -235,14 +241,131 @@ function admitPanel(row) {
   return panel;
 }
 
+function candidateToTemporaryPanel(row) {
+  const panel = h("div", { class: "inline-panel" });
+  loadChoices()
+    .then((choices) => {
+      const initial = row.project_name ? [row.project_name] : [];
+      panel.append(
+        form({
+          fields: [
+            { name: "days", label: t("memory.days"), kind: "number", step: "0.5", value: 7, hint: t("memory.days_hint") },
+            ...temporaryDeliveryFields(choices, initial),
+          ],
+          submit: t("candidate.to_temporary"),
+          onCancel: () => togglePanel("to_temporary"),
+          onSubmit: (values) => {
+            if (!checkTemporaryDelivery(values)) return;
+            act(async () => {
+              const result = await call("review.to_temporary", {
+                nomination_id: row.nomination_id,
+                expected_version: row.version,
+                days: values.days,
+                projects: temporaryProjectsFrom(values),
+              });
+              inbox.panel = null;
+              if (result.changed === "candidate") return t("candidate.changed");
+              return "";
+            }, t("candidate.made_temporary"));
+          },
+        })
+      );
+    })
+    .catch(fail);
+  return panel;
+}
+
 // ---------------------------------------------------------------- Memory changes
+
+function changeEditPanel(row) {
+  const panel = h("div", { class: "inline-panel" });
+  const target = row.target || {};
+  const op = row.operation;
+  loadChoices()
+    .then((choices) => {
+      const fields = [];
+      if (op === "replace") {
+        const currentBody = (row.successor && row.successor.content) || (row.successor_snapshot && row.successor_snapshot.content) || "";
+        fields.push({
+          name: "successor_content",
+          label: t("change.replacement_body"),
+          kind: "area",
+          rows: 3,
+          value: currentBody,
+          max: inbox.contentLimit,
+          big: true,
+        });
+      }
+      if (op !== "redeliver") {
+        const field = op === "restore" ? "restore_reason" : "retire_reason";
+        fields.push({
+          name: "reason",
+          label: t("retire.reason"),
+          kind: "area",
+          rows: 3,
+          value: row[field] || "",
+        });
+      }
+      const editsDelivery = op === "redeliver" || op === "replace";
+      const isTopic = (values) => values.delivery === "topic";
+      const isProject = (values) => values.delivery === "project";
+      if (editsDelivery) {
+        const initialDelivery = row.successor_delivery || target.delivery || "always";
+        const initialProject = row.successor_project_name || (target.project_names && target.project_names[0]) || (choices.projects[0] || "");
+        const initialTopic = row.successor_topic_id || (row.successor_topic_name && row.successor_topic_trigger ? "__new" : "");
+        fields.push(
+          { name: "delivery", label: t("delivery.title"), kind: "radio", options: deliveryOptions(), value: initialDelivery },
+          { name: "project", label: t("delivery.area"), kind: "select", options: choices.projects.map((name) => [name, name]), value: initialProject, show: isProject },
+          ...topicFields(choices, initialTopic, isTopic)
+        );
+        if (initialTopic === "__new") {
+          for (const field of fields) {
+            if (field.name === "new_topic_name") field.value = row.successor_topic_name || "";
+            if (field.name === "new_topic_trigger") field.value = row.successor_topic_trigger || "";
+            if (field.name === "new_topic_project") field.value = row.successor_project_name || "";
+          }
+        }
+      }
+      panel.append(
+        form({
+          fields,
+          onCancel: () => togglePanel("change_edit"),
+          onSubmit: (values) =>
+            act(async () => {
+              const args = {
+                change_id: row.change_id,
+                version: row.version,
+                target_revision_id: target.current_revision_id,
+              };
+              if (op === "replace") args.successor_content = values.successor_content;
+              if (op !== "redeliver") args.reason = values.reason;
+              if (editsDelivery) {
+                args.delivery = values.delivery;
+                if (isProject(values)) args.project = values.project;
+                Object.assign(args, topicArgs(isTopic(values) ? values : {}));
+              }
+              await call("change.edit", args);
+              inbox.panel = null;
+            }, t("change.saved")),
+        })
+      );
+    })
+    .catch(fail);
+  return panel;
+}
 
 function changeDetail(row) {
   const target = row.target || {};
   const nodes = [
     meta(idTag(row.change_id), t("change.meta", { op: named("change.op", row.operation), when: when(row.proposed_at) }), who(row.proposed_by)),
     h("p", { class: "rule-text", text: target.content }),
-    h("p", { class: "sub", text: deliveryText(target) }),
+    h(
+      "p",
+      { class: "sub" },
+      deliveryText(target),
+      " ",
+      button(t("change.open_target"), () => openMemory(row.target_memory_id, target.status).catch(fail), { kind: "quiet small" })
+    ),
   ];
   if (target.status === "retired" && target.retirement) {
     const retirement = target.retirement;
@@ -268,12 +391,18 @@ function changeDetail(row) {
     { kind: "primary" }
   );
   const gate = readGate(row.conflicts || [], row.blocking_conflict_ids, apply);
+  const editLabel =
+    row.operation === "redeliver"
+      ? t("change.edit_delivery")
+      : row.operation === "replace"
+        ? t("change.edit")
+        : t("change.edit_reason");
   nodes.push(
     h(
       "div",
       { class: "actions" },
       apply,
-      row.operation === "redeliver" ? null : button(t("change.edit_reason"), () => togglePanel("reason")),
+      button(editLabel, () => togglePanel("change_edit")),
       h("span", { class: "spacer" }),
       button(t("change.withdraw"), () => togglePanel("withdraw"), { kind: "quiet" }),
       button(t("change.decline"), () => togglePanel("decline"), { kind: "danger quiet" })
@@ -281,29 +410,7 @@ function changeDetail(row) {
   );
   if (gate) nodes.push(gate);
 
-  if (inbox.panel === "reason") {
-    const field = row.operation === "restore" ? "restore_reason" : "retire_reason";
-    nodes.push(
-      h(
-        "div",
-        { class: "inline-panel" },
-        form({
-          fields: [{ name: "reason", label: t("retire.reason"), kind: "area", rows: 3, value: row[field] || "" }],
-          onCancel: () => togglePanel("reason"),
-          onSubmit: (values) =>
-            act(async () => {
-              await call("change.reason", {
-                change_id: row.change_id,
-                version: row.version,
-                target_revision_id: target.current_revision_id,
-                reason: values.reason,
-              });
-              inbox.panel = null;
-            }, t("change.reason_saved")),
-        })
-      )
-    );
-  }
+  if (inbox.panel === "change_edit") nodes.push(changeEditPanel(row));
   for (const [name, op, done, danger] of [
     ["decline", "change.decline", "change.declined", true],
     ["withdraw", "change.withdraw", "change.withdrawn", false],
@@ -373,6 +480,41 @@ function changeDetail(row) {
 
 // ---------------------------------------------------------------- close proposals
 
+function closeEditPanel(row) {
+  const { task, proposal } = row;
+  return h(
+    "div",
+    { class: "inline-panel" },
+    form({
+      fields: [
+        {
+          name: "outcome",
+          label: t("close.outcome"),
+          kind: "radio",
+          value: proposal.outcome,
+          options: ["completed", "abandoned", "superseded"].map((outcome) => [outcome, named("close.outcome", outcome)]),
+        },
+        {
+          name: "reason",
+          label: t("common.reason"),
+          kind: "area",
+          rows: 2,
+          value: proposal.reason || "",
+          hint: t("work.close_reason_hint"),
+        },
+      ],
+      submit: t("work.close"),
+      kind: "danger solid",
+      onCancel: () => togglePanel("edit_close"),
+      onSubmit: (values) =>
+        act(async () => {
+          await call("task.close", { task_id: task.task_id, outcome: values.outcome, reason: values.reason });
+          inbox.panel = null;
+        }, t("work.closed")),
+    })
+  );
+}
+
 function closeDetail(row) {
   const { task, state, proposal } = row;
   const accept = button(t("close.accept"), () =>
@@ -404,13 +546,17 @@ function closeDetail(row) {
       "div",
       { class: "actions" },
       accept,
+      button(t("close.edit_close"), () => togglePanel("edit_close")),
       button(
         t("close.keep"),
         () => act(() => call("task.keep", { task_id: task.task_id }), t("close.kept")),
         { title: t("close.keep_title") }
-      )
+      ),
+      h("span", { class: "spacer" }),
+      button(t("close.open_task"), () => openTask(task.task_id, row.activity === "dormant" ? "dormant" : "active").catch(fail), { kind: "quiet" })
     ),
     gate,
+    inbox.panel === "edit_close" ? closeEditPanel(row) : null,
     section(
       t("work.state"),
       null,
@@ -443,7 +589,7 @@ page("inbox", {
     ]);
     inbox.candidates = queue.candidates;
     inbox.hiddenDeferred = queue.hidden_deferred || 0;
-    inbox.contentLimit = queue.content_limit;
+    inbox.contentLimit = queue.content_limit || changeList.content_limit;
     inbox.changes = changeList.changes;
     inbox.closes = [...active.tasks, ...dormant.tasks].filter((row) => row.proposal);
     const ids = inboxItems().map((item) => item.id);
@@ -454,6 +600,11 @@ page("inbox", {
   badge: (status) => status.pending_ready + status.memory_changes + status.close_proposals.length,
   keys: {
     a: () => inboxItem() && inboxItem().type === "candidate" && togglePanel("admit"),
-    e: () => inboxItem() && inboxItem().type === "candidate" && togglePanel("edit"),
+    e: () => {
+      const item = inboxItem();
+      if (!item) return;
+      if (item.type === "candidate") togglePanel("edit");
+      else if (item.type === "change") togglePanel("change_edit");
+    },
   },
 });

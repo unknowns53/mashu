@@ -227,7 +227,7 @@ topic は本文を pull で届ける。検索による pull が起動されな�
 guard は action を持つ topic である。独立した delivery にはしない。一つの種類の作業に規則を絞るという点で topic と同じことをするので、別の仕組みにすると、見出しも一覧も持たないぶん読みにくい第二の方法になるからである。
 
 - topic は action を一つ持てる（例 `delegate`）。PreToolUse フックが tool call を action に対応づけ（Agent / Task は組み込みで `delegate`、それ以外はインストールごとの設定）、`mashu guard <action>` でその action に結びついた topic の active な規則を読み、呼び出しの `additionalContext` として足す。呼び出しは止めない。委譲のたびに止まる手間が、規則で防げる損より大きいからである。文面は topic の名前を示し、topic に source（5 節）があれば規則の後に `Source: ...` の一行を添える。フックは `mashu guard --json` の各行の本文を一行ずつ並べるので、source は memory を持たない最後の行として返す
-- 一つの action に結びつく open な topic は一つだけで、DB の部分 unique index が保証する。action は topic の編集でだけ設定し、作成の手順には足さない
+- 一つの action に結びつく open な topic は一つだけで、DB の部分 unique index が保証する。デスクトップアプリでは topic の作成・編集のどちらでも設定できる
 - action を持つ topic も、見出しは他の topic と同じく bootstrap に載る。作業に入るときに読まれる経路はそのまま残り、guard はその上に重なる
 - 発火は 1 セッションにつき行為ごとに一度（compaction のたびに改めて一度）。発火は topic の ID とともに event_log に残る
 - `guard_followed` の event は、呼び出しを止めていた hook が書いた既存の行だけがある。拒否の次の最初の呼び出しが同じ tool_input だったか、変えたかの記録で、`mashu status` の変わった割合はそこから出る
@@ -239,9 +239,9 @@ bootstrap は「セッションの前提」を、guard は「判断の直前」�
 
 期限つきの条件（今週のメンテナンス、明日リセットされる quota）は、書いた時点で失効時刻が分かっており、Review も retire も要らず、期限で勝手に消える。window の上限は 14 日。それより長い主張は期限つきの顔をした恒久の主張なので、通常の実証経路へ回す。
 
-Temporary Context は User だけが CLI / TUI から作る。Agent が書く経路は無い。開始時点で expiry を指定した条件は、期限到来時に追加承認なしで配信対象から外れる。Memory 専用の expiry や汎用条件 engine は作らない。
+Temporary Context は User だけが CLI / TUI / デスクトップアプリから作る。Agent が書く経路は無い。project 規則と同じく、全セッション（`project_id IS NULL`）または複数の Project（`temporary_context.project_id` と `temporary_context_project`）へ届けられ、それぞれの Project の Temporary 容量に数える。期限の変更は変更時点から 14 日以内の範囲で行える。開始時点で expiry を指定した条件は、期限到来時に追加承認なしで配信対象から外れる。Memory 専用の expiry や汎用条件 engine は作らない。
 
-Memories TUI の `c` は、active な always / project Memory と Temporary Context を相互変換する。Temporary Context は Project を一つしか持たないので、複数の Project に届く Memory は変換せずに拒否する。Memory からの変換では期限を必須とし、元の Memory を `relocated` として移動先 ID とともに記録してから、本文と Project を保った Temporary Context を作る。逆変換では Temporary Context をその時点で終了し、同じ本文と Project の active Memory を作る。無関係な withdrawn / legacy conflict は上書きせず、容量の判定が拒否した場合は元の行を有効なまま残す。topic は、発動条件という配送条件を Temporary Context へ移せないため対象外とする。
+Memories TUI の `c` とデスクトップアプリは、active な Memory と Temporary Context を相互変換する。Memory からの変換では期限を必須とし、元の Memory を `relocated` として移動先 ID とともに記録してから、本文と Project（複数 Project を含む）を保った Temporary Context を作る。デスクトップアプリでは変換先 Project を選び直せ、topic Memory も配信先を指定して変換できる。逆変換では Temporary Context をその時点で終了し、同じ本文の active Memory を作る（デスクトップアプリでは配信先・topic・理由も選べる）。無関係な withdrawn / legacy conflict は上書きせず、容量の判定が拒否した場合は元の行を有効なまま残す。TUI の無指定変換では、topic は発動条件を移せないため対象外とする。
 
 同じ画面の `r` は、選んだ Temporary Context を確認のうえその時点で終了する。誤って登録した条件を、期限まで配信させ続けないためである。行は削除せず、期限到来と同じく `expires_at` を現在時刻にして配信対象から外し、`temporary_ended` の event を残す。
 
