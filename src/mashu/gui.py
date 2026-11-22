@@ -595,7 +595,7 @@ def _task_detail(cur: psycopg.Cursor, task_id: UUID) -> tuple[str, str]:
         empty="no checkpoints",
     )
     ruling_table = _table(
-        ("when", "decision", "quote", "withdrawn with"),
+        ("when", "decision", "quote", "outcome"),
         (
             *(
                 [
@@ -611,7 +611,31 @@ def _task_detail(cur: psycopg.Cursor, task_id: UUID) -> tuple[str, str]:
                     _td(_e(item["created_at"]), "nowrap"),
                     _td(_e(item["ruling"]), "text"),
                     _td(_e(item["user_instruction"]), "text"),
-                    _td(_e(item["withdrawn_because"]), "text"),
+                    _td(
+                        _e(
+                            f"settled in {item['settled_in']}"
+                            + (f" ({item['settled_note']})" if item.get("settled_note") else "")
+                        ),
+                        "text",
+                    ),
+                ]
+                for item in row.get("settled_rulings") or []
+            ),
+            *(
+                [
+                    _td(_e(item["created_at"]), "nowrap"),
+                    _td(_e(item["ruling"]), "text"),
+                    _td(_e(item["user_instruction"]), "text"),
+                    _td(_e(f"superseded by {str(item['superseded_by'])[:8]}"), "text"),
+                ]
+                for item in row.get("superseded_rulings") or []
+            ),
+            *(
+                [
+                    _td(_e(item["created_at"]), "nowrap"),
+                    _td(_e(item["ruling"]), "text"),
+                    _td(_e(item["user_instruction"]), "text"),
+                    _td(_e(f"withdrawn: {item['withdrawn_because']}"), "text"),
                 ]
                 for item in row["withdrawn_rulings"]
             ),

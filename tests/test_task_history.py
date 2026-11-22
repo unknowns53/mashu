@@ -70,6 +70,8 @@ def _history_counts(cur):
         "decision",
         "ruling",
         "ruling_withdrawal",
+        "ruling_settlement",
+        "ruling_supersession",
         "artifact_reference",
     ):
         cur.execute(f"SELECT count(*) AS n FROM {table}")
@@ -336,19 +338,180 @@ def test_attempts_and_decisions_stay_as_a_record_task_get_only_counts(cur, task,
 
 
 def test_rulings_are_searched_with_the_users_words_those_in_force_first(cur, task, task_id):
-    held = _rule(cur, task_id, 1)[0]
+    held = _rule(cur, task_id, 3)
     checkpoint(
         cur,
         tasks.task_get(cur, task_id),
-        rulings=[{"ruling": "ruling kept", "user_instruction": "rule kept"}],
-        withdraw_rulings=[{"ruling_id": str(held["ruling_id"]), "user_instruction": "drop it"}],
+        rulings=[
+            {
+                "ruling": "ruling kept",
+                "user_instruction": "rule kept",
+                "supersedes": [str(held[2]["ruling_id"])],
+            }
+        ],
+        withdraw_rulings=[{"ruling_id": str(held[0]["ruling_id"]), "user_instruction": "drop it"}],
+        settle_rulings=[{"ruling_id": str(held[1]["ruling_id"]), "settled_in": "docs/spec.md"}],
     )
     found = tasks.ruling_search(cur, "rule")
-    assert [(row["ruling"], row["withdrawn"]) for row in found] == [
-        ("ruling kept", False),
-        ("ruling 0", True),
+    assert [(row["ruling"], row["status"], row["withdrawn"]) for row in found] == [
+        ("ruling kept", "in_force", False),
+        ("ruling 2", "superseded", False),
+        ("ruling 1", "settled", False),
+        ("ruling 0", "withdrawn", True),
     ]
     assert found[0]["user_said"] == "rule kept"
+    assert found[1]["superseded_by"] is not None
+    assert found[2]["settled_in"] == "docs/spec.md"
+
+
+def test_settling_a_ruling_frees_a_slot_records_where_it_lives_and_keeps_home_paths_relative(
+    cur, task, task_id
+):
+    settings.set_limits(cur, {"ruling_count": 2}, actor="user")
+    held = _rule(cur, task_id, 2)
+    home = str(Path.home())
+
+    settled = checkpoint(
+        cur,
+        tasks.task_get(cur, task_id),
+        rulings=[{"ruling": "ruling after settle", "user_instruction": "これも決めた"}],
+        settle_rulings=[
+            {
+                "ruling_id": str(held[0]["ruling_id"]),
+                "settled_in": f"{home}/docs/design.md",
+                "note": "written into design doc",
+            }
+        ],
+    )
+    assert settled["settled_rulings"][0]["settled_in"] == "~/docs/design.md"
+    assert settled["settled_rulings"][0]["note"] == "written into design doc"
+    assert task_history.ruling_count(cur, [task_id])[task_id] == 2
+    assert settled["state"]["rulings_count"] == 2
+
+    expanded = task_history.expanded_task(cur, task_id, withdrawn_rulings=True)
+    assert [r["ruling"] for r in expanded["rulings"]] == ["ruling after settle", "ruling 1"]
+    assert len(expanded["settled_rulings"]) == 1
+    assert expanded["settled_rulings"][0]["settled_in"] == "~/docs/design.md"
+    assert expanded["settled_rulings"][0]["settled_note"] == "written into design doc"
+
+    cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'ruling_settled'")
+    assert cur.fetchone()["n"] == 1
+
+
+def test_superseding_rulings_links_successor_and_keeps_cap_without_withdrawal_words(
+    cur, task, task_id
+):
+    settings.set_limits(cur, {"ruling_count": 2}, actor="user")
+    held = _rule(cur, task_id, 2)
+
+    updated = checkpoint(
+        cur,
+        tasks.task_get(cur, task_id),
+        rulings=[
+            {
+                "ruling": "merged target to end of April",
+                "user_instruction": "4月末まで広げて",
+                "supersedes": [str(held[0]["ruling_id"]), str(held[1]["ruling_id"])],
+            }
+        ],
+    )
+    successor_id = updated["rulings"][0]["ruling_id"]
+    assert task_history.ruling_count(cur, [task_id])[task_id] == 1
+    assert len(updated["superseded_rulings"]) == 2
+
+    expanded = task_history.expanded_task(cur, task_id, withdrawn_rulings=True)
+    assert [r["ruling_id"] for r in expanded["rulings"]] == [successor_id]
+    assert {r["ruling_id"] for r in expanded["superseded_rulings"]} == {
+        held[0]["ruling_id"],
+        held[1]["ruling_id"],
+    }
+    assert all(r["superseded_by"] == successor_id for r in expanded["superseded_rulings"])
+
+    cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'ruling_superseded'")
+    assert cur.fetchone()["n"] == 2
+
+
+def test_a_ruling_ends_at_most_once_across_all_three_outcomes_and_only_within_its_task(
+    cur, task, task_id
+):
+    import psycopg
+
+    held = _rule(cur, task_id, 2)
+    other = new_task(cur, "different task", "history")
+
+    with pytest.raises(MashuError, match="another task"):
+        checkpoint(
+            cur,
+            other,
+            settle_rulings=[{"ruling_id": str(held[0]["ruling_id"]), "settled_in": "commit abc"}],
+        )
+    with pytest.raises(MashuError, match="another task"):
+        checkpoint(
+            cur,
+            other,
+            rulings=[
+                {
+                    "ruling": "cross-task",
+                    "user_instruction": "別タスク",
+                    "supersedes": [str(held[0]["ruling_id"])],
+                }
+            ],
+        )
+    with pytest.raises(MashuError, match="ended more than once"):
+        checkpoint(
+            cur,
+            tasks.task_get(cur, task_id),
+            withdraw_rulings=[{"ruling_id": str(held[0]["ruling_id"]), "user_instruction": "drop"}],
+            settle_rulings=[{"ruling_id": str(held[0]["ruling_id"]), "settled_in": "commit abc"}],
+        )
+
+    checkpoint(
+        cur,
+        tasks.task_get(cur, task_id),
+        settle_rulings=[{"ruling_id": str(held[0]["ruling_id"]), "settled_in": "commit abc"}],
+    )
+    with pytest.raises(MashuError, match="already settled"):
+        checkpoint(
+            cur,
+            tasks.task_get(cur, task_id),
+            withdraw_rulings=[{"ruling_id": str(held[0]["ruling_id"]), "user_instruction": "drop"}],
+        )
+    with pytest.raises(MashuError, match="already settled"):
+        checkpoint(
+            cur,
+            tasks.task_get(cur, task_id),
+            rulings=[
+                {
+                    "ruling": "try again",
+                    "user_instruction": "上書き",
+                    "supersedes": [str(held[0]["ruling_id"])],
+                }
+            ],
+        )
+
+    # Even direct SQL inserts cannot end an already-settled ruling a second time.
+    with pytest.raises(psycopg.DatabaseError, match="already settled"):
+        with cur.connection.transaction():
+            cur.execute(
+                "INSERT INTO ruling_withdrawal (ruling_id, user_instruction, created_by) "
+                "VALUES (%s, 'bypass', 'agent')",
+                (held[0]["ruling_id"],),
+            )
+
+
+def test_one_checkpoint_carries_at_most_its_share_of_settlements(cur, task, task_id):
+    most = task_history.CHECKPOINT_ITEM_MAX["settle_rulings"]
+    with pytest.raises(MalformedRequestError) as refused:
+        checkpoint(
+            cur,
+            task,
+            settle_rulings=[
+                {"ruling_id": str(uuid4()), "settled_in": f"commit {n}"} for n in range(most + 1)
+            ],
+        )
+    assert refused.value.over_limit == [
+        {"field": "settle_rulings", "limit": most, "actual": most + 1, "unit": "items"}
+    ]
 
 
 def test_close_freezes_the_last_state_with_the_closing_actor(cur, task, task_id):

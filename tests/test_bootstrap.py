@@ -240,7 +240,10 @@ def test_an_opening_and_the_hook_reader_survive_pending_topic_migrations(cur, pr
     ]
 
 
-@pytest.mark.parametrize("missing", ["0004_project_state.sql", "0007_close_proposal.sql"])
+@pytest.mark.parametrize(
+    "missing",
+    ["0004_project_state.sql", "0007_close_proposal.sql", "0027_ruling_outcomes.sql"],
+)
 def test_an_opening_survives_pending_task_migrations(old_store, missing):
     from mashu import db
 

@@ -615,6 +615,45 @@ def test_tasks_rulings_artifacts_topics_and_pain_ledger_work_through_desktop(dsn
         user_instruction="no longer applies",
     )
     assert withdrawn["ok"]
+    updated_at = withdrawn["result"]["state"]["updated_at"]
+
+    ruled2 = ask(
+        dsn,
+        "task.ruling_add",
+        task_id=task_id,
+        expect_updated_at=updated_at,
+        ruling="Start with one page",
+    )
+    assert ruled2["ok"]
+    ruling2_id = ruled2["result"]["rulings"][0]["ruling_id"]
+    updated_at = ruled2["result"]["state"]["updated_at"]
+
+    ruled3 = ask(
+        dsn,
+        "task.ruling_add",
+        task_id=task_id,
+        expect_updated_at=updated_at,
+        ruling="Cover every page",
+        supersedes=[ruling2_id],
+    )
+    assert ruled3["ok"]
+    ruling3_id = ruled3["result"]["rulings"][0]["ruling_id"]
+    updated_at = ruled3["result"]["state"]["updated_at"]
+
+    settled = ask(
+        dsn,
+        "task.ruling_settle",
+        task_id=task_id,
+        expect_updated_at=updated_at,
+        ruling_id=ruling3_id,
+        settled_in="desktop/ui/work.js",
+        note="wired in work page",
+    )
+    assert settled["ok"]
+    listed_tasks = ask(dsn, "work.tasks", activity="active")["result"]["tasks"]
+    assert listed_tasks[0]["rulings"] == []
+    assert listed_tasks[0]["settled_rulings"][0]["settled_in"] == "desktop/ui/work.js"
+    assert listed_tasks[0]["superseded_rulings"][0]["ruling_id"] == ruling2_id
 
     topic = ask(
         dsn,

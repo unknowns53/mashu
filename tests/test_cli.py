@@ -543,15 +543,30 @@ def test_the_history_and_the_artifact_locators_are_visible_on_one_task(run, comm
     with db.transaction(committing_dsn) as cur:
         task_id = cli._task_ref(cur, short)
         state = tasks.task_get(cur, task_id)["state"]
-        task_history.checkpoint(
+        written = task_history.checkpoint(
             cur,
             task_id,
             actor="agent",
             what_changed=CHANGED,
             expect_updated_at=state["updated_at"],
             status_text=CHANGED,
-            rulings=[{"ruling": "count every seed", "user_instruction": "全部数えて"}],
+            rulings=[
+                {"ruling": "count every seed", "user_instruction": "全部数えて"},
+                {"ruling": "write the count to the manifest", "user_instruction": "台帳にも書いて"},
+            ],
             artifacts=[{"kind": "git_commit", "locator": LOCATOR, "label": "the manifest"}],
+        )
+        task_history.checkpoint(
+            cur,
+            task_id,
+            actor="agent",
+            expect_updated_at=written["state"]["updated_at"],
+            settle_rulings=[
+                {
+                    "ruling_id": written["rulings"][1]["ruling_id"],
+                    "settled_in": "docs/manifest.md",
+                }
+            ],
         )
         # Attempts and decisions are no longer written; rows from before stay readable here.
         cur.execute(
@@ -568,6 +583,7 @@ def test_the_history_and_the_artifact_locators_are_visible_on_one_task(run, comm
     code, out, _ = run("task", "show", short)
     assert code == 0
     assert "count every seed" in out and "quote       全部数えて" in out
+    assert "settled  write the count to the manifest" in out and "docs/manifest.md" in out
     assert ATTEMPT in out and "the count came out short" in out
     assert DECISION in out and "a half-run must not look whole" in out
     assert CHANGED in out

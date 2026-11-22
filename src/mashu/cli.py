@@ -1465,6 +1465,24 @@ def cmd_task_show(args: argparse.Namespace) -> int:
     for ruling in row["rulings"]:
         print(f"  {_short(ruling['ruling_id'])}  {_date(ruling['on'])}  {ruling['ruling']}")
         print(f"    quote       {ruling['user_said']}")
+    for ruling in row.get("settled_rulings") or []:
+        print(
+            f"  {_short(ruling['ruling_id'])}  {_date(ruling['created_at'])}  settled  "
+            f"{ruling['ruling']}"
+        )
+        print(f"    quote       {ruling['user_instruction']}")
+        note = f"  ({ruling['settled_note']})" if ruling.get("settled_note") else ""
+        print(f"    settled in  {_date(ruling['settled_at'])}  {ruling['settled_in']}{note}")
+    for ruling in row.get("superseded_rulings") or []:
+        print(
+            f"  {_short(ruling['ruling_id'])}  {_date(ruling['created_at'])}  superseded  "
+            f"{ruling['ruling']}"
+        )
+        print(f"    quote       {ruling['user_instruction']}")
+        print(
+            f"    superseded  {_date(ruling['superseded_at'])}  "
+            f"by {_short(ruling['superseded_by'])}"
+        )
     for ruling in row["withdrawn_rulings"]:
         print(
             f"  {_short(ruling['ruling_id'])}  {_date(ruling['created_at'])}  withdrawn  "

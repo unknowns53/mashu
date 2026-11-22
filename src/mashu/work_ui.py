@@ -114,6 +114,8 @@ def _matches_task(row: dict[str, Any], query: str) -> bool:
     ]
     for history in (
         "rulings",
+        "settled_rulings",
+        "superseded_rulings",
         "withdrawn_rulings",
         "attempts",
         "decisions",
@@ -215,14 +217,31 @@ def _history_lines(row: dict[str, Any]) -> list[str]:
     """All immutable history, in the same groups as `mashu task show`."""
     lines: list[str] = []
     rulings = row.get("rulings") or []
+    settled = row.get("settled_rulings") or []
+    superseded = row.get("superseded_rulings") or []
     withdrawn = row.get("withdrawn_rulings") or []
-    if rulings or withdrawn:
+    if rulings or settled or superseded or withdrawn:
         lines.append(screen.accent(f"  User decisions ({len(rulings)})"))
         for item in rulings:
             dated = f"{_short(item['ruling_id'])}  {_date(item.get('on'))}"
             lines.append(f"    {screen.dim(dated)}")
             lines.extend(_field("decision", item.get("ruling"), _ENTRY, 9))
             lines.extend(_field("quote", item.get("user_said"), _ENTRY, 9))
+        for item in settled:
+            dated = f"{_short(item['ruling_id'])}  {_date(item.get('created_at'))}  settled"
+            lines.append(f"    {screen.dim(dated)}")
+            lines.extend(_field("decision", item.get("ruling"), _ENTRY, 9))
+            lines.extend(_field("quote", item.get("user_instruction"), _ENTRY, 9))
+            where = item.get("settled_in") or "-"
+            if item.get("settled_note"):
+                where = f"{where} ({item['settled_note']})"
+            lines.extend(_field("settled", where, _ENTRY, 9))
+        for item in superseded:
+            dated = f"{_short(item['ruling_id'])}  {_date(item.get('created_at'))}  superseded"
+            lines.append(f"    {screen.dim(dated)}")
+            lines.extend(_field("decision", item.get("ruling"), _ENTRY, 9))
+            lines.extend(_field("quote", item.get("user_instruction"), _ENTRY, 9))
+            lines.extend(_field("by", _short(item.get("superseded_by")), _ENTRY, 9))
         for item in withdrawn:
             dated = f"{_short(item['ruling_id'])}  {_date(item.get('created_at'))}  withdrawn"
             lines.append(f"    {screen.dim(dated)}")

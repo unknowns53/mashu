@@ -48,7 +48,17 @@ def test_the_history_refuses_to_be_rewritten_or_deleted(seeded, table, column):
         seeded.execute(f"DELETE FROM {table}")
 
 
-@pytest.mark.parametrize("table", [*(row[0] for row in HISTORY), "decision_supersession"])
+@pytest.mark.parametrize(
+    "table",
+    [
+        *(row[0] for row in HISTORY),
+        "decision_supersession",
+        "ruling",
+        "ruling_withdrawal",
+        "ruling_settlement",
+        "ruling_supersession",
+    ],
+)
 def test_the_task_history_refuses_to_be_emptied(cur, table):
     # CASCADE also empties the tables that reference this one, which a bare TRUNCATE of
     # decision refuses on its foreign keys before any trigger runs.
