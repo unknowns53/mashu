@@ -55,7 +55,9 @@ def active_states(cur: psycopg.Cursor, project_id: UUID | None = None) -> list[d
     cur.execute(
         "SELECT to_regclass('task') IS NOT NULL AS tasks, "
         "to_regclass('task_close_proposal') IS NOT NULL AS proposals, "
-        "to_regclass('ruling') IS NOT NULL AS rulings"
+        "to_regclass('ruling') IS NOT NULL AS rulings, "
+        "to_regclass('ruling_settlement') IS NOT NULL "
+        "AND to_regclass('ruling_supersession') IS NOT NULL AS ruling_outcomes"
     )
     available = cur.fetchone()
     if not available["tasks"]:
@@ -65,6 +67,7 @@ def active_states(cur: psycopg.Cursor, project_id: UUID | None = None) -> list[d
         activity="active",
         include_proposals=available["proposals"],
         include_rulings=available["rulings"],
+        include_ruling_outcomes=available["ruling_outcomes"],
     )
     # A task reaches only the sessions of its own project; an unrouted session receives none.
     if project_id is None:

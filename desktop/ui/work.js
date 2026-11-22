@@ -83,7 +83,20 @@ function shownWork() {
     work.view === "projects"
       ? work.rows.filter((row) => matches(work.query, row.project_id, row.name, row.summary, ...row.folders.map(tilde)))
       : work.rows.filter((row) =>
-          matches(work.query, row.task.task_id, row.task.name, row.task.project_name, row.state, row.rulings, row.withdrawn_rulings, row.decisions, row.attempts, row.artifacts)
+          matches(
+            work.query,
+            row.task.task_id,
+            row.task.name,
+            row.task.project_name,
+            row.state,
+            row.rulings,
+            row.settled_rulings,
+            row.superseded_rulings,
+            row.withdrawn_rulings,
+            row.decisions,
+            row.attempts,
+            row.artifacts
+          )
         );
   const key = [work.view, workSort.state.key, workSort.state.dir, work.query].join("\n");
   return workOrder.place(sortRows(found, workSort.state, workSortValue), workId, key);
@@ -318,11 +331,15 @@ function addArtifactPanel(row) {
 
 function rulingsSection(row) {
   const rulings = row.rulings || [];
+  const settled = row.settled_rulings || [];
+  const superseded = row.superseded_rulings || [];
   const withdrawn = row.withdrawn_rulings || [];
   const open = row.task.status !== "closed";
   const addBtn = open ? button(t("work.ruling_add"), () => workTogglePanel("add_ruling"), { kind: "quiet small" }) : null;
   const withdrawKey = (id) => `withdraw:${id}`;
+  const settleKey = (id) => `settle:${id}`;
   const activeWithdrawal = rulings.find((item) => work.panel === withdrawKey(item.ruling_id));
+  const activeSettlement = rulings.find((item) => work.panel === settleKey(item.ruling_id));
   return sectionWithAction(
     t("work.rulings"),
     rulings.length,
@@ -334,12 +351,38 @@ function rulingsSection(row) {
             "div",
             { class: "entry-head" },
             h("span", { class: "when", text: day(item.on) }),
+            button(t("work.ruling_settle"), () => workTogglePanel(settleKey(item.ruling_id)), { kind: "quiet small" }),
             button(t("work.ruling_withdraw"), () => workTogglePanel(withdrawKey(item.ruling_id)), { kind: "quiet small danger" })
           )
         : day(item.on),
       item.ruling,
       [t("work.user_said"), item.user_said],
     ]),
+    activeSettlement
+      ? h(
+          "div",
+          { class: "inline-panel" },
+          form({
+            fields: [
+              { name: "settled_in", label: t("work.ruling_settled_in"), max: 500 },
+              { name: "note", label: t("work.ruling_settled_note"), max: 300 },
+            ],
+            submit: t("work.ruling_settle"),
+            onCancel: () => workTogglePanel(settleKey(activeSettlement.ruling_id)),
+            onSubmit: (values) =>
+              act(async () => {
+                await call("task.ruling_settle", {
+                  task_id: row.task.task_id,
+                  expect_updated_at: row.state.updated_at,
+                  ruling_id: activeSettlement.ruling_id,
+                  settled_in: values.settled_in,
+                  note: values.note,
+                });
+                work.panel = null;
+              }, t("work.ruling_settled")),
+          })
+        )
+      : null,
     activeWithdrawal
       ? reasonPanel({
           label: t("work.ruling_withdraw_reason"),
@@ -357,6 +400,40 @@ function rulingsSection(row) {
               work.panel = null;
             }, t("work.ruling_withdrawn")),
         })
+      : null,
+    settled.length
+      ? h(
+          "details",
+          { class: "more" },
+          h("summary", { text: t("work.rulings_settled", { n: settled.length }) }),
+          entries(
+            settled,
+            (item) => [
+              day(item.created_at),
+              item.ruling,
+              [t("work.user_said"), item.user_instruction],
+              [t("work.settled_in"), item.settled_note ? `${item.settled_in} (${item.settled_note})` : item.settled_in],
+            ],
+            { old: () => true }
+          )
+        )
+      : null,
+    superseded.length
+      ? h(
+          "details",
+          { class: "more" },
+          h("summary", { text: t("work.rulings_superseded", { n: superseded.length }) }),
+          entries(
+            superseded,
+            (item) => [
+              day(item.created_at),
+              item.ruling,
+              [t("work.user_said"), item.user_instruction],
+              [t("work.superseded_by"), String(item.superseded_by || "").slice(0, 8)],
+            ],
+            { old: () => true }
+          )
+        )
       : null,
     withdrawn.length
       ? h(

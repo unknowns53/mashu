@@ -56,7 +56,7 @@ Mashu
 | 更新 | 稀 | 頻繁 |
 | 古くなることへの対策 | 入口を絞る | lease による退場 |
 | bootstrap | 全量 push | active Task の索引 card のみ。Current State 全文は `task_get` |
-| 履歴 | revision | ruling と取り下げ、close 時の checkpoint |
+| 履歴 | revision | ruling と終了（定着・上書き・取り下げ）、close 時の checkpoint |
 | 終了 | retire / replace / restore。理由と retire の種類（`retirement_kind`）を記録 | close（User）/ dormant（lease） |
 
 Project State から Memory への昇格経路は作らない。作業中に恒久規則が見つかったなら、それは通常どおり `pain_report` の実証経路か、User の明示指示による `memory_admit` を通る。
@@ -152,19 +152,25 @@ MCP で全文の state を返すのは `task_get` だけである。検索結果
 Task が Current State のほかに次のセッションへ渡すのは、User がその作業について決めたこと、退けたことだけである。
 
 ```text
-ruling:            task_id / ruling / user_instruction (300) / created_at / created_by
-ruling_withdrawal: ruling_id / user_instruction (300) / created_at / created_by
+ruling:              task_id / ruling / user_instruction (300) / created_at / created_by
+ruling_withdrawal:   ruling_id / user_instruction (300) / created_at / created_by
+ruling_settlement:   ruling_id / settled_in (500) / note (300) / created_at / created_by
+ruling_supersession: ruling_id / supersedes_id / created_at / created_by
 ```
 
 `ruling` は Agent が User の決定を書き直した文、`user_instruction` は User の言葉の短い原文で、どちらも必須である。原文は Memory の `user_instruction` と同じく監査のための記録で、server は真正性を認証しない（3.1 節）。Agent 自身の判断は ruling にならず、置き換え式の approach に書く。
 
 **なぜ Agent に追記させないか。**Agent が試行（attempt）と判断（decision）を承認なしに追記し、有効な decision を毎回 `task_get` で返す形では、次のことが起きる。Memory の流入は User が一件ずつ通すので User の速さで頭打ちになるが、Task への流入は書き手の Agent が「次に要るか」を自分で判定するので、測定を回す Task では一日に十数件ずつ積もり、User が読んで裁ける量を超えた。件数の上限を掛けても、何を外すかは書き手が決めるので、Agent は関係のない古い決定を置き換えて枠を空け、1 件に何件分も詰め込んだ。さらに、Agent が自分で決めた測定の条件が User の決定と同じ「有効な決定」の形で返り、次のセッションはそれを合意済みの仕様として読んだ。一方で、試行の記録は要る場面で読まれず、Agent はセッションログを読みに行った。試行錯誤の正本はセッションログとプロジェクトの文書であり、Mashu に写しを持つ理由が無い。
 
-**枠の大きさは User が決める。**一つの Task が持てる有効な ruling の件数（`ruling_count`、既定 10）と、ruling 1 件の字数（`ruling_chars`、既定 120）は、設定画面の「配信量の上限」で変えられる。件数の上限を超える書き込みは、同じ書き込みで取り下げる数が足す数以上でない限り拒否する。上限は書き込み後の件数に掛け、件数を増やさない書き込みは上限を超えた状態からでも通す。User が上限を下げても、すでにある ruling は消さない。拒否は `ruling_cap_refused` として event_log に数える（15 節）。
+**枠の大きさは User が決める。**一つの Task が持てる有効な ruling の件数（`ruling_count`、既定 10）と、ruling 1 件の字数（`ruling_chars`、既定 120）は、設定画面の「配信量の上限」で変えられる。件数の上限を超える書き込みは、同じ書き込みで終了する（定着・上書き・取り下げ）数が足す数以上でない限り拒否する。上限は書き込み後の件数に掛け、件数を増やさない書き込みは上限を超えた状態からでも通す。User が上限を下げても、すでにある ruling は消さない。拒否は `ruling_cap_refused` として event_log に数える（15 節）。
 
-**取り下げにも User の言葉が要る。**`withdraw_rulings` は取り下げる ruling ごとに、その ruling についての User の言葉を求める。同じ書き込みで足す ruling と同じ言葉を使った取り下げは拒否する。一つの指示で ruling を足し、関係のない ruling を追い出す形を防ぐためで、store が見分けられるのはこの使い回しだけである。
+**ruling の終了は三種類に分ける。**一つの ruling は最大一度しか終了できない（DB trigger と service 層で排他を強制する）。
 
-**`task_get` は有効な ruling をすべて、User の言葉つきで返す。**上限の件数までしか無いので切り詰めない。言葉を必ず並べるのは、ruling の文が User の言ったことより広い条件を含みうるからで、読む側が言葉と照らせることだけが、その広がりへの備えになる。`task_search` も ruling を User の言葉つきで探す。閉じた Task や別の Task で User が決めた事項を引くためで、日本語の短い語には pg_trgm の類似度がほぼ 0 になるので、語をすべて含むかどうかで当てる。
+- **取り下げ（`withdraw_rulings` → `ruling_withdrawal`）** — User が決定そのものを撤回したとき。取り下げる ruling ごとに、その ruling についての User の言葉を求める。同じ書き込みで足す ruling と同じ言葉を使った取り下げは拒否する。一つの指示で ruling を足し、関係のない ruling を追い出す形を防ぐためである
+- **定着・完了（`settle_rulings` → `ruling_settlement`）** — 採択された仕様がコード・文書・スキル・Memory など外部の正本に落ちたとき、または一回限りの手順指示が完了したとき。移した先や完了の根拠を `settled_in`（commit・ファイル・文書・memory ID 等。ホームディレクトリは `~` 化）に必須で記録する。退けた案や未反映の制約はコードに痕跡が残らないため、文書に明記して参照先を付けない限り定着させない
+- **上書き（`rulings[].supersedes` → `ruling_supersession`）** — 同じ Task の新しい ruling が古い ruling を更新するとき。新しい ruling 側に User の言葉が必須であり、新旧の因果リンクを保持する
+
+**`task_get` は有効な ruling をすべて、User の言葉つきで返す。**上限の件数までしか無いので切り詰めない。言葉を必ず並べるのは、ruling の文が User の言ったことより広い条件を含みうるからで、読む側が言葉と照らせることだけが、その広がりへの備えになる。`task_search` も ruling を User の言葉つきで探し、有効なものを先頭に、`status` と `settled_in` / `superseded_by` を添えて返す。閉じた Task や別の Task で User が決めた事項と、その定着先を引くためで、日本語の短い語には pg_trgm の類似度がほぼ 0 になるので、語をすべて含むかどうかで当てる。
 
 **過去の attempt と decision は記録として残す。**行は消さず（append-only の trigger がある）、`mashu task show`・GUI・デスクトップアプリの Work で「裁定より前の記録」として読める。MCP は返さず、`task_get` は件数と読み方を `past_record` で示すだけである。`task_checkpoint` に `attempts` や `decisions` を渡す呼び出しは、それぞれの行き先（approach、プロジェクトの文書と artifacts、ruling）を示して拒否する。黙って捨てると、書いたつもりの内容が消える。
 
@@ -184,7 +190,7 @@ Agent が次のセッションへ作業を引き継ぐために打つ。渡す�
 
 **一つのセッションが一つの Task に書くのは、作業を止める前の一度を目安とする。**測定を回す Agent は数分ごとに status と次の一手を変え、そのたびに書く理由があると判断しやすい。そこで tool の説明で、すぐにまた書きたくなった内容は進捗か測定なので、その場で commit か文書へ置くよう指示する。続けて書いた二回目に警告は付けない。書き込みのたびに追加される履歴は ruling と artifact のみなので、status の書き換えが続いても残るのは最後の state であり、警告で防ぐべき害が無い。また、続けて書いた二回目は、一回目のあとに User が下した裁定を記録していることが多い。そこに警告を付けると、残すべき書き込みを余分なものとして扱うことになる。拒否はなおさらしない。拒否すると、その裁定が次のセッションへ配信されない。書き込みの event には MCP server のプロセスごとの id を session として記録し、同じセッションが何度書いたかを後から集計できるようにする。
 
-裁定・取り下げ・外部成果物の原典は同じ呼び出しの `rulings` / `withdraw_rulings` / `artifacts` で渡す。state の置換とそれらの追記は一つの transaction で行い、文字上限・件数の上限・入口拒否・kind・取り下げの対象・楽観チェック・予算の検査は最初の行を書く前にすべてかけ、形の誤りと上限の超過は行とフィールドをまたいで一度の拒否にまとめて返す。一行でも拒否されれば state も履歴も書かない。履歴を書くための動詞を別に覚えさせずに済む。
+裁定・上書き・定着・取り下げ・外部成果物の原典は同じ呼び出しの `rulings`（任意で `supersedes`） / `settle_rulings` / `withdraw_rulings` / `artifacts` で渡す。state の置換とそれらの追記は一つの transaction で行い、文字上限・件数の上限・入口拒否・kind・終了対象の整合・楽観チェック・予算の検査は最初の行を書く前にすべてかけ、形の誤りと上限の超過は行とフィールドをまたいで一度の拒否にまとめて返す。一行でも拒否されれば state も履歴も書かない。履歴を書くための動詞を別に覚えさせずに済む。
 
 **呼び出しのたびに state のスナップショットを保存しない。**写しはほとんど読まれず、添える what_changed は commit log の言い直しになるからである。代わりに、任意の `what_changed` と、同じ呼び出しで書いた ruling・取り下げ・artifact の id を `task_state_replaced` の event に残す。Ruling と Artifact Reference はもともと Task に結びついているので、それで足りる。
 
@@ -310,7 +316,8 @@ task_checkpoint の `rulings` は User がその作業について決めたこ�
 |---|---|---|
 | pain / nomination | ○ | ○ |
 | task 作成・state・checkpoint・artifact | ○ | ○ |
-| ruling の記録と取り下げ | User の言葉を運ぶときだけ | Agent を通す（直接の画面や CLI は無い） |
+| ruling の記録・上書き・取り下げ | User の言葉を運ぶときだけ | デスクトップアプリから追加・取り下げ可 |
+| ruling の定着（`settle_rulings`） | 正本参照（`settled_in`）を添えるときだけ | デスクトップアプリから定着可 |
 | task close / reopen | × | ○ |
 | close proposal（提案のみ・決定ではない） | ○ | ○（取り下げ） |
 | Memory admission / retire / replace / restore / redeliver | 明示指示どおりの実行、または pending proposal | 直接操作 |
@@ -337,7 +344,7 @@ Memory 関連 Tool は `docs/memory.md` 7.1 節に記す。`session_bootstrap` �
 |---|---|
 | `task_create` | 重複照合つきの Task 作成（5.2 節） |
 | `task_get` / `task_search` / `project_list` | 明示取得・検索 |
-| `task_checkpoint` | Agent が state を書く唯一の Tool。Current State の置換と任意の Task 名変更（楽観チェック・重複照合・hard limit・予算判定つき）+ ruling の記録と取り下げ、artifact の追記。state のスナップショットは保存しない（5.6 節） |
+| `task_checkpoint` | Agent が state を書く唯一の Tool。Current State の置換と任意の Task 名変更（楽観チェック・重複照合・hard limit・予算判定つき）+ ruling の記録・上書き・定着・取り下げ、artifact の追記。state のスナップショットは保存しない（5.6 節） |
 | `task_propose_close` / `task_withdraw_close_proposal` | 終了の提案と取り下げ（6.1 節） |
 
 有効な ruling は `task_get` が常に返し、artifact と close の checkpoint は `task_get` の展開引数として提供し、Tool 数の増殖を避ける。全文の state を返すのは `task_get` だけで、他の Task 系 Tool は card view と予算を返す（5.3 節）。**`task_close` は Agent 用 MCP に置かない。**提案は close ではないので `task_propose_close` はこの禁止に触れない。
@@ -369,14 +376,14 @@ Work の `c` は選択中の Task だけを同じ close decision screen で開�
 
 ## 13. スキーマ
 
-Memory の 12 表と Project State の 10 表に、両者が使う 2 表を加えて 24 表。
+Memory の 12 表と Project State の 12 表に、両者が使う 2 表を加えて 26 表。
 
 ```text
 Memory:        project route ledger trace memory memory_project memory_revision topic
                nomination memory_change temporary_context event_log
 
 Project State: task task_state task_checkpoint task_close_proposal
-               ruling ruling_withdrawal artifact_reference
+               ruling ruling_withdrawal ruling_settlement ruling_supersession artifact_reference
                attempt decision decision_supersession（記録。もう書かない）
 
 共通:          setting（User が変えた上限） schema_migration（適用済みの migration）
@@ -394,8 +401,8 @@ DB / service 層のテストで保証する。
 
 ```text
 Task lifecycle:
-  ruling は User の言葉なしに記録も取り下げもされない
-  task_get は有効な ruling をすべて User の言葉つきで返し、過去の attempt と decision を返さない
+  ruling は User の言葉なしに記録・上書き・取り下げされず、定着には正本参照が必須で、一つの ruling は最大一度しか終了しない
+  task_get は有効な ruling をすべて User の言葉つきで返し、終了した ruling や過去の attempt と decision を返さない
   Agent は Task を close できない
   Agent の close proposal は Task の status を変えない
   沈黙は Task を close しない（lease は dormant 導出までしかしない）
@@ -420,7 +427,7 @@ Bootstrap:
 
 ## 15. 観測指標と、この設計が誤りだったと知る方法
 
-event_log から最低限次を測れるようにする。active / dormant Task 数、自動 dormant 率、reactivate 頻度、Task card と full detail の token 使用量、`task_card_write_refused` の件数と超過量、`ruling_recorded`・`ruling_withdrawn`・`ruling_cap_refused` の件数、checkpoint の打たれた率、stale-state incident（古い state を信じて誤った作業が出た pain_report）、有った知識が使われなかった incident（Task の state や ruling、または指示ファイルや skill にあったのに、それを使わずに誤った作業が出た pain_report。`ignored_task_id` か `ignored_source` を渡すと `knowledge_unused` として数える）。
+event_log から最低限次を測れるようにする。active / dormant Task 数、自動 dormant 率、reactivate 頻度、Task card と full detail の token 使用量、`task_card_write_refused` の件数と超過量、`ruling_recorded`・`ruling_settled`・`ruling_superseded`・`ruling_withdrawn`・`ruling_cap_refused` の件数、checkpoint の打たれた率、stale-state incident（古い state を信じて誤った作業が出た pain_report）、有った知識が使われなかった incident（Task の state や ruling、または指示ファイルや skill にあったのに、それを使わずに誤った作業が出た pain_report。`ignored_task_id` か `ignored_source` を渡すと `knowledge_unused` として数える）。
 
 | 観測 | 意味 |
 |---|---|

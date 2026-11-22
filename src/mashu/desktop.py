@@ -592,12 +592,16 @@ def task_reopen(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 def task_ruling_add(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     ruling = _text(args, "ruling")
     quote = _optional(args, "user_instruction") or ruling
+    item: dict[str, Any] = {"ruling": ruling, "user_instruction": quote}
+    supersedes = _uuids(args, "supersedes")
+    if supersedes:
+        item["supersedes"] = supersedes
     return task_history.checkpoint(
         cur,
         _uuid(args, "task_id"),
         actor=ACTOR,
         expect_updated_at=_when(args.get("expect_updated_at"), "expect_updated_at"),
-        rulings=[{"ruling": ruling, "user_instruction": quote}],
+        rulings=[item],
     )
 
 
@@ -613,6 +617,23 @@ def task_ruling_withdraw(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
                 "user_instruction": _text(args, "user_instruction"),
             }
         ],
+    )
+
+
+def task_ruling_settle(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "ruling_id": _uuid(args, "ruling_id"),
+        "settled_in": _text(args, "settled_in"),
+    }
+    note = _optional(args, "note")
+    if note is not None:
+        item["note"] = note
+    return task_history.checkpoint(
+        cur,
+        _uuid(args, "task_id"),
+        actor=ACTOR,
+        expect_updated_at=_when(args.get("expect_updated_at"), "expect_updated_at"),
+        settle_rulings=[item],
     )
 
 
@@ -855,6 +876,7 @@ OPERATIONS: dict[str, Operation] = {
     "task.reopen": task_reopen,
     "task.ruling_add": task_ruling_add,
     "task.ruling_withdraw": task_ruling_withdraw,
+    "task.ruling_settle": task_ruling_settle,
     "task.artifact_add": task_artifact_add,
     "ledger.list": ledger_list,
     "pain.report": pain_report,

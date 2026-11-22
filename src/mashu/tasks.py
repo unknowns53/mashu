@@ -94,10 +94,18 @@ _HEADINGS = {
 }
 
 #: Rulings in force on the task, which its card names; every read that costs a card carries it.
-_RULINGS_COUNT = """
+_RULINGS_COUNT_WITHDRAWAL_ONLY = """
 (SELECT count(*) FROM ruling r
  WHERE r.task_id = t.task_id
    AND NOT EXISTS (SELECT 1 FROM ruling_withdrawal w WHERE w.ruling_id = r.ruling_id))::int
+"""
+
+_RULINGS_COUNT = """
+(SELECT count(*) FROM ruling r
+ WHERE r.task_id = t.task_id
+   AND NOT EXISTS (SELECT 1 FROM ruling_withdrawal w WHERE w.ruling_id = r.ruling_id)
+   AND NOT EXISTS (SELECT 1 FROM ruling_settlement s WHERE s.ruling_id = r.ruling_id)
+   AND NOT EXISTS (SELECT 1 FROM ruling_supersession p WHERE p.supersedes_id = r.ruling_id))::int
 """
 
 _ACTIVITY = """
@@ -118,10 +126,19 @@ _NO_PROPOSAL_COLUMNS = """
 """
 
 
-def _task_row(include_proposals: bool, include_rulings: bool = True) -> str:
+def _task_row(
+    include_proposals: bool,
+    include_rulings: bool = True,
+    include_ruling_outcomes: bool = True,
+) -> str:
     proposal_columns = _PROPOSAL_COLUMNS if include_proposals else _NO_PROPOSAL_COLUMNS
     proposal_join = _PROPOSAL_JOIN if include_proposals else ""
-    rulings_count = _RULINGS_COUNT if include_rulings else "0"
+    if not include_rulings:
+        rulings_count = "0"
+    elif include_ruling_outcomes:
+        rulings_count = _RULINGS_COUNT
+    else:
+        rulings_count = _RULINGS_COUNT_WITHDRAWAL_ONLY
     return f"""
 SELECT t.*, p.name AS project_name, {_ACTIVITY} AS activity,
        clock_timestamp() - ts.updated_at AS state_age,
@@ -418,6 +435,7 @@ def task_list(
     activity: str = "active",
     include_proposals: bool = True,
     include_rulings: bool = True,
+    include_ruling_outcomes: bool = True,
 ) -> list[dict[str, Any]]:
     """Tasks in one activity, newest activity first.
 
@@ -433,7 +451,7 @@ def task_list(
         "closed": "t.status = 'closed'",
         "all": "TRUE",
     }[activity]
-    task_row = _task_row(include_proposals, include_rulings)
+    task_row = _task_row(include_proposals, include_rulings, include_ruling_outcomes)
     cur.execute(
         f"""
         {task_row}
@@ -652,17 +670,27 @@ def search_terms(query: str) -> list[str]:
 _RULING_SEARCH = f"""
 SELECT r.ruling_id, r.ruling, r.user_instruction AS user_said, r.created_at, t.task_id,
        t.name AS task_name, t.status AS task_status, p.name AS project_name,
-       EXISTS (
-           SELECT 1 FROM ruling_withdrawal w WHERE w.ruling_id = r.ruling_id
-       ) AS withdrawn
+       (w.ruling_id IS NOT NULL) AS withdrawn,
+       CASE
+           WHEN w.ruling_id IS NOT NULL THEN 'withdrawn'
+           WHEN st.ruling_id IS NOT NULL THEN 'settled'
+           WHEN sp.supersedes_id IS NOT NULL THEN 'superseded'
+           ELSE 'in_force'
+       END AS status,
+       st.settled_in,
+       sp.ruling_id AS superseded_by
 FROM ruling r
 JOIN task t ON t.task_id = r.task_id
 JOIN project p ON p.project_id = t.project_id
+LEFT JOIN ruling_withdrawal w ON w.ruling_id = r.ruling_id
+LEFT JOIN ruling_settlement st ON st.ruling_id = r.ruling_id
+LEFT JOIN ruling_supersession sp ON sp.supersedes_id = r.ruling_id
 WHERE (%(project)s::uuid IS NULL OR t.project_id = %(project)s::uuid)
   AND (%(closed)s OR t.status = 'open')
   AND cardinality(%(terms)s::text[]) > 0
   AND {_HAS_TERMS.format(text="r.ruling || ' ' || r.user_instruction")}
-ORDER BY withdrawn, r.created_at DESC, r.ruling_id DESC
+ORDER BY (w.ruling_id IS NOT NULL OR st.ruling_id IS NOT NULL OR sp.supersedes_id IS NOT NULL),
+         r.created_at DESC, r.ruling_id DESC
 LIMIT %(limit)s
 """
 

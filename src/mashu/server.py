@@ -95,11 +95,18 @@ class EvidenceItem(TypedDict):
 class RulingItem(TypedDict):
     ruling: str
     user_instruction: str
+    supersedes: NotRequired[list[UUID]]
 
 
 class WithdrawalItem(TypedDict):
     ruling_id: UUID
     user_instruction: str
+
+
+class SettlementItem(TypedDict):
+    ruling_id: UUID
+    settled_in: str
+    note: NotRequired[str]
 
 
 class ArtifactItem(TypedDict):
@@ -148,6 +155,7 @@ RulingList = Annotated[list[Any], _ItemSchema(RulingItem)]
 #: passing it is refused with where its content goes, instead of having it dropped unseen.
 _Retired = Annotated[Any, SkipJsonSchema()]
 WithdrawalList = Annotated[list[Any], _ItemSchema(WithdrawalItem)]
+SettlementList = Annotated[list[Any], _ItemSchema(SettlementItem)]
 ArtifactList = Annotated[list[Any], _ItemSchema(ArtifactItem)]
 
 
@@ -188,7 +196,8 @@ def _history_contract(settings_now: dict[str, int]) -> str:
     counts = ", ".join(f"{most} {name}" for name, most in task_history.CHECKPOINT_ITEM_MAX.items())
     return (
         f"History char limits: {'; '.join(parts)}. One write carries at most {counts}. A "
-        f"task holds at most {settings_now['ruling_count']} rulings; past that, ask the user "
+        f"task holds at most {settings_now['ruling_count']} rulings; settle codified or finished "
+        "ones with `settle_rulings`, supersede outdated ones with `supersedes`, or ask the user "
         "which one to withdraw."
     )
 
@@ -1055,9 +1064,14 @@ def build_server() -> Any:
             "`what_changed` is logged with the write and never delivered. Optional history, "
             "all written with the state or not at all: `rulings` for what the user decided on "
             "this task, each `ruling` in your words beside `user_instruction`, a short exact "
-            "quote of the user's own words; your own judgment is never a ruling and goes in "
-            "`approach`. `withdraw_rulings` names a ruling the user dropped, with their words "
-            "about that ruling. `artifacts` for external sources. The quotes are kept for "
+            "quote of the user's own words (optional `supersedes` lists older ruling_ids this "
+            "updates); your own judgment is never a ruling and goes in `approach`. "
+            "`settle_rulings` retires a ruling that is now codified in code, docs, a skill, or "
+            "memory, or a finished one-off step, with `settled_in` naming where it lives (commit, "
+            "file, doc, or memory id) and optional `note`; never settle a rejected option or "
+            "uncodified constraint unless it is written in a linked doc. "
+            "`withdraw_rulings` names a ruling the user dropped, with their words about that "
+            "ruling. `artifacts` for external sources. The quotes are kept for "
             "audit, not authentication. No snapshot is frozen per write; closing the task "
             f"freezes the final state. {state_contract} {_history_contract(limits)} "
             f"{_REFUSALS} Success returns the "
@@ -1077,6 +1091,7 @@ def build_server() -> Any:
         what_changed: str | None = None,
         rulings: RulingList | None = None,
         withdraw_rulings: WithdrawalList | None = None,
+        settle_rulings: SettlementList | None = None,
         artifacts: ArtifactList | None = None,
         attempts: _Retired = None,
         decisions: _Retired = None,
@@ -1100,6 +1115,7 @@ def build_server() -> Any:
                     next_actions=next_actions,
                     rulings=rulings,
                     withdraw_rulings=withdraw_rulings,
+                    settle_rulings=settle_rulings,
                     artifacts=artifacts,
                     session=session,
                 )
