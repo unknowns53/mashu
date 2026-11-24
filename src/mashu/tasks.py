@@ -1004,6 +1004,17 @@ def touch(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, Any]:
     return task_get(cur, task_id)
 
 
+def pause(cur: psycopg.Cursor, task_id: UUID, *, actor: str) -> dict[str, Any]:
+    """Move an open task out of startup delivery by expiring its active lease now."""
+    _require_open(cur, task_id)
+    cur.execute(
+        "UPDATE task SET active_until = clock_timestamp() - interval '1 second' WHERE task_id = %s",
+        (task_id,),
+    )
+    events.record(cur, "task_paused", actor, detail={"task_id": str(task_id)})
+    return task_get(cur, task_id)
+
+
 def lock_close_snapshot(cur: psycopg.Cursor, task_id: UUID) -> dict[str, Any]:
     """Lock an open task and return the state and proposal that still stand on it."""
     _lock(cur)

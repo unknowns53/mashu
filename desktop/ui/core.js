@@ -170,6 +170,50 @@ function errorText(error) {
   return String((error && error.message) || error);
 }
 
+/** Translate common backend validation refusals into clear UI text while keeping unknown details intact. */
+function friendlyError(text) {
+  const raw = String(text || "");
+  if (language !== "ja") return raw;
+  let m;
+  if (/delivery 'project' needs a project/i.test(raw) || /Choose at least one project/i.test(raw)) return t("temporary.projects_required");
+  if (/topic delivery needs a topic|needs the topic it is read with/i.test(raw)) return t("error.topic_required");
+  if (/a topic needs a name/i.test(raw)) return t("error.topic_name_required");
+  if (/a topic needs a trigger/i.test(raw)) return t("error.topic_trigger_required");
+  if (/a project needs a name/i.test(raw)) return t("error.project_name_required");
+  if (/a task needs a name/i.test(raw)) return t("error.task_name_required");
+  if (/cannot be empty|is empty; a Memory body/i.test(raw)) return t("error.empty_required");
+  if (/is not a git checkout/.test(raw)) return t("setup.not_checkout");
+  if (/has no .*mashu/.test(raw)) return t("setup.no_venv");
+  if ((m = raw.match(/topic '([^']+)' already exists/i))) return t("error.topic_exists", { name: m[1] });
+  if ((m = raw.match(/project '([^']+)' already exists/i))) return t("error.project_exists", { name: m[1] });
+  if (/already belongs to/i.test(raw)) return t("error.route_taken");
+  if (/still has .+; move, retire, or remove them first/i.test(raw)) return t("error.project_in_use");
+  if (/still holds \d+ active rule/i.test(raw)) return t("error.topic_in_use");
+  if (/a similar active Memory already exists/i.test(raw)) return t("error.similar_active_memory");
+  if (/may not exceed .+?, which delivers it/i.test(raw)) return t("error.limit_nested");
+  if (/the opening seats|the always layer seats|the topic '.*' holds|the temporary share seats/i.test(raw)) return `${t("error.capacity_exceeded")}\n${raw}`;
+  return raw;
+}
+
+/** Days remaining until an ISO timestamp (0 = today, negative = past due). */
+function daysLeft(value) {
+  const at = Date.parse(value);
+  if (Number.isNaN(at)) return null;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const target = new Date(at);
+  const targetDay = new Date(target.getFullYear(), target.getMonth(), target.getDate()).getTime();
+  return Math.round((targetDay - today) / 86400000);
+}
+
+function remainingDaysLabel(value) {
+  const left = daysLeft(value);
+  if (left === null) return day(value);
+  if (left < 0) return t("temporary.expired");
+  if (left === 0) return t("temporary.due_today");
+  return t("temporary.remaining_days", { n: left });
+}
+
 /** Whether a search occurs, ignoring case, in any of the values given. */
 function matches(query, ...values) {
   if (!query) return true;
@@ -228,7 +272,7 @@ function fail(error) {
     showSetup(missing);
     return;
   }
-  toast(text, "error");
+  toast(friendlyError(text), "error");
 }
 
 // ---------------------------------------------------------------- first run
@@ -392,23 +436,45 @@ function confirmDialog({ title, lines = [], list = [], confirm, danger = false }
       dialog.close();
       resolve(answer);
     };
+    const no = button(t("common.cancel"), () => finish(false));
     const yes = button(confirm, () => finish(true), { kind: danger ? "danger solid" : "primary" });
     dialog.replaceChildren();
     append(dialog, [
       h("h1", { text: title }),
       lines.map((line) => h("p", { text: line })),
       list.length ? h("ul", null, list.map((line) => h("li", { text: line }))) : null,
-      h("div", { class: "form-actions" }, button(t("common.cancel"), () => finish(false)), yes),
+      h("div", { class: "form-actions" }, no, yes),
     ]);
     dialog.onclose = () => resolve(false);
     dialog.showModal();
-    yes.focus();
+    if (danger) no.focus();
+    else yes.focus();
+  });
+}
+
+function hasDirtyForm() {
+  return !!document.querySelector(".detail-pane form[data-dirty='1']");
+}
+
+/** Run `action` directly when no form has unsaved edits; otherwise ask before discarding. */
+function guardDirty(action) {
+  if (!hasDirtyForm()) {
+    action();
+    return;
+  }
+  confirmDialog({
+    title: t("common.discard_title"),
+    lines: [t("common.discard_body")],
+    confirm: t("common.discard_confirm"),
+    danger: true,
+  }).then((yes) => {
+    if (yes) action();
   });
 }
 
 /**
  * Carry one decision to the store, then read everything again. work() may return a warning
- * string to show instead of `done`. handle(error) may take a refusal over, returning true.
+ * string or `{ message, kind }` to show instead of `done`. handle(error) may take a refusal over, returning true.
  */
 async function act(work, done, handle) {
   if (app.busy) return;
@@ -416,10 +482,20 @@ async function act(work, done, handle) {
   document.body.dataset.busy = "";
   try {
     const returned = await work();
-    const note = typeof returned === "string" ? returned : "";
+    let note = "";
+    let toastKind = "ok";
+    if (typeof returned === "string" && returned) {
+      note = returned;
+      toastKind = "warn";
+    } else if (returned && typeof returned === "object" && returned.message) {
+      note = returned.message;
+      toastKind = returned.kind || "ok";
+    }
+    // Clear dirty markers before reload so saving never triggers an unsaved-form guard.
+    for (const formNode of document.querySelectorAll("form[data-dirty]")) delete formNode.dataset.dirty;
     // Pages read app.busy in load() to tell this reload from one the user asked for.
     await reload();
-    toast(note || done, note ? "warn" : "ok");
+    toast(note || done, note ? toastKind : "ok");
   } catch (error) {
     if (!(handle && handle(error))) fail(error);
   } finally {
@@ -460,7 +536,12 @@ function page(name, spec) {
   app.pages.set(name, spec);
   const item = h(
     "button",
-    { type: "button", class: "nav-item", id: `nav-${name}`, on: { click: () => show(name).catch(fail) } },
+    {
+      type: "button",
+      class: "nav-item",
+      id: `nav-${name}`,
+      on: { click: () => guardDirty(() => show(name).catch(fail)) },
+    },
     icon(spec.icon),
     h("span", { class: "label", text: t(spec.nav) }),
     h("span", { class: "badge", hidden: true })
@@ -704,8 +785,13 @@ function segmented(views, current, onChange) {
       "aria-pressed": String(value === current),
       on: {
         click: () => {
-          for (const other of buttons) other.setAttribute("aria-pressed", String(other === buttons[views.findIndex(([v]) => v === value)]));
-          onChange(value);
+          if (value === current && buttons.find((b) => b.getAttribute("aria-pressed") === "true") === buttons[views.findIndex(([v]) => v === value)]) {
+            return;
+          }
+          guardDirty(() => {
+            control.select(value);
+            onChange(value);
+          });
         },
       },
     })
@@ -759,7 +845,7 @@ function fieldList(pairs, { showEmpty = false } = {}) {
   return node;
 }
 
-/** A list of entries, each rendered as [when, text, ...notes]; notes are [label, text]. */
+/** A list of entries, each rendered as [when, text, ...notesOrNodes]. */
 function entries(rows, render, { empty = t("common.none"), old } = {}) {
   if (!rows || !rows.length) return h("p", { class: "empty-note", text: empty });
   return h(
@@ -771,10 +857,14 @@ function entries(rows, render, { empty = t("common.none"), old } = {}) {
         "li",
         { class: `entry${old && old(row) ? " old" : ""}` },
         whenText ? (whenText instanceof Node ? whenText : h("div", { class: "when", text: whenText })) : null,
-        h("div", { class: "text", text }),
-        notes
-          .filter((note) => note && note[1])
-          .map(([label, value]) => h("div", { class: "note" }, label ? h("b", { text: label }) : null, value))
+        text ? h("div", { class: "text", text }) : null,
+        notes.map((entry) => {
+          if (!entry) return null;
+          if (entry instanceof Node) return entry;
+          const [label, value] = entry;
+          if (!value) return null;
+          return h("div", { class: "note" }, label ? h("b", { text: label }) : null, value);
+        })
       );
     })
   );
@@ -867,13 +957,23 @@ function reference(id, text, length = 40) {
  * returns false; options are [value, label, description]; onPick(path, inputOf) runs after a
  * folder is picked, with inputOf(name) giving another field's input. Returns the form node.
  */
-function form({ title, fields, submit, onSubmit, onCancel, kind = "primary" }) {
+function form({ title, fields, submit, onSubmit, onCancel, onUpdate, kind = "primary" }) {
   const node = h("form", { class: "form" });
   if (title) node.append(h("h1", { class: "title", text: title }));
   const inputs = [];
-  for (const field of fields) {
+  const buildField = (field) => {
+    if (field.kind === "group") {
+      const groupNode = h(
+        "details",
+        { class: "form-more", open: !!field.open },
+        h("summary", { text: field.label }),
+        field.fields.map((child) => buildField(child))
+      );
+      return groupNode;
+    }
     const counter = h("span", { class: "counter" });
     let input;
+    let radioDesc = null;
     if (field.kind === "area" || field.kind === "lines") {
       input = h("textarea", { rows: field.rows || (field.kind === "lines" ? 4 : 3), class: field.big ? "big" : "" });
       input.value = field.kind === "lines" ? (field.value || []).join("\n") : field.value || "";
@@ -882,9 +982,11 @@ function form({ title, fields, submit, onSubmit, onCancel, kind = "primary" }) {
       if (field.value !== undefined && field.value !== null) input.value = field.value;
     } else if (field.kind === "radio" || field.kind === "checks") {
       const many = field.kind === "checks";
+      const seg = !many && field.options.length >= 2 && field.options.length <= 3;
+      if (seg && field.options.some((opt) => opt[2])) radioDesc = h("div", { class: "hint" });
       input = h(
         "div",
-        { class: "radio-list" },
+        { class: many ? "check-grid" : seg ? "radio-seg" : "radio-list" },
         field.options.map(([value, label, description]) =>
           h(
             "label",
@@ -895,7 +997,9 @@ function form({ title, fields, submit, onSubmit, onCancel, kind = "primary" }) {
               value,
               checked: many ? (field.value || []).includes(value) : value === field.value,
             }),
-            h("span", null, h("div", { class: "what", text: label }), description ? h("div", { class: "why", text: description }) : null)
+            seg
+              ? h("span", { class: "what", text: label })
+              : h("span", null, h("div", { class: "what", text: label }), description ? h("div", { class: "why", text: description }) : null)
           )
         )
       );
@@ -908,17 +1012,20 @@ function form({ title, fields, submit, onSubmit, onCancel, kind = "primary" }) {
       field.kind === "folder"
         ? folderInput(input, (path) => field.onPick && field.onPick(path, (name) => inputs.find((entry) => entry.field.name === name)?.input))
         : input;
-    // A label around a list of options would toggle the first option on a click of its title.
+    // A label around option lists or compound folder controls would misdirect label clicks.
+    const wrapperTag = ["checks", "radio", "folder"].includes(field.kind) ? "div" : "label";
     const label = h(
-      field.kind === "checks" ? "div" : "label",
+      wrapperTag,
       { class: "field" },
       h("span", { class: "label" }, h("span", { text: field.label }), field.max || field.maxItems ? counter : null),
       control,
+      radioDesc,
       field.hint ? h("div", { class: "hint", text: field.hint }) : null
     );
-    inputs.push({ field, input, label, counter });
-    node.append(label);
-  }
+    inputs.push({ field, input, label, counter, radioDesc });
+    return label;
+  };
+  for (const field of fields) node.append(buildField(field));
   const valueOf = ({ field, input }) => {
     if (field.kind === "checks") return [...input.querySelectorAll("input:checked")].map((box) => box.value);
     if (field.kind === "radio") {
@@ -930,11 +1037,19 @@ function form({ title, fields, submit, onSubmit, onCancel, kind = "primary" }) {
     return input.value;
   };
   const values = () => Object.fromEntries(inputs.map((entry) => [entry.field.name, valueOf(entry)]));
+  const initialSnapshot = JSON.stringify(values());
   const refresh = () => {
     const current = values();
+    node.dataset.dirty = JSON.stringify(current) === initialSnapshot ? "" : "1";
     for (const entry of inputs) {
-      const { field, label, counter } = entry;
+      const { field, label, counter, radioDesc } = entry;
       if (field.show) label.hidden = !field.show(current);
+      if (radioDesc) {
+        const match = field.options.find(([value]) => value === current[field.name]);
+        const desc = match && match[2] ? match[2] : "";
+        radioDesc.textContent = desc;
+        radioDesc.hidden = !desc;
+      }
       if (field.maxItems) {
         const n = current[field.name].length;
         counter.textContent = t("common.items", { n, max: field.maxItems });
@@ -945,6 +1060,7 @@ function form({ title, fields, submit, onSubmit, onCancel, kind = "primary" }) {
         counter.classList.toggle("over", n > field.max);
       }
     }
+    if (onUpdate) onUpdate(current);
   };
   const grow = (area) => {
     area.style.height = "auto";
@@ -1071,6 +1187,106 @@ function deliveryText(row) {
   if (row.delivery === "topic") return `${t("delivery.topic")}: ${row.topic_name}`;
   if (row.delivery === "project") return `${t("delivery.project")}: ${row.project_name || "-"}`;
   return t("delivery.always") + (row.project_name ? ` (${row.project_name})` : "");
+}
+
+function checkMemoryDelivery(values, { allowMultiProject = true } = {}) {
+  if (values.delivery === "project") {
+    const ok = allowMultiProject ? (values.projects || []).length > 0 : !!values.project;
+    if (!ok) {
+      toast(t("temporary.projects_required"), "warn");
+      return false;
+    }
+  }
+  if (values.delivery === "topic") {
+    if (!values.topic) {
+      toast(t("error.topic_required"), "warn");
+      return false;
+    }
+    if (values.topic === "__new" && (!String(values.new_topic_name || "").trim() || !String(values.new_topic_trigger || "").trim())) {
+      toast(t("error.new_topic_required"), "warn");
+      return false;
+    }
+  }
+  return true;
+}
+
+function deliveryMoveLines(row) {
+  if (!row.successor_delivery) return [];
+  const target = row.target || {};
+  const formatTarget = (delivery, projectName, topicName) => {
+    if (delivery === "topic") return `${t("delivery.topic")}: ${topicName || "-"}`;
+    if (delivery === "project") return `${t("delivery.project")}: ${projectName || t("common.every_area")}`;
+    return t("delivery.always");
+  };
+  const after = formatTarget(row.successor_delivery, row.successor_project_name, row.successor_topic_name);
+  const lines = [];
+  if (row.operation === "redeliver") {
+    const before = formatTarget(target.delivery, target.project_name, target.topic_name);
+    lines.push(t("change.delivery_arrow", { before, after }));
+  } else {
+    lines.push(t("change.delivery_replacement", { after }));
+  }
+  if (row.successor_topic_trigger) {
+    lines.push(
+      t("change.delivery_new_topic", {
+        name: row.successor_topic_name,
+        area: row.successor_project_name || t("topic.area_all"),
+        trigger: row.successor_topic_trigger,
+      })
+    );
+  }
+  return lines;
+}
+
+// Live token estimation matching mashu/tokens.py and mashu/tasks.py for task forms.
+const _CJK_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f]/g;
+function estimateTokens(text) {
+  const s = String(text || "");
+  const cjk = (s.match(_CJK_RE) || []).length;
+  return Math.ceil(cjk + (s.length - cjk) / 4);
+}
+function pushedCost(contents) {
+  return contents.reduce((sum, item) => sum + estimateTokens(item) + 8, 0);
+}
+function taskCardTokens(name, state, rulingsCount = 0) {
+  const parts = [name];
+  if (state.goal && state.goal.trim()) parts.push(`goal: ${state.goal.trim()}`);
+  if (state.status_text && state.status_text.trim()) parts.push(`status: ${state.status_text.trim()}`);
+  const details = [];
+  if (state.approach && state.approach.trim()) details.push("approach");
+  for (const [key, s, p] of [
+    ["open_questions", "open question", "open questions"],
+    ["blockers", "blocker", "blockers"],
+    ["next_actions", "next action", "next actions"],
+  ]) {
+    const n = (state[key] || []).length;
+    if (n) details.push(`${n} ${n === 1 ? s : p}`);
+  }
+  if (rulingsCount) details.push(`${rulingsCount} user ruling${rulingsCount === 1 ? "" : "s"}`);
+  if (details.length) parts.push(`details: ${details.join(", ")}`);
+  return pushedCost([parts.join("\n")]);
+}
+function taskDetailTokens(name, state) {
+  const parts = [name];
+  for (const [key, label] of [
+    ["goal", "goal"],
+    ["approach", "approach"],
+    ["status_text", "status"],
+  ]) {
+    if (state[key] && state[key].trim()) parts.push(`${label}: ${state[key].trim()}`);
+  }
+  for (const [key, label] of [
+    ["open_questions", "open questions"],
+    ["blockers", "blockers"],
+    ["next_actions", "next actions"],
+  ]) {
+    const items = state[key] || [];
+    if (items.length) {
+      parts.push(`${label}:`);
+      for (const item of items) parts.push(`- ${item}`);
+    }
+  }
+  return pushedCost([parts.join("\n")]);
 }
 
 function temporaryDeliveryOptions() {

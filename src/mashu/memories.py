@@ -479,6 +479,7 @@ def convert_to_temporary(
     project_id: UUID | None = None,
     also_project_ids: Sequence[UUID] = (),
     override_projects: bool = False,
+    content: str | None = None,
 ) -> dict[str, Any]:
     """Replace an active memory with an expiring condition in one transaction.
 
@@ -489,6 +490,9 @@ def convert_to_temporary(
     from mashu import temporary
 
     current = _require_active(cur, memory_id)
+    body = current["content"] if content is None else content.strip()
+    if not body:
+        raise MashuError("temporary context cannot be empty")
     if override_projects:
         target_project = project_id
         target_others: Sequence[UUID] = also_project_ids
@@ -501,7 +505,7 @@ def convert_to_temporary(
         target_others = other_projects(cur, memory_id) if current["delivery"] == "project" else ()
     context = temporary.put_temporary(
         cur,
-        content=current["content"],
+        content=body,
         actor=actor,
         days=days,
         project_id=target_project,
@@ -629,6 +633,7 @@ def restore(
     clear_project: bool = False,
     topic_id: UUID | None = None,
     also_project_ids: Sequence[UUID] | None = None,
+    content: str | None = None,
 ) -> dict[str, Any]:
     """Restore a retired body through normal text, capacity, and conflict checks.
 
@@ -645,11 +650,15 @@ def restore(
     )
     if not reason or not reason.strip():
         raise MashuError("restore needs the reason for reversing its retirement")
-    verdict = redact.gate({"restored content": current["content"], "restore_reason": reason})
+    final_content = current["content"] if content is None else content.strip()
+    body_changed = final_content != current["content"]
+    if body_changed:
+        check_body(final_content, limit=settings.limit(cur, "content_limit"), rest=None)
+    verdict = redact.gate({"restored content": final_content, "restore_reason": reason})
 
     conflicts = [
         row
-        for row in match.similar_tombstones(cur, current["content"], limit=None)
+        for row in match.similar_tombstones(cur, final_content, limit=None)
         if row["memory_id"] != memory_id
         and row["score"] >= config.match_threshold()
         and row.get("retirement_kind") in ("withdrawn", "legacy")
@@ -666,7 +675,7 @@ def restore(
 
     active = [
         row
-        for row in match.similar_active_memories(cur, current["content"])
+        for row in match.similar_active_memories(cur, final_content)
         if row["score"] >= config.match_threshold()
     ]
     if active:
@@ -696,7 +705,7 @@ def restore(
 
     admission = capacity.check_admission(
         cur,
-        content=current["content"],
+        content=final_content,
         delivery=target_delivery,
         project_id=home,
         topic_id=target_topic,
@@ -707,16 +716,21 @@ def restore(
     cur.execute(
         """
         UPDATE memory
-        SET status = 'active', retire_reason = NULL, retired_at = NULL, updated_at = now(),
-            retirement_kind = NULL, superseded_by = NULL,
+        SET content = %s, status = 'active', retire_reason = NULL, retired_at = NULL,
+            updated_at = now(), retirement_kind = NULL, superseded_by = NULL,
             relocated_to_kind = NULL, relocated_to_id = NULL,
             delivery = %s, project_id = %s, topic_id = %s
         WHERE memory_id = %s AND status = 'retired'
         RETURNING *
         """,
-        (target_delivery, home, target_topic, memory_id),
+        (final_content, target_delivery, home, target_topic, memory_id),
     )
     row = cur.fetchone()
+    if body_changed:
+        cur.execute(
+            "INSERT INTO memory_revision (memory_id, content, actor, note) VALUES (%s, %s, %s, %s)",
+            (memory_id, final_content, actor, "restored with revision"),
+        )
     if before_others or others:
         _write_other_projects(cur, memory_id, others, actor=actor)
     events.record(

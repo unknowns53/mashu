@@ -4,9 +4,12 @@
 const work = {
   view: "active",
   rows: [],
+  projects: [],
+  projectFilter: "",
+  includeArchivedProjects: false,
   query: "",
   selected: null,
-  panel: null, // "edit" or "close"
+  panel: null, // "edit", "close", "add_ruling", "add_artifact", "add_folder", "supersede:<id>", "settle:<id>", "withdraw:<id>", "folder:<path>"
   creating: null, // "task" or "project" while the new form is shown
 };
 
@@ -32,13 +35,74 @@ const workSeg = segmented(
     reload().catch(fail);
   }
 );
-const workNew = button("", () => {
-  work.creating = work.view === "projects" ? "project" : "task";
-  work.panel = null;
-  renderWorkDetail();
-}, { kind: "icon" });
-workNew.append(icon("plus"));
+const workNew = button(
+  t("common.add"),
+  () => {
+    guardDirty(() => {
+      work.creating = work.view === "projects" ? "project" : "task";
+      work.panel = null;
+      renderWorkDetail();
+    });
+  },
+  { kind: "small" }
+);
+workNew.prepend(icon("plus"));
 const workSort = sortControl("work", () => renderWork());
+
+const workProjectFilter = h("select", { "aria-label": t("filter.project") });
+workProjectFilter.addEventListener("change", () => {
+  work.projectFilter = workProjectFilter.value;
+  work.selected = keepSelection(shownWork().map(workId), work.selected);
+  renderWork();
+});
+const workArchivedInput = h("input", {
+  type: "checkbox",
+  on: {
+    change: (event) => {
+      work.includeArchivedProjects = event.target.checked;
+      reload().catch(fail);
+    },
+  },
+});
+const workArchivedCheck = h("label", { class: "check", hidden: true }, workArchivedInput, t("work.show_archived"));
+const workFilterRow = h("div", { class: "filter-row" }, workProjectFilter, workArchivedCheck);
+
+const workFilterCount = h("span", { class: "sub" });
+const workFilterClear = button(
+  t("filter.clear"),
+  () => {
+    work.query = "";
+    work.projectFilter = "";
+    const search = workList.pane.querySelector("[data-search]");
+    if (search) search.value = "";
+    work.selected = keepSelection(shownWork().map(workId), work.selected);
+    renderWork();
+  },
+  { kind: "quiet small" }
+);
+const workFilterMeta = h("div", { class: "filter-meta", hidden: true }, workFilterCount, workFilterClear);
+
+function syncWorkFilters() {
+  const isProjects = work.view === "projects";
+  workArchivedCheck.hidden = !isProjects;
+  if (isProjects) {
+    workProjectFilter.hidden = true;
+    workFilterRow.hidden = false;
+    return;
+  }
+  const names = [...new Set([...work.projects, ...work.rows.map((r) => r.task.project_name), work.projectFilter].filter(Boolean))].sort();
+  workProjectFilter.hidden = !names.length;
+  if (names.length) {
+    workProjectFilter.replaceChildren(
+      ...[["", `${t("filter.project")}: ${t("common.all")}`], ...names.map((name) => [name, name])].map(([value, label]) =>
+        h("option", { value, text: label })
+      )
+    );
+    workProjectFilter.value = names.includes(work.projectFilter) ? work.projectFilter : "";
+    work.projectFilter = workProjectFilter.value;
+  }
+  workFilterRow.hidden = workProjectFilter.hidden;
+}
 
 function workSortKeys() {
   if (work.view === "projects") return [["created", t("sort.created")], ["name", t("sort.name")]];
@@ -64,7 +128,9 @@ const workList = listPane(
     }),
     workNew
   ),
-  workSort
+  workFilterRow,
+  workSort,
+  workFilterMeta
 );
 const workDetail = detailPane();
 const workOrder = heldOrder();
@@ -79,43 +145,77 @@ function workRow() {
 
 function shownWork() {
   workSort.setKeys(workSortKeys());
-  const found =
-    work.view === "projects"
-      ? work.rows.filter((row) => matches(work.query, row.project_id, row.name, row.summary, ...row.folders.map(tilde)))
-      : work.rows.filter((row) =>
-          matches(
-            work.query,
-            row.task.task_id,
-            row.task.name,
-            row.task.project_name,
-            row.state,
-            row.rulings,
-            row.settled_rulings,
-            row.superseded_rulings,
-            row.withdrawn_rulings,
-            row.decisions,
-            row.attempts,
-            row.artifacts
-          )
+  syncWorkFilters();
+  const isProjects = work.view === "projects";
+  const found = isProjects
+    ? work.rows.filter((row) => matches(work.query, row.project_id, row.name, row.summary, ...row.folders.map(tilde)))
+    : work.rows.filter((row) => {
+        if (work.projectFilter && row.task.project_name !== work.projectFilter) return false;
+        return matches(
+          work.query,
+          row.task.task_id,
+          row.task.name,
+          row.task.project_name,
+          row.state,
+          row.rulings,
+          row.settled_rulings,
+          row.superseded_rulings,
+          row.withdrawn_rulings,
+          row.decisions,
+          row.attempts,
+          row.artifacts
         );
-  const key = [work.view, workSort.state.key, workSort.state.dir, work.query].join("\n");
+      });
+  const activeFilter = !!(work.query || (!isProjects && work.projectFilter));
+  workFilterMeta.hidden = !activeFilter;
+  if (activeFilter) workFilterCount.textContent = t("common.items", { n: found.length, max: work.rows.length });
+  const key = [work.view, workSort.state.key, workSort.state.dir, work.query, isProjects ? "" : work.projectFilter].join("\n");
   return workOrder.place(sortRows(found, workSort.state, workSortValue), workId, key);
 }
 
 function pickWork(id) {
-  work.selected = id;
-  work.panel = null;
-  work.creating = null;
-  renderWork();
+  guardDirty(() => {
+    work.selected = id;
+    work.panel = null;
+    work.creating = null;
+    renderWork();
+  });
 }
 
 /** Open a task from elsewhere, such as a task card in another page. */
 async function openTask(taskId, view = "active") {
   work.view = view;
   workSeg.select(view);
+  work.projectFilter = "";
   work.query = "";
   workList.pane.querySelector("[data-search]").value = "";
   work.selected = taskId;
+  work.panel = null;
+  work.creating = null;
+  await show("work");
+}
+
+/** Open tasks filtered to a specific project. */
+async function openProjectTasks(projectName, view = "active") {
+  work.view = view;
+  workSeg.select(view);
+  work.projectFilter = projectName;
+  work.query = "";
+  workList.pane.querySelector("[data-search]").value = "";
+  work.selected = null;
+  work.panel = null;
+  work.creating = null;
+  await show("work");
+}
+
+/** Open the projects tab. */
+async function openProjects() {
+  work.view = "projects";
+  workSeg.select("projects");
+  work.projectFilter = "";
+  work.query = "";
+  workList.pane.querySelector("[data-search]").value = "";
+  work.selected = null;
   work.panel = null;
   work.creating = null;
   await show("work");
@@ -134,6 +234,7 @@ function renderWork() {
                 id: row.project_id,
                 primary: row.name,
                 secondary: [row.folders.length ? tilde(row.folders[0]) : t("work.project_no_folder"), projectTasks(row)],
+                dim: !!row.archived_at,
               }
             : {
                 id: row.task.task_id,
@@ -182,11 +283,20 @@ function renderWorkDetail() {
 function taskDetail(row) {
   const { task, state, proposal } = row;
   const closed = task.status === "closed";
+  const dormant = row.activity === "dormant";
   const nodes = [
-    meta(idTag(task.task_id), task.project_name, named("work.activity", row.activity), t("work.as_of", { date: row.as_of })),
+    meta(
+      idTag(task.task_id),
+      task.project_name,
+      named("work.activity", row.activity),
+      t("work.as_of", { date: row.as_of }),
+      !closed && task.active_until
+        ? t("work.lease", { date: day(task.active_until), left: remainingDaysLabel(task.active_until) })
+        : null
+    ),
     h("h1", { class: "title", text: task.name }),
   ];
-  if (row.activity === "dormant") nodes.push(h("div", { class: "callout warn" }, h("p", { text: t("work.dormant_note") })));
+  if (dormant) nodes.push(h("div", { class: "callout warn" }, h("p", { text: t("work.dormant_note") })));
   if (closed) {
     nodes.push(
       h(
@@ -223,7 +333,12 @@ function taskDetail(row) {
         ? button(t("work.reopen"), () => act(() => call("task.reopen", { task_id: task.task_id }), t("work.reopened")))
         : [
             button(t("common.edit"), () => workTogglePanel("edit")),
-            button(t("work.renew"), () => act(() => call("task.renew", { task_id: task.task_id }), t("work.renewed")), { title: t("work.renew_title") }),
+            dormant
+              ? button(t("work.restore_active"), () => act(() => call("task.renew", { task_id: task.task_id }), t("work.restored_active")))
+              : [
+                  button(t("work.renew"), () => act(() => call("task.renew", { task_id: task.task_id }), t("work.renewed")), { title: t("work.renew_title") }),
+                  button(t("work.pause"), () => act(() => call("task.pause", { task_id: task.task_id }), t("work.paused")), { kind: "quiet" }),
+                ],
             h("span", { class: "spacer" }),
             button(t("work.close"), () => workTogglePanel("close"), { kind: "danger quiet" }),
           ]
@@ -268,40 +383,39 @@ function taskDetail(row) {
   return nodes;
 }
 
-function addRulingPanel(row) {
-  const panel = h("div", { class: "inline-panel" });
-  loadChoices()
-    .then((choices) => {
-      panel.append(
-        form({
-          fields: [
-            { name: "ruling", label: t("work.ruling_text"), kind: "area", rows: 2, max: choices.ruling_chars || 200 },
-            { name: "user_instruction", label: t("work.ruling_quote"), kind: "area", rows: 2, max: choices.ruling_words_chars || 240, hint: t("work.ruling_quote_hint") },
-          ],
-          submit: t("common.add"),
-          onCancel: () => workTogglePanel("add_ruling"),
-          onSubmit: (values) =>
-            act(async () => {
-              await call("task.ruling_add", {
-                task_id: row.task.task_id,
-                expect_updated_at: row.state.updated_at,
-                ruling: values.ruling,
-                user_instruction: values.user_instruction,
-              });
-              work.panel = null;
-            }, t("work.ruling_added")),
-        })
-      );
+function addRulingPanel(row, choices) {
+  return h(
+    "div",
+    { class: "inline-panel" },
+    form({
+      fields: [
+        { name: "ruling", label: t("work.ruling_text"), kind: "area", rows: 2, max: choices.ruling_chars || 200 },
+        { name: "user_instruction", label: t("work.ruling_quote"), kind: "area", rows: 2, max: choices.ruling_words_chars || 240, hint: t("work.ruling_quote_hint") },
+      ],
+      submit: t("common.add"),
+      onCancel: () => workTogglePanel("add_ruling"),
+      onSubmit: (values) =>
+        act(async () => {
+          await call("task.ruling_add", {
+            task_id: row.task.task_id,
+            expect_updated_at: row.state.updated_at,
+            ruling: values.ruling,
+            user_instruction: values.user_instruction,
+          });
+          work.panel = null;
+        }, t("work.ruling_added")),
     })
-    .catch(fail);
-  return panel;
+  );
 }
 
 function addArtifactPanel(row) {
   const panel = h("div", { class: "inline-panel" });
   loadChoices()
     .then((choices) => {
-      const kinds = (choices.artifact_kinds || ["file", "document", "url", "other"]).map((kind) => [kind, kind]);
+      const kinds = (choices.artifact_kinds || ["file", "document", "url", "other"]).map((kind) => [
+        kind,
+        named("artifact.kind", kind) || kind,
+      ]);
       panel.append(
         form({
           fields: [
@@ -336,71 +450,119 @@ function rulingsSection(row) {
   const withdrawn = row.withdrawn_rulings || [];
   const open = row.task.status !== "closed";
   const addBtn = open ? button(t("work.ruling_add"), () => workTogglePanel("add_ruling"), { kind: "quiet small" }) : null;
-  const withdrawKey = (id) => `withdraw:${id}`;
+  const supersedeKey = (id) => `supersede:${id}`;
   const settleKey = (id) => `settle:${id}`;
-  const activeWithdrawal = rulings.find((item) => work.panel === withdrawKey(item.ruling_id));
-  const activeSettlement = rulings.find((item) => work.panel === settleKey(item.ruling_id));
+  const withdrawKey = (id) => `withdraw:${id}`;
+
+  const rulingTextById = new Map();
+  for (const item of rulings) rulingTextById.set(item.ruling_id, item.ruling);
+  for (const list of [settled, superseded, withdrawn]) {
+    for (const item of list) rulingTextById.set(item.ruling_id, item.ruling);
+  }
+
+  let addPanelNode = null;
+  if (work.panel === "add_ruling") {
+    addPanelNode = h("div");
+    loadChoices()
+      .then((choices) => addPanelNode.replaceChildren(addRulingPanel(row, choices)))
+      .catch(fail);
+  }
+
+  const inlinePanelFor = (item) => {
+    if (!open) return null;
+    if (work.panel === supersedeKey(item.ruling_id)) {
+      const slot = h("div", { class: "inline-panel" });
+      loadChoices()
+        .then((choices) => {
+          slot.append(
+            form({
+              fields: [
+                { name: "ruling", label: t("work.ruling_new_text"), kind: "area", rows: 2, value: item.ruling, max: choices.ruling_chars || 200 },
+                { name: "user_instruction", label: t("work.ruling_quote"), kind: "area", rows: 2, max: choices.ruling_words_chars || 240, hint: t("work.ruling_quote_hint") },
+              ],
+              submit: t("work.ruling_supersede"),
+              onCancel: () => workTogglePanel(supersedeKey(item.ruling_id)),
+              onSubmit: (values) =>
+                act(async () => {
+                  await call("task.ruling_add", {
+                    task_id: row.task.task_id,
+                    expect_updated_at: row.state.updated_at,
+                    ruling: values.ruling,
+                    user_instruction: values.user_instruction,
+                    supersedes: [item.ruling_id],
+                  });
+                  work.panel = null;
+                }, t("work.ruling_superseded")),
+            })
+          );
+        })
+        .catch(fail);
+      return slot;
+    }
+    if (work.panel === settleKey(item.ruling_id)) {
+      return h(
+        "div",
+        { class: "inline-panel" },
+        form({
+          fields: [
+            { name: "settled_in", label: t("work.ruling_settled_in"), max: 500 },
+            { name: "note", label: t("work.ruling_settled_note"), max: 300 },
+          ],
+          submit: t("work.ruling_settle"),
+          onCancel: () => workTogglePanel(settleKey(item.ruling_id)),
+          onSubmit: (values) =>
+            act(async () => {
+              await call("task.ruling_settle", {
+                task_id: row.task.task_id,
+                expect_updated_at: row.state.updated_at,
+                ruling_id: item.ruling_id,
+                settled_in: values.settled_in,
+                note: values.note,
+              });
+              work.panel = null;
+            }, t("work.ruling_settled")),
+        })
+      );
+    }
+    if (work.panel === withdrawKey(item.ruling_id)) {
+      return reasonPanel({
+        label: t("work.ruling_withdraw_reason"),
+        confirm: t("work.ruling_withdraw"),
+        danger: true,
+        onCancel: () => workTogglePanel(withdrawKey(item.ruling_id)),
+        onConfirm: (reason) =>
+          act(async () => {
+            await call("task.ruling_withdraw", {
+              task_id: row.task.task_id,
+              expect_updated_at: row.state.updated_at,
+              ruling_id: item.ruling_id,
+              user_instruction: reason,
+            });
+            work.panel = null;
+          }, t("work.ruling_withdrawn")),
+      });
+    }
+    return null;
+  };
+
   return sectionWithAction(
     t("work.rulings"),
     rulings.length,
     addBtn,
-    work.panel === "add_ruling" ? addRulingPanel(row) : null,
+    addPanelNode,
     entries(rulings, (item) => [
-      open
-        ? h(
-            "div",
-            { class: "entry-head" },
-            h("span", { class: "when", text: day(item.on) }),
-            button(t("work.ruling_settle"), () => workTogglePanel(settleKey(item.ruling_id)), { kind: "quiet small" }),
-            button(t("work.ruling_withdraw"), () => workTogglePanel(withdrawKey(item.ruling_id)), { kind: "quiet small danger" })
-          )
-        : day(item.on),
+      h(
+        "div",
+        { class: "entry-head" },
+        h("span", { class: "when meta" }, idTag(item.ruling_id), " ", day(item.on)),
+        open ? button(t("work.ruling_supersede"), () => workTogglePanel(supersedeKey(item.ruling_id)), { kind: "quiet small" }) : null,
+        open ? button(t("work.ruling_settle"), () => workTogglePanel(settleKey(item.ruling_id)), { kind: "quiet small" }) : null,
+        open ? button(t("work.ruling_withdraw"), () => workTogglePanel(withdrawKey(item.ruling_id)), { kind: "quiet small danger" }) : null
+      ),
       item.ruling,
       [t("work.user_said"), item.user_said],
+      inlinePanelFor(item),
     ]),
-    activeSettlement
-      ? h(
-          "div",
-          { class: "inline-panel" },
-          form({
-            fields: [
-              { name: "settled_in", label: t("work.ruling_settled_in"), max: 500 },
-              { name: "note", label: t("work.ruling_settled_note"), max: 300 },
-            ],
-            submit: t("work.ruling_settle"),
-            onCancel: () => workTogglePanel(settleKey(activeSettlement.ruling_id)),
-            onSubmit: (values) =>
-              act(async () => {
-                await call("task.ruling_settle", {
-                  task_id: row.task.task_id,
-                  expect_updated_at: row.state.updated_at,
-                  ruling_id: activeSettlement.ruling_id,
-                  settled_in: values.settled_in,
-                  note: values.note,
-                });
-                work.panel = null;
-              }, t("work.ruling_settled")),
-          })
-        )
-      : null,
-    activeWithdrawal
-      ? reasonPanel({
-          label: t("work.ruling_withdraw_reason"),
-          confirm: t("work.ruling_withdraw"),
-          danger: true,
-          onCancel: () => workTogglePanel(withdrawKey(activeWithdrawal.ruling_id)),
-          onConfirm: (reason) =>
-            act(async () => {
-              await call("task.ruling_withdraw", {
-                task_id: row.task.task_id,
-                expect_updated_at: row.state.updated_at,
-                ruling_id: activeWithdrawal.ruling_id,
-                user_instruction: reason,
-              });
-              work.panel = null;
-            }, t("work.ruling_withdrawn")),
-        })
-      : null,
     settled.length
       ? h(
           "details",
@@ -409,7 +571,7 @@ function rulingsSection(row) {
           entries(
             settled,
             (item) => [
-              day(item.created_at),
+              h("span", { class: "when meta" }, idTag(item.ruling_id), " ", day(item.created_at)),
               item.ruling,
               [t("work.user_said"), item.user_instruction],
               [t("work.settled_in"), item.settled_note ? `${item.settled_in} (${item.settled_note})` : item.settled_in],
@@ -426,10 +588,10 @@ function rulingsSection(row) {
           entries(
             superseded,
             (item) => [
-              day(item.created_at),
+              h("span", { class: "when meta" }, idTag(item.ruling_id), " ", day(item.created_at)),
               item.ruling,
               [t("work.user_said"), item.user_instruction],
-              [t("work.superseded_by"), String(item.superseded_by || "").slice(0, 8)],
+              [t("work.superseded_by"), reference(item.superseded_by, rulingTextById.get(item.superseded_by) || "", 60)],
             ],
             { old: () => true }
           )
@@ -443,7 +605,7 @@ function rulingsSection(row) {
           entries(
             withdrawn,
             (item) => [
-              day(item.created_at),
+              h("span", { class: "when meta" }, idTag(item.ruling_id), " ", day(item.created_at)),
               item.ruling,
               [t("work.user_said"), item.user_instruction],
               [t("work.withdrawn_because"), item.withdrawn_because],
@@ -465,7 +627,20 @@ function artifactsSection(row) {
     addBtn,
     work.panel === "add_artifact" ? addArtifactPanel(row) : null,
     entries(artifacts, (item) => [
-      `${item.kind || "other"} · ${day(item.created_at)}`,
+      h(
+        "div",
+        { class: "entry-head" },
+        h("span", { class: "when", text: `${named("artifact.kind", item.kind) || item.kind || "other"} · ${day(item.created_at)}` }),
+        button(
+          t("work.artifact_copy"),
+          () =>
+            navigator.clipboard
+              .writeText(tilde(item.locator))
+              .then(() => toast(t("common.copied", { id: excerpt(tilde(item.locator), 32) })))
+              .catch(fail),
+          { kind: "quiet small" }
+        )
+      ),
       tilde(item.locator),
       [null, item.label && tilde(item.label)],
     ])
@@ -561,8 +736,19 @@ function editTaskForm(target, row) {
   target.replaceChildren();
   loadChoices()
     .then((choices) => {
+      const meters = h("div", { class: "size-line" });
+      const updateMeters = (values) => {
+        const card = taskCardTokens(values.name.trim() || task.name, values, (row.rulings || []).length);
+        const detail = taskDetailTokens(values.name.trim() || task.name, values);
+        meters.replaceChildren(
+          meterRow(t("work.card"), card, row.card_capacity),
+          meterRow(t("work.detail"), detail, row.detail_capacity)
+        );
+      };
+      updateMeters({ name: task.name, ...state });
       target.replaceChildren(
         meta(idTag(task.task_id), task.project_name, t("work.as_of", { date: row.as_of })),
+        meters,
         form({
           fields: [
             { name: "name", label: t("work.name"), value: task.name, big: true },
@@ -570,10 +756,11 @@ function editTaskForm(target, row) {
             { name: "goal", label: t("work.goal"), kind: "area", rows: 1, value: state.goal, max: 80 },
             { name: "approach", label: t("work.approach"), kind: "area", rows: 4, value: state.approach, max: 500 },
             { name: "status_text", label: t("work.status"), kind: "area", rows: 2, value: state.status_text, max: 120 },
-            { name: "open_questions", label: t("work.open_questions"), kind: "lines", value: state.open_questions, maxItems: 5, hint: t("work.one_per_line") },
-            { name: "blockers", label: t("work.blockers"), kind: "lines", value: state.blockers, maxItems: 5, hint: t("work.one_per_line") },
-            { name: "next_actions", label: t("work.next_actions"), kind: "lines", value: state.next_actions, maxItems: 5, hint: t("work.one_per_line") },
+            { name: "open_questions", label: t("work.open_questions"), kind: "lines", value: state.open_questions, maxItems: 5, hint: t("work.list_hint") },
+            { name: "blockers", label: t("work.blockers"), kind: "lines", value: state.blockers, maxItems: 5, hint: t("work.list_hint") },
+            { name: "next_actions", label: t("work.next_actions"), kind: "lines", value: state.next_actions, maxItems: 5, hint: t("work.list_hint") },
           ],
+          onUpdate: updateMeters,
           onCancel: () => workTogglePanel("edit"),
           onSubmit: (values) =>
             act(async () => {
@@ -599,13 +786,19 @@ function newTaskForm(target) {
           title: t("work.task_new"),
           fields: [
             { name: "name", label: t("work.name"), big: true },
-            { name: "project", label: t("work.project"), kind: "select", options: choices.projects.map((name) => [name, name]) },
+            { name: "project", label: t("work.project"), kind: "select", options: choices.projects.map((name) => [name, name]), value: work.projectFilter || choices.projects[0] },
             { name: "goal", label: t("work.goal"), kind: "area", rows: 1, max: 80 },
-            { name: "approach", label: t("work.approach"), kind: "area", rows: 3, max: 500 },
-            { name: "status_text", label: t("work.status"), kind: "area", rows: 2, max: 120 },
-            { name: "open_questions", label: t("work.open_questions"), kind: "lines", value: [], maxItems: 5, hint: t("work.one_per_line") },
-            { name: "blockers", label: t("work.blockers"), kind: "lines", value: [], maxItems: 5, hint: t("work.one_per_line") },
-            { name: "next_actions", label: t("work.next_actions"), kind: "lines", value: [], maxItems: 5, hint: t("work.one_per_line") },
+            {
+              kind: "group",
+              label: t("work.more_fields"),
+              fields: [
+                { name: "approach", label: t("work.approach"), kind: "area", rows: 3, max: 500 },
+                { name: "status_text", label: t("work.status"), kind: "area", rows: 2, max: 120 },
+                { name: "open_questions", label: t("work.open_questions"), kind: "lines", value: [], maxItems: 5, hint: t("work.list_hint") },
+                { name: "blockers", label: t("work.blockers"), kind: "lines", value: [], maxItems: 5, hint: t("work.list_hint") },
+                { name: "next_actions", label: t("work.next_actions"), kind: "lines", value: [], maxItems: 5, hint: t("work.list_hint") },
+              ],
+            },
           ],
           submit: t("common.create"),
           onCancel: () => {
@@ -639,6 +832,23 @@ function newTaskForm(target) {
 
 function projectTasks(row) {
   return t("work.project_tasks", { a: row.n_tasks_active, d: row.n_tasks_dormant, c: row.n_tasks_closed });
+}
+
+function addFolderPanel(row) {
+  return h(
+    "div",
+    { class: "inline-panel" },
+    form({
+      fields: [{ name: "path", label: t("route.path"), kind: "folder", value: "" }],
+      submit: t("common.add"),
+      onCancel: () => workTogglePanel("add_folder"),
+      onSubmit: (values) =>
+        act(async () => {
+          await call("route.save", { path: values.path, project: row.name });
+          work.panel = null;
+        }, t("work.folder_added")),
+    })
+  );
 }
 
 function editFolderPanel(row, path) {
@@ -677,10 +887,7 @@ function editFolderPanel(row, path) {
 
 /** A project with the folders its sessions open in, which are added, edited, and removed here. */
 function projectDetail(row) {
-  const addFolder = async () => {
-    const path = await pickFolder();
-    if (path) act(() => call("route.save", { path, project: row.name }), t("work.folder_added"));
-  };
+  const archived = !!row.archived_at;
   const removeFolder = async (path) => {
     const yes = await confirmDialog({ title: t("work.folder_remove_confirm"), lines: [tilde(path), t("work.folder_remove_note")], confirm: t("common.remove"), danger: true });
     if (yes) act(() => call("route.remove", { path }), t("work.folder_removed"));
@@ -694,12 +901,20 @@ function projectDetail(row) {
       return removed.removed === "archived" ? t("project.archived") : "";
     }, t("project.removed"));
   };
-  const editingFolder = row.folders.find((path) => work.panel === `folder:${path}`);
   return [
-    meta(idTag(row.project_id), t("work.project_created", { when: day(row.created_at) })),
+    meta(idTag(row.project_id), t("work.project_created", { when: day(row.created_at) }), archived ? t("common.archived") : null),
     h("h1", { class: "title", text: row.name }),
     row.summary ? h("p", { class: "sub", text: row.summary }) : null,
     h("p", { class: "sub", text: [projectTasks(row), t("work.project_rules", { n: row.n_rules }), t("work.project_tokens", { n: row.push_tokens })].join("・") }),
+    h(
+      "div",
+      { class: "actions" },
+      button(t("work.open_project_tasks"), () => openProjectTasks(row.name, "active").catch(fail), { kind: "small" }),
+      button(t("work.open_project_memories"), () => openProjectMemories(row.name).catch(fail), { kind: "small" }),
+      archived ? null : button(t("common.edit"), () => workTogglePanel("edit")),
+      h("span", { class: "spacer" }),
+      archived ? null : button(t("common.remove"), remove, { kind: "danger quiet" })
+    ),
     section(
       t("work.project_folders"),
       row.folders.length,
@@ -711,25 +926,26 @@ function projectDetail(row) {
               h(
                 "li",
                 null,
-                h("span", { class: "mono", text: tilde(path) }),
                 h(
-                  "span",
-                  { class: "folder-ops" },
-                  button(t("common.edit"), () => workTogglePanel(`folder:${path}`), { kind: "quiet small" }),
-                  button(t("common.remove"), () => removeFolder(path), { kind: "quiet small danger" })
-                )
+                  "div",
+                  { class: "folder-row" },
+                  h("span", { class: "mono", text: tilde(path) }),
+                  archived
+                    ? null
+                    : h(
+                        "span",
+                        { class: "folder-ops" },
+                        button(t("common.edit"), () => workTogglePanel(`folder:${path}`), { kind: "quiet small" }),
+                        button(t("common.remove"), () => removeFolder(path), { kind: "quiet small danger" })
+                      )
+                ),
+                !archived && work.panel === `folder:${path}` ? editFolderPanel(row, path) : null
               )
             )
           )
         : h("p", { class: "sub", text: t("work.project_no_folder_note") }),
-      editingFolder ? editFolderPanel(row, editingFolder) : null,
-      h("div", { class: "actions" }, button(t("work.folder_add"), addFolder))
-    ),
-    h(
-      "div",
-      { class: "actions" },
-      button(t("common.edit"), () => workTogglePanel("edit")),
-      button(t("common.remove"), remove, { kind: "danger" })
+      !archived && work.panel === "add_folder" ? addFolderPanel(row) : null,
+      archived ? null : h("div", { class: "actions" }, button(t("work.folder_add"), () => workTogglePanel("add_folder")))
     ),
   ].filter(Boolean);
 }
@@ -738,8 +954,6 @@ function projectForm(target, row) {
   target.replaceChildren(
     form({
       title: row ? null : t("work.project_new"),
-      // A new project is linked to its repository as it is made, so its sessions can file
-      // tasks at once.
       fields: row
         ? [
             { name: "name", label: t("work.project_name"), value: row.name },
@@ -791,15 +1005,24 @@ page("work", {
   async load() {
     if (!app.busy) workOrder.release();
     const before = listIds(workList.list);
-    work.rows =
-      work.view === "projects"
-        ? (await call("work.projects")).projects
-        : (await call("work.tasks", { activity: work.view })).tasks;
+    if (work.view === "projects") {
+      work.rows = (await call("work.projects", { include_archived: work.includeArchivedProjects })).projects;
+      work.projects = work.rows.filter((row) => !row.archived_at).map((row) => row.name);
+    } else {
+      const [tasksRes, choices] = await Promise.all([call("work.tasks", { activity: work.view }), loadChoices()]);
+      work.rows = tasksRes.tasks;
+      work.projects = choices.projects || [];
+    }
     work.selected = keepSelection(shownWork().map(workId), work.selected, before);
     renderWork();
   },
   keys: {
-    e: () => workRow() && work.view !== "closed" && workTogglePanel("edit"),
+    e: () => {
+      const row = workRow();
+      if (!row || work.view === "closed") return;
+      if (work.view === "projects" && row.archived_at) return;
+      workTogglePanel("edit");
+    },
     n: () => workNew.click(),
   },
 });

@@ -75,10 +75,13 @@ def active_states(cur: psycopg.Cursor, project_id: UUID | None = None) -> list[d
     return [row for row in rows if row["task"]["project_id"] == project_id]
 
 
-def _behind_projects(cur: psycopg.Cursor, *, actor: str, ceiling: int) -> dict[str, Any]:
+def _behind_projects(
+    cur: psycopg.Cursor, *, actor: str, ceiling: int, record_events: bool = True
+) -> dict[str, Any]:
     """An empty opening that names the pending migrations, for a store that predates projects."""
     schema_pending = migrate.pending(cur)
-    events.record(cur, "bootstrap_schema_behind", actor, detail={"pending": schema_pending})
+    if record_events:
+        events.record(cur, "bootstrap_schema_behind", actor, detail={"pending": schema_pending})
     return {
         "always": [],
         "project_rules": [],
@@ -112,11 +115,15 @@ def session_bootstrap(
     project_id: UUID | None = None,
     project_name: str | None = None,
     routed: bool = False,
+    record_events: bool = True,
+    include_ids: bool = False,
 ) -> dict[str, Any]:
     """Everything a session in this project is told, and what it cost to tell it."""
     limits = settings.limits(cur)
     if migrate.before_projects(cur):
-        return _behind_projects(cur, actor=actor, ceiling=limits["total_capacity"])
+        return _behind_projects(
+            cur, actor=actor, ceiling=limits["total_capacity"], record_events=record_events
+        )
     always = memories.always_memories(cur)
     project_rules = (
         memories.project_push_memories(cur, project_id) if project_id is not None else []
@@ -166,44 +173,45 @@ def session_bootstrap(
     ceiling = limits["total_capacity"]
     over = total > ceiling
 
-    events.record(
-        cur,
-        "bootstrap_served",
-        actor,
-        detail={
-            "tokens": total,
-            "memory": memory_tokens,
-            "topics": topic_tokens,
-            "project": project_tokens,
-            "cards": project_tokens,
-            "unseated": len(unseated),
-            "temporary": temporary_tokens,
-            "project_name": project_name,
-        },
-    )
-    if over:
-        # An invariant nobody can observe is not an invariant (project-state 14).
+    if record_events:
         events.record(
             cur,
-            "bootstrap_over_capacity",
+            "bootstrap_served",
             actor,
             detail={
                 "tokens": total,
-                "capacity": ceiling,
                 "memory": memory_tokens,
+                "topics": topic_tokens,
                 "project": project_tokens,
                 "cards": project_tokens,
+                "unseated": len(unseated),
                 "temporary": temporary_tokens,
+                "project_name": project_name,
             },
         )
-    if schema_pending:
-        # Count sessions opened against a newer schema to track migration lag.
-        events.record(
-            cur,
-            "bootstrap_schema_behind",
-            actor,
-            detail={"pending": schema_pending},
-        )
+        if over:
+            # An invariant nobody can observe is not an invariant (project-state 14).
+            events.record(
+                cur,
+                "bootstrap_over_capacity",
+                actor,
+                detail={
+                    "tokens": total,
+                    "capacity": ceiling,
+                    "memory": memory_tokens,
+                    "project": project_tokens,
+                    "cards": project_tokens,
+                    "temporary": temporary_tokens,
+                },
+            )
+        if schema_pending:
+            # Count sessions opened against a newer schema to track migration lag.
+            events.record(
+                cur,
+                "bootstrap_schema_behind",
+                actor,
+                detail={"pending": schema_pending},
+            )
     return {
         "always": [{"memory_id": r["memory_id"], "content": r["content"]} for r in always],
         "project_rules": [
@@ -218,7 +226,14 @@ def session_bootstrap(
         "unseated": named,
         "unseated_more": unnamed,
         "unseated_instruction": UNSEATED_INSTRUCTION if unseated else None,
-        "temporary": [{"content": r["content"], "expires_at": r["expires_at"]} for r in contexts],
+        "temporary": [
+            {
+                **({"context_id": r["context_id"]} if include_ids else {}),
+                "content": r["content"],
+                "expires_at": r["expires_at"],
+            }
+            for r in contexts
+        ],
         "pending": pending,
         "memory_tokens": memory_tokens,
         "topic_tokens": topic_tokens,

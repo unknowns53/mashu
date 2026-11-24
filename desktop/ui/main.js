@@ -5,11 +5,28 @@ const refresh = $("refresh");
 refresh.title = t("nav.refresh");
 refresh.append(icon("refresh"));
 refresh.addEventListener("click", () => {
-  invoke("check_now");
-  reload().catch(fail);
+  guardDirty(() => {
+    invoke("check_now");
+    reload().catch(fail);
+  });
 });
 
-listen("status", (event) => showStatus(event.payload));
+let lastInboxSignature = null;
+function inboxSignature(status) {
+  if (!status) return "";
+  const closes = (status.close_proposals || []).map((row) => `${row.task_id}:${row.proposed_at || ""}`).join(",");
+  return `${status.pending_ready}:${status.pending_deferred}:${status.memory_changes}:${closes}`;
+}
+
+listen("status", (event) => {
+  const nextSig = inboxSignature(event.payload);
+  const changed = lastInboxSignature !== null && nextSig !== lastInboxSignature;
+  lastInboxSignature = nextSig;
+  showStatus(event.payload);
+  if (changed && app.current === "inbox" && !app.busy && !hasDirtyForm()) {
+    reload().catch(fail);
+  }
+});
 
 /** Ask for a newer release at start and once a day; the Settings page shows the details. */
 async function checkUpdate() {

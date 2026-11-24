@@ -1,25 +1,50 @@
-// Settings: store health, mistakes made despite existing knowledge, what a session receives, projects, topics, routes, delivery limits,
-// the schema, versions and updates, starting at login, and the window's language.
+// Settings: inspection/records and app/store configuration.
 "use strict";
 
-const SECTIONS = ["health", "missed", "ledger", "bootstrap", "topics", "routes", "limits", "schema", "version", "startup", "display"];
+const SECTION_GROUPS = [
+  ["inspect", ["health", "bootstrap", "ledger", "missed"]],
+  ["manage", ["routes", "limits", "schema", "version", "general"]],
+];
 
-const settings = { section: "health", editing: null, bootstrapCwd: "", bootstrap: null, ledgerProject: "" };
+const settings = {
+  section: "health",
+  editing: null,
+  bootstrapCwd: "",
+  bootstrap: null,
+  ledgerProject: "",
+  ledgerKind: "",
+  ledgerQuery: "",
+  routeFilter: "all",
+};
 
 const settingsList = listPane();
 settingsList.pane.classList.add("narrow");
 const settingsDetail = detailPane();
 
+function normalizeSection(id) {
+  if (id === "startup" || id === "display") return "general";
+  return SECTION_VIEWS[id] ? id : "health";
+}
+
 function pickSection(id) {
-  settings.section = id;
-  settings.editing = null;
-  reload().catch(fail);
+  guardDirty(() => {
+    if (id === "topics") {
+      openTopics().catch(fail);
+      return;
+    }
+    settings.section = normalizeSection(id);
+    settings.editing = null;
+    reload().catch(fail);
+  });
 }
 
 function renderSections() {
   fillList(
     settingsList.list,
-    [{ rows: SECTIONS.map((id) => ({ id, primary: t(`settings.${id}`), secondary: [t(`settings.${id}.about`)] })) }],
+    SECTION_GROUPS.map(([group, ids]) => ({
+      title: t(`settings.group.${group}`),
+      rows: ids.map((id) => ({ id, primary: t(`settings.${id}`), secondary: [t(`settings.${id}.about`)] })),
+    })),
     { selected: settings.section, onPick: pickSection }
   );
 }
@@ -42,9 +67,9 @@ function renderEditing() {
       },
       onSubmit: (values) =>
         act(async () => {
-          const note = await spec.onSubmit(values);
+          const result = await spec.onSubmit(values);
           settings.editing = null;
-          return note;
+          return result;
         }, spec.done),
     })
   );
@@ -116,8 +141,14 @@ async function healthSection() {
         [t("health.rules"), t("health.rules_value", { always: counts.always || 0, project: counts.project || 0, topic: counts.topic || 0 })],
         [t("health.queue"), t("health.queue_value", { ready: health.pending_ready, deferred: health.pending_deferred })],
         [t("health.tasks"), t("health.tasks_value", { a: health.tasks_active, d: health.tasks_dormant, c: health.tasks_closed })],
-        [t("settings.projects"), String(health.project_count)],
-        [t("settings.topics"), String(health.topic_count)],
+        [
+          t("work.view.projects"),
+          h("span", null, String(health.project_count), " ", button(t("missed.open"), () => openProjects().catch(fail), { kind: "quiet small" })),
+        ],
+        [
+          t("memory.view.topics"),
+          h("span", null, String(health.topic_count), " ", button(t("missed.open"), () => openTopics().catch(fail), { kind: "quiet small" })),
+        ],
       ])
     ),
     section(
@@ -148,7 +179,8 @@ function missedPlace(place) {
 
 async function missedSection() {
   const { pains } = await call("settings.missed");
-  const list = (rows) => entries(rows, (row) => [
+  const list = (rows) =>
+    entries(rows, (row) => [
       [day(row.created_at), short(row.ledger_id), row.created_by && who(row.created_by)].filter(Boolean).join(" · "),
       row.what,
       ...row.places.map(missedPlace),
@@ -169,11 +201,45 @@ async function missedSection() {
   ];
 }
 
+function renderLedgerEntries(rows) {
+  return section(
+    t("settings.ledger"),
+    rows.length,
+    entries(rows, (row) => {
+      const fixed = RECORDING_KINDS.includes(row.kind) ? fixedAccount(row.what) : null;
+      const body = fixed ? t(`evidence.text.${fixed}`) : row.what;
+      const showPrevention = fixed ? null : [t("evidence.prevention"), row.prevention];
+      return [
+        [day(row.created_at), short(row.ledger_id), named("evidence.kind", row.kind), row.project_name, row.created_by && who(row.created_by)].filter(Boolean).join(" · "),
+        body,
+        showPrevention,
+      ];
+    })
+  );
+}
+
 async function ledgerSection() {
   const [{ entries: rows, content_limit: contentLimit }, choices] = await Promise.all([
-    call("ledger.list", { limit: 100, ...(settings.ledgerProject ? { project: settings.ledgerProject } : {}) }),
+    call("ledger.list", {
+      limit: 100,
+      ...(settings.ledgerProject ? { project: settings.ledgerProject } : {}),
+      ...(settings.ledgerKind ? { kind: settings.ledgerKind } : {}),
+      ...(settings.ledgerQuery ? { query: settings.ledgerQuery } : {}),
+    }),
     loadChoices(),
   ]);
+  const listSlot = h("div", null, renderLedgerEntries(rows));
+  const refreshList = async () => {
+    const res = await call("ledger.list", {
+      limit: 100,
+      ...(settings.ledgerProject ? { project: settings.ledgerProject } : {}),
+      ...(settings.ledgerKind ? { kind: settings.ledgerKind } : {}),
+      ...(settings.ledgerQuery ? { query: settings.ledgerQuery } : {}),
+    });
+    listSlot.replaceChildren(renderLedgerEntries(res.entries));
+  };
+  let timer = null;
+
   const openReport = async () => {
     const [activeTasks, dormantTasks, activeMemories] = await Promise.all([
       call("work.tasks", { activity: "active" }),
@@ -183,7 +249,7 @@ async function ledgerSection() {
     const openTasks = [...activeTasks.tasks, ...dormantTasks.tasks];
     const taskOpts = [["", t("common.none")], ...openTasks.map((row) => [row.task.task_id, `${row.task.name} (${row.task.project_name})`])];
     const memOpts = [["", t("common.none")], ...activeMemories.rows.map((row) => [row.memory_id, `${short(row.memory_id)} ${excerpt(row.content, 60)}`])];
-    const spec = {
+    editInSection({
       title: t("pain.new"),
       fields: [
         { name: "what", label: t("pain.what"), kind: "area", rows: 3 },
@@ -200,9 +266,15 @@ async function ledgerSection() {
           value: "rule",
         },
         { name: "task_id", label: t("pain.task"), kind: "select", options: taskOpts, value: "", show: (values) => values.prevention_kind === "work" },
-        { name: "violated_memory_id", label: t("pain.violated"), kind: "select", options: memOpts, value: "" },
-        { name: "ignored_task_id", label: t("pain.ignored_task"), kind: "select", options: taskOpts, value: "" },
-        { name: "ignored_source", label: t("pain.ignored_source"), value: "", hint: t("pain.ignored_source_hint") },
+        {
+          kind: "group",
+          label: t("pain.existing_knowledge"),
+          fields: [
+            { name: "violated_memory_id", label: t("pain.violated"), kind: "select", options: memOpts, value: "" },
+            { name: "ignored_task_id", label: t("pain.ignored_task"), kind: "select", options: taskOpts, value: "" },
+            { name: "ignored_source", label: t("pain.ignored_source"), value: "", hint: t("pain.ignored_source_hint") },
+          ],
+        },
       ],
       submit: t("common.add"),
       done: t("pain.reported"),
@@ -219,15 +291,33 @@ async function ledgerSection() {
         });
         if (result.delivery_suspect) return t("pain.delivery_suspect");
         if (result.ignored_task_id || result.ignored_source) return t("pain.knowledge_unused");
-        if (result.prevention_kind === "work" && result.filed_task) spec.done = t("pain.work_filed");
-        else if (result.nomination_existing) spec.done = t("pain.candidate_joined");
-        else if (result.nomination) spec.done = t("pain.candidate_created");
-        else spec.done = t("pain.reported");
+        if (result.prevention_kind === "work" && result.filed_task) return { message: t("pain.work_filed"), kind: "ok" };
+        if (result.nomination_existing) return { message: t("pain.candidate_joined"), kind: "ok" };
+        if (result.nomination) return { message: t("pain.candidate_created"), kind: "ok" };
         return "";
       },
-    };
-    editInSection(spec);
+    });
   };
+
+  const kindOptions = [
+    ["", `${t("ledger.kind")}: ${t("common.all")}`],
+    ...["incident", "friction", "explicit", "claimed", "proposed"].map((k) => [k, named("evidence.kind", k)]),
+  ];
+  const kindFilter = h(
+    "select",
+    {
+      "aria-label": t("ledger.kind"),
+      on: {
+        change: (event) => {
+          settings.ledgerKind = event.target.value;
+          refreshList().catch(fail);
+        },
+      },
+    },
+    kindOptions.map(([value, label]) => h("option", { value, text: label }))
+  );
+  kindFilter.value = settings.ledgerKind;
+
   const projectFilter = h(
     "select",
     {
@@ -235,7 +325,7 @@ async function ledgerSection() {
       on: {
         change: (event) => {
           settings.ledgerProject = event.target.value;
-          reload().catch(fail);
+          refreshList().catch(fail);
         },
       },
     },
@@ -244,27 +334,27 @@ async function ledgerSection() {
     )
   );
   projectFilter.value = settings.ledgerProject;
+
+  const search = searchBox((query) => {
+    settings.ledgerQuery = query;
+    clearTimeout(timer);
+    timer = setTimeout(() => refreshList().catch(fail), 200);
+  });
+  search.querySelector("input").value = settings.ledgerQuery;
+
   return [
     sectionHead(t("settings.ledger"), button(t("pain.new"), () => openReport().catch(fail), { kind: "primary" })),
-    choices.projects.length ? h("div", { class: "filter-row" }, projectFilter) : null,
-    section(
-      t("settings.ledger"),
-      rows.length,
-      entries(rows, (row) => [
-        [day(row.created_at), short(row.ledger_id), named("evidence.kind", row.kind), row.project_name, row.created_by && who(row.created_by)].filter(Boolean).join(" · "),
-        row.what,
-        [t("evidence.prevention"), row.prevention],
-      ])
-    ),
+    h("div", { class: "filter-row ledger-filters" }, search, kindFilter, choices.projects.length ? projectFilter : null),
+    listSlot,
   ];
 }
 
-function bootstrapSection() {
+async function bootstrapSection() {
+  const { routes } = await call("route.list");
   const input = h("input", { type: "text", placeholder: t("bootstrap.placeholder"), value: settings.bootstrapCwd });
   const result = h("div");
-  const run = async (event) => {
-    event.preventDefault();
-    settings.bootstrapCwd = input.value.trim();
+  const runPreview = async (cwd) => {
+    settings.bootstrapCwd = cwd.trim();
     if (!settings.bootstrapCwd) return;
     try {
       settings.bootstrap = await call("settings.bootstrap", { cwd: settings.bootstrapCwd });
@@ -273,17 +363,48 @@ function bootstrapSection() {
       fail(error);
     }
   };
+  const run = async (event) => {
+    event.preventDefault();
+    await runPreview(input.value);
+  };
+  const routeSelect = routes.length
+    ? h(
+        "select",
+        {
+          class: "bootstrap-routes",
+          "aria-label": t("bootstrap.registered_folders"),
+          on: {
+            change: (event) => {
+              if (!event.target.value) return;
+              input.value = event.target.value;
+              runPreview(event.target.value);
+            },
+          },
+        },
+        [
+          ["", t("bootstrap.pick_folder")],
+          ...routes.map((row) => [row.path_prefix, `${tilde(row.path_prefix)} (${row.project_name || t("work.folder_ignored")})`]),
+        ].map(([value, label]) => h("option", { value, text: label }))
+      )
+    : null;
+  if (routeSelect && settings.bootstrapCwd) {
+    const match = routes.find((r) => tilde(r.path_prefix) === tilde(settings.bootstrapCwd) || r.path_prefix === settings.bootstrapCwd);
+    if (match) routeSelect.value = match.path_prefix;
+  }
   if (settings.bootstrap) result.append(...bootstrapView(settings.bootstrap));
   return [
     h("h1", { class: "title", text: t("settings.bootstrap") }),
-    h("p", { class: "sub", text: t("bootstrap.note") }),
+    routeSelect ? h("div", { class: "field" }, routeSelect) : null,
     h("form", { class: "row preview-row", on: { submit: run } }, folderInput(input), h("button", { type: "submit", class: "btn primary", text: t("bootstrap.run") })),
     result,
   ];
 }
 
 function bootstrapView(answer) {
-  const rules = (rows) => entries(rows, (row) => [null, row.content]);
+  const entryWithOpen = (label, onOpen, body) => [
+    h("div", { class: "entry-head" }, h("span", { class: "when", text: label || "" }), button(t("missed.open"), () => onOpen().catch(fail), { kind: "quiet small" })),
+    body,
+  ];
   return [
     h("p", { class: "sub", text: `${t("bootstrap.area")}: ${answer.project || t("bootstrap.unrouted")}` }),
     h(
@@ -291,62 +412,11 @@ function bootstrapView(answer) {
       { class: "meters preview-total" },
       meterRow(`${t("bootstrap.total")}${answer.over_budget ? `（${t("bootstrap.over")}）` : ""}`, answer.tokens, answer.capacity)
     ),
-    section(t("bootstrap.always"), answer.always.length, rules(answer.always)),
-    section(t("bootstrap.project_rules"), answer.project_rules.length, rules(answer.project_rules)),
-    section(t("bootstrap.topics"), answer.topics.length, entries(answer.topics, (row) => [null, row.line])),
-    section(t("bootstrap.cards"), answer.states.length, entries(answer.states, (row) => [row.heading, row.content])),
-    section(t("bootstrap.temporary"), answer.temporary.length, entries(answer.temporary, (row) => [t("temporary.until", { when: day(row.expires_at) }), row.content])),
-  ];
-}
-
-async function topicsSection() {
-  const [{ topics, capacity }, choices] = await Promise.all([call("topic.list"), loadChoices()]);
-  const edit = (row) =>
-    editInSection({
-      title: row ? row.name : t("topic.new"),
-      fields: [
-        { name: "name", label: t("topic.name"), value: row ? row.name : "", max: 40 },
-        { name: "trigger", label: t("topic.trigger"), value: row ? row.trigger : "", hint: t("topic.trigger_hint"), max: 160 },
-        { name: "project", label: t("topic.area"), kind: "select", options: projectOptions(choices, t("topic.area_all")), value: row ? row.project_name || "" : "" },
-        { name: "action", label: t("topic.action"), value: row ? row.action || "" : "", hint: t("topic.action_hint") },
-        { name: "source", label: t("topic.source"), value: row ? row.source || "" : "", hint: t("topic.source_hint") },
-      ],
-      submit: row ? t("common.save") : t("common.create"),
-      done: t("topic.saved"),
-      onSubmit: (values) =>
-        call("topic.save", {
-          topic_id: row ? row.topic_id : null,
-          ...values,
-          project: values.project || null,
-          action: values.action || null,
-          source: values.source || null,
-        }).then(() => ""),
-    });
-  const remove = async (row) => {
-    const yes = await confirmDialog({ title: t("topic.remove_confirm"), lines: [row.name, t("topic.remove_note")], confirm: t("common.remove"), danger: true });
-    if (!yes) return;
-    act(async () => {
-      const removed = await call("topic.remove", { topic_id: row.topic_id });
-      return removed.removed === "archived" ? t("topic.archived") : "";
-    }, t("topic.removed"));
-  };
-  return [
-    sectionHead(t("settings.topics"), button(t("topic.new"), () => edit(null))),
-    table(
-      [t("topic.name"), t("topic.trigger"), t("topic.rules"), t("topic.tokens")],
-      topics,
-      (row) => [
-        [row.name + (row.project_name ? `\n${row.project_name}` : ""), "name"],
-        [row.trigger, "muted"],
-        [String(row.rules), "num"],
-        [`${row.body_tokens} / ${capacity}`, "num"],
-      ],
-      (row) => [
-        button(t("topic.open_memories"), () => openTopicMemories(row.name).catch(fail), { kind: "quiet small" }),
-        button(t("common.edit"), () => edit(row), { kind: "quiet small" }),
-        button(t("common.remove"), () => remove(row), { kind: "quiet small danger" }),
-      ]
-    ),
+    section(t("bootstrap.always"), answer.always.length, entries(answer.always, (row) => entryWithOpen(null, () => openMemory(row.memory_id, "active"), row.content))),
+    section(t("bootstrap.project_rules"), answer.project_rules.length, entries(answer.project_rules, (row) => entryWithOpen(null, () => openMemory(row.memory_id, "active"), row.content))),
+    section(t("bootstrap.topics"), answer.topics.length, entries(answer.topics, (row) => entryWithOpen(null, () => openTopicMemories(row.topic), row.line))),
+    section(t("bootstrap.cards"), answer.states.length, entries(answer.states, (row) => entryWithOpen(row.heading, () => openTask(row.task_id, "active"), row.content))),
+    section(t("bootstrap.temporary"), answer.temporary.length, entries(answer.temporary, (row) => entryWithOpen(t("temporary.until", { when: day(row.expires_at) }), () => openTemporary(row.context_id), row.content))),
   ];
 }
 
@@ -375,24 +445,37 @@ async function routesSection() {
     const yes = await confirmDialog({ title: t("route.remove_confirm"), lines: [tilde(row.path_prefix)], confirm: t("common.remove"), danger: true });
     if (yes) act(() => call("route.remove", { path: row.path_prefix }), t("route.removed"));
   };
-  const sorted = [...routes].sort((a, b) => a.path_prefix.localeCompare(b.path_prefix));
+  const filterSeg = segmented(
+    [
+      ["all", t("route.filter_all")],
+      ["ignored", t("route.filter_ignored")],
+    ],
+    settings.routeFilter,
+    (val) => {
+      settings.routeFilter = val;
+      reload().catch(fail);
+    }
+  );
+  const filtered = settings.routeFilter === "ignored" ? routes.filter((r) => !r.project_name) : routes;
+  const sorted = [...filtered].sort((a, b) => a.path_prefix.localeCompare(b.path_prefix));
   return [
-    sectionHead(t("settings.routes"), button(t("route.new"), () => edit(null))),
-    table(
-      [t("route.path"), t("route.project")],
-      sorted,
-      (row) => [
-        [tilde(row.path_prefix), "mono"],
-        [row.project_name || t("work.folder_ignored"), row.project_name ? "" : "muted"],
-      ],
-      (row) => [button(t("common.edit"), () => edit(row), { kind: "quiet small" }), button(t("common.remove"), () => remove(row), { kind: "quiet small danger" })]
-    ),
+    sectionHead(t("settings.routes"), filterSeg, button(t("route.new"), () => edit(null))),
+    h("p", { class: "sub", text: t("route.precedence_note") }),
+    sorted.length
+      ? table(
+          [t("route.path"), t("route.project")],
+          sorted,
+          (row) => [
+            [tilde(row.path_prefix), "mono"],
+            [row.project_name || t("work.folder_ignored"), row.project_name ? "" : "muted"],
+          ],
+          (row) => [button(t("common.edit"), () => edit(row), { kind: "quiet small" }), button(t("common.remove"), () => remove(row), { kind: "quiet small danger" })]
+        )
+      : h("p", { class: "empty-note", text: t("memory.empty") }),
   ];
 }
 
-/** The limits in the order a person reads them: what one session opens with, then each share.
- * A name the backend does not return is skipped, since the app's pages ship with a release and
- * the backend is the checkout's, which may be newer or older. */
+/** The limits in the order a person reads them: what one session opens with, then each share. */
 const LIMIT_GROUPS = [
   ["opening", ["total_capacity"]],
   ["memory", ["memory_capacity", "always_capacity", "topic_capacity", "content_limit"]],
@@ -404,13 +487,21 @@ async function limitsSection() {
   const { limits } = await call("limits.get");
   const byName = Object.fromEntries(limits.map((row) => [row.name, row]));
   const inputs = {};
+  const initialValues = {};
+  const formNode = h("form", { class: "limits" });
+  const syncDirty = () => {
+    const dirty = Object.entries(inputs).some(([name, input]) => input.value !== initialValues[name]);
+    formNode.dataset.dirty = dirty ? "1" : "";
+  };
   const row = (limit) => {
     const input = h("input", { type: "number", placeholder: String(limit.default) });
     input.min = String(limit.low);
     input.max = String(limit.high);
     if (limit.set) input.value = String(limit.value);
     inputs[limit.name] = input;
-    const over = limit.used !== null && limit.used > limit.value;
+    initialValues[limit.name] = input.value;
+    input.addEventListener("input", syncDirty);
+    const over = limit.used !== null && limit.used !== undefined && limit.used > limit.value;
     return h(
       "div",
       { class: "limit-row" },
@@ -419,7 +510,9 @@ async function limitsSection() {
       h(
         "div",
         { class: "limit-note" },
-        limit.used !== null ? h("div", { class: over ? "over" : "", text: t(limit.unit === "chars" ? "limit.longest" : "limit.used", { n: limit.used }) }) : null,
+        limit.used !== null && limit.used !== undefined
+          ? h("div", { class: over ? "over" : "", text: t(limit.unit === "chars" ? "limit.longest" : "limit.used", { n: limit.used }) })
+          : null,
         h("div", { class: "sub", text: t("limit.default", { n: limit.default }) })
       )
     );
@@ -440,16 +533,28 @@ async function limitsSection() {
     if (!Object.keys(changes).length) return;
     act(() => call("limits.set", { changes }), t("limit.saved"));
   };
-  return [
-    h("h1", { class: "title", text: t("settings.limits") }),
-    h("p", { class: "sub", text: t("limit.lead") }),
+  const hasCustom = limits.some((l) => l.set);
+  const resetAll = async () => {
+    const yes = await confirmDialog({
+      title: t("limit.reset_confirm"),
+      confirm: t("limit.reset_all"),
+      danger: true,
+    });
+    if (!yes) return;
+    const changes = Object.fromEntries(limits.filter((l) => l.set).map((l) => [l.name, null]));
+    act(() => call("limits.set", { changes }), t("limit.reset_done"));
+  };
+  formNode.addEventListener("submit", submit);
+  append(formNode, [
+    LIMIT_GROUPS.map(([group, names]) => section(t(`limit.group.${group}`), null, h("div", { class: "limit-list" }, names.filter((name) => byName[name]).map((name) => row(byName[name]))))),
     h(
-      "form",
-      { class: "limits", on: { submit } },
-      LIMIT_GROUPS.map(([group, names]) => section(t(`limit.group.${group}`), null, h("div", { class: "limit-list" }, names.filter((name) => byName[name]).map((name) => row(byName[name]))))),
-      h("div", { class: "form-actions" }, h("button", { type: "submit", class: "btn primary", text: t("common.save") }))
+      "div",
+      { class: "form-actions" },
+      h("button", { type: "submit", class: "btn primary", text: t("common.save") }),
+      hasCustom ? button(t("limit.reset_all"), resetAll, { kind: "quiet" }) : null
     ),
-  ];
+  ]);
+  return [h("h1", { class: "title", text: t("settings.limits") }), h("p", { class: "sub", text: t("limit.lead") }), formNode];
 }
 
 async function schemaSection() {
@@ -483,7 +588,6 @@ async function versionSection() {
   const [info, place] = await Promise.all([invoke("update_check"), invoke("checkout_get")]);
   showUpdate(info);
   const latest = info.latest ? (info.available ? info.latest : t("update.current", { version: info.latest })) : info.error || t("update.unknown");
-  // A mashu from before 4.0.0 has no version op to answer with.
   const mashu = info.mashu || (/unknown op/.test(info.mashu_error || "") ? t("update.mashu_old") : info.mashu_error || t("update.unknown"));
   const progress = h("p", { class: "sub" });
   const check = button(t("update.check"), async () => {
@@ -533,7 +637,7 @@ async function versionSection() {
         info.available && info.checkout ? button(t("update.run_to", { version: info.latest }), update, { kind: "primary" }) : null,
         check
       ),
-      h("p", { class: "sub", text: t("update.checked", { time: clock(app.updateChecked) }) }),
+      h("p", { class: "sub", text: t("update.checked", { time: clock(app.updateChecked || new Date()) }) }),
       info.checkout ? null : h("p", { class: "sub", text: t("update.no_checkout") }),
       progress,
       info.dev_build ? h("p", { class: "sub", text: t("update.dev_hint") }) : null
@@ -544,7 +648,7 @@ async function versionSection() {
       h(
         "form",
         { class: "row interval-row", on: { submit: savePlace } },
-        input,
+        folderInput(input),
         h("button", { type: "submit", class: "btn primary", text: t("common.save") })
       ),
       h("p", { class: "sub", text: place.from_env ? t("update.from_env") : place.from_build ? t("update.from_build") : t("update.place_hint") })
@@ -552,31 +656,29 @@ async function versionSection() {
   ];
 }
 
-async function startupSection() {
+async function generalSection() {
   const enabled = await invoke("plugin:autostart|is_enabled");
   return [
-    h("h1", { class: "title", text: t("settings.startup") }),
-    h(
-      "label",
-      { class: "check" },
-      h("input", {
-        type: "checkbox",
-        checked: enabled,
-        on: {
-          change: (event) => {
-            const wanted = event.target.checked;
-            act(() => invoke(wanted ? "plugin:autostart|enable" : "plugin:autostart|disable"), t(wanted ? "startup.enabled" : "startup.disabled"));
+    h("h1", { class: "title", text: t("settings.general") }),
+    section(
+      t("settings.startup"),
+      null,
+      h(
+        "label",
+        { class: "check" },
+        h("input", {
+          type: "checkbox",
+          checked: enabled,
+          on: {
+            change: (event) => {
+              const wanted = event.target.checked;
+              act(() => invoke(wanted ? "plugin:autostart|enable" : "plugin:autostart|disable"), t(wanted ? "startup.enabled" : "startup.disabled"));
+            },
           },
-        },
-      }),
-      t("startup.login")
+        }),
+        t("startup.login")
+      )
     ),
-  ];
-}
-
-function displaySection() {
-  return [
-    h("h1", { class: "title", text: t("settings.display") }),
     section(
       t("display.language"),
       null,
@@ -611,14 +713,12 @@ const SECTION_VIEWS = {
   health: healthSection,
   missed: missedSection,
   ledger: ledgerSection,
-  bootstrap: async () => bootstrapSection(),
-  topics: topicsSection,
+  bootstrap: bootstrapSection,
   routes: routesSection,
   limits: limitsSection,
   version: versionSection,
-  startup: startupSection,
+  general: generalSection,
   schema: schemaSection,
-  display: async () => displaySection(),
 };
 
 page("settings", {
@@ -629,6 +729,7 @@ page("settings", {
   selected: () => settings.section,
   pick: pickSection,
   async load() {
+    settings.section = normalizeSection(settings.section);
     renderSections();
     if (settings.editing) return renderEditing();
     settingsDetail.mark(settings.section);
