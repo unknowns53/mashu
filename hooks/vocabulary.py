@@ -1,7 +1,7 @@
 """Coinages this project's documents used to carry, for ~/.claude/hooks/guard-vocabulary.py.
 
 The user-level guard loads this file for writes and replies in sessions of this project, and
-the stop-ai-slop-jp skill's scan_coinages.py reads it when it lists candidates. Each word was
+the akunuki-kotoba skill's scan_coinages.py reads it when it lists candidates. Each word was
 a short Japanese stand-in for an English term or an identifier, such as 台帳 for the ledger
 table or 退役 for the retire operation. Later sessions copied them from the documents, so
 the guard stops them coming back.
