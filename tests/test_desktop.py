@@ -677,3 +677,135 @@ def test_tasks_rulings_artifacts_topics_and_pain_ledger_work_through_desktop(dsn
     assert pain["ok"] and pain["result"]["nomination"] is not None
     entries = ask(dsn, "ledger.list", project="enrai")["result"]["entries"]
     assert any(row["what"] == "forgot to run migrations" for row in entries)
+
+
+def test_desktop_gui_ux_extensions(dsn):
+    with db.transaction(dsn) as cur:
+        projects.create_project(cur, name="alpha", actor="user")
+        projects.create_project(cur, name="beta", actor="user")
+
+    # memory.revise updates content, delivery, and why without duplicating identical reasons
+    rule = ask(dsn, "memory.remember", content=RULE, delivery="always", why="initial why")["result"]
+    edited = ask(
+        dsn,
+        "memory.revise",
+        memory_id=rule["memory_id"],
+        content=f"{RULE} now",
+        delivery="project",
+        projects=["alpha", "beta"],
+        why="updated why",
+    )
+    assert edited["ok"]
+    detail = ask(dsn, "memory.get", memory_id=rule["memory_id"])["result"]
+    assert (detail["content"], detail["delivery"], detail["project_names"]) == (
+        f"{RULE} now",
+        "project",
+        ["alpha", "beta"],
+    )
+    assert detail["basis"][0]["what"] == "updated why"
+
+    # Re-sending the same why only updates nothing extra
+    same_why = ask(
+        dsn,
+        "memory.revise",
+        memory_id=rule["memory_id"],
+        content=f"{RULE} now",
+        delivery="project",
+        projects=["alpha", "beta"],
+        why="updated why",
+    )
+    assert same_why["ok"]
+    assert len(ask(dsn, "memory.get", memory_id=rule["memory_id"])["result"]["basis"]) == 2
+
+    # memory.to_temporary and temporary.to_memory allow revising content
+    temp = ask(
+        dsn,
+        "memory.to_temporary",
+        memory_id=rule["memory_id"],
+        days=5,
+        projects=["alpha"],
+        content="temporary wording",
+    )
+    assert temp["ok"]
+    listed_temp = ask(dsn, "memory.list", view="temporary")["result"]["rows"]
+    assert listed_temp[0]["content"] == "temporary wording"
+    assert listed_temp[0]["expired"] is False
+
+    # Restore retired original rule with edited content
+    restored = ask(
+        dsn,
+        "memory.restore",
+        memory_id=rule["memory_id"],
+        reason="needed with better wording",
+        delivery="always",
+        content="restored rule wording",
+    )
+    assert restored["ok"]
+    restored_detail = ask(dsn, "memory.get", memory_id=rule["memory_id"])["result"]
+    assert restored_detail["content"] == "restored rule wording"
+
+    # Temporary -> memory with revised content and include_expired check
+    back = ask(
+        dsn,
+        "temporary.to_memory",
+        context_id=listed_temp[0]["context_id"],
+        delivery="always",
+        content="promoted rule wording",
+    )
+    assert back["ok"]
+    assert back["result"]["memory"]["content"] == "promoted rule wording"
+    with_expired = ask(dsn, "memory.list", view="temporary", include_expired=True)["result"]["rows"]
+    assert len(with_expired) == 1 and with_expired[0]["expired"] is True
+
+    # Candidate defer -> undefer -> admit with edited content and why
+    cand = a_candidate(dsn, "initial candidate wording")
+    assert ask(dsn, "review.defer", nomination_id=str(cand["nomination_id"]), reason="wait")["ok"]
+    assert ask(dsn, "review.undefer", nomination_id=str(cand["nomination_id"]))["ok"]
+    admitted = ask(
+        dsn,
+        "review.admit",
+        nomination_id=str(cand["nomination_id"]),
+        expected_version=cand["version"],
+        delivery="always",
+        content="admitted edited wording",
+        why="from inbox admit",
+    )
+    assert admitted["ok"] and "admitted" in admitted["result"]
+    admitted_id = admitted["result"]["admitted"]["memory_id"]
+    admitted_detail = ask(dsn, "memory.get", memory_id=admitted_id)["result"]
+    assert admitted_detail["content"] == "admitted edited wording"
+    assert admitted_detail["basis"][0]["what"] == "from inbox admit"
+
+    # task.pause moves an open active task into dormant
+    created = ask(dsn, "task.create", name="pausable task", project="alpha")
+    task_id = created["result"]["task"]["task_id"]
+    paused = ask(dsn, "task.pause", task_id=task_id)
+    assert paused["ok"] and paused["result"]["activity"] == "dormant"
+    assert [r["task"]["task_id"] for r in listed_tasks(dsn, "dormant")] == [task_id]
+
+    # settings.bootstrap does not record bootstrap_served events
+    preview = ask(dsn, "settings.bootstrap", cwd="/nowhere")
+    assert preview["ok"]
+    with db.transaction(dsn) as cur:
+        cur.execute("SELECT count(*) AS n FROM event_log WHERE event_type = 'bootstrap_served'")
+        assert cur.fetchone()["n"] == 0
+
+    # ledger.list filters by kind and query
+    reported = ask(
+        dsn,
+        "pain.report",
+        what="initial build missed env check",
+        prevention="check env vars before running",
+        project="alpha",
+    )
+    assert reported["ok"]
+    incidents = ask(dsn, "ledger.list", kind="incident", query="env check")["result"]["entries"]
+    assert len(incidents) == 1 and incidents[0]["kind"] == "incident"
+    frictions = ask(dsn, "ledger.list", kind="friction", query="initial")["result"]["entries"]
+    assert len(frictions) == 1 and frictions[0]["kind"] == "friction"
+    none = ask(dsn, "ledger.list", kind="explicit", query="nonexistent-xyz")["result"]["entries"]
+    assert none == []
+
+    # limits.get populates used counts for every limit
+    limits = ask(dsn, "limits.get")["result"]["limits"]
+    assert all(row["used"] is not None for row in limits)

@@ -48,13 +48,18 @@ def admit(
     actor: str,
     project_name: str | None = None,
     project_names: Sequence[str] | None = None,
+    content: str | None = None,
+    why: str | None = None,
 ) -> dict[str, Any] | Changed:
     """Admit exactly the version shown to the person, after refreshing its conflicts.
 
     conflict_ids are the retired conflicts the person was shown and read past.
     When `project_names` or `project_name` is given for project delivery, delivers there
-    instead of the candidate's own project.
+    instead of the candidate's own project. Optional `content` revises the wording before
+    admitting, and optional `why` records a reason row in the same transaction.
     """
+    from mashu import memories
+
     cur.execute(
         "SELECT status, version, content, project_id FROM nomination "
         "WHERE nomination_id = %s FOR UPDATE",
@@ -65,13 +70,28 @@ def admit(
         raise MashuError(nominations.NOT_PENDING)
     if current["version"] != expected_version:
         return Changed("candidate", _pending(cur, nomination_id))
-    refreshed = nominations.refresh_conflicts(
-        cur, nomination_id, nominations.current_conflict_ids(cur, current["content"]), actor=actor
-    )
-    if refreshed is None:
-        raise MashuError(nominations.NOT_PENDING)
-    if refreshed["version"] != expected_version:
-        return Changed("conflicts", _pending(cur, nomination_id))
+
+    revised_content = (content or "").strip() or None
+    if revised_content is not None and revised_content != current["content"]:
+        revised = nominations.revise(cur, nomination_id, content=revised_content, actor=actor)
+        expected_version = revised["version"]
+        new_blocking = nominations.blocking_conflicts(
+            nominations.conflict_rows(cur, revised["conflicts"])
+        )
+        if set(new_blocking) - set(conflict_ids):
+            return Changed("conflicts", _pending(cur, nomination_id))
+        conflict_ids = new_blocking
+    else:
+        refreshed = nominations.refresh_conflicts(
+            cur,
+            nomination_id,
+            nominations.current_conflict_ids(cur, current["content"]),
+            actor=actor,
+        )
+        if refreshed is None:
+            raise MashuError(nominations.NOT_PENDING)
+        if refreshed["version"] != expected_version:
+            return Changed("conflicts", _pending(cur, nomination_id))
 
     project_id: UUID | None = None
     project_override = False
@@ -86,7 +106,7 @@ def admit(
             project_id = memory_actions.project_id_named(cur, project_name)
             project_override = True
 
-    return nominations.admit(
+    admitted = nominations.admit(
         cur,
         nomination_id,
         actor=actor,
@@ -99,6 +119,10 @@ def admit(
         approval={"kind": "user_direct", "conflict_ids": conflict_ids},
         request_id=uuid4(),
     )
+    why_clean = (why or "").strip() or None
+    if why_clean is not None:
+        memories.add_reason(cur, UUID(str(admitted["memory_id"])), why=why_clean, actor=actor)
+    return admitted
 
 
 def admit_as_temporary(

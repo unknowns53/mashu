@@ -25,6 +25,8 @@ import psycopg
 from mashu import (
     __version__,
     application,
+    bootstrap,
+    capacity,
     config,
     db,
     ledger,
@@ -45,6 +47,7 @@ from mashu import (
 )
 from mashu.errors import ChangedSinceReadError, MashuError
 from mashu.server import _failure, _plain
+from mashu.tokens import pushed_cost
 
 ACTOR = "user"
 
@@ -226,6 +229,8 @@ def review_admit(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
         actor=ACTOR,
         project_name=_optional(args, "project"),
         project_names=_lines(args, "projects") if args.get("projects") is not None else None,
+        content=_optional(args, "content"),
+        why=_optional(args, "why"),
     )
     if isinstance(outcome, review_actions.Changed):
         return {"changed": outcome.what, "current": outcome.current}
@@ -263,6 +268,10 @@ def review_defer(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     return nominations.defer(
         cur, _uuid(args, "nomination_id"), actor=ACTOR, reason=_text(args, "reason")
     )
+
+
+def review_undefer(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    return nominations.undefer(cur, _uuid(args, "nomination_id"), actor=ACTOR)
 
 
 # Memory changes
@@ -349,7 +358,9 @@ def memory_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     if view not in ("active", "retired", "temporary"):
         raise MashuError("view must be active, retired, or temporary")
     return {
-        "rows": application.memory_view(cur, view),
+        "rows": application.memory_view(
+            cur, view, include_expired=bool(args.get("include_expired"))
+        ),
         "content_limit": settings.limit(cur, "content_limit"),
     }
 
@@ -377,7 +388,8 @@ def memory_remember(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 def memory_revise(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     delivery = _optional(args, "delivery")
-    if delivery is not None:
+    why = _optional(args, "why")
+    if delivery is not None or why is not None:
         return memory_actions.edit_memory(
             cur,
             _uuid(args, "memory_id"),
@@ -388,6 +400,7 @@ def memory_revise(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
             project_name=_optional(args, "project"),
             project_names=_lines(args, "projects") if args.get("projects") is not None else None,
             topic=_topic(args) if delivery == "topic" else None,
+            why=why,
         )
     return memories.revise(
         cur,
@@ -414,6 +427,7 @@ def memory_restore(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
         project_name=_optional(args, "project"),
         project_names=_lines(args, "projects") if args.get("projects") is not None else None,
         topic=_topic(args) if delivery == "topic" else None,
+        content=_optional(args, "content"),
     )
 
 
@@ -442,6 +456,7 @@ def memory_to_temporary(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
         days=_days(args),
         actor=ACTOR,
         project_names=_lines(args, "projects") if args.get("projects") is not None else None,
+        content=_optional(args, "content"),
     )
 
 
@@ -484,6 +499,7 @@ def temporary_to_memory(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
         project_names=_lines(args, "projects") if args.get("projects") is not None else None,
         topic=_topic(args) if delivery == "topic" else None,
         why=_optional(args, "why"),
+        content=_optional(args, "content"),
     )
 
 
@@ -508,7 +524,9 @@ def work_tasks(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 
 def work_projects(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    return {"projects": projects.list_projects(cur)}
+    return {
+        "projects": projects.list_projects(cur, include_archived=bool(args.get("include_archived")))
+    }
 
 
 def task_create(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
@@ -583,6 +601,10 @@ def task_keep(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 def task_renew(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     return tasks.touch(cur, _uuid(args, "task_id"), actor=ACTOR)
+
+
+def task_pause(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
+    return tasks.pause(cur, _uuid(args, "task_id"), actor=ACTOR)
 
 
 def task_reopen(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
@@ -661,7 +683,13 @@ def ledger_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
     project_name = _optional(args, "project")
     project_id = memory_actions.project_id_named(cur, project_name)
     return {
-        "entries": ledger.ledger_entries(cur, limit=limit, project_id=project_id),
+        "entries": ledger.ledger_entries(
+            cur,
+            limit=limit,
+            project_id=project_id,
+            kind=_optional(args, "kind"),
+            query=_optional(args, "query"),
+        ),
         "content_limit": settings.limit(cur, "content_limit"),
     }
 
@@ -715,12 +743,16 @@ def missed(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 
 def bootstrap_preview(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    """What a session opened in the directory given receives; it is recorded as served."""
-    return application.bootstrap_preview(cur, cwd=_text(args, "cwd"), actor=ACTOR)
+    """What a session opened in the directory given receives, without recording delivery."""
+    return application.bootstrap_preview(
+        cur, cwd=_text(args, "cwd"), actor=ACTOR, record_events=False, include_ids=True
+    )
 
 
 def project_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    return {"projects": projects.list_projects(cur)}
+    return {
+        "projects": projects.list_projects(cur, include_archived=bool(args.get("include_archived")))
+    }
 
 
 def project_remove(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
@@ -739,7 +771,7 @@ def project_save(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 
 def topic_list(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    rows = topics.list_topics(cur)
+    rows = topics.list_topics(cur, include_archived=bool(args.get("include_archived")))
     for row in rows:
         row["source_text"] = topics.source_text(row.get("source"))
     return {"topics": rows, "capacity": settings.limit(cur, "topic_capacity")}
@@ -785,16 +817,96 @@ def route_remove(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
 
 
 def limits_get(cur: psycopg.Cursor, args: Args) -> dict[str, Any]:
-    """Every delivery limit, with what its share holds now where one share is measured."""
+    """Every delivery limit, with what its share currently holds."""
     snapshot = application.status_snapshot(cur)
     cur.execute("SELECT max(char_length(content)) AS n FROM memory WHERE status = 'active'")
+    content_max = cur.fetchone()["n"] or 0
+
+    mem_totals = capacity.bootstrap_totals(cur)
+    temp_totals = temporary.pushed_totals(cur)
+    active_cards = tasks.active_state_costs(cur)
+    active_tasks = tasks.task_list(cur, activity="active") if active_cards else []
+    detail_max = max(
+        (tasks.state_cost(row["task"]["name"], row["state"]) for row in active_tasks),
+        default=0,
+    )
+    card_max = max((row["tokens"] for row in active_cards), default=0)
+
+    project_ids: set[Any] = {
+        None,
+        *mem_totals["projects"].keys(),
+        *temp_totals["projects"].keys(),
+        *(row["project_id"] for row in active_cards),
+    }
+    total_max = 0
+    overflow_max = 0
+    project_cap = snapshot.limits["project_capacity"]
+    overflow_cap = snapshot.limits["card_overflow_capacity"]
+    for pid in project_ids:
+        mem_cost = mem_totals["always"] + (mem_totals["projects"].get(pid, 0) if pid else 0)
+        temp_cost = temp_totals["always"] + (temp_totals["projects"].get(pid, 0) if pid else 0)
+        cards_for_p = [row for row in active_cards if row["project_id"] == pid] if pid else []
+        seated, unseated = tasks.seat_cards(cards_for_p, project_cap)
+        if unseated:
+            named, _ = bootstrap._unseated_lines(unseated, overflow_cap)
+            overflow_cost = pushed_cost(
+                [bootstrap.UNSEATED_INSTRUCTION, *(bootstrap._unseated_text(row) for row in named)]
+            )
+        else:
+            overflow_cost = 0
+        overflow_max = max(overflow_max, overflow_cost)
+        cards_cost = sum(row["tokens"] for row in seated) + overflow_cost
+        total_max = max(total_max, mem_cost + temp_cost + cards_cost)
+
+    ruling_count_max = 0
+    ruling_chars_max = 0
+    ruling_words_max = 0
+    cur.execute(
+        "SELECT to_regclass('ruling') IS NOT NULL AS has_ruling, "
+        "to_regclass('ruling_settlement') IS NOT NULL "
+        "AND to_regclass('ruling_supersession') IS NOT NULL AS has_outcomes"
+    )
+    tables = cur.fetchone()
+    if tables["has_ruling"]:
+        outcome_filter = (
+            "AND NOT EXISTS (SELECT 1 FROM ruling_settlement s WHERE s.ruling_id = r.ruling_id) "
+            "AND NOT EXISTS "
+            "(SELECT 1 FROM ruling_supersession p WHERE p.supersedes_id = r.ruling_id)"
+            if tables["has_outcomes"]
+            else ""
+        )
+        cur.execute(
+            f"""
+            SELECT r.task_id, count(*)::int AS cnt,
+                   max(char_length(r.ruling)) AS r_len,
+                   max(char_length(r.user_instruction)) AS w_len
+            FROM ruling r
+            JOIN task t ON t.task_id = r.task_id
+            WHERE t.status = 'open'
+              AND NOT EXISTS (SELECT 1 FROM ruling_withdrawal w WHERE w.ruling_id = r.ruling_id)
+              {outcome_filter}
+            GROUP BY r.task_id
+            """
+        )
+        for row in cur.fetchall():
+            ruling_count_max = max(ruling_count_max, row["cnt"] or 0)
+            ruling_chars_max = max(ruling_chars_max, row["r_len"] or 0)
+            ruling_words_max = max(ruling_words_max, row["w_len"] or 0)
+
     usage = {
+        "total_capacity": total_max,
         "always_capacity": snapshot.memory_always_tokens,
         "memory_capacity": snapshot.memory_worst_tokens,
         "topic_capacity": snapshot.topic_heaviest_tokens,
         "project_capacity": snapshot.state_worst_tokens,
+        "card_overflow_capacity": overflow_max,
+        "task_card_capacity": card_max,
+        "task_detail_capacity": detail_max,
         "temporary_capacity": snapshot.temporary_tokens,
-        "content_limit": cur.fetchone()["n"] or 0,
+        "content_limit": content_max,
+        "ruling_count": ruling_count_max,
+        "ruling_chars": ruling_chars_max,
+        "ruling_words_chars": ruling_words_max,
     }
     return {"limits": [{**row, "used": usage.get(row["name"])} for row in settings.limit_rows(cur)]}
 
@@ -847,6 +959,7 @@ OPERATIONS: dict[str, Operation] = {
     "review.revise": review_revise,
     "review.decline": review_decline,
     "review.defer": review_defer,
+    "review.undefer": review_undefer,
     "change.list": change_list,
     "change.reason": change_reason,
     "change.edit": change_edit,
@@ -873,6 +986,7 @@ OPERATIONS: dict[str, Operation] = {
     "task.close": task_close,
     "task.keep": task_keep,
     "task.renew": task_renew,
+    "task.pause": task_pause,
     "task.reopen": task_reopen,
     "task.ruling_add": task_ruling_add,
     "task.ruling_withdraw": task_ruling_withdraw,
@@ -918,6 +1032,7 @@ READS = frozenset(
         "work.projects",
         "settings.health",
         "settings.missed",
+        "settings.bootstrap",
         "project.list",
         "topic.list",
         "route.list",

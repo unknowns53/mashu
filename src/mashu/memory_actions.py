@@ -127,6 +127,16 @@ def set_delivery(
     )
 
 
+def _latest_reason(detail: dict[str, Any]) -> str:
+    """The newest written reason on a Memory, ignoring fixed account placeholders."""
+    fixed = (memories._EXPLICIT_WHAT, nominations.CLAIMED_WHAT, nominations.PROPOSED_WHAT)
+    for item in detail.get("basis") or ():
+        what = item.get("what")
+        if what and not any(what.startswith(prefix) for prefix in fixed):
+            return what
+    return ""
+
+
 def restore(
     cur: psycopg.Cursor,
     memory_id: UUID,
@@ -138,6 +148,7 @@ def restore(
     project_name: str | None = None,
     project_names: Sequence[str] | None = None,
     topic: dict[str, Any] | None = None,
+    content: str | None = None,
 ) -> dict[str, Any]:
     """Bring a retired rule back on the person's word, optionally into a new delivery.
 
@@ -150,7 +161,7 @@ def restore(
         approval["conflict_ids"] = sorted(str(ident) for ident in acknowledged)
     if delivery is None:
         return memories.restore(
-            cur, memory_id, reason=reason, actor=actor, approval_source=approval
+            cur, memory_id, reason=reason, actor=actor, approval_source=approval, content=content
         )
     others: list[UUID] | None = None
     if project_names is not None and delivery == "project":
@@ -171,6 +182,7 @@ def restore(
         clear_project=project_id is None,
         topic_id=topic_id_for(cur, topic, actor=actor),
         also_project_ids=others,
+        content=content,
     )
 
 
@@ -185,8 +197,9 @@ def edit_memory(
     project_name: str | None = None,
     project_names: Sequence[str] | None = None,
     topic: dict[str, Any] | None = None,
+    why: str | None = None,
 ) -> dict[str, Any]:
-    """Rewrite an active rule's body and optionally its delivery in one transaction.
+    """Rewrite an active rule's body, delivery, and/or reason in one transaction.
 
     Runs whichever of body revision or delivery move frees capacity first when both change.
     """
@@ -212,7 +225,10 @@ def edit_memory(
             wanted_topic_id = topic.get("topic_id") if topic else None
             delivery_changed = topic is None or wanted_topic_id != current["topic_id"]
 
-    if not body_changed and not delivery_changed:
+    why_clean = (why or "").strip() or None
+    why_changed = why_clean is not None and why_clean != _latest_reason(current).strip()
+
+    if not body_changed and not delivery_changed and not why_changed:
         return current
 
     def do_revise() -> dict[str, Any]:
@@ -236,15 +252,26 @@ def edit_memory(
             project_names=project_names if delivery == "project" else None,
         )
 
+    result: dict[str, Any] | None = None
     if body_changed and delivery_changed:
         if len(content) <= len(current["content"]):
             do_revise()
-            return do_deliver()
-        do_deliver()
-        return do_revise()
-    if body_changed:
-        return do_revise()
-    return do_deliver()
+            result = do_deliver()
+        else:
+            do_deliver()
+            result = do_revise()
+    elif body_changed:
+        result = do_revise()
+    elif delivery_changed:
+        result = do_deliver()
+
+    if why_changed:
+        assert why_clean is not None
+        memories.add_reason(cur, memory_id, why=why_clean, actor=actor)
+        if result is None:
+            result = memories.get_memory(cur, memory_id)
+    assert result is not None
+    return result
 
 
 def retire(cur: psycopg.Cursor, memory_id: UUID, *, reason: str, actor: str) -> dict[str, Any]:
@@ -319,10 +346,13 @@ def convert_to_temporary(
     days: float,
     actor: str,
     project_names: Sequence[str] | None = None,
+    content: str | None = None,
 ) -> dict[str, Any]:
     """Convert an active memory to temporary context, keeping or overriding its projects."""
     if project_names is None:
-        return memories.convert_to_temporary(cur, memory_id, days=days, actor=actor)
+        return memories.convert_to_temporary(
+            cur, memory_id, days=days, actor=actor, content=content
+        )
     home, others = project_ids_named(cur, project_names)
     return memories.convert_to_temporary(
         cur,
@@ -332,6 +362,7 @@ def convert_to_temporary(
         project_id=home,
         also_project_ids=others,
         override_projects=True,
+        content=content,
     )
 
 
@@ -346,11 +377,17 @@ def convert_temporary_to_memory(
     project_names: Sequence[str] | None = None,
     topic: dict[str, Any] | None = None,
     why: str | None = None,
+    content: str | None = None,
 ) -> dict[str, Any]:
     """Convert a temporary context to an active memory, keeping or choosing its delivery."""
     if delivery is None:
         return temporary.convert_to_memory(
-            cur, context_id, actor=actor, acknowledged_conflicts=acknowledged, why=why
+            cur,
+            context_id,
+            actor=actor,
+            acknowledged_conflicts=acknowledged,
+            why=why,
+            content=content,
         )
     if delivery == "project":
         if project_names is not None:
@@ -369,6 +406,7 @@ def convert_temporary_to_memory(
         also_project_ids=others,
         topic_id=topic_id_for(cur, topic, actor=actor),
         why=why,
+        content=content,
     )
 
 

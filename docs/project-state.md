@@ -316,7 +316,7 @@ task_checkpoint の `rulings` は User がその作業について決めたこ�
 |---|---|---|
 | pain / nomination | ○ | ○ |
 | task 作成・state・checkpoint・artifact | ○ | ○ |
-| ruling の記録・上書き・取り下げ | User の言葉を運ぶときだけ | デスクトップアプリから追加・取り下げ可 |
+| ruling の記録・上書き・取り下げ | User の言葉を運ぶときだけ | デスクトップアプリから追加・上書き・取り下げ可 |
 | ruling の定着（`settle_rulings`） | 正本参照（`settled_in`）を添えるときだけ | デスクトップアプリから定着可 |
 | task close / reopen | × | ○ |
 | close proposal（提案のみ・決定ではない） | ○ | ○（取り下げ） |
@@ -354,7 +354,7 @@ Memory 関連 Tool は `docs/memory.md` 7.1 節に記す。`session_bootstrap` �
 ```text
 mashu                           人向け dashboard。Attention / Memories / Work / Settings を開く
 mashu gui                       Task を含む一覧の読み取り専用ブラウザ表示（docs/memory.md 7.2 節）
-mashu desktop-backend           デスクトップアプリの子プロセス。Task と Project の操作を Work と close の画面と同じ関数で行う（docs/memory.md 7.2 節）
+mashu desktop-backend           デスクトップアプリの子プロセス。Task と Project の操作を Work と close の画面と同じ関数で行い、配信プレビューは記録を残さない（docs/memory.md 7.2 節）
 mashu task list [--dormant] [--closed]
 mashu task show <id>            state・履歴・artifacts を全文
 mashu task create / touch <id>

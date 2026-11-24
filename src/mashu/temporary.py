@@ -332,6 +332,7 @@ def convert_to_memory(
     also_project_ids: Sequence[UUID] | None = None,
     topic_id: UUID | None = None,
     why: str | None = None,
+    content: str | None = None,
 ) -> dict[str, Any]:
     """Replace a standing condition with a durable memory in one transaction.
 
@@ -350,6 +351,9 @@ def convert_to_memory(
     current = cur.fetchone()
     if current is None:
         raise MashuError(f"no standing temporary context {context_id}")
+    body = current["content"] if content is None else content.strip()
+    if not body:
+        raise MashuError("content is empty; a Memory body states the rule itself")
     if delivery is None:
         delivery = "project" if current["project_id"] else "always"
         target_project = current["project_id"]
@@ -361,7 +365,7 @@ def convert_to_memory(
         target_others = also_project_ids or ()
     memory = memories.remember(
         cur,
-        content=current["content"],
+        content=body,
         actor=actor,
         project_id=target_project,
         delivery=delivery,

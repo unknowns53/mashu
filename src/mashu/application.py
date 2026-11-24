@@ -66,17 +66,25 @@ class StatusSnapshot:
     limits: dict[str, int]
 
 
-def memory_view(cur: psycopg.Cursor, view: str) -> list[dict[str, Any]]:
+def memory_view(
+    cur: psycopg.Cursor, view: str, *, include_expired: bool = False
+) -> list[dict[str, Any]]:
     """Read one complete view, including the project names people recognize."""
     if view == "temporary":
+        where = "" if include_expired else "WHERE t.expires_at > now()"
+        order = (
+            "ORDER BY (t.expires_at <= now()), t.expires_at DESC, t.context_id"
+            if include_expired
+            else "ORDER BY t.expires_at, t.context_id"
+        )
         cur.execute(
             """
-            SELECT t.*, """
+            SELECT t.*, (t.expires_at <= now()) AS expired, """
             + temporary.project_names_sql(cur)
-            + """
+            + f"""
             FROM temporary_context t LEFT JOIN project s ON s.project_id = t.project_id
-            WHERE t.expires_at > now()
-            ORDER BY t.expires_at, t.context_id
+            {where}
+            {order}
             """
         )
     else:
@@ -159,7 +167,14 @@ def routed_project(cur: psycopg.Cursor, cwd: str | None) -> tuple[UUID | None, s
     return project_id, row["name"] if row else None, routed
 
 
-def bootstrap_preview(cur: psycopg.Cursor, *, cwd: str, actor: str) -> dict[str, Any]:
+def bootstrap_preview(
+    cur: psycopg.Cursor,
+    *,
+    cwd: str,
+    actor: str,
+    record_events: bool = True,
+    include_ids: bool = False,
+) -> dict[str, Any]:
     """Build the session payload for a directory without duplicating route resolution."""
     project_id, project_name, routed = routed_project(cur, cwd)
     return bootstrap.session_bootstrap(
@@ -168,6 +183,8 @@ def bootstrap_preview(cur: psycopg.Cursor, *, cwd: str, actor: str) -> dict[str,
         project_id=project_id,
         project_name=project_name,
         routed=routed,
+        record_events=record_events,
+        include_ids=include_ids,
     )
 
 

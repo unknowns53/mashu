@@ -373,7 +373,12 @@ def _file_work(
 
 
 def ledger_entries(
-    cur: psycopg.Cursor, *, limit: int = 20, project_id: UUID | None = None
+    cur: psycopg.Cursor,
+    *,
+    limit: int = 20,
+    project_id: UUID | None = None,
+    kind: str | None = None,
+    query: str | None = None,
 ) -> list[dict[str, Any]]:
     """The recent record, newest first."""
     cur.execute(
@@ -381,10 +386,14 @@ def ledger_entries(
         SELECT l.*, s.name AS project_name
         FROM ledger l LEFT JOIN project s ON s.project_id = l.project_id
         WHERE (%(project)s::uuid IS NULL OR l.project_id = %(project)s::uuid)
+          AND (%(kind)s::text IS NULL OR l.kind = %(kind)s::text)
+          AND (%(query)s::text IS NULL
+               OR strpos(lower(l.what), lower(%(query)s::text)) > 0
+               OR strpos(lower(l.prevention), lower(%(query)s::text)) > 0)
         ORDER BY l.created_at DESC, l.ledger_id
         LIMIT %(limit)s
         """,
-        {"project": project_id, "limit": limit},
+        {"project": project_id, "kind": kind, "query": query, "limit": limit},
     )
     return cur.fetchall()
 

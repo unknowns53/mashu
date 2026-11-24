@@ -808,3 +808,24 @@ def defer(cur: psycopg.Cursor, nomination_id: UUID, *, actor: str, reason: str) 
     if verdict.malformed:
         row["malformed"] = verdict.malformed
     return row
+
+
+def undefer(cur: psycopg.Cursor, nomination_id: UUID, *, actor: str) -> dict[str, Any]:
+    """Return a postponed candidate to the ready queue."""
+    row = _require_pending(cur, nomination_id)
+    if row["deferred_at"] is None:
+        raise MashuError("candidate is not deferred")
+    cur.execute(
+        """
+        UPDATE nomination
+        SET deferred_at = NULL, defer_reason = NULL
+        WHERE nomination_id = %s AND status = 'pending'
+        RETURNING *
+        """,
+        (nomination_id,),
+    )
+    if cur.rowcount != 1:
+        raise MashuError(NOT_PENDING)
+    updated = cur.fetchone()
+    events.record(cur, "nomination_undeferred", actor, nomination_id=nomination_id)
+    return updated
