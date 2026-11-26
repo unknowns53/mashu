@@ -165,6 +165,12 @@ def test_work_belonging_to_another_project_stays_there(cur, project_id, task):
     # An unrouted session belongs to no project, so no task's card reaches it.
     unrouted = bootstrap.session_bootstrap(cur, actor="agent")
     assert unrouted["states"] == []
+    # It is told so, and how to name the project, since nothing else in the payload says it.
+    assert unrouted["project_instruction"] == bootstrap.UNMATCHED_INSTRUCTION
+    assert at_home["project_instruction"] is None
+    # A folder the user marked as belonging to no project gets the silence they chose.
+    ignored = bootstrap.session_bootstrap(cur, actor="agent", routed=True)
+    assert ignored["project_instruction"] is None
 
 
 def test_what_was_handed_over_is_logged(cur, project_id):
