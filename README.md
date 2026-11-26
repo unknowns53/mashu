@@ -316,7 +316,7 @@ topic の見出しの行も Memory の容量に数える。Project を持たな�
 
 ## Project とフォルダ
 
-Project は一つのリポジトリで開いたセッションに届く規則と Task card の範囲で、Task の所属先でもある。フォルダ（route）は作業ディレクトリの path prefix を Project に対応づける。`mashu bootstrap` と `session_bootstrap` は、今のディレクトリからフォルダの対応をたどって Project を決める。無関係なディレクトリは `--ignore` で、どの Project にも属さないと明示できる。
+Project は一つのリポジトリで開いたセッションに届く規則と Task card の範囲で、Task の所属先でもある。フォルダ（route）は作業ディレクトリの path prefix を Project に対応づける。`mashu bootstrap` と `session_bootstrap` は、今のディレクトリからフォルダの対応をたどって Project を決める。チャットの gateway のように Project のフォルダで開かないセッションには、`mashu bootstrap --project <name>` と `session_bootstrap(project=...)` で Project を指定する。無関係なディレクトリは `--ignore` で、どの Project にも属さないと明示できる。
 
 ~~~bash
 mashu project
