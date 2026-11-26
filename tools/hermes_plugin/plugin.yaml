@@ -1,0 +1,6 @@
+name: mashu
+version: "0.1.0"
+description: "Deliver the Mashu bootstrap (memories, task cards, temporary context) into the first turn of each Hermes Discord conversation, choosing the project from a channel map."
+author: "Mashu"
+provides_hooks:
+  - pre_llm_call

@@ -140,6 +140,16 @@ hook の無い client では、AGENTS.md か CLAUDE.md に次の行を置き、a
 - Mashu MCP が接続されているセッションでは、開始時に一度 session_bootstrap を呼ぶ。SessionStart hook が既に配信していれば不要
 ~~~
 
+### Hermes Agent の Discord の会話に配信する
+
+Hermes は MCP server をどの Project のフォルダでもない場所で起動し、MCP の返り値を従わないデータとして包む。`tools/hermes_plugin` を Hermes の plugin として入れると、Discord の会話の最初のターンと、圧縮で要約に置き換わった後のターンに、bootstrap の内容を `pre_llm_call` の文脈として差し込む。Hermes のホームの `plugins/mashu` をこのフォルダへの junction（Windows）か symlink にして、`config.yaml` の `plugins.enabled` に `mashu` を加える。
+
+Project は、Hermes のホームの `mashu-channels.json` で、スレッドかチャンネルの ID に結びつける。スレッド、親チャンネル、チャンネルの順に引き、どれにも当たらなければ Project の無い bootstrap を配信する。表は毎ターン読み直すので、書き換えに再起動は要らない。
+
+~~~json
+{"123456789012345678": "des"}
+~~~
+
 ### PreToolUse hook で特定操作の前に規則を示す
 
 `tools/pretooluse_guard.py` を PreToolUse hook に登録すると、action を結びつけた topic（[Topic](#topic) を参照）の規則を、その action に当たる tool call に `additionalContext` として配信する。呼び出しは止めない。初回の呼び出しと、compaction 後にそれぞれ 1 回ずつ配信する。topic に source があれば、規則の後に `Source: ...` の一行で原典を示す。
