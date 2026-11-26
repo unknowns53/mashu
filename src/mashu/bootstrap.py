@@ -28,6 +28,15 @@ UNSEATED_INSTRUCTION = (
     "with one's id before continuing it, and task_search finds the rest."
 )
 
+#: A client that starts the server outside every project folder, such as a chat gateway, gets
+#: no project from its folder; this tells it how to ask for one.
+UNMATCHED_INSTRUCTION = (
+    "This session's folder belongs to no project, so no project rules or task cards were "
+    "delivered. If the work belongs to a project, call session_bootstrap with `project` "
+    "(project_list names them). Naming it there does not carry over: the other tools that "
+    "take `project` fall back to the same folder, so pass it to them as well."
+)
+
 
 def _unseated_lines(rows: list[dict[str, Any]], share: int) -> tuple[list[dict[str, Any]], int]:
     """Name as many cardless tasks as the overflow share holds, and count the rest."""
@@ -89,6 +98,7 @@ def _behind_projects(
         "topic_instruction": None,
         "project": None,
         "routed": False,
+        "project_instruction": None,
         "states": [],
         "task_instruction": None,
         "unseated": [],
@@ -221,6 +231,10 @@ def session_bootstrap(
         "topic_instruction": topics.INSTRUCTION if index else None,
         "project": project_name,
         "routed": routed,
+        # A folder the user marked as belonging to no project is routed, and stays quiet.
+        "project_instruction": (
+            UNMATCHED_INSTRUCTION if project_id is None and not routed else None
+        ),
         "states": state_rows,
         "task_instruction": TASK_DETAIL_INSTRUCTION if state_rows else None,
         "unseated": named,

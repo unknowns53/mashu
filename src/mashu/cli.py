@@ -301,7 +301,9 @@ def _quartiles(values: list[int]) -> str:
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     with db.transaction(args.dsn) as cur:
-        answer = application.bootstrap_preview(cur, cwd=os.getcwd(), actor=ACTOR)
+        answer = application.bootstrap_preview(
+            cur, cwd=os.getcwd(), actor=ACTOR, project=args.project
+        )
     unapplied = answer.get("schema_pending") or []
     if unapplied:
         print(f"schema    {len(unapplied)} MIGRATION(S) PENDING: {', '.join(unapplied)}")
@@ -1766,10 +1768,13 @@ def build_parser() -> argparse.ArgumentParser:
         "what a session in this directory is pushed, and its token cost",
         description=(
             "Show the active memories, task cards, and temporary context delivered to a "
-            "session started in the current working directory."
+            "session started in the current working directory, or in the project --project "
+            "names. A client whose sessions do not open in a project folder, such as a chat "
+            "gateway, names the project instead."
         ),
-        examples=("mashu bootstrap",),
+        examples=("mashu bootstrap", "mashu bootstrap --project des"),
     )
+    bootstrap.add_argument("--project", help="the project to deliver, in place of the folder's")
     bootstrap.set_defaults(func=cmd_bootstrap)
 
     remember = _command(

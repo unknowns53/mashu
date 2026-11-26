@@ -174,9 +174,14 @@ def bootstrap_preview(
     actor: str,
     record_events: bool = True,
     include_ids: bool = False,
+    project: str | None = None,
 ) -> dict[str, Any]:
-    """Build the session payload for a directory without duplicating route resolution."""
-    project_id, project_name, routed = routed_project(cur, cwd)
+    """Build the session payload for a directory, or for the project named in its place."""
+    if project is not None:
+        row = projects.require_project(cur, project)
+        project_id, project_name, routed = row["project_id"], row["name"], False
+    else:
+        project_id, project_name, routed = routed_project(cur, cwd)
     return bootstrap.session_bootstrap(
         cur,
         actor=actor,

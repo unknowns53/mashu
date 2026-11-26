@@ -390,7 +390,11 @@ def build_server() -> Any:
 
     @server.tool()
     def session_bootstrap(project: str | None = None) -> dict[str, Any]:
-        """Return session memories, the topic index, task cards, and temporary context."""
+        """Return session memories, the topic index, task cards, and temporary context.
+
+        Without `project`, the project is the one whose folder holds the folder this server
+        started in. A client that starts it elsewhere names the project here.
+        """
         try:
             with db.transaction() as cur:
                 project_id, project_name, routed = _project(cur, project)

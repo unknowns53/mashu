@@ -306,6 +306,17 @@ def test_the_work_that_is_current_is_printed_under_its_date(
     assert "print the active states with their headings" in out
     assert "call task_get" in out
 
+    # A session outside the folder gets the same cards by naming the project.
+    elsewhere = tmp_path.parent / f"{tmp_path.name}-elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert str(task["task"]["task_id"]) not in run("bootstrap")[1]
+    code, out, _ = run("bootstrap", "--project", "the command line")
+    assert code == 0 and str(task["task"]["task_id"]) in out
+    code, _, err = run("bootstrap", "--project", "no such project")
+    assert code == 1 and "the command line" in err
+    monkeypatch.chdir(tmp_path)
+
     tokens_line = next(row for row in out.splitlines() if row.startswith("tokens"))
     assert f"/{config.total_capacity()}" in tokens_line
     assert "memory=" in tokens_line and "cards=" in tokens_line and "temporary=" in tokens_line
